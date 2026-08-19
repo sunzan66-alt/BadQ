@@ -372,8 +372,10 @@ const Maximize2=__mk('<path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7
 const Wallet=__mk('<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>');
 const Trophy=__mk('<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>');
 const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>');
+const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
+const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -643,6 +645,7 @@ function matchWinner(m) {
 function playerStats(pid, matches) {
   let win = 0,
     loss = 0,
+    draw = 0,
     noScore = 0;
   const partners = {},
     opps = {};
@@ -661,12 +664,13 @@ function playerStats(pid, matches) {
     const w = matchWinner(m);
     if (w) {
       if (w === (inA ? "A" : "B")) win++;else loss++;
-    }
+    } else draw++; // hasScore true but no winner => genuine draw/tie, distinct from noScore
   }
   const decided = win + loss;
   return {
     win,
     loss,
+    draw,
     noScore,
     winRate: decided ? Math.round(win / decided * 100) : null,
     partners,
@@ -690,6 +694,35 @@ function computeBill(players, settings) {
       total: Math.round(court + shuttle + other)
     };
   });
+}
+// build the plain-text summary used by the Web Share API (with clipboard/alert fallback)
+function buildShareText({
+  name,
+  date,
+  playerCount,
+  totalMatches,
+  maxGames,
+  totalExpense
+}) {
+  return `BadQ — ${name || "ก๊วนแบดมินตัน"}\n${date || ""}\nผู้เล่น ${playerCount} คน\n${totalMatches} แมตช์\nเกมมากสุด ${maxGames} เกม\nค่าใช้จ่ายรวม ฿${totalExpense}`;
+}
+async function shareSummary(text) {
+  try {
+    if (navigator.share) {
+      await navigator.share({
+        text
+      });
+      return;
+    }
+  } catch (e) {
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    alert("อุปกรณ์นี้แชร์ตรงไม่ได้ — คัดลอกข้อความสรุปก๊วนแล้ว");
+  } catch (e) {
+    alert(text);
+  }
 }
 // read an image WITHOUT cropping (for QR — must stay scannable)
 function fileToDataURL(file) {
@@ -788,6 +821,7 @@ function App() {
   });
   const [lockPairs, setLockPairs] = useState([]);
   const [sel, setSel] = useState(null);
+  const [sessionHistory, setSessionHistory] = useState([]); // archived (ended) sessions — see endSession()
   const [now, setNow] = useState(Date.now());
   const [loaded, setLoaded] = useState(false);
   const fileRef = useRef();
@@ -812,6 +846,7 @@ function App() {
           }));
           s.session && setSession(s.session);
           s.lockPairs && setLockPairs(s.lockPairs);
+          setSessionHistory(Array.isArray(s.sessionHistory) ? s.sessionHistory : []); // new field: default [] if absent (backward-compatible)
         }
       } catch (e) {}
       setLoaded(true);
@@ -831,11 +866,12 @@ function App() {
           mode,
           settings,
           session,
-          lockPairs
+          lockPairs,
+          sessionHistory
         }));
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, mode, settings, session, lockPairs, loaded]);
+  }, [players, history, current, future, roundNo, courtCount, mode, settings, session, lockPairs, sessionHistory, loaded]);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(t);
@@ -1196,12 +1232,93 @@ function App() {
     games: 0
   })));
   const isSel = (pid, mid, team, idx) => sel && sel.playerId === pid && sel.mid === mid && sel.team === team && sel.idx === idx;
+
+  // archive the current session into sessionHistory, then reset session-specific state (keeps player roster)
+  const endSession = () => {
+    const doneCurrent = current.filter(m => m.status === "done");
+    const totalMatches = history.length + doneCurrent.length;
+    const gamesArr = players.map(p => p.games || 0);
+    const bill = computeBill(players, settings);
+    const wc = players.reduce((s, p) => s + (p.waitCount || 0), 0);
+    const wt = players.reduce((s, p) => s + (p.waitTotal || 0), 0);
+    const wmax = players.reduce((s, p) => Math.max(s, p.waitMax || 0), 0);
+    const snapshot = {
+      id: uid(),
+      name: session.name || "ก๊วนไม่มีชื่อ",
+      date: session.date,
+      endedAt: Date.now(),
+      courtCount,
+      mode,
+      settings: {
+        ...settings
+      },
+      players: players.map(p => ({
+        id: p.id,
+        name: p.name,
+        level: p.level,
+        photo: p.photo || null,
+        games: p.games || 0
+      })),
+      matches: [...history, ...current].map(m => ({
+        ...m
+      })),
+      stats: {
+        totalMatches,
+        totalGames: gamesArr.reduce((s, g) => s + g, 0),
+        minGames: gamesArr.length ? Math.min(...gamesArr) : 0,
+        maxGames: gamesArr.length ? Math.max(...gamesArr) : 0,
+        avgWaitMin: wc > 0 ? Math.round(wt / wc / 60000) : null,
+        maxWaitMin: wc > 0 ? Math.round(wmax / 60000) : null
+      },
+      bill: bill.map(b => ({
+        id: b.id,
+        name: b.name,
+        level: b.level,
+        games: b.games || 0,
+        total: b.total,
+        paid: !!b.paid
+      }))
+    };
+    setSessionHistory(prev => [snapshot, ...prev]);
+    setPlayers(prev => prev.map(p => ({
+      ...p,
+      games: 0,
+      paid: false,
+      waitingSince: Date.now(),
+      lastPlayedRound: -1,
+      waitTotal: 0,
+      waitCount: 0,
+      waitMax: 0
+    })));
+    setHistory([]);
+    setCurrent([]);
+    setFuture([]);
+    setRoundNo(0);
+    setLockPairs([]);
+    setSel(null);
+    setSession({
+      name: "",
+      date: new Date().toISOString().slice(0, 10)
+    });
+  };
+  // toggle payment status inside an archived session (independent of the current session's players/paid state)
+  const toggleHistoricalPaid = (sessId, playerId) => {
+    setSessionHistory(prev => prev.map(s => s.id !== sessId ? s : {
+      ...s,
+      bill: s.bill.map(b => b.id === playerId ? {
+        ...b,
+        paid: !b.paid
+      } : b)
+    }));
+  };
+  const deleteSessionHistory = sessId => setSessionHistory(prev => prev.filter(s => s.id !== sessId));
   return /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.bg,
       color: T.text,
       minHeight: "100vh",
-      fontFamily: "ui-sans-serif, system-ui, sans-serif"
+      fontFamily: "ui-sans-serif, system-ui, sans-serif",
+      paddingTop: "env(safe-area-inset-top)"
     }
   }, /*#__PURE__*/React.createElement("input", {
     ref: fileRef,
@@ -1223,7 +1340,8 @@ function App() {
     style: {
       maxWidth: 520,
       margin: "0 auto",
-      padding: "16px 14px 92px"
+      padding: "16px 14px calc(92px + env(safe-area-inset-bottom))",
+      boxSizing: "border-box"
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1296,7 +1414,12 @@ function App() {
     waitQueue,
     now,
     resetGames,
-    qrRef
+    qrRef,
+    endSession
+  }), tab === "history" && /*#__PURE__*/React.createElement(HistoryTab, {
+    sessionHistory,
+    toggleHistoricalPaid,
+    deleteSessionHistory
   }), tab === "summary" && /*#__PURE__*/React.createElement(SummaryTab, {
     players,
     history,
@@ -1304,7 +1427,8 @@ function App() {
     getP,
     settings,
     togglePaid,
-    qrRef
+    qrRef,
+    session
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -1312,7 +1436,8 @@ function App() {
       left: 0,
       right: 0,
       background: T.surface,
-      borderTop: `1px solid ${T.border}`
+      borderTop: `1px solid ${T.border}`,
+      paddingBottom: "env(safe-area-inset-bottom)"
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -1337,6 +1462,13 @@ function App() {
       lineHeight: "20px"
     }
   }, "\uD83C\uDFF8")), /*#__PURE__*/React.createElement(TabBtn, {
+    active: tab === "history",
+    onClick: () => setTab("history"),
+    label: "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34"
+  }, /*#__PURE__*/React.createElement(History, {
+    size: 20,
+    strokeWidth: tab === "history" ? 2.4 : 1.8
+  })), /*#__PURE__*/React.createElement(TabBtn, {
     active: tab === "summary",
     onClick: () => setTab("summary"),
     label: "\u0E2A\u0E23\u0E38\u0E1B"
@@ -1843,11 +1975,14 @@ function SessionTab(props) {
     waitQueue,
     now,
     resetGames,
-    qrRef
+    qrRef,
+    endSession
   } = props;
   const [openSettings, setOpenSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
+  const [confirmRegenAll, setConfirmRegenAll] = useState(false);
+  const [confirmEnd, setConfirmEnd] = useState(false);
   const started = current.length > 0;
   const waitMin = p => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
   const teamScore = arr => arr.reduce((s, id) => s + (id ? WEIGHT[getP(id)?.level] || 0 : 0), 0);
@@ -1886,20 +2021,28 @@ function SessionTab(props) {
       }
     }, "\u0E04\u0E2D\u0E23\u0E4C\u0E17 ", m.court), editable && /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleCurrentLock(m.id),
-      title: "\u0E25\u0E47\u0E2D\u0E01\u0E04\u0E39\u0E48\u0E19\u0E35\u0E49\u0E44\u0E27\u0E49",
+      title: m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)",
       style: {
         marginLeft: 8,
-        background: "none",
-        border: "none",
-        color: m.locked ? T.accent : T.muted,
         display: "flex",
-        padding: 0
+        alignItems: "center",
+        gap: 4,
+        background: m.locked ? "#fdecea" : "none",
+        border: "none",
+        borderRadius: 8,
+        padding: m.locked ? "3px 7px" : 0,
+        color: m.locked ? T.accent : T.muted
       }
     }, m.locked ? /*#__PURE__*/React.createElement(Lock, {
       size: 15
     }) : /*#__PURE__*/React.createElement(Unlock, {
       size: 15
-    })), /*#__PURE__*/React.createElement("span", {
+    }), m.locked && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        fontWeight: 800
+      }
+    }, "\u0E25\u0E47\u0E2D\u0E01")), /*#__PURE__*/React.createElement("span", {
       style: {
         marginLeft: "auto",
         fontSize: 11.5,
@@ -2282,14 +2425,88 @@ function SessionTab(props) {
     }
   }, /*#__PURE__*/React.createElement(RotateCcw, {
     size: 14
-  }), " \u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21")), /*#__PURE__*/React.createElement("div", {
+  }), " \u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 18,
+      paddingTop: 14,
+      borderTop: `1px dashed ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E31\u0E14\u0E01\u0E32\u0E23\u0E01\u0E4A\u0E27\u0E19"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmEnd(true),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "10px 0",
+      borderRadius: 11,
+      background: "none",
+      border: `1px solid ${T.accent}`,
+      color: T.accent,
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(LogOut, {
+    size: 14
+  }), " \u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19\u0E27\u0E31\u0E19\u0E19\u0E35\u0E49"))), confirmEnd && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setConfirmEnd(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.4)",
+      zIndex: 60,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19 \"", session.name || "ไม่มีชื่อ", "\"?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 16
+    }
+  }, "\u0E23\u0E30\u0E1A\u0E1A\u0E08\u0E30\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19\u0E19\u0E35\u0E49\u0E44\u0E27\u0E49\u0E43\u0E19\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19 \u0E41\u0E25\u0E49\u0E27\u0E40\u0E23\u0E34\u0E48\u0E21\u0E01\u0E4A\u0E27\u0E19\u0E43\u0E2B\u0E21\u0E48\u0E43\u0E2B\u0E49\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmEnd(false),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setConfirmEnd(false);
+      endSession();
+    },
+    style: {
+      ...btnPrimary,
+      background: T.accent
+    }
+  }, "\u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19")))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
       marginBottom: 16
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: genStart,
+    onClick: () => started ? setConfirmRegenAll(true) : genStart(),
     style: {
       flex: 1,
       padding: "13px 0",
@@ -2330,7 +2547,54 @@ function SessionTab(props) {
       textAlign: "center",
       padding: "0 0 18px"
     }
-  }, "\u0E15\u0E34\u0E4A\u0E01 \"\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E25\u0E48\u0E19\" \u0E43\u0E19\u0E41\u0E17\u0E47\u0E1A\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 \u0E41\u0E25\u0E49\u0E27\u0E01\u0E14\u0E40\u0E23\u0E34\u0E48\u0E21\u0E08\u0E31\u0E14\u0E01\u0E4A\u0E27\u0E19"), playing.length > 0 && /*#__PURE__*/React.createElement(SectionHead, {
+  }, "\u0E15\u0E34\u0E4A\u0E01 \"\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E25\u0E48\u0E19\" \u0E43\u0E19\u0E41\u0E17\u0E47\u0E1A\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 \u0E41\u0E25\u0E49\u0E27\u0E01\u0E14\u0E40\u0E23\u0E34\u0E48\u0E21\u0E08\u0E31\u0E14\u0E01\u0E4A\u0E27\u0E19"), confirmRegenAll && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setConfirmRegenAll(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.4)",
+      zIndex: 60,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E08\u0E31\u0E14\u0E04\u0E39\u0E48\u0E43\u0E2B\u0E21\u0E48\u0E17\u0E38\u0E01\u0E04\u0E2D\u0E23\u0E4C\u0E17?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 16
+    }
+  }, "\u0E40\u0E01\u0E21\u0E17\u0E35\u0E48\u0E01\u0E33\u0E25\u0E31\u0E07\u0E40\u0E25\u0E48\u0E19\u0E08\u0E30\u0E44\u0E21\u0E48\u0E16\u0E39\u0E01\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19 \u0E23\u0E30\u0E1A\u0E1A\u0E08\u0E30\u0E08\u0E31\u0E14\u0E43\u0E2B\u0E21\u0E48\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E40\u0E01\u0E21\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E40\u0E23\u0E34\u0E48\u0E21"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmRegenAll(false),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setConfirmRegenAll(false);
+      regenFuture();
+    },
+    style: btnPrimary
+  }, "\u0E08\u0E31\u0E14\u0E43\u0E2B\u0E21\u0E48\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14")))), playing.length > 0 && /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(Play, {
       size: 16,
       color: T.green
@@ -2449,13 +2713,29 @@ function SessionTab(props) {
     style: {
       fontSize: 11
     }
-  }, p.games || 0, " \u0E40\u0E01\u0E21")))))), dones.length > 0 && /*#__PURE__*/React.createElement(SectionHead, {
+  }, p.games || 0, " \u0E40\u0E01\u0E21")))))), dones.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      margin: "4px 0 10px"
+    }
+  }, /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(Check, {
       size: 16,
       color: T.green
     }),
     title: "\u0E40\u0E1E\u0E34\u0E48\u0E07\u0E08\u0E1A \u2014 \u0E40\u0E23\u0E34\u0E48\u0E21\u0E40\u0E01\u0E21\u0E16\u0E31\u0E14\u0E44\u0E1B\u0E44\u0E14\u0E49\u0E40\u0E25\u0E22"
-  }), dones.map(m => /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowHistory(true),
+    style: {
+      marginLeft: "auto",
+      background: "none",
+      border: "none",
+      color: T.green,
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, "\u0E14\u0E39\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14")), dones.map(m => /*#__PURE__*/React.createElement("div", {
     key: m.id,
     style: {
       marginBottom: 8
@@ -2589,6 +2869,8 @@ function Seg({
     }
   }, lb)));
 }
+const TEAM_A_COLOR = "#2563eb"; // blue
+const TEAM_B_COLOR = "#e11d48"; // red (not the same hue as the error/unpaid accent color)
 function CompactMatch({
   m,
   getP,
@@ -2631,28 +2913,35 @@ function CompactMatch({
     style: {
       flex: 1,
       fontSize: 12.5,
-      minWidth: 0
+      minWidth: 0,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap",
+      display: "block"
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
-      display: "block",
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
+      color: TEAM_A_COLOR,
+      fontWeight: 700
     }
-  }, side(m.teamA), " ", /*#__PURE__*/React.createElement("span", {
+  }, side(m.teamA)), sc ? /*#__PURE__*/React.createElement("span", {
     style: {
-      color: T.muted,
-      fontWeight: 800
-    }
-  }, sc ? "" : "vs"), " ", side(m.teamB)), sc && /*#__PURE__*/React.createElement("span", {
-    style: {
-      display: "block",
       fontWeight: 800,
       color: T.text,
-      marginTop: 2
+      margin: "0 6px"
     }
-  }, sc)));
+  }, sc) : /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: T.muted,
+      fontWeight: 800,
+      margin: "0 6px"
+    }
+  }, "vs"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: TEAM_B_COLOR,
+      fontWeight: 700
+    }
+  }, side(m.teamB))));
 }
 function ScoreEditor({
   m,
@@ -2783,6 +3072,512 @@ function SectionHead({
   }, sub));
 }
 
+/* ============ SESSION HISTORY (archived / ended sessions) ============ */
+function fmtThaiDate(iso) {
+  if (!iso) return "-";
+  const MO = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d.getTime())) return iso;
+  return `${d.getDate()} ${MO[d.getMonth()]} ${d.getFullYear() + 543}`;
+}
+function HistoryTab({
+  sessionHistory,
+  toggleHistoricalPaid,
+  deleteSessionHistory
+}) {
+  const [q, setQ] = useState("");
+  const [sort, setSort] = useState("latest"); // "latest" | "oldest"
+  const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const list = useMemo(() => {
+    let l = sessionHistory.filter(s => (s.name || "").toLowerCase().includes(q.trim().toLowerCase()) || (s.date || "").includes(q.trim()));
+    l = [...l].sort((a, b) => sort === "latest" ? (b.endedAt || 0) - (a.endedAt || 0) : (a.endedAt || 0) - (b.endedAt || 0));
+    return l;
+  }, [sessionHistory, q, sort]);
+  const open = openId ? sessionHistory.find(s => s.id === openId) : null;
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "relative",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Search, {
+    size: 17,
+    style: {
+      position: "absolute",
+      left: 12,
+      top: 12,
+      color: T.muted
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: q,
+    onChange: e => setQ(e.target.value),
+    placeholder: "\u0E04\u0E49\u0E19\u0E2B\u0E32\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \u0E2B\u0E23\u0E37\u0E2D\u0E27\u0E31\u0E19\u0E17\u0E35\u0E48",
+    style: {
+      width: "100%",
+      padding: "11px 12px 11px 36px",
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 14.5,
+      outline: "none",
+      boxSizing: "border-box"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Seg, {
+    options: [["latest", "ล่าสุด"], ["oldest", "เก่าสุด"]],
+    value: sort,
+    onChange: setSort
+  })), sessionHistory.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "40px 0"
+    }
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19", /*#__PURE__*/React.createElement("br", null), "\u0E40\u0E21\u0E37\u0E48\u0E2D\u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19 \u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E30\u0E16\u0E39\u0E01\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49\u0E17\u0E35\u0E48\u0E19\u0E35\u0E48") : list.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "24px 0"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E04\u0E49\u0E19\u0E2B\u0E32") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, list.map(s => {
+    const paidCount = (s.bill || []).filter(b => b.paid).length;
+    return /*#__PURE__*/React.createElement("button", {
+      key: s.id,
+      onClick: () => setOpenId(s.id),
+      style: {
+        textAlign: "left",
+        background: T.surface,
+        border: `1px solid ${T.border}`,
+        borderRadius: 13,
+        padding: "12px 14px"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        marginBottom: 4
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 800,
+        fontSize: 14.5
+      }
+    }, s.name || "ก๊วนไม่มีชื่อ"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: "auto",
+        fontSize: 12,
+        color: T.muted,
+        fontWeight: 700
+      }
+    }, fmtThaiDate(s.date))), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        fontSize: 12,
+        color: T.muted
+      }
+    }, /*#__PURE__*/React.createElement("span", null, (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.stats?.totalMatches ?? 0, " \u0E41\u0E21\u0E15\u0E0A\u0E4C \xB7 ", s.courtCount || 1, " \u0E04\u0E2D\u0E23\u0E4C\u0E17"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        marginLeft: "auto",
+        fontWeight: 800,
+        color: T.green
+      }
+    }, "\u0E3F", (s.bill || []).reduce((sum, b) => sum + (b.total || 0), 0))), (s.bill || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 4,
+        fontSize: 11,
+        color: T.muted
+      }
+    }, "\u0E08\u0E48\u0E32\u0E22\u0E41\u0E25\u0E49\u0E27 ", paidCount, "/", (s.bill || []).length, " \u0E04\u0E19"));
+  })), open && /*#__PURE__*/React.createElement(Overlay, {
+    onClose: () => setOpenId(null)
+  }, /*#__PURE__*/React.createElement(HistoricalDetail, {
+    s: open,
+    toggleHistoricalPaid: toggleHistoricalPaid,
+    onDelete: () => setConfirmDeleteId(open.id)
+  })), confirmDeleteId && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setConfirmDeleteId(null),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.4)",
+      zIndex: 70,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E25\u0E1A\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19\u0E19\u0E35\u0E49?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 16
+    }
+  }, "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E41\u0E25\u0E30\u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19\u0E02\u0E2D\u0E07\u0E01\u0E4A\u0E27\u0E19\u0E19\u0E35\u0E49\u0E08\u0E30\u0E16\u0E39\u0E01\u0E25\u0E1A\u0E2D\u0E2D\u0E01\u0E08\u0E32\u0E01\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmDeleteId(null),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      const id = confirmDeleteId;
+      setConfirmDeleteId(null);
+      setOpenId(null);
+      deleteSessionHistory(id);
+    },
+    style: {
+      ...btnPrimary,
+      background: T.accent
+    }
+  }, /*#__PURE__*/React.createElement(Trash2, {
+    size: 15
+  }), " \u0E25\u0E1A")))));
+}
+function HistoricalDetail({
+  s,
+  toggleHistoricalPaid,
+  onDelete
+}) {
+  const stats = s.stats || {};
+  const bill = s.bill || [];
+  const grandTotal = bill.reduce((sum, b) => sum + (b.total || 0), 0);
+  const collected = bill.filter(b => b.paid).reduce((sum, b) => sum + (b.total || 0), 0);
+  const paidCount = bill.filter(b => b.paid).length;
+  const getSP = id => (s.players || []).find(p => p.id === id);
+  const ranking = [...(s.players || [])].sort((a, b) => (b.games || 0) - (a.games || 0) || a.name.localeCompare(b.name));
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 800
+    }
+  }, s.name || "ก๊วนไม่มีชื่อ"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginTop: 2
+    }
+  }, fmtThaiDate(s.date), " \xB7 ", (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.courtCount || 1, " \u0E04\u0E2D\u0E23\u0E4C\u0E17 \xB7 ", fmtMode(s.settings || {}, s.mode))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => shareSummary(buildShareText({
+      name: s.name,
+      date: fmtThaiDate(s.date),
+      playerCount: (s.players || []).length,
+      totalMatches: stats.totalMatches || 0,
+      maxGames: stats.maxGames || 0,
+      totalExpense: grandTotal
+    })),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 7,
+      padding: "10px 0",
+      borderRadius: 11,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(Share2, {
+    size: 15
+  }), " \u0E41\u0E0A\u0E23\u0E4C\u0E2A\u0E23\u0E38\u0E1B\u0E01\u0E4A\u0E27\u0E19"), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(ClipboardList, {
+      size: 16,
+      color: T.green
+    }),
+    title: "\u0E2A\u0E23\u0E38\u0E1B"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement(MiniStat, {
+    label: "\u0E41\u0E21\u0E15\u0E0A\u0E4C",
+    value: stats.totalMatches ?? 0
+  }), /*#__PURE__*/React.createElement(MiniStat, {
+    label: "\u0E40\u0E01\u0E21\u0E23\u0E27\u0E21",
+    value: stats.totalGames ?? 0
+  }), /*#__PURE__*/React.createElement(MiniStat, {
+    label: "\u0E40\u0E01\u0E21\u0E21\u0E32\u0E01\u0E2A\u0E38\u0E14",
+    value: stats.maxGames ?? 0
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(MiniStat, {
+    label: "\u0E40\u0E01\u0E21\u0E19\u0E49\u0E2D\u0E22\u0E2A\u0E38\u0E14",
+    value: stats.minGames ?? 0
+  }), /*#__PURE__*/React.createElement(MiniStat, {
+    label: "\u0E23\u0E2D\u0E40\u0E09\u0E25\u0E35\u0E48\u0E22 (\u0E19\u0E32\u0E17\u0E35)",
+    value: stats.avgWaitMin ?? "-"
+  }), /*#__PURE__*/React.createElement(MiniStat, {
+    label: "\u0E23\u0E2D\u0E19\u0E32\u0E19\u0E2A\u0E38\u0E14 (\u0E19\u0E32\u0E17\u0E35)",
+    value: stats.maxWaitMin ?? "-"
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(User, {
+      size: 16,
+      color: T.green
+    }),
+    title: "\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19",
+    sub: "\u0E0A\u0E19\u0E30-\u0E41\u0E1E\u0E49-\u0E40\u0E2A\u0E21\u0E2D"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 18
+    }
+  }, ranking.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "8px 0"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19") : ranking.map(p => {
+    const st = playerStats(p.id, s.matches || []);
+    return /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "8px 11px",
+        borderRadius: 11,
+        background: T.surface,
+        border: `1px solid ${T.border}`
+      }
+    }, /*#__PURE__*/React.createElement(Avatar, {
+      p: p,
+      size: 28
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontSize: 13.5,
+        fontWeight: 600,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, p.name, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: LEVEL_COLOR[p.level],
+        fontWeight: 800,
+        fontSize: 12
+      }
+    }, "(", p.level, ")")), st.win + st.loss + st.draw > 0 && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11.5,
+        color: T.muted
+      }
+    }, st.win, "-", st.loss, "-", st.draw), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12.5,
+        fontWeight: 800,
+        color: T.text
+      }
+    }, p.games || 0, " \u0E40\u0E01\u0E21"));
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(Wallet, {
+      size: 16,
+      color: T.green
+    }),
+    title: "\u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19",
+    sub: "\u0E41\u0E15\u0E30\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E23\u0E31\u0E1A/\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01 \u2014 \u0E41\u0E01\u0E49\u0E22\u0E49\u0E2D\u0E19\u0E2B\u0E25\u0E31\u0E07\u0E44\u0E14\u0E49"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, "\u0E08\u0E48\u0E32\u0E22\u0E41\u0E25\u0E49\u0E27"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      color: T.green
+    }
+  }, paidCount, "/", bill.length, " \u0E04\u0E19")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, "\u0E23\u0E31\u0E1A\u0E41\u0E25\u0E49\u0E27"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      color: T.green
+    }
+  }, "\u0E3F", collected, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: T.muted,
+      fontWeight: 600
+    }
+  }, "/ \u0E3F", grandTotal)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 18
+    }
+  }, bill.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "8px 0"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19") : bill.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "8px 11px",
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontSize: 13.5,
+      fontWeight: 700,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, b.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: LEVEL_COLOR[b.level],
+      fontWeight: 800,
+      fontSize: 11.5
+    }
+  }, "(", b.level, ")"), " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: T.muted,
+      fontWeight: 600,
+      fontSize: 11.5
+    }
+  }, "\xB7 \u0E3F", b.total)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => toggleHistoricalPaid(s.id, b.id),
+    style: {
+      padding: "6px 11px",
+      borderRadius: 20,
+      fontSize: 12,
+      fontWeight: 800,
+      border: "none",
+      background: b.paid ? "#e2f5ec" : "#fdecea",
+      color: b.paid ? T.green : T.accent
+    }
+  }, b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย")))), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(History, {
+      size: 16,
+      color: T.muted
+    }),
+    title: "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E41\u0E21\u0E15\u0E0A\u0E4C",
+    sub: `${(s.matches || []).length} เกม`
+  }), (s.matches || []).length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "8px 0",
+      marginBottom: 18
+    }
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E17\u0E35\u0E48\u0E08\u0E1A") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 18
+    }
+  }, (s.matches || []).map(m => /*#__PURE__*/React.createElement(CompactMatch, {
+    key: m.id,
+    m: m,
+    getP: getSP,
+    onClick: () => {}
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: onDelete,
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "11px 0",
+      borderRadius: 11,
+      background: "none",
+      border: `1px solid ${T.accent}`,
+      color: T.accent,
+      fontSize: 13,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(Trash2, {
+    size: 15
+  }), " \u0E25\u0E1A\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19"));
+}
+
 /* ============ SUMMARY ============ */
 function SummaryTab({
   players,
@@ -2791,10 +3586,12 @@ function SummaryTab({
   getP,
   settings,
   togglePaid,
-  qrRef
+  qrRef,
+  session
 }) {
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
+  const [payFilter, setPayFilter] = useState("unpaid"); // "all" | "unpaid" | "paid"
   const doneCurrent = current.filter(m => m.status === "done");
   const totalMatches = history.length + doneCurrent.length;
   const played = players.filter(p => (p.games || 0) > 0 || p.status !== "absent");
@@ -2888,13 +3685,39 @@ function SummaryTab({
   }), /*#__PURE__*/React.createElement(Stat, {
     label: "\u0E23\u0E2D\u0E19\u0E32\u0E19\u0E2A\u0E38\u0E14 (\u0E19\u0E32\u0E17\u0E35)",
     value: maxWaitMin ?? "-"
-  })), /*#__PURE__*/React.createElement(SectionHead, {
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => shareSummary(buildShareText({
+      name: session?.name,
+      date: session?.date,
+      playerCount: ranking.length,
+      totalMatches,
+      maxGames,
+      totalExpense: grandTotal
+    })),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 7,
+      padding: "10px 0",
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13,
+      fontWeight: 700,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(Share2, {
+    size: 15
+  }), " \u0E41\u0E0A\u0E23\u0E4C\u0E2A\u0E23\u0E38\u0E1B\u0E01\u0E4A\u0E27\u0E19"), /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(User, {
       size: 16,
       color: T.green
     }),
     title: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21\u0E02\u0E2D\u0E07\u0E41\u0E15\u0E48\u0E25\u0E30\u0E04\u0E19",
-    sub: "\u0E41\u0E15\u0E30\u0E14\u0E39\u0E23\u0E32\u0E22\u0E25\u0E30\u0E40\u0E2D\u0E35\u0E22\u0E14"
+    sub: "\u0E0A\u0E19\u0E30-\u0E41\u0E1E\u0E49-\u0E40\u0E2A\u0E21\u0E2D \xB7 \u0E41\u0E15\u0E30\u0E14\u0E39\u0E23\u0E32\u0E22\u0E25\u0E30\u0E40\u0E2D\u0E35\u0E22\u0E14"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -2942,12 +3765,12 @@ function SummaryTab({
         fontWeight: 800,
         fontSize: 12
       }
-    }, "(", p.level, ")")), st.win + st.loss > 0 && /*#__PURE__*/React.createElement("span", {
+    }, "(", p.level, ")")), st.win + st.loss + st.draw > 0 && /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 11.5,
         color: T.muted
       }
-    }, st.win, "-", st.loss), /*#__PURE__*/React.createElement("span", {
+    }, st.win, "-", st.loss, "-", st.draw), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 12.5,
         fontWeight: 800,
@@ -3016,12 +3839,27 @@ function SummaryTab({
     }
   }, "/ \u0E3F", grandTotal)))), /*#__PURE__*/React.createElement("div", {
     style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(Seg, {
+    options: [["unpaid", "ยังไม่จ่าย"], ["all", "ทั้งหมด"], ["paid", "จ่ายแล้ว"]],
+    value: payFilter,
+    onChange: setPayFilter
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
       display: "flex",
       flexDirection: "column",
       gap: 6,
       marginBottom: 18
     }
-  }, bill.map(b => /*#__PURE__*/React.createElement("div", {
+  }, bill.filter(b => payFilter === "all" ? true : payFilter === "paid" ? b.paid : !b.paid).length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "16px 0"
+    }
+  }, payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีข้อมูลการชำระเงิน") : bill.filter(b => payFilter === "all" ? true : payFilter === "paid" ? b.paid : !b.paid).map(b => /*#__PURE__*/React.createElement("div", {
     key: b.id,
     style: {
       display: "flex",
@@ -3153,6 +3991,10 @@ function SummaryTab({
     value: detailStats.loss,
     color: T.accent
   }), /*#__PURE__*/React.createElement(MiniStat, {
+    label: "\u0E40\u0E2A\u0E21\u0E2D",
+    value: detailStats.draw,
+    color: T.blue
+  }), /*#__PURE__*/React.createElement(MiniStat, {
     label: "Win%",
     value: detailStats.winRate != null ? detailStats.winRate + "%" : "-"
   })), /*#__PURE__*/React.createElement("div", {
@@ -3223,59 +4065,29 @@ function SummaryTab({
       background: detailBill.paid ? "#e2f5ec" : T.green,
       color: detailBill.paid ? T.green : "#fff"
     }
-  }, detailBill.paid ? "🟢 จ่ายแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าจ่ายแล้ว")), settings.qr && /*#__PURE__*/React.createElement("div", {
+  }, detailBill.paid ? "🟢 จ่ายแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าจ่ายแล้ว")), settings.qr && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setQrFull({
+      name: detailP.name,
+      amount: detailBill.total
+    }),
     style: {
       marginTop: 12,
-      textAlign: "center"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: T.muted,
-      marginBottom: 8
-    }
-  }, "\u0E2A\u0E41\u0E01\u0E19\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19 \u0E3F", detailBill.total), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setQrFull({
-      name: detailP.name,
-      amount: detailBill.total
-    }),
-    style: {
-      border: "none",
-      background: "#fff",
-      borderRadius: 12,
-      padding: 6,
-      cursor: "pointer"
-    }
-  }, /*#__PURE__*/React.createElement("img", {
-    src: settings.qr,
-    alt: "QR",
-    style: {
-      width: 168,
-      height: 168,
-      objectFit: "contain",
-      display: "block"
-    }
-  })), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setQrFull({
-      name: detailP.name,
-      amount: detailBill.total
-    }),
-    style: {
-      marginTop: 10,
-      display: "inline-flex",
+      width: "100%",
+      display: "flex",
       alignItems: "center",
-      gap: 7,
-      padding: "11px 20px",
-      borderRadius: 30,
+      justifyContent: "center",
+      gap: 8,
+      padding: "13px 0",
+      borderRadius: 13,
       background: T.green,
       border: "none",
       color: "#fff",
       fontSize: 14,
       fontWeight: 800
     }
-  }, /*#__PURE__*/React.createElement(Maximize2, {
-    size: 16
-  }), " \u0E40\u0E1B\u0E34\u0E14 QR \u0E43\u0E2B\u0E49\u0E2A\u0E41\u0E01\u0E19 (\u0E40\u0E15\u0E47\u0E21\u0E08\u0E2D)"))), settings.bank && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(QrCode, {
+    size: 17
+  }), " \u0E40\u0E1B\u0E34\u0E14 QR \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19 \u0E3F", detailBill.total), settings.bank && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 12,
       background: "#fff",
@@ -3313,7 +4125,7 @@ function SummaryTab({
       flexDirection: "column",
       alignItems: "center",
       justifyContent: "center",
-      padding: 20
+      padding: "calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom))"
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3471,7 +4283,7 @@ function Overlay({
       maxHeight: "88vh",
       overflowY: "auto",
       borderRadius: "18px 18px 0 0",
-      padding: 18,
+      padding: "18px 18px calc(18px + env(safe-area-inset-bottom))",
       boxSizing: "border-box"
     }
   }, /*#__PURE__*/React.createElement("div", {
