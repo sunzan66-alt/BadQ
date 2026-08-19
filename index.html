@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.5";
+      var CURRENT_VERSION = "1.7.6";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -407,8 +407,9 @@ const Trophy=__mk('<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.
 const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>');
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
+const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.5";
+const APP_VERSION = "1.7.6";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -932,17 +933,13 @@ async function resizePhoto(file) {
     return dataUrl;
   }
 }
-function App() {
-  const isWide = useIsWide(); // landscape phone / tablet — widen the shell so it doesn't look squeezed into a narrow column
-  const [tab, setTab] = useState("members");
-  const [players, setPlayers] = useState([]);
-  const [history, setHistory] = useState([]);
-  const [current, setCurrent] = useState([]);
-  const [future, setFuture] = useState([]);
-  const [roundNo, setRoundNo] = useState(0);
-  const [courtCount, setCourtCount] = useState(2);
-  const [mode, setMode] = useState("doubles");
-  const [settings, setSettings] = useState({
+
+// fresh defaults for `settings` — pulled out into a function (instead of an inline useState() object
+// literal) so the exact same shape can be reused both on first load AND as the fallback base when
+// migrating an old/partial backup file on import. Called fresh each time so nobody accidentally shares
+// (and mutates) the same wheelPrizes array reference.
+function getDefaultSettings() {
+  return {
     court: 65,
     shuttle: 25,
     other: 0,
@@ -953,9 +950,7 @@ function App() {
     bank: "",
     pairingMode: "auto",
     levelPresetId: "isan",
-    // display-only: which label set to show for each skillIndex (matchmaking always uses skillIndex)
     customLevels: [],
-    // used only when levelPresetId === "custom": [{ id, name, skillIndex, description }]
     wheelPrizes: [{
       id: uid(),
       label: "ส่วนลด 20฿ (ใช้ทันที)",
@@ -980,8 +975,214 @@ function App() {
       type: "none",
       amount: 0,
       qty: 40
-    }]
-  });
+    }],
+    lastBackupAt: null
+  };
+}
+
+/* ============ BACKUP / RESTORE ============
+   Local-file backup: the exported JSON is a thin envelope (app/backupVersion/schemaVersion/appVersion/
+   exportedAt) around a `data` object that is exactly the same shape already persisted to localStorage
+   under "bg-v11" — so building a backup is just "wrap the current state", and importing is "validate,
+   migrate to the current schema, then feed it through the same setters the app uses on normal load". */
+const BACKUP_APP_ID = "BadQ";
+const BACKUP_VERSION = 1; // outer envelope format — bump only if this wrapper shape itself changes
+const SCHEMA_VERSION = 1; // inner `data` shape — bump whenever the persisted state shape changes, and
+// add a migration step in migrateBackupData() so OLD backups keep importing
+// into NEWER app versions (import is tied to schemaVersion, never APP_VERSION)
+
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+function fmtBackupStamp(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+}
+function fmtBytes(n) {
+  if (!n && n !== 0) return "-";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+function fmtThaiDateTime(iso) {
+  if (!iso) return "-";
+  const MO = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return `${d.getDate()} ${MO[d.getMonth()]} ${d.getFullYear() + 543} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+// simple deterministic string hash (djb2) — used only to mint a STABLE id for legacy session-history
+// entries that predate stable IDs, so re-importing the same old backup twice still dedups correctly.
+function stableHash(str) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = (h << 5) + h + str.charCodeAt(i) | 0;
+  return (h >>> 0).toString(36);
+}
+function ensureSessionId(s) {
+  if (s && s.id) return s;
+  return {
+    ...s,
+    id: "legacy-" + stableHash(`${s?.name || ""}|${s?.date || ""}|${s?.endedAt || ""}`)
+  };
+}
+
+// wraps the currently-persisted state shape into the exportable envelope
+function buildBackupPayload(state) {
+  return {
+    app: BACKUP_APP_ID,
+    backupVersion: BACKUP_VERSION,
+    schemaVersion: SCHEMA_VERSION,
+    appVersion: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    data: {
+      players: state.players,
+      history: state.history,
+      current: state.current,
+      future: state.future,
+      roundNo: state.roundNo,
+      courtCount: state.courtCount,
+      mode: state.mode,
+      settings: state.settings,
+      session: state.session,
+      lockPairs: state.lockPairs,
+      sessionHistory: state.sessionHistory
+    }
+  };
+}
+// stats shown both on the post-export success banner and the pre-import preview
+function backupStats(data) {
+  return {
+    playerCount: (data.players || []).length,
+    sessionHistoryCount: (data.sessionHistory || []).length,
+    matchCount: (data.history?.length || 0) + (data.current?.length || 0) + (data.future?.length || 0),
+    hasCurrentSession: (data.current?.length || 0) > 0 || !!(data.session && data.session.name),
+    hasPayment: (data.players || []).some(p => p.paid) || (data.sessionHistory || []).some(s => (s.bill || []).some(b => b.paid)),
+    hasQR: !!(data.settings && data.settings.qr)
+  };
+}
+// cheap structural check — catches "this isn't even a BadQ backup" before we try to migrate/use it
+function validateBackupStructure(parsed) {
+  if (!parsed || typeof parsed !== "object") return {
+    ok: false,
+    reason: "โครงสร้างไฟล์ไม่ถูกต้อง"
+  };
+  if (parsed.app !== BACKUP_APP_ID) return {
+    ok: false,
+    reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"
+  };
+  if (typeof parsed.backupVersion !== "number" || typeof parsed.schemaVersion !== "number") return {
+    ok: false,
+    reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"
+  };
+  if (!parsed.data || typeof parsed.data !== "object" || !Array.isArray(parsed.data.players)) return {
+    ok: false,
+    reason: "โครงสร้างข้อมูลในไฟล์สำรองไม่ถูกต้อง"
+  };
+  return {
+    ok: true
+  };
+}
+// forward-migrates `data` up to SCHEMA_VERSION, then fills in backward-compatible defaults for any
+// field that predates this export — never reject a backup just because a newer field is missing.
+function migrateBackupData(parsed) {
+  let {
+    schemaVersion,
+    data
+  } = parsed;
+  data = {
+    ...data
+  };
+  // while (schemaVersion < SCHEMA_VERSION) { data = MIGRATIONS[schemaVersion](data); schemaVersion++; }
+  // (no steps needed yet — SCHEMA_VERSION is still 1; this is the extension point for future bumps)
+  data.players = Array.isArray(data.players) ? data.players.map(normPlayer) : [];
+  data.history = Array.isArray(data.history) ? data.history : [];
+  data.current = Array.isArray(data.current) ? data.current : [];
+  data.future = Array.isArray(data.future) ? data.future : [];
+  data.roundNo = typeof data.roundNo === "number" ? data.roundNo : 0;
+  data.courtCount = data.courtCount || 2;
+  data.mode = data.mode || "doubles";
+  data.settings = {
+    ...getDefaultSettings(),
+    ...(data.settings || {})
+  };
+  if (!data.settings.levelPresetId) data.settings.levelPresetId = "isan"; // e.g. no levelPresetId -> isan
+  if (!Array.isArray(data.settings.customLevels)) data.settings.customLevels = [];
+  if (!Array.isArray(data.settings.wheelPrizes) || data.settings.wheelPrizes.length === 0) data.settings.wheelPrizes = getDefaultSettings().wheelPrizes;
+  data.session = data.session && typeof data.session === "object" ? data.session : {
+    name: "",
+    date: new Date().toISOString().slice(0, 10)
+  };
+  data.lockPairs = Array.isArray(data.lockPairs) ? data.lockPairs : [];
+  data.sessionHistory = (Array.isArray(data.sessionHistory) ? data.sessionHistory : []).map(ensureSessionId); // e.g. no sessionHistory -> []
+  return {
+    ...parsed,
+    schemaVersion: SCHEMA_VERSION,
+    data
+  };
+}
+// deeper integrity check AFTER migration — corrupted core structure rejects the whole restore;
+// broken/invalid sub-fields fall back to a safe default instead of failing the whole import.
+function validateBackupIntegrity(data) {
+  if (!Array.isArray(data.players)) return {
+    ok: false,
+    reason: "ข้อมูลผู้เล่นเสียหาย"
+  };
+  const seenP = new Set();
+  for (const p of data.players) {
+    if (!p || !p.id) return {
+      ok: false,
+      reason: "พบผู้เล่นที่ไม่มีรหัส (id)"
+    };
+    if (seenP.has(p.id)) return {
+      ok: false,
+      reason: "พบรหัสผู้เล่นซ้ำกัน"
+    };
+    seenP.add(p.id);
+    p.skillIndex = Math.max(1, Math.min(11, Number(p.skillIndex) || 1)); // clamp to valid 1–11 range
+    p.discount = Number(p.discount) || 0;
+  }
+  const allMatches = [...data.history, ...data.current, ...data.future, ...data.sessionHistory.flatMap(s => s.matches || [])];
+  const seenM = new Set();
+  for (const m of allMatches) {
+    if (!m || !m.id) return {
+      ok: false,
+      reason: "พบแมตช์ที่ไม่มีรหัส (id)"
+    };
+    if (seenM.has(m.id)) return {
+      ok: false,
+      reason: "พบรหัสแมตช์ซ้ำกัน"
+    };
+    seenM.add(m.id);
+  }
+  const seenS = new Set();
+  for (const s of data.sessionHistory) {
+    if (seenS.has(s.id)) return {
+      ok: false,
+      reason: "พบรหัสประวัติก๊วนซ้ำกัน"
+    };
+    seenS.add(s.id);
+    (s.bill || []).forEach(b => {
+      b.total = Number(b.total) || 0;
+    }); // payment amounts must be numeric
+  }
+  if (!Array.isArray(data.settings.customLevels) || data.settings.customLevels.some(l => !l || typeof l.skillIndex !== "number")) {
+    data.settings.customLevels = []; // not core-critical — fall back safely instead of rejecting the backup
+  }
+  return {
+    ok: true,
+    data
+  };
+}
+function App() {
+  const isWide = useIsWide(); // landscape phone / tablet — widen the shell so it doesn't look squeezed into a narrow column
+  const [tab, setTab] = useState("members");
+  const [players, setPlayers] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [current, setCurrent] = useState([]);
+  const [future, setFuture] = useState([]);
+  const [roundNo, setRoundNo] = useState(0);
+  const [courtCount, setCourtCount] = useState(2);
+  const [mode, setMode] = useState("doubles");
+  const [settings, setSettings] = useState(getDefaultSettings);
   const [session, setSession] = useState({
     name: "",
     date: new Date().toISOString().slice(0, 10)
@@ -991,6 +1192,7 @@ function App() {
   const [sessionHistory, setSessionHistory] = useState([]); // archived (ended) sessions — see endSession()
   const [now, setNow] = useState(Date.now());
   const [loaded, setLoaded] = useState(false);
+  const [hasPreRestoreBackup, setHasPreRestoreBackup] = useState(false); // safety snapshot exists -> show "undo last restore"
   const fileRef = useRef();
   const qrRef = useRef();
   const photoTarget = useRef(null);
@@ -1015,6 +1217,10 @@ function App() {
           s.lockPairs && setLockPairs(s.lockPairs);
           setSessionHistory(Array.isArray(s.sessionHistory) ? s.sessionHistory : []); // new field: default [] if absent (backward-compatible)
         }
+      } catch (e) {}
+      try {
+        const pr = await window.storage.get("bg-v11-prerestore");
+        setHasPreRestoreBackup(!!pr?.value);
       } catch (e) {}
       setLoaded(true);
     })();
@@ -1662,6 +1868,185 @@ function App() {
     }));
   };
   const deleteSessionHistory = sessId => setSessionHistory(prev => prev.filter(s => s.id !== sessId));
+
+  // ---- Backup / Restore ----
+  // Export the entire persisted state (same shape as "bg-v11") as a downloadable/shareable JSON file.
+  // Returns null if the user cancelled the native share sheet or every fallback failed; otherwise
+  // { stats, sizeLabel } for the caller to show a success banner with.
+  const exportBackup = async () => {
+    const payload = buildBackupPayload({
+      players,
+      history,
+      current,
+      future,
+      roundNo,
+      courtCount,
+      mode,
+      settings,
+      session,
+      lockPairs,
+      sessionHistory
+    });
+    const json = JSON.stringify(payload);
+    const filename = `BadQ_Backup_${fmtBackupStamp(new Date())}.json`;
+    const blob = new Blob([json], {
+      type: "application/json"
+    });
+    let completed = false;
+    if (navigator.share && navigator.canShare) {
+      try {
+        const file = new File([blob], filename, {
+          type: "application/json"
+        });
+        if (navigator.canShare({
+          files: [file]
+        })) {
+          await navigator.share({
+            files: [file],
+            title: filename
+          });
+          completed = true;
+        }
+      } catch (e) {
+        if (e && e.name === "AbortError") return null; // user cancelled the share sheet — do nothing
+        // any other share failure: fall through to the direct-download fallback below
+      }
+    }
+    if (!completed) {
+      try {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 2000);
+        completed = true;
+      } catch (e) {
+        try {
+          window.open(URL.createObjectURL(blob), "_blank");
+          completed = true;
+        } catch (e2) {
+          return null;
+        }
+      }
+    }
+    setSettings(s => ({
+      ...s,
+      lastBackupAt: new Date().toISOString()
+    }));
+    return {
+      stats: backupStats(payload.data),
+      sizeLabel: fmtBytes(blob.size)
+    };
+  };
+  // parse + validate + migrate an uploaded backup file's text content; never throws, always returns
+  // either { ok:true, backup } or { ok:false, reason }.
+  const validateBackupFile = text => {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      return {
+        ok: false,
+        reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"
+      };
+    }
+    const struct = validateBackupStructure(parsed);
+    if (!struct.ok) return struct;
+    let migrated;
+    try {
+      migrated = migrateBackupData(parsed);
+    } catch (e) {
+      return {
+        ok: false,
+        reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"
+      };
+    }
+    const integ = validateBackupIntegrity(migrated.data);
+    if (!integ.ok) return integ;
+    return {
+      ok: true,
+      backup: {
+        ...migrated,
+        data: integ.data
+      }
+    };
+  };
+  // apply a validated backup. restoreMode "replace" takes a safety snapshot of the CURRENT state first
+  // (so it can be undone), then overwrites everything. "mergeHistory" only adds session-history entries
+  // that aren't already present (by stable id) — current players/session are left untouched.
+  const applyRestore = async (restoreMode, backup) => {
+    const data = backup.data;
+    if (restoreMode === "replace") {
+      try {
+        const snapshot = buildBackupPayload({
+          players,
+          history,
+          current,
+          future,
+          roundNo,
+          courtCount,
+          mode,
+          settings,
+          session,
+          lockPairs,
+          sessionHistory
+        });
+        await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
+        setHasPreRestoreBackup(true);
+      } catch (e) {}
+      setPlayers(data.players.map(normPlayer));
+      setHistory(data.history);
+      setCurrent(data.current);
+      setFuture(data.future);
+      setRoundNo(data.roundNo);
+      setCourtCount(data.courtCount);
+      setMode(data.mode);
+      setSettings(data.settings);
+      setSession(data.session);
+      setLockPairs(data.lockPairs);
+      setSessionHistory(data.sessionHistory);
+    } else if (restoreMode === "mergeHistory") {
+      setSessionHistory(prev => {
+        const existing = new Set(prev.map(s => s.id));
+        const toAdd = (data.sessionHistory || []).filter(s => !existing.has(s.id)); // stable-id dedup — never duplicate an existing archived session
+        return [...prev, ...toAdd];
+      });
+    }
+  };
+  // revert the most recent "replace all" restore using the safety snapshot taken right before it.
+  const undoRestore = async () => {
+    try {
+      const r = await window.storage.get("bg-v11-prerestore");
+      if (!r?.value) {
+        setHasPreRestoreBackup(false);
+        return false;
+      }
+      const snap = JSON.parse(r.value);
+      const data = snap.data || snap;
+      setPlayers((data.players || []).map(normPlayer));
+      setHistory(data.history || []);
+      setCurrent(data.current || []);
+      setFuture(data.future || []);
+      setRoundNo(data.roundNo || 0);
+      setCourtCount(data.courtCount || 2);
+      setMode(data.mode || "doubles");
+      setSettings(data.settings || getDefaultSettings());
+      setSession(data.session || {
+        name: "",
+        date: new Date().toISOString().slice(0, 10)
+      });
+      setLockPairs(data.lockPairs || []);
+      setSessionHistory(data.sessionHistory || []);
+      await window.storage.delete("bg-v11-prerestore");
+      setHasPreRestoreBackup(false);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.bg,
@@ -1770,7 +2155,12 @@ function App() {
     qrRef,
     endSession,
     changeLevelPreset,
-    setCustomLevels
+    setCustomLevels,
+    exportBackup,
+    validateBackupFile,
+    applyRestore,
+    undoRestore,
+    hasPreRestoreBackup
   }), tab === "history" && /*#__PURE__*/React.createElement(HistoryTab, {
     sessionHistory,
     toggleHistoricalPaid,
@@ -2440,13 +2830,19 @@ function SessionTab(props) {
     qrRef,
     endSession,
     changeLevelPreset,
-    setCustomLevels
+    setCustomLevels,
+    exportBackup,
+    validateBackupFile,
+    applyRestore,
+    undoRestore,
+    hasPreRestoreBackup
   } = props;
   const isWide = useIsWide(); // landscape phone / tablet — lay court cards out in a grid instead of one long column
   const [openGameSettings, setOpenGameSettings] = useState(false);
   const [openPaymentSettings, setOpenPaymentSettings] = useState(false);
   const [openPrizeSettings, setOpenPrizeSettings] = useState(false);
   const [openLevelSettings, setOpenLevelSettings] = useState(false);
+  const [openBackupSettings, setOpenBackupSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
@@ -3028,6 +3424,49 @@ function SessionTab(props) {
     settings: settings,
     changeLevelPreset: changeLevelPreset,
     setCustomLevels: setCustomLevels
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenBackupSettings(v => !v),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "11px 14px",
+      borderRadius: 12,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13.5,
+      fontWeight: 700,
+      marginBottom: openBackupSettings ? 0 : 12
+    }
+  }, /*#__PURE__*/React.createElement(Download, {
+    size: 15,
+    color: T.muted
+  }), " \u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E41\u0E25\u0E30\u0E01\u0E32\u0E23\u0E2A\u0E33\u0E23\u0E2D\u0E07", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 17,
+    color: T.muted,
+    style: {
+      marginLeft: "auto",
+      transform: openBackupSettings ? "rotate(180deg)" : "none",
+      transition: "transform .15s"
+    }
+  })), openBackupSettings && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 12px 12px",
+      padding: 14,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(BackupSettingsEditor, {
+    exportBackup: exportBackup,
+    validateBackupFile: validateBackupFile,
+    applyRestore: applyRestore,
+    undoRestore: undoRestore,
+    lastBackupAt: settings.lastBackupAt,
+    hasPreRestoreBackup: hasPreRestoreBackup
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -5983,6 +6422,368 @@ function CustomLevelEditor({
       fontWeight: 700
     }
   }, error));
+}
+
+// local-file backup / restore UI: export the whole app state as a JSON file, or import one back with
+// a validate -> preview -> confirm flow. A "replace all" restore always takes a safety snapshot first
+// (see App().applyRestore) so it can be undone with the button below the two main actions.
+function BackupSettingsEditor({
+  exportBackup,
+  validateBackupFile,
+  applyRestore,
+  undoRestore,
+  lastBackupAt,
+  hasPreRestoreBackup
+}) {
+  const [busy, setBusy] = useState(false);
+  const [successMsg, setSuccessMsg] = useState(null); // { kind: "export"|"import"|"undo", stats?, sizeLabel? }
+  const [importError, setImportError] = useState(null);
+  const [preview, setPreview] = useState(null); // validated backup object awaiting mode choice / confirm
+  const [restoreMode, setRestoreMode] = useState("replace"); // "replace" | "mergeHistory"
+  const [confirmRestore, setConfirmRestore] = useState(false);
+  const [confirmUndo, setConfirmUndo] = useState(false);
+  const fileRef = useRef();
+  const doExport = async () => {
+    setBusy(true);
+    setSuccessMsg(null);
+    setImportError(null);
+    const res = await exportBackup();
+    setBusy(false);
+    if (res) setSuccessMsg({
+      kind: "export",
+      stats: res.stats,
+      sizeLabel: res.sizeLabel
+    });
+  };
+  const onFile = async e => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    setSuccessMsg(null);
+    setImportError(null);
+    let text;
+    try {
+      text = await f.text();
+    } catch (err) {
+      setImportError("ไม่สามารถอ่านไฟล์นี้ได้");
+      return;
+    }
+    const res = validateBackupFile(text);
+    if (!res.ok) {
+      setImportError(res.reason || "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ");
+      return;
+    }
+    setRestoreMode("replace");
+    setPreview(res.backup);
+  };
+  const confirmDoRestore = async () => {
+    setConfirmRestore(false);
+    setBusy(true);
+    const stats = backupStats(preview.data);
+    await applyRestore(restoreMode, preview);
+    setBusy(false);
+    setSuccessMsg({
+      kind: "import",
+      stats
+    });
+    setPreview(null);
+  };
+  const doUndo = async () => {
+    setConfirmUndo(false);
+    setBusy(true);
+    const ok = await undoRestore();
+    setBusy(false);
+    if (ok) setSuccessMsg({
+      kind: "undo"
+    });
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("input", {
+    ref: fileRef,
+    type: "file",
+    accept: "application/json",
+    onChange: onFile,
+    style: {
+      display: "none"
+    }
+  }), /*#__PURE__*/React.createElement(Label, null, "\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E41\u0E25\u0E30\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      marginBottom: 10
+    }
+  }, lastBackupAt ? `สำรองล่าสุด: ${fmtThaiDateTime(lastBackupAt)}` : "ยังไม่เคยสำรองข้อมูล"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    disabled: busy,
+    onClick: doExport,
+    style: {
+      ...btnSecondary,
+      opacity: busy ? 0.6 : 1
+    }
+  }, /*#__PURE__*/React.createElement(Download, {
+    size: 15
+  }), " \u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25"), /*#__PURE__*/React.createElement("button", {
+    disabled: busy,
+    onClick: () => fileRef.current.click(),
+    style: {
+      ...btnSecondary,
+      opacity: busy ? 0.6 : 1
+    }
+  }, /*#__PURE__*/React.createElement(Upload, {
+    size: 15
+  }), " \u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25")), hasPreRestoreBackup && /*#__PURE__*/React.createElement("button", {
+    disabled: busy,
+    onClick: () => setConfirmUndo(true),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "9px 0",
+      borderRadius: 11,
+      background: "none",
+      border: `1px dashed ${T.border}`,
+      color: T.muted,
+      fontSize: 12,
+      fontWeight: 700,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement(RotateCcw, {
+    size: 14
+  }), " \u0E22\u0E49\u0E2D\u0E19\u0E01\u0E25\u0E31\u0E1A\u0E01\u0E32\u0E23\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E04\u0E23\u0E31\u0E49\u0E07\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14"), successMsg && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#e2f5ec",
+      border: `1px solid ${T.green}`,
+      borderRadius: 11,
+      padding: "10px 12px",
+      fontSize: 12.5,
+      color: T.green,
+      marginBottom: 8,
+      lineHeight: 1.7
+    }
+  }, successMsg.kind === "export" && /*#__PURE__*/React.createElement(React.Fragment, null, "\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E40\u0E23\u0E35\u0E22\u0E1A\u0E23\u0E49\u0E2D\u0E22", /*#__PURE__*/React.createElement("br", null), "\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 ", successMsg.stats.playerCount, " \u0E04\u0E19 \xB7 \u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19 ", successMsg.stats.sessionHistoryCount, " \u0E04\u0E23\u0E31\u0E49\u0E07 \xB7 \u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14 ", successMsg.stats.matchCount, " \u0E41\u0E21\u0E15\u0E0A\u0E4C", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: T.muted
+    }
+  }, "\u0E02\u0E19\u0E32\u0E14\u0E44\u0E1F\u0E25\u0E4C\u0E2A\u0E33\u0E23\u0E2D\u0E07 ", successMsg.sizeLabel)), successMsg.kind === "import" && /*#__PURE__*/React.createElement(React.Fragment, null, "\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E40\u0E23\u0E35\u0E22\u0E1A\u0E23\u0E49\u0E2D\u0E22", /*#__PURE__*/React.createElement("br", null), "\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 ", successMsg.stats.playerCount, " \u0E04\u0E19 \xB7 \u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19 ", successMsg.stats.sessionHistoryCount, " \u0E04\u0E23\u0E31\u0E49\u0E07"), successMsg.kind === "undo" && /*#__PURE__*/React.createElement(React.Fragment, null, "\u0E22\u0E49\u0E2D\u0E19\u0E01\u0E25\u0E31\u0E1A\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E48\u0E2D\u0E19\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E40\u0E23\u0E35\u0E22\u0E1A\u0E23\u0E49\u0E2D\u0E22")), importError && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#fdecea",
+      border: `1px solid ${T.accent}`,
+      borderRadius: 11,
+      padding: "10px 12px",
+      fontSize: 12.5,
+      color: T.accent,
+      marginBottom: 8,
+      lineHeight: 1.7
+    }
+  }, "\u0E44\u0E21\u0E48\u0E2A\u0E32\u0E21\u0E32\u0E23\u0E16\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E44\u0E14\u0E49", /*#__PURE__*/React.createElement("br", null), "\u0E44\u0E1F\u0E25\u0E4C\u0E19\u0E35\u0E49\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E44\u0E1F\u0E25\u0E4C\u0E2A\u0E33\u0E23\u0E2D\u0E07 BadQ \u0E17\u0E35\u0E48\u0E23\u0E2D\u0E07\u0E23\u0E31\u0E1A"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      lineHeight: 1.5
+    }
+  }, "\u0E44\u0E1F\u0E25\u0E4C\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E2D\u0E32\u0E08\u0E21\u0E35\u0E0A\u0E37\u0E48\u0E2D \u0E23\u0E39\u0E1B\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 \u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E32\u0E23\u0E40\u0E25\u0E48\u0E19 \u0E41\u0E25\u0E30\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19 \u0E01\u0E23\u0E38\u0E13\u0E32\u0E40\u0E01\u0E47\u0E1A\u0E44\u0E1F\u0E25\u0E4C\u0E44\u0E27\u0E49\u0E43\u0E19\u0E17\u0E35\u0E48\u0E1B\u0E25\u0E2D\u0E14\u0E20\u0E31\u0E22"), preview && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setPreview(null),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.5)",
+      zIndex: 70,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 360,
+      width: "100%",
+      maxHeight: "85vh",
+      overflowY: "auto",
+      boxSizing: "border-box"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 10
+    }
+  }, "\u0E1E\u0E1A\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2A\u0E33\u0E23\u0E2D\u0E07"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 2
+    }
+  }, "\u0E27\u0E31\u0E19\u0E17\u0E35\u0E48\u0E2A\u0E33\u0E23\u0E2D\u0E07: ", fmtThaiDateTime(preview.exportedAt)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 12
+    }
+  }, "Version: BadQ v", preview.appVersion), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface2,
+      borderRadius: 11,
+      padding: 12,
+      fontSize: 12.5,
+      marginBottom: 14,
+      lineHeight: 1.9
+    }
+  }, (() => {
+    const st = backupStats(preview.data);
+    return /*#__PURE__*/React.createElement(React.Fragment, null, "\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 ", st.playerCount, " \u0E04\u0E19", /*#__PURE__*/React.createElement("br", null), "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19 ", st.sessionHistoryCount, " \u0E04\u0E23\u0E31\u0E49\u0E07", /*#__PURE__*/React.createElement("br", null), "\u0E41\u0E21\u0E15\u0E0A\u0E4C ", st.matchCount, " \u0E41\u0E21\u0E15\u0E0A\u0E4C", /*#__PURE__*/React.createElement("br", null), st.hasCurrentSession && /*#__PURE__*/React.createElement(React.Fragment, null, "\u0E21\u0E35\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E01\u0E33\u0E25\u0E31\u0E07\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19 1 \u0E01\u0E4A\u0E27\u0E19", /*#__PURE__*/React.createElement("br", null)), st.hasPayment && /*#__PURE__*/React.createElement(React.Fragment, null, "\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19", /*#__PURE__*/React.createElement("br", null)), st.hasQR && /*#__PURE__*/React.createElement(React.Fragment, null, "\u0E21\u0E35 QR \u0E23\u0E31\u0E1A\u0E40\u0E07\u0E34\u0E19"));
+  })()), /*#__PURE__*/React.createElement(Label, null, "\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A\u0E01\u0E32\u0E23\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRestoreMode("replace"),
+    style: {
+      textAlign: "left",
+      padding: "10px 12px",
+      borderRadius: 11,
+      border: `1.5px solid ${restoreMode === "replace" ? T.green : T.border}`,
+      background: restoreMode === "replace" ? "#e2f5ec" : T.surface
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      color: restoreMode === "replace" ? T.green : T.text
+    }
+  }, "\u0E41\u0E17\u0E19\u0E17\u0E35\u0E48\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginTop: 2
+    }
+  }, "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25 BadQ \u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19\u0E08\u0E30\u0E16\u0E39\u0E01\u0E41\u0E17\u0E19\u0E17\u0E35\u0E48\u0E14\u0E49\u0E27\u0E22\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E44\u0E1F\u0E25\u0E4C\u0E2A\u0E33\u0E23\u0E2D\u0E07")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRestoreMode("mergeHistory"),
+    style: {
+      textAlign: "left",
+      padding: "10px 12px",
+      borderRadius: 11,
+      border: `1.5px solid ${restoreMode === "mergeHistory" ? T.green : T.border}`,
+      background: restoreMode === "mergeHistory" ? "#e2f5ec" : T.surface
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      color: restoreMode === "mergeHistory" ? T.green : T.text
+    }
+  }, "\u0E23\u0E27\u0E21\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginTop: 2
+    }
+  }, "\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35 \u0E44\u0E21\u0E48\u0E41\u0E15\u0E30\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19/\u0E01\u0E4A\u0E27\u0E19\u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19 (\u0E01\u0E31\u0E19\u0E0B\u0E49\u0E33\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34)"))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPreview(null),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmRestore(true),
+    style: btnPrimary
+  }, "\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25")))), confirmRestore && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setConfirmRestore(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.5)",
+      zIndex: 71,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2A\u0E33\u0E23\u0E2D\u0E07?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 16
+    }
+  }, restoreMode === "replace" ? "ระบบจะสำรองข้อมูลปัจจุบันไว้ก่อนดำเนินการ" : "จะเพิ่มเฉพาะประวัติก๊วนที่ยังไม่มี ไม่กระทบผู้เล่น/ก๊วนปัจจุบัน"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmRestore(false),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: confirmDoRestore,
+    style: btnPrimary
+  }, "\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25")))), confirmUndo && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setConfirmUndo(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.5)",
+      zIndex: 71,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 16
+    }
+  }, "\u0E22\u0E49\u0E2D\u0E19\u0E01\u0E25\u0E31\u0E1A\u0E01\u0E32\u0E23\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E04\u0E23\u0E31\u0E49\u0E07\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmUndo(false),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: doUndo,
+    style: btnPrimary
+  }, "\u0E22\u0E49\u0E2D\u0E19\u0E01\u0E25\u0E31\u0E1A")))));
 }
 
 // custom spin wheel — picks a weighted-random prize, animates the wheel to land on it, then reports the result
