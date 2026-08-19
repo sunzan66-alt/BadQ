@@ -27,6 +27,29 @@
     async delete(k){ try{ localStorage.removeItem("bg:"+k); }catch(e){} return { deleted:true }; },
   };
 </script>
+<script>
+  // Auto-update check: on every launch, fetch the live index.html (bypassing any
+  // browser/PWA cache) and compare its embedded APP_VERSION with the one that's
+  // currently running. If a newer version has been deployed, force a cache-busted
+  // reload so the app updates itself — without ever touching localStorage (data
+  // lives in a separate storage area and is never affected by this).
+  (function(){
+    try{
+      var CURRENT_VERSION = "1.5.1";
+      var qs = new URLSearchParams(location.search);
+      if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
+      fetch(location.pathname, { cache: "no-store" })
+        .then(function(r){ return r.text(); })
+        .then(function(html){
+          var m = html.match(/APP_VERSION\s*=\s*"([^"]+)"/);
+          if (m && m[1] && m[1] !== CURRENT_VERSION) {
+            location.replace(location.pathname + "?_v=" + Date.now());
+          }
+        })
+        .catch(function(){ /* offline: keep running current cached version */ });
+    }catch(e){}
+  })();
+</script>
 </head>
 <body>
 <div id="root"><div id="boot">BadQ Loading...</div></div>
@@ -375,7 +398,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.5.1";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
