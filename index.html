@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.5.1";
+      var CURRENT_VERSION = "1.6.0";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -398,7 +398,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.6.0";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1589,7 +1589,8 @@ function App() {
     qrRef,
     session,
     setPDiscount,
-    applyWheelPrize
+    applyWheelPrize,
+    endSession
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -2139,11 +2140,12 @@ function SessionTab(props) {
     qrRef,
     endSession
   } = props;
-  const [openSettings, setOpenSettings] = useState(false);
+  const [openGameSettings, setOpenGameSettings] = useState(false);
+  const [openPaymentSettings, setOpenPaymentSettings] = useState(false);
+  const [openPrizeSettings, setOpenPrizeSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
-  const [confirmEnd, setConfirmEnd] = useState(false);
   const started = current.length > 0;
   const waitMin = p => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
   const teamScore = arr => arr.reduce((s, id) => s + (id ? WEIGHT[getP(id)?.level] || 0 : 0), 0);
@@ -2331,7 +2333,7 @@ function SessionTab(props) {
       marginBottom: 12
     }
   }, fmtMode(settings, mode)), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setOpenSettings(v => !v),
+    onClick: () => setOpenGameSettings(v => !v),
     style: {
       width: "100%",
       display: "flex",
@@ -2344,27 +2346,27 @@ function SessionTab(props) {
       color: T.text,
       fontSize: 13.5,
       fontWeight: 700,
-      marginBottom: openSettings ? 0 : 12
+      marginBottom: openGameSettings ? 0 : 8
     }
-  }, /*#__PURE__*/React.createElement(Lock, {
+  }, /*#__PURE__*/React.createElement(Shuffle, {
     size: 15,
     color: T.muted
-  }), " \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32 (\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A \xB7 \u0E04\u0E2D\u0E23\u0E4C\u0E17 \xB7 \u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22 \xB7 \u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 \xB7 QR)", /*#__PURE__*/React.createElement(ChevronDown, {
+  }), " \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E40\u0E01\u0E21 (\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A \xB7 \u0E04\u0E2D\u0E23\u0E4C\u0E17 \xB7 \u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48)", /*#__PURE__*/React.createElement(ChevronDown, {
     size: 17,
     color: T.muted,
     style: {
       marginLeft: "auto",
-      transform: openSettings ? "rotate(180deg)" : "none",
+      transform: openGameSettings ? "rotate(180deg)" : "none",
       transition: "transform .15s"
     }
-  })), openSettings && /*#__PURE__*/React.createElement("div", {
+  })), openGameSettings && /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.surface,
       border: `1px solid ${T.border}`,
       borderTop: "none",
       borderRadius: "0 0 12px 12px",
       padding: 14,
-      marginBottom: 12
+      marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement(Label, null, "\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A\u0E01\u0E32\u0E23\u0E40\u0E25\u0E48\u0E19"), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -2443,7 +2445,68 @@ function SessionTab(props) {
     setValue: setCourtCount,
     min: 1,
     max: 12
-  })), /*#__PURE__*/React.createElement(Label, null, "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22"), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(Label, null, "\u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48)"), /*#__PURE__*/React.createElement(LockPairEditor, {
+    players,
+    lockPairs,
+    addLockPair,
+    removeLockPair,
+    getP
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: resetGames,
+    style: {
+      marginTop: 14,
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "10px 0",
+      borderRadius: 11,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.muted,
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(RotateCcw, {
+    size: 14
+  }), " \u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenPaymentSettings(v => !v),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "11px 14px",
+      borderRadius: 12,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13.5,
+      fontWeight: 700,
+      marginBottom: openPaymentSettings ? 0 : 8
+    }
+  }, /*#__PURE__*/React.createElement(Wallet, {
+    size: 15,
+    color: T.muted
+  }), " \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E01\u0E32\u0E23\u0E08\u0E48\u0E32\u0E22\u0E40\u0E07\u0E34\u0E19 (\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22 \xB7 QR \xB7 \u0E1A\u0E31\u0E0D\u0E0A\u0E35)", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 17,
+    color: T.muted,
+    style: {
+      marginLeft: "auto",
+      transform: openPaymentSettings ? "rotate(180deg)" : "none",
+      transition: "transform .15s"
+    }
+  })), openPaymentSettings && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 12px 12px",
+      padding: 14,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement(Label, null, "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -2474,13 +2537,7 @@ function SessionTab(props) {
       ...s,
       other: v
     }))
-  })), /*#__PURE__*/React.createElement(Label, null, "\u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48)"), /*#__PURE__*/React.createElement(LockPairEditor, {
-    players,
-    lockPairs,
-    addLockPair,
-    removeLockPair,
-    getP
-  }), /*#__PURE__*/React.createElement(Label, null, "QR \u0E23\u0E31\u0E1A\u0E40\u0E07\u0E34\u0E19"), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(Label, null, "QR \u0E23\u0E31\u0E1A\u0E40\u0E07\u0E34\u0E19"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -2584,30 +2641,41 @@ function SessionTab(props) {
       resize: "vertical",
       fontFamily: "inherit"
     }
-  })), /*#__PURE__*/React.createElement("button", {
-    onClick: resetGames,
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenPrizeSettings(v => !v),
     style: {
-      marginTop: 12,
       width: "100%",
       display: "flex",
       alignItems: "center",
-      justifyContent: "center",
-      gap: 6,
-      padding: "10px 0",
-      borderRadius: 11,
-      background: T.surface2,
+      gap: 8,
+      padding: "11px 14px",
+      borderRadius: 12,
+      background: T.surface,
       border: `1px solid ${T.border}`,
-      color: T.muted,
-      fontSize: 12.5,
-      fontWeight: 700
+      color: T.text,
+      fontSize: 13.5,
+      fontWeight: 700,
+      marginBottom: openPrizeSettings ? 0 : 12
     }
-  }, /*#__PURE__*/React.createElement(RotateCcw, {
-    size: 14
-  }), " \u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(Trophy, {
+    size: 15,
+    color: T.muted
+  }), " \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 (\u0E27\u0E07\u0E25\u0E49\u0E2D)", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 17,
+    color: T.muted,
     style: {
-      marginTop: 18,
-      paddingTop: 14,
-      borderTop: `1px dashed ${T.border}`
+      marginLeft: "auto",
+      transform: openPrizeSettings ? "rotate(180deg)" : "none",
+      transition: "transform .15s"
+    }
+  })), openPrizeSettings && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 12px 12px",
+      padding: 14,
+      marginBottom: 12
     }
   }, /*#__PURE__*/React.createElement(Label, null, "\uD83C\uDFA1 \u0E27\u0E07\u0E25\u0E49\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 \u2014 \u0E01\u0E33\u0E2B\u0E19\u0E14\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E41\u0E25\u0E30\u0E42\u0E2D\u0E01\u0E32\u0E2A\u0E2D\u0E2D\u0E01"), /*#__PURE__*/React.createElement(WheelPrizeEditor, {
     prizes: settings.wheelPrizes || [],
@@ -2616,80 +2684,6 @@ function SessionTab(props) {
       wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater
     }))
   })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 18,
-      paddingTop: 14,
-      borderTop: `1px dashed ${T.border}`
-    }
-  }, /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E31\u0E14\u0E01\u0E32\u0E23\u0E01\u0E4A\u0E27\u0E19"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setConfirmEnd(true),
-    style: {
-      width: "100%",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 6,
-      padding: "10px 0",
-      borderRadius: 11,
-      background: "none",
-      border: `1px solid ${T.accent}`,
-      color: T.accent,
-      fontSize: 12.5,
-      fontWeight: 700
-    }
-  }, /*#__PURE__*/React.createElement(LogOut, {
-    size: 14
-  }), " \u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19\u0E27\u0E31\u0E19\u0E19\u0E35\u0E49"))), confirmEnd && /*#__PURE__*/React.createElement("div", {
-    onClick: () => setConfirmEnd(false),
-    style: {
-      position: "fixed",
-      inset: 0,
-      background: "rgba(0,0,0,0.4)",
-      zIndex: 60,
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      padding: 20
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    onClick: e => e.stopPropagation(),
-    style: {
-      background: T.surface,
-      borderRadius: 16,
-      padding: 18,
-      maxWidth: 340,
-      width: "100%"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 15,
-      fontWeight: 800,
-      marginBottom: 8
-    }
-  }, "\u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19 \"", session.name || "ไม่มีชื่อ", "\"?"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      color: T.muted,
-      marginBottom: 16
-    }
-  }, "\u0E23\u0E30\u0E1A\u0E1A\u0E08\u0E30\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19\u0E19\u0E35\u0E49\u0E44\u0E27\u0E49\u0E43\u0E19\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19 \u0E41\u0E25\u0E49\u0E27\u0E40\u0E23\u0E34\u0E48\u0E21\u0E01\u0E4A\u0E27\u0E19\u0E43\u0E2B\u0E21\u0E48\u0E43\u0E2B\u0E49\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setConfirmEnd(false),
-    style: btnSecondary
-  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setConfirmEnd(false);
-      endSession();
-    },
-    style: {
-      ...btnPrimary,
-      background: T.accent
-    }
-  }, "\u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19")))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
@@ -3779,12 +3773,14 @@ function SummaryTab({
   qrRef,
   session,
   setPDiscount,
-  applyWheelPrize
+  applyWheelPrize,
+  endSession
 }) {
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
   const [payFilter, setPayFilter] = useState("unpaid"); // "all" | "unpaid" | "paid"
   const [wheelFor, setWheelFor] = useState(null); // player id currently spinning the wheel
+  const [confirmEnd, setConfirmEnd] = useState(false);
   const doneCurrent = current.filter(m => m.status === "done");
   const totalMatches = history.length + doneCurrent.length;
   const played = players.filter(p => (p.games || 0) > 0 || p.status !== "absent");
@@ -3805,6 +3801,7 @@ function SummaryTab({
   const grandTotal = bill.reduce((s, b) => s + b.total, 0);
   const collected = bill.filter(b => b.paid).reduce((s, b) => s + b.total, 0);
   const paidCount = bill.filter(b => b.paid).length;
+  const allPaid = bill.length > 0 && paidCount === bill.length;
   const detailP = detail ? players.find(p => p.id === detail) : null;
   const detailStats = detailP ? playerStats(detailP.id, allHist) : null;
   const detailBill = detailP ? billBy(detailP.id) : null;
@@ -4114,7 +4111,28 @@ function SummaryTab({
       background: b.paid ? "#e2f5ec" : "#fdecea",
       color: b.paid ? T.green : T.accent
     }
-  }, b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย")))), /*#__PURE__*/React.createElement(SectionHead, {
+  }, b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย")))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => allPaid && setConfirmEnd(true),
+    disabled: !allPaid,
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 7,
+      padding: "12px 0",
+      borderRadius: 13,
+      background: allPaid ? "none" : T.surface2,
+      border: `1.5px solid ${allPaid ? T.accent : T.border}`,
+      color: allPaid ? T.accent : T.muted,
+      fontSize: 13.5,
+      fontWeight: 800,
+      marginBottom: 18,
+      opacity: allPaid ? 1 : 0.6
+    }
+  }, /*#__PURE__*/React.createElement(LogOut, {
+    size: 15
+  }), " ", bill.length === 0 ? "ยังไม่มีผู้เล่นที่ต้องจ่าย" : allPaid ? "จบก๊วนวันนี้" : `จบก๊วนวันนี้ (รอจ่ายอีก ${bill.length - paidCount} คน)`), /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(History, {
       size: 16,
       color: T.muted
@@ -4443,7 +4461,57 @@ function SummaryTab({
     prizes: settings.wheelPrizes || [],
     onFinish: prize => applyWheelPrize(wheelFor, prize),
     onClose: () => setWheelFor(null)
-  }));
+  }), confirmEnd && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setConfirmEnd(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.4)",
+      zIndex: 60,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19 \"", session.name || "ไม่มีชื่อ", "\"?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 16
+    }
+  }, "\u0E23\u0E30\u0E1A\u0E1A\u0E08\u0E30\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19\u0E19\u0E35\u0E49\u0E44\u0E27\u0E49\u0E43\u0E19\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19 \u0E41\u0E25\u0E49\u0E27\u0E40\u0E23\u0E34\u0E48\u0E21\u0E01\u0E4A\u0E27\u0E19\u0E43\u0E2B\u0E21\u0E48\u0E43\u0E2B\u0E49\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmEnd(false),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setConfirmEnd(false);
+      endSession();
+    },
+    style: {
+      ...btnPrimary,
+      background: T.accent
+    }
+  }, "\u0E08\u0E1A\u0E01\u0E4A\u0E27\u0E19")))));
 }
 function MiniStat({
   label,
