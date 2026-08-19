@@ -375,7 +375,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -682,16 +682,19 @@ function computeBill(players, settings) {
   const payers = players.filter(p => p.status && p.status !== "absent");
   const n = payers.length || 1;
   const otherShare = (settings.other || 0) / n;
+  const discount = settings.discount || 0; // flat discount subtracted per person (฿/คน)
   return payers.map(p => {
     const court = settings.court || 0,
       shuttle = (p.games || 0) * (settings.shuttle || 0),
       other = otherShare;
+    const total = Math.max(0, Math.round(court + shuttle + other - discount));
     return {
       ...p,
       eCourt: court,
       eShuttle: shuttle,
       eOther: other,
-      total: Math.round(court + shuttle + other)
+      eDiscount: discount,
+      total
     };
   });
 }
@@ -809,11 +812,13 @@ function App() {
     court: 65,
     shuttle: 25,
     other: 0,
+    discount: 0,
     rounds: 1,
     winScore: 21,
     deuce: true,
     qr: null,
-    bank: ""
+    bank: "",
+    pairingMode: "auto"
   });
   const [session, setSession] = useState({
     name: "",
@@ -930,7 +935,28 @@ function App() {
   };
 
   // engine
+  const emptyTeam = () => mode === "doubles" ? [null, null] : [null];
   const genStart = () => {
+    if (settings.pairingMode === "manual") {
+      const cur = Array.from({
+        length: courtCount
+      }, (_, i) => ({
+        id: uid(),
+        mode,
+        teamA: emptyTeam(),
+        teamB: emptyTeam(),
+        status: "next",
+        round: 0,
+        court: i + 1,
+        locked: false
+      }));
+      setHistory([]);
+      setCurrent(cur);
+      setFuture([]);
+      setRoundNo(0);
+      setSel(null);
+      return;
+    }
     const base = players.map(p => ({
       ...p,
       lastPlayedRound: -1
@@ -997,39 +1023,53 @@ function App() {
     } : {
       ...p
     });
-    const others = current.filter(c => c.id !== mid);
-    const reserved = new Set(others.flatMap(c => [...c.teamA, ...c.teamB].filter(Boolean)));
-    const base = np.map(p => ({
-      ...p
-    }));
-    const stats = counts([...history, m, ...others]);
-    const order = base.filter(p => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
-    const nm = buildMatch(order, mode, lockPairs, base, stats);
-    let newMatch = null;
-    if (nm) {
-      const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
-      np = np.map(p => {
-        if (!ids.has(p.id)) return p;
-        const wms = Math.max(0, t - (p.waitingSince || t));
-        return {
-          ...p,
-          lastPlayedRound: seq,
-          waitingSince: t,
-          waitTotal: (p.waitTotal || 0) + wms,
-          waitCount: (p.waitCount || 0) + 1,
-          waitMax: Math.max(p.waitMax || 0, wms)
-        };
-      });
+    let newMatch;
+    if (settings.pairingMode === "manual") {
       newMatch = {
         id: uid(),
         mode,
-        teamA: nm.teamA,
-        teamB: nm.teamB,
+        teamA: emptyTeam(),
+        teamB: emptyTeam(),
         status: "next",
         round: seq,
         court,
         locked: false
       };
+    } else {
+      const others = current.filter(c => c.id !== mid);
+      const reserved = new Set(others.flatMap(c => [...c.teamA, ...c.teamB].filter(Boolean)));
+      const base = np.map(p => ({
+        ...p
+      }));
+      const stats = counts([...history, m, ...others]);
+      const order = base.filter(p => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+      const nm = buildMatch(order, mode, lockPairs, base, stats);
+      newMatch = null;
+      if (nm) {
+        const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
+        np = np.map(p => {
+          if (!ids.has(p.id)) return p;
+          const wms = Math.max(0, t - (p.waitingSince || t));
+          return {
+            ...p,
+            lastPlayedRound: seq,
+            waitingSince: t,
+            waitTotal: (p.waitTotal || 0) + wms,
+            waitCount: (p.waitCount || 0) + 1,
+            waitMax: Math.max(p.waitMax || 0, wms)
+          };
+        });
+        newMatch = {
+          id: uid(),
+          mode,
+          teamA: nm.teamA,
+          teamB: nm.teamB,
+          status: "next",
+          round: seq,
+          court,
+          locked: false
+        };
+      }
     }
     const newCurrent = current.map(c => c.id === mid ? newMatch : c).filter(Boolean);
     setPlayers(np);
@@ -1040,9 +1080,19 @@ function App() {
   };
 
   // regenerate a single not-started court (reserve other courts, don't touch playing/games)
+  // in manual pairing mode this just clears the court back to empty slots for re-picking
   const regenCourt = mid => {
     const m = current.find(x => x.id === mid);
     if (!m || m.status !== "next" || m.locked) return;
+    if (settings.pairingMode === "manual") {
+      setCurrent(prev => prev.map(c => c.id === mid ? {
+        ...c,
+        teamA: emptyTeam(),
+        teamB: emptyTeam()
+      } : c));
+      setSel(null);
+      return;
+    }
     const others = current.filter(c => c.id !== mid);
     const reserved = new Set(others.flatMap(c => [...c.teamA, ...c.teamB].filter(Boolean)));
     const base = players.map(p => ({
@@ -1060,8 +1110,23 @@ function App() {
     setSel(null);
   };
 
-  // fill an empty court from the waiting pool
+  // fill an empty court — auto-pick from the waiting pool, or open empty slots for manual pick
   const fillCourt = court => {
+    if (settings.pairingMode === "manual") {
+      const nc = {
+        id: uid(),
+        mode,
+        teamA: emptyTeam(),
+        teamB: emptyTeam(),
+        status: "next",
+        round: roundNo + 1,
+        court,
+        locked: false
+      };
+      setCurrent(prev => [...prev, nc].sort((a, b) => a.court - b.court));
+      setSel(null);
+      return;
+    }
     const reserved = new Set(current.flatMap(c => [...c.teamA, ...c.teamB].filter(Boolean)));
     const base = players.map(p => ({
       ...p
@@ -1085,7 +1150,17 @@ function App() {
   };
 
   // regenerate all not-started courts at once (reserve playing + locked)
+  // in manual pairing mode this clears all not-started/not-locked courts back to empty slots
   const regenFuture = () => {
+    if (settings.pairingMode === "manual") {
+      setCurrent(prev => prev.map(c => c.status !== "next" || c.locked ? c : {
+        ...c,
+        teamA: emptyTeam(),
+        teamB: emptyTeam()
+      }));
+      setSel(null);
+      return;
+    }
     const fixed = current.filter(c => c.status === "playing" || c.locked);
     const used = new Set(fixed.flatMap(c => [...c.teamA, ...c.teamB].filter(Boolean)));
     const base = players.map(p => ({
@@ -1206,14 +1281,13 @@ function App() {
     setSel(null);
   };
 
-  // swap a slot's player for someone from the waiting bench (dropdown-based substitution)
+  // set a slot's player from the waiting bench (dropdown-based substitution / manual pick). newPid === null clears the slot.
   const replaceSlot = (mid, team, idx, newPid) => {
-    if (!newPid) return;
     setCurrent(prev => prev.map(m => {
       if (m.id !== mid) return m;
       const arr = (team === "A" ? m.teamA : m.teamB).slice();
       if (arr[idx] === newPid) return m;
-      arr[idx] = newPid;
+      arr[idx] = newPid || null;
       return team === "A" ? {
         ...m,
         teamA: arr
@@ -1462,19 +1536,19 @@ function App() {
       lineHeight: "20px"
     }
   }, "\uD83C\uDFF8")), /*#__PURE__*/React.createElement(TabBtn, {
-    active: tab === "history",
-    onClick: () => setTab("history"),
-    label: "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34"
-  }, /*#__PURE__*/React.createElement(History, {
-    size: 20,
-    strokeWidth: tab === "history" ? 2.4 : 1.8
-  })), /*#__PURE__*/React.createElement(TabBtn, {
     active: tab === "summary",
     onClick: () => setTab("summary"),
     label: "\u0E2A\u0E23\u0E38\u0E1B"
   }, /*#__PURE__*/React.createElement(ClipboardList, {
     size: 20,
     strokeWidth: tab === "summary" ? 2.4 : 1.8
+  })), /*#__PURE__*/React.createElement(TabBtn, {
+    active: tab === "history",
+    onClick: () => setTab("history"),
+    label: "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34"
+  }, /*#__PURE__*/React.createElement(History, {
+    size: 20,
+    strokeWidth: tab === "history" ? 2.4 : 1.8
   })))));
 }
 function TabBtn({
@@ -2078,7 +2152,7 @@ function SessionTab(props) {
       }
     }, /*#__PURE__*/React.createElement(Shuffle, {
       size: 15
-    }), " \u0E08\u0E31\u0E14\u0E43\u0E2B\u0E21\u0E48"), /*#__PURE__*/React.createElement("button", {
+    }), " ", settings.pairingMode === "manual" ? "ล้างคอร์ท" : "จัดใหม่"), /*#__PURE__*/React.createElement("button", {
       onClick: () => startGame(m.id),
       style: btnPrimary
     }, /*#__PURE__*/React.createElement(Play, {
@@ -2256,6 +2330,23 @@ function SessionTab(props) {
       ...s,
       deuce: v
     }))
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      marginBottom: 5
+    }
+  }, "\u0E42\u0E2B\u0E21\u0E14\u0E08\u0E31\u0E14\u0E04\u0E39\u0E48"), /*#__PURE__*/React.createElement(Seg, {
+    options: [["auto", "สุ่มอัตโนมัติ"], ["manual", "เลือกเอง (Manual)"]],
+    value: settings.pairingMode || "auto",
+    onChange: v => setSettings(s => ({
+      ...s,
+      pairingMode: v
+    }))
   })), /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E04\u0E2D\u0E23\u0E4C\u0E17"), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 16
@@ -2295,6 +2386,17 @@ function SessionTab(props) {
     onChange: v => setSettings(s => ({
       ...s,
       other: v
+    }))
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 16
+    }
+  }, /*#__PURE__*/React.createElement(NumField, {
+    label: "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14/\u0E04\u0E19 (\u0E3F)",
+    value: settings.discount || 0,
+    onChange: v => setSettings(s => ({
+      ...s,
+      discount: v
     }))
   })), /*#__PURE__*/React.createElement(Label, null, "\u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48)"), /*#__PURE__*/React.createElement(LockPairEditor, {
     players,
@@ -2523,9 +2625,9 @@ function SessionTab(props) {
     }
   }, /*#__PURE__*/React.createElement(Shuffle, {
     size: 17
-  }), " ", started ? "จัดก๊วนใหม่ทั้งหมด" : "เริ่มจัดก๊วน"), nexts.length > 1 && /*#__PURE__*/React.createElement("button", {
+  }), " ", started ? settings.pairingMode === "manual" ? "ล้างคอร์ททั้งหมด" : "จัดก๊วนใหม่ทั้งหมด" : settings.pairingMode === "manual" ? "เริ่มก๊วน (เลือกเอง)" : "เริ่มจัดก๊วน"), nexts.length > 1 && /*#__PURE__*/React.createElement("button", {
     onClick: regenFuture,
-    title: "\u0E2A\u0E38\u0E48\u0E21\u0E04\u0E2D\u0E23\u0E4C\u0E17\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E40\u0E23\u0E34\u0E48\u0E21\u0E43\u0E2B\u0E21\u0E48\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14",
+    title: settings.pairingMode === "manual" ? "ล้างคอร์ทที่ยังไม่เริ่มทั้งหมด" : "สุ่มคอร์ทที่ยังไม่เริ่มใหม่ทั้งหมด",
     style: {
       padding: "0 15px",
       borderRadius: 13,
@@ -2547,7 +2649,7 @@ function SessionTab(props) {
       textAlign: "center",
       padding: "0 0 18px"
     }
-  }, "\u0E15\u0E34\u0E4A\u0E01 \"\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E25\u0E48\u0E19\" \u0E43\u0E19\u0E41\u0E17\u0E47\u0E1A\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 \u0E41\u0E25\u0E49\u0E27\u0E01\u0E14\u0E40\u0E23\u0E34\u0E48\u0E21\u0E08\u0E31\u0E14\u0E01\u0E4A\u0E27\u0E19"), confirmRegenAll && /*#__PURE__*/React.createElement("div", {
+  }, settings.pairingMode === "manual" ? 'ติ๊ก "พร้อมเล่น" ในแท็บผู้เล่น แล้วกดเริ่มก๊วน จากนั้นแตะ "+ เลือกคน" เพื่อจัดคู่เอง' : 'ติ๊ก "พร้อมเล่น" ในแท็บผู้เล่น แล้วกดเริ่มจัดก๊วน'), confirmRegenAll && /*#__PURE__*/React.createElement("div", {
     onClick: () => setConfirmRegenAll(false),
     style: {
       position: "fixed",
@@ -2574,13 +2676,13 @@ function SessionTab(props) {
       fontWeight: 800,
       marginBottom: 8
     }
-  }, "\u0E08\u0E31\u0E14\u0E04\u0E39\u0E48\u0E43\u0E2B\u0E21\u0E48\u0E17\u0E38\u0E01\u0E04\u0E2D\u0E23\u0E4C\u0E17?"), /*#__PURE__*/React.createElement("div", {
+  }, settings.pairingMode === "manual" ? "ล้างคู่ทุกคอร์ทที่ยังไม่เริ่ม?" : "จัดคู่ใหม่ทุกคอร์ท?"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
       color: T.muted,
       marginBottom: 16
     }
-  }, "\u0E40\u0E01\u0E21\u0E17\u0E35\u0E48\u0E01\u0E33\u0E25\u0E31\u0E07\u0E40\u0E25\u0E48\u0E19\u0E08\u0E30\u0E44\u0E21\u0E48\u0E16\u0E39\u0E01\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19 \u0E23\u0E30\u0E1A\u0E1A\u0E08\u0E30\u0E08\u0E31\u0E14\u0E43\u0E2B\u0E21\u0E48\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E40\u0E01\u0E21\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E40\u0E23\u0E34\u0E48\u0E21"), /*#__PURE__*/React.createElement("div", {
+  }, settings.pairingMode === "manual" ? "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะล้างเฉพาะคอร์ทที่ยังไม่เริ่มให้เลือกคนใหม่" : "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะจัดใหม่เฉพาะเกมที่ยังไม่เริ่ม"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -2594,7 +2696,7 @@ function SessionTab(props) {
       regenFuture();
     },
     style: btnPrimary
-  }, "\u0E08\u0E31\u0E14\u0E43\u0E2B\u0E21\u0E48\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14")))), playing.length > 0 && /*#__PURE__*/React.createElement(SectionHead, {
+  }, settings.pairingMode === "manual" ? "ล้างทั้งหมด" : "จัดใหม่ทั้งหมด")))), playing.length > 0 && /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(Play, {
       size: 16,
       color: T.green
@@ -4033,6 +4135,9 @@ function SummaryTab({
   }), /*#__PURE__*/React.createElement(BillRow, {
     label: "\u0E2D\u0E37\u0E48\u0E19 \u0E46",
     v: Math.round(detailBill.eOther)
+  }), detailBill.eDiscount > 0 && /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14",
+    v: -Math.round(detailBill.eDiscount)
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -4210,15 +4315,16 @@ function BillRow({
   label,
   v
 }) {
+  const neg = v < 0;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
       fontSize: 13,
       padding: "3px 0",
-      color: T.muted
+      color: neg ? T.green : T.muted
     }
-  }, /*#__PURE__*/React.createElement("span", null, label), /*#__PURE__*/React.createElement("span", null, "\u0E3F", v));
+  }, /*#__PURE__*/React.createElement("span", null, label), /*#__PURE__*/React.createElement("span", null, neg ? "-" : "", "\u0E3F", Math.abs(v)));
 }
 function DetailList({
   title,
@@ -4318,6 +4424,7 @@ function MatchTeams({
   replaceSlot,
   bench
 }) {
+  const [openSlot, setOpenSlot] = useState(null); // { team, idx } | null — shared between both team sides so only one picker is open at a time
   const A = m.teamA,
     B = m.teamB;
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(TeamSide, {
@@ -4329,7 +4436,9 @@ function MatchTeams({
     tapSlot: tapSlot,
     isSel: isSel,
     replaceSlot: replaceSlot,
-    bench: bench
+    bench: bench,
+    openSlot: openSlot,
+    setOpenSlot: setOpenSlot
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -4364,7 +4473,9 @@ function MatchTeams({
     tapSlot: tapSlot,
     isSel: isSel,
     replaceSlot: replaceSlot,
-    bench: bench
+    bench: bench,
+    openSlot: openSlot,
+    setOpenSlot: setOpenSlot
   }));
 }
 function TeamSide({
@@ -4376,7 +4487,9 @@ function TeamSide({
   tapSlot,
   isSel,
   replaceSlot,
-  bench
+  bench,
+  openSlot,
+  setOpenSlot
 }) {
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4386,6 +4499,15 @@ function TeamSide({
   }, arr.map((id, idx) => {
     const p = id ? getP(id) : null;
     const selected = isSel && isSel(id, m.id, team, idx);
+    const isOpen = !!(openSlot && openSlot.team === team && openSlot.idx === idx);
+    const toggle = () => setOpenSlot(isOpen ? null : {
+      team,
+      idx
+    });
+    const pick = newId => {
+      replaceSlot && replaceSlot(m.id, team, idx, newId);
+      setOpenSlot(null);
+    };
     return p ? /*#__PURE__*/React.createElement("div", {
       key: idx,
       style: {
@@ -4421,40 +4543,149 @@ function TeamSide({
         fontWeight: 800,
         color: LEVEL_COLOR[p.level]
       }
-    }, "(", p.level, ")")), editable && /*#__PURE__*/React.createElement("select", {
-      value: id,
-      onChange: e => replaceSlot && replaceSlot(m.id, team, idx, e.target.value),
+    }, "(", p.level, ")")), editable && /*#__PURE__*/React.createElement("button", {
+      onClick: toggle,
       title: "\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19",
       style: {
         position: "absolute",
         inset: 0,
         width: "100%",
         height: "100%",
-        opacity: 0,
+        background: "none",
         border: "none",
+        padding: 0,
         cursor: "pointer"
       }
-    }, /*#__PURE__*/React.createElement("option", {
-      value: id
-    }, p.name, " (", p.level, ")"), (bench || []).map(b => /*#__PURE__*/React.createElement("option", {
-      key: b.id,
-      value: b.id
-    }, b.name, " (", b.level, ")")))) : /*#__PURE__*/React.createElement("div", {
+    }), isOpen && /*#__PURE__*/React.createElement(PlayerPicker, {
+      bench: bench || [],
+      allowClear: true,
+      onPick: pick,
+      onClose: () => setOpenSlot(null)
+    })) : /*#__PURE__*/React.createElement("div", {
       key: idx,
       style: {
         flex: 1,
+        position: "relative",
         padding: "8px 9px",
         borderRadius: 11,
-        border: `1.5px dashed ${T.border}`,
-        color: T.muted,
+        border: `1.5px dashed ${editable ? T.green : T.border}`,
+        color: editable ? T.green : T.muted,
         fontSize: 12.5,
         minHeight: 46,
         display: "flex",
         alignItems: "center",
         justifyContent: "center"
       }
-    }, "\u0E27\u0E48\u0E32\u0E07");
+    }, editable ? /*#__PURE__*/React.createElement("button", {
+      onClick: toggle,
+      style: {
+        position: "absolute",
+        inset: 0,
+        width: "100%",
+        height: "100%",
+        background: "none",
+        border: "none",
+        color: T.green,
+        fontSize: 12.5,
+        fontWeight: 700,
+        cursor: "pointer"
+      }
+    }, "+ \u0E40\u0E25\u0E37\u0E2D\u0E01\u0E04\u0E19") : "ว่าง", isOpen && /*#__PURE__*/React.createElement(PlayerPicker, {
+      bench: bench || [],
+      onPick: pick,
+      onClose: () => setOpenSlot(null)
+    }));
   }));
+}
+
+// custom dropdown (shows avatar photos — a native <select>/<option> can't render images)
+function PlayerPicker({
+  bench,
+  allowClear,
+  onPick,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: onClose,
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 55,
+      background: "transparent"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      position: "absolute",
+      top: "100%",
+      left: 0,
+      right: 0,
+      marginTop: 4,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      boxShadow: "0 10px 28px rgba(0,0,0,0.2)",
+      zIndex: 56,
+      maxHeight: 250,
+      overflowY: "auto"
+    }
+  }, allowClear && /*#__PURE__*/React.createElement("button", {
+    onClick: () => onPick(null),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "9px 11px",
+      background: "none",
+      border: "none",
+      borderBottom: `1px solid ${T.border}`,
+      textAlign: "left",
+      color: T.accent,
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(X, {
+    size: 15
+  }), " \u0E40\u0E2D\u0E32\u0E2D\u0E2D\u0E01 (\u0E27\u0E48\u0E32\u0E07)"), bench.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "12px 11px",
+      fontSize: 12.5,
+      color: T.muted,
+      textAlign: "center"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E19\u0E23\u0E2D\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19") : bench.map(b => /*#__PURE__*/React.createElement("button", {
+    key: b.id,
+    onClick: () => onPick(b.id),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 9,
+      padding: "9px 11px",
+      background: "none",
+      border: "none",
+      borderBottom: `1px solid ${T.border}`,
+      textAlign: "left"
+    }
+  }, /*#__PURE__*/React.createElement(Avatar, {
+    p: b,
+    size: 26
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 600,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, b.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: LEVEL_COLOR[b.level],
+      fontWeight: 800,
+      fontSize: 11.5
+    }
+  }, "(", b.level, ")"))))));
 }
 function MiniMatch({
   m,
