@@ -373,7 +373,7 @@ const Wallet=__mk('<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1
 const Trophy=__mk('<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>');
 const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.1.11";
+const APP_VERSION = "1.2.0";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1169,6 +1169,24 @@ function App() {
     });
     setSel(null);
   };
+
+  // swap a slot's player for someone from the waiting bench (dropdown-based substitution)
+  const replaceSlot = (mid, team, idx, newPid) => {
+    if (!newPid) return;
+    setCurrent(prev => prev.map(m => {
+      if (m.id !== mid) return m;
+      const arr = (team === "A" ? m.teamA : m.teamB).slice();
+      if (arr[idx] === newPid) return m;
+      arr[idx] = newPid;
+      return team === "A" ? {
+        ...m,
+        teamA: arr
+      } : {
+        ...m,
+        teamB: arr
+      };
+    }));
+  };
   const addLockPair = (a, b) => {
     if (a && b && a !== b && !lockPairs.some(lp => lp.includes(a) || lp.includes(b))) setLockPairs(prev => [...prev, [a, b]]);
   };
@@ -1274,6 +1292,7 @@ function App() {
     tapSlot,
     isSel,
     sel,
+    replaceSlot,
     waitQueue,
     now,
     resetGames,
@@ -1820,6 +1839,7 @@ function SessionTab(props) {
     tapSlot,
     isSel,
     sel,
+    replaceSlot,
     waitQueue,
     now,
     resetGames,
@@ -1894,7 +1914,9 @@ function SessionTab(props) {
       getP: getP,
       editable: editable,
       tapSlot: tapSlot,
-      isSel: isSel
+      isSel: isSel,
+      replaceSlot: replaceSlot,
+      bench: waitQueue
     }), /*#__PURE__*/React.createElement(Fairness, {
       sA: sA,
       sB: sB
@@ -3480,7 +3502,9 @@ function MatchTeams({
   getP,
   editable,
   tapSlot,
-  isSel
+  isSel,
+  replaceSlot,
+  bench
 }) {
   const A = m.teamA,
     B = m.teamB;
@@ -3491,7 +3515,9 @@ function MatchTeams({
     getP: getP,
     editable: editable,
     tapSlot: tapSlot,
-    isSel: isSel
+    isSel: isSel,
+    replaceSlot: replaceSlot,
+    bench: bench
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -3524,7 +3550,9 @@ function MatchTeams({
     getP: getP,
     editable: editable,
     tapSlot: tapSlot,
-    isSel: isSel
+    isSel: isSel,
+    replaceSlot: replaceSlot,
+    bench: bench
   }));
 }
 function TeamSide({
@@ -3534,7 +3562,9 @@ function TeamSide({
   getP,
   editable,
   tapSlot,
-  isSel
+  isSel,
+  replaceSlot,
+  bench
 }) {
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3544,11 +3574,11 @@ function TeamSide({
   }, arr.map((id, idx) => {
     const p = id ? getP(id) : null;
     const selected = isSel && isSel(id, m.id, team, idx);
-    return p ? /*#__PURE__*/React.createElement("button", {
+    return p ? /*#__PURE__*/React.createElement("div", {
       key: idx,
-      onClick: () => editable && tapSlot && tapSlot(m.id, team, idx, id),
       style: {
         flex: 1,
+        position: "relative",
         display: "flex",
         alignItems: "center",
         gap: 7,
@@ -3556,9 +3586,7 @@ function TeamSide({
         borderRadius: 11,
         background: selected ? "#e2f5ec" : T.surface2,
         border: `1.5px solid ${selected ? T.green : "transparent"}`,
-        minHeight: 46,
-        textAlign: "left",
-        cursor: editable ? "pointer" : "default"
+        minHeight: 46
       }
     }, /*#__PURE__*/React.createElement(Avatar, {
       p: p,
@@ -3567,7 +3595,8 @@ function TeamSide({
       style: {
         overflow: "hidden",
         textOverflow: "ellipsis",
-        whiteSpace: "nowrap"
+        whiteSpace: "nowrap",
+        flex: 1
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
@@ -3580,7 +3609,25 @@ function TeamSide({
         fontWeight: 800,
         color: LEVEL_COLOR[p.level]
       }
-    }, "(", p.level, ")"))) : /*#__PURE__*/React.createElement("div", {
+    }, "(", p.level, ")")), editable && /*#__PURE__*/React.createElement("select", {
+      value: id,
+      onChange: e => replaceSlot && replaceSlot(m.id, team, idx, e.target.value),
+      title: "\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19",
+      style: {
+        position: "absolute",
+        inset: 0,
+        width: "100%",
+        height: "100%",
+        opacity: 0,
+        border: "none",
+        cursor: "pointer"
+      }
+    }, /*#__PURE__*/React.createElement("option", {
+      value: id
+    }, p.name, " (", p.level, ")"), (bench || []).map(b => /*#__PURE__*/React.createElement("option", {
+      key: b.id,
+      value: b.id
+    }, b.name, " (", b.level, ")")))) : /*#__PURE__*/React.createElement("div", {
       key: idx,
       style: {
         flex: 1,
