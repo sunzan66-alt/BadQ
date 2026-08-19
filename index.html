@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.6.2";
+      var CURRENT_VERSION = "1.7.0";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -398,7 +398,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.6.2";
+const APP_VERSION = "1.7.0";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -426,6 +426,78 @@ const LEVEL_COLOR = {
   P: "#dc2626",
   C: "#b91c1c"
 };
+
+/* ============ LEVEL PRESET SYSTEM ============
+   Canonical source of truth for matchmaking is the numeric skillIndex (1–11), stored per player.
+   A "preset" only controls the DISPLAY label shown for each skillIndex — swapping presets never
+   changes skillIndex, so matchmaking / fairness / queue priority are unaffected. */
+const LEVEL_COLORS_BY_INDEX = ["#64748b", "#0284c7", "#0891b2", "#0d9488", "#16a34a", "#65a30d", "#ca8a04", "#d97706", "#ea580c", "#dc2626", "#b91c1c"];
+function levelColor(skillIndex) {
+  return LEVEL_COLORS_BY_INDEX[Math.max(1, Math.min(11, skillIndex || 1)) - 1];
+}
+const SKILL_DESC = {
+  1: "เริ่มต้น — เพิ่งเริ่มจับไม้ ยังไม่คุ้นการตีโต้",
+  2: "เริ่มตี — เริ่มตีโต้ได้บ้าง ยังไม่นิ่ง",
+  3: "พื้นฐาน — ตีโต้ได้พอสมควร เริ่มคุมลูก และเล่นเกมได้ในระดับพื้นฐาน",
+  4: "เล่นเป็นเกม — เริ่มเข้าใจแทคติก เล่นเป็นเกมได้",
+  5: "กลางล่าง — ตีได้หลากหลายลูก คุมเกมได้ระดับหนึ่ง",
+  6: "กลาง — เล่นได้คล่อง มีจังหวะ คุมเกมได้ดี",
+  7: "กลางสูง — ตีแม่นขึ้น มีกลยุทธ์ชัดเจน",
+  8: "มือดี — ควบคุมเกมได้ดี ตีได้หลากหลายจังหวะ",
+  9: "มือแข็ง — ฝีมือสูง แข่งขันได้ในระดับก๊วน",
+  10: "แข่งขัน — ระดับแข่งขันจริงจัง",
+  11: "ระดับสูง — ฝีมือสูงสุด เล่นแข่งขันระดับสูง"
+};
+const LEVEL_PRESETS = [{
+  id: "isan",
+  name: "อีสาน",
+  description: "ใช้ลำดับ: R → BG1 → BG2 → BG3 → S- → S → N- → N → P- → P → C",
+  levels: ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"]
+}, {
+  id: "badweb-central",
+  name: "Bad Web / กลาง",
+  description: "ใช้ลำดับ: BG → BG+ → NB → N- → N → NS → S → P- → P → P+ → C",
+  levels: ["BG", "BG+", "NB", "N-", "N", "NS", "S", "P-", "P", "P+", "C"]
+}, {
+  id: "north",
+  name: "เหนือ / เชียงใหม่",
+  description: "ใช้ลำดับ: มือหัดตี → Beginner → ตีโต้ → N → N+ → S → S+ → P- → P → Open → Open+",
+  levels: ["มือหัดตี", "Beginner", "ตีโต้", "N", "N+", "S", "S+", "P-", "P", "Open", "Open+"]
+}];
+function getPresetMeta(id) {
+  if (id === "custom") return {
+    id: "custom",
+    name: "กำหนดเอง",
+    description: "Organizer กำหนดระดับฝีมือเองได้ โดย map เข้ากับ Skill Index 1–11"
+  };
+  return LEVEL_PRESETS.find(p => p.id === id) || LEVEL_PRESETS[0];
+}
+// display label for a given skillIndex, resolved against whichever preset is currently active (incl. custom)
+function displayLevelFor(skillIndex, settings) {
+  const idx = Math.max(1, Math.min(11, skillIndex || 1));
+  const presetId = settings && settings.levelPresetId || "isan";
+  if (presetId === "custom") {
+    const found = (settings && settings.customLevels || []).find(l => l.skillIndex === idx);
+    return found ? found.name : "Skill " + idx;
+  }
+  const preset = LEVEL_PRESETS.find(p => p.id === presetId) || LEVEL_PRESETS[0];
+  return preset.levels[idx - 1] || "Skill " + idx;
+}
+// { skillIndex, label } options for level <select> dropdowns, reflecting the active preset
+function activeLevelOptions(settings) {
+  const presetId = settings && settings.levelPresetId || "isan";
+  if (presetId === "custom") {
+    return (settings && settings.customLevels || []).slice().sort((a, b) => a.skillIndex - b.skillIndex).map(l => ({
+      skillIndex: l.skillIndex,
+      label: l.name
+    }));
+  }
+  const preset = LEVEL_PRESETS.find(p => p.id === presetId) || LEVEL_PRESETS[0];
+  return preset.levels.map((label, i) => ({
+    skillIndex: i + 1,
+    label
+  }));
+}
 const T = {
   bg: "#f3f6f4",
   surface: "#ffffff",
@@ -485,7 +557,8 @@ const PSTATUS = {
 };
 const PSTATUS_OPTS = ["absent", "ready", "resting", "left"];
 const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
-// backward-compatible: old data used `present` boolean
+// backward-compatible: old data used `present` boolean; old data also has no skillIndex yet — derive it
+// from the (isan-based) label so matchmaking strength is 100% preserved across the upgrade.
 const normPlayer = p => ({
   ...p,
   status: p.status || (p.present ? "ready" : "absent"),
@@ -497,7 +570,8 @@ const normPlayer = p => ({
   wheelDiscount: p.wheelDiscount || 0,
   pendingDiscount: p.pendingDiscount || 0,
   spun: p.spun || false,
-  wheelResult: p.wheelResult || null
+  wheelResult: p.wheelResult || null,
+  skillIndex: p.skillIndex || WEIGHT[p.level] || 1
 });
 const uid = () => Math.random().toString(36).slice(2, 9);
 const keyOf = (a, b) => a < b ? a + "|" + b : b + "|" + a;
@@ -540,7 +614,7 @@ function counts(matches) {
 function buildMatch(pool, mode, lockPairs, players, stats) {
   const need = mode === "doubles" ? 4 : 2;
   if (pool.length < need) return null;
-  const w = id => WEIGHT[players.find(p => p.id === id)?.level] || 0;
+  const w = id => players.find(p => p.id === id)?.skillIndex || 0;
   const anchor = pool[0].id;
   const win = pool.slice(0, Math.min(pool.length, mode === "doubles" ? 8 : 6)).map(p => p.id);
   const idxOf = id => win.indexOf(id);
@@ -848,6 +922,10 @@ function App() {
     qr: null,
     bank: "",
     pairingMode: "auto",
+    levelPresetId: "isan",
+    // display-only: which label set to show for each skillIndex (matchmaking always uses skillIndex)
+    customLevels: [],
+    // used only when levelPresetId === "custom": [{ id, name, skillIndex, description }]
     wheelPrizes: [{
       id: uid(),
       label: "ส่วนลด 20฿ (ใช้ทันที)",
@@ -940,13 +1018,15 @@ function App() {
   const waitQueue = useMemo(() => players.filter(p => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order), [players, inPlay]);
 
   // members
-  const addPlayer = (name, level) => {
+  const addPlayer = (name, skillIndex) => {
     const n = name.trim();
     if (!n) return;
+    const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
     setPlayers(prev => [...prev, {
       id: uid(),
       name: n,
-      level,
+      level: displayLevelFor(si, settings),
+      skillIndex: si,
       status: "absent",
       games: 0,
       order: prev.length,
@@ -990,10 +1070,74 @@ function App() {
     status: st,
     waitingSince: st === "ready" && p.status !== "ready" ? Date.now() : p.waitingSince
   } : p));
-  const setPLevel = (id, lv) => setPlayers(prev => prev.map(p => p.id === id ? {
-    ...p,
-    level: lv
-  } : p));
+  const setPLevel = (id, skillIndex) => {
+    const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
+    setPlayers(prev => prev.map(p => p.id === id ? {
+      ...p,
+      skillIndex: si,
+      level: displayLevelFor(si, settings)
+    } : p));
+  };
+  // switch the active level-preset: skillIndex (matchmaking) never changes, only the cached display label
+  // is recomputed for every player so their level badge reflects the new preset immediately.
+  const changeLevelPreset = newPresetId => {
+    // first time switching to "กำหนดเอง" with no custom levels defined yet: seed a sensible starter
+    // set so the "at least 2 levels" invariant holds immediately instead of leaving an empty editor.
+    const needsSeed = newPresetId === "custom" && (!settings.customLevels || settings.customLevels.length === 0);
+    const nextCustom = needsSeed ? [{
+      id: uid(),
+      name: "มือใหม่",
+      skillIndex: 2,
+      description: "เริ่มเล่น"
+    }, {
+      id: uid(),
+      name: "กลาง",
+      skillIndex: 6,
+      description: "เล่นได้คล่อง"
+    }, {
+      id: uid(),
+      name: "กลาง+",
+      skillIndex: 7,
+      description: "มือกลางสูง"
+    }, {
+      id: uid(),
+      name: "มือแข่ง",
+      skillIndex: 10,
+      description: "แข่งขัน"
+    }] : settings.customLevels;
+    setSettings(s => ({
+      ...s,
+      levelPresetId: newPresetId,
+      customLevels: nextCustom
+    }));
+    const mergedSettings = {
+      levelPresetId: newPresetId,
+      customLevels: nextCustom
+    };
+    setPlayers(prev => prev.map(p => ({
+      ...p,
+      level: displayLevelFor(p.skillIndex, mergedSettings)
+    })));
+  };
+  // update the "กำหนดเอง" (custom) level definitions; if custom is the active preset, resync every
+  // player's cached display label so edits (rename / re-map skillIndex) show immediately.
+  const setCustomLevels = updater => {
+    const nextCustom = typeof updater === "function" ? updater(settings.customLevels || []) : updater;
+    setSettings(s => ({
+      ...s,
+      customLevels: nextCustom
+    }));
+    if (settings.levelPresetId === "custom") {
+      const mergedSettings = {
+        levelPresetId: "custom",
+        customLevels: nextCustom
+      };
+      setPlayers(prev => prev.map(p => ({
+        ...p,
+        level: displayLevelFor(p.skillIndex, mergedSettings)
+      })));
+    }
+  };
   const delPlayer = id => {
     setPlayers(prev => prev.filter(p => p.id !== id));
     setLockPairs(prev => prev.filter(lp => !lp.includes(id)));
@@ -1406,10 +1550,13 @@ function App() {
       settings: {
         ...settings
       },
+      levelPresetId: settings.levelPresetId || "isan",
+      // freeze which preset was active — historical display must never change later
       players: players.map(p => ({
         id: p.id,
         name: p.name,
         level: p.level,
+        skillIndex: p.skillIndex,
         photo: p.photo || null,
         games: p.games || 0
       })),
@@ -1428,6 +1575,7 @@ function App() {
         id: b.id,
         name: b.name,
         level: b.level,
+        skillIndex: b.skillIndex,
         games: b.games || 0,
         total: b.total,
         paid: !!b.paid
@@ -1537,7 +1685,8 @@ function App() {
     setStatus,
     setPLevel,
     delPlayer,
-    openPhoto
+    openPhoto,
+    settings
   }), tab === "session" && /*#__PURE__*/React.createElement(SessionTab, {
     players,
     getP,
@@ -1574,7 +1723,9 @@ function App() {
     now,
     resetGames,
     qrRef,
-    endSession
+    endSession,
+    changeLevelPreset,
+    setCustomLevels
   }), tab === "history" && /*#__PURE__*/React.createElement(HistoryTab, {
     sessionHistory,
     toggleHistoricalPaid,
@@ -1674,22 +1825,25 @@ function MembersTab({
   setStatus,
   setPLevel,
   delPlayer,
-  openPhoto
+  openPhoto,
+  settings
 }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("levelDesc");
   const [onlyPresent, setOnlyPresent] = useState(false);
+  const levelOptions = activeLevelOptions(settings);
+  const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
   const [name, setName] = useState("");
-  const [level, setLevel] = useState("N-");
+  const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
   const [showLevelInfo, setShowLevelInfo] = useState(false);
   const list = useMemo(() => {
     let l = players.filter(p => p.name.toLowerCase().includes(q.trim().toLowerCase()));
     if (onlyPresent) l = l.filter(p => p.status !== "absent");
-    return [...l].sort((a, b) => sort === "levelDesc" ? WEIGHT[b.level] - WEIGHT[a.level] || a.name.localeCompare(b.name) : sort === "levelAsc" ? WEIGHT[a.level] - WEIGHT[b.level] || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
+    return [...l].sort((a, b) => sort === "levelDesc" ? (b.skillIndex || 0) - (a.skillIndex || 0) || a.name.localeCompare(b.name) : sort === "levelAsc" ? (a.skillIndex || 0) - (b.skillIndex || 0) || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
   }, [players, q, sort, onlyPresent]);
   const readyCount = players.filter(p => p.status === "ready").length;
   const submit = () => {
-    addPlayer(name, level);
+    addPlayer(name, skillIndex);
     setName("");
   };
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
@@ -1748,9 +1902,9 @@ function MembersTab({
     }
   }, /*#__PURE__*/React.createElement("option", {
     value: "levelDesc"
-  }, "\u0E23\u0E30\u0E14\u0E31\u0E1A: \u0E40\u0E01\u0E48\u0E07 \u2192 \u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19"), /*#__PURE__*/React.createElement("option", {
+  }, "\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D: \u0E40\u0E01\u0E48\u0E07 \u2192 \u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19"), /*#__PURE__*/React.createElement("option", {
     value: "levelAsc"
-  }, "\u0E23\u0E30\u0E14\u0E31\u0E1A: \u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19 \u2192 \u0E40\u0E01\u0E48\u0E07"), /*#__PURE__*/React.createElement("option", {
+  }, "\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D: \u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19 \u2192 \u0E40\u0E01\u0E48\u0E07"), /*#__PURE__*/React.createElement("option", {
     value: "name"
   }, "\u0E0A\u0E37\u0E48\u0E2D (\u0E01-\u0E2E)")), /*#__PURE__*/React.createElement(ChevronDown, {
     size: 16,
@@ -1794,8 +1948,8 @@ function MembersTab({
       outline: "none"
     }
   }), /*#__PURE__*/React.createElement("select", {
-    value: level,
-    onChange: e => setLevel(e.target.value),
+    value: skillIndex,
+    onChange: e => setSkillIndex(Number(e.target.value)),
     style: {
       padding: "0 8px",
       borderRadius: 11,
@@ -1805,12 +1959,12 @@ function MembersTab({
       fontSize: 14,
       fontWeight: 700
     }
-  }, LEVELS.map(l => /*#__PURE__*/React.createElement("option", {
-    key: l,
-    value: l
-  }, l))), /*#__PURE__*/React.createElement("button", {
+  }, levelOptions.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o.skillIndex + o.label,
+    value: o.skillIndex
+  }, o.label))), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowLevelInfo(v => !v),
-    title: "\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E21\u0E37\u0E2D",
+    title: "\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D",
     style: {
       padding: "0 10px",
       borderRadius: 11,
@@ -1846,7 +2000,25 @@ function MembersTab({
       padding: "10px 12px",
       marginBottom: 12
     }
-  }, LEVEL_HELP), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 800,
+      color: T.text,
+      marginBottom: 4
+    }
+  }, "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22 Skill Index 1\u201311 (\u0E43\u0E0A\u0E49\u0E15\u0E31\u0E14\u0E2A\u0E34\u0E19\u0E01\u0E32\u0E23\u0E08\u0E31\u0E1A\u0E04\u0E39\u0E48 \u0E44\u0E21\u0E48\u0E02\u0E36\u0E49\u0E19\u0E01\u0E31\u0E1A\u0E0A\u0E37\u0E48\u0E2D\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E17\u0E35\u0E48\u0E41\u0E2A\u0E14\u0E07)"), Array.from({
+    length: 11
+  }, (_, i) => i + 1).map(si => /*#__PURE__*/React.createElement("div", {
+    key: si,
+    style: {
+      marginBottom: 2
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 800,
+      color: levelColor(si)
+    }
+  }, "Skill ", si), " \u2014 ", SKILL_DESC[si]))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -1926,11 +2098,11 @@ function MembersTab({
       whiteSpace: "nowrap"
     }
   }, p.name), /*#__PURE__*/React.createElement("select", {
-    value: p.level,
-    onChange: e => setPLevel(p.id, e.target.value),
+    value: p.skillIndex,
+    onChange: e => setPLevel(p.id, Number(e.target.value)),
     style: {
       marginTop: 4,
-      background: LEVEL_COLOR[p.level],
+      background: levelColor(p.skillIndex),
       color: "#fff",
       fontWeight: 800,
       fontSize: 11,
@@ -1938,14 +2110,14 @@ function MembersTab({
       borderRadius: 7,
       padding: "3px 6px"
     }
-  }, LEVELS.map(l => /*#__PURE__*/React.createElement("option", {
-    key: l,
-    value: l,
+  }, levelOptions.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o.skillIndex + o.label,
+    value: o.skillIndex,
     style: {
       background: "#fff",
       color: "#000"
     }
-  }, l)))), inPlay && inPlay.has(p.id) ? /*#__PURE__*/React.createElement("span", {
+  }, o.label)))), inPlay && inPlay.has(p.id) ? /*#__PURE__*/React.createElement("span", {
     style: {
       padding: "7px 12px",
       borderRadius: 20,
@@ -2010,7 +2182,7 @@ function Avatar({
       width: size,
       height: size,
       borderRadius: size / 2,
-      background: LEVEL_COLOR[p.level],
+      background: levelColor(p.skillIndex),
       color: "#fff",
       display: "flex",
       alignItems: "center",
@@ -2138,17 +2310,20 @@ function SessionTab(props) {
     now,
     resetGames,
     qrRef,
-    endSession
+    endSession,
+    changeLevelPreset,
+    setCustomLevels
   } = props;
   const [openGameSettings, setOpenGameSettings] = useState(false);
   const [openPaymentSettings, setOpenPaymentSettings] = useState(false);
   const [openPrizeSettings, setOpenPrizeSettings] = useState(false);
+  const [openLevelSettings, setOpenLevelSettings] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
   const started = current.length > 0;
   const waitMin = p => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
-  const teamScore = arr => arr.reduce((s, id) => s + (id ? WEIGHT[getP(id)?.level] || 0 : 0), 0);
+  const teamScore = arr => arr.reduce((s, id) => s + (id ? getP(id)?.skillIndex || 0 : 0), 0);
   const byCourt = (a, b) => a.court - b.court;
   const playing = current.filter(m => m.status === "playing").sort(byCourt);
   const nexts = current.filter(m => m.status === "next").sort(byCourt);
@@ -2675,7 +2850,7 @@ function SessionTab(props) {
       borderTop: "none",
       borderRadius: "0 0 12px 12px",
       padding: 14,
-      marginBottom: 12
+      marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement(Label, null, "\uD83C\uDFA1 \u0E27\u0E07\u0E25\u0E49\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 \u2014 \u0E01\u0E33\u0E2B\u0E19\u0E14\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E41\u0E25\u0E30\u0E42\u0E2D\u0E01\u0E32\u0E2A\u0E2D\u0E2D\u0E01"), /*#__PURE__*/React.createElement(WheelPrizeEditor, {
     prizes: settings.wheelPrizes || [],
@@ -2683,6 +2858,46 @@ function SessionTab(props) {
       ...s,
       wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater
     }))
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenLevelSettings(v => !v),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "11px 14px",
+      borderRadius: 12,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13.5,
+      fontWeight: 700,
+      marginBottom: openLevelSettings ? 0 : 12
+    }
+  }, /*#__PURE__*/React.createElement(ClipboardList, {
+    size: 15,
+    color: T.muted
+  }), " \u0E23\u0E30\u0E1A\u0E1A\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D (", getPresetMeta(settings.levelPresetId || "isan").name, ")", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 17,
+    color: T.muted,
+    style: {
+      marginLeft: "auto",
+      transform: openLevelSettings ? "rotate(180deg)" : "none",
+      transition: "transform .15s"
+    }
+  })), openLevelSettings && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 12px 12px",
+      padding: 14,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(LevelPresetEditor, {
+    settings: settings,
+    changeLevelPreset: changeLevelPreset,
+    setCustomLevels: setCustomLevels
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -2882,7 +3097,7 @@ function SessionTab(props) {
     }
   }, p.name, " ", /*#__PURE__*/React.createElement("span", {
     style: {
-      color: LEVEL_COLOR[p.level],
+      color: levelColor(p.skillIndex),
       fontWeight: 800,
       fontSize: 12
     }
@@ -3584,7 +3799,7 @@ function HistoricalDetail({
       }
     }, p.name, " ", /*#__PURE__*/React.createElement("span", {
       style: {
-        color: LEVEL_COLOR[p.level],
+        color: levelColor(p.skillIndex),
         fontWeight: 800,
         fontSize: 12
       }
@@ -3693,7 +3908,7 @@ function HistoricalDetail({
     }
   }, b.name, " ", /*#__PURE__*/React.createElement("span", {
     style: {
-      color: LEVEL_COLOR[b.level],
+      color: levelColor(b.skillIndex),
       fontWeight: 800,
       fontSize: 11.5
     }
@@ -3951,7 +4166,7 @@ function SummaryTab({
       }
     }, p.name, " ", /*#__PURE__*/React.createElement("span", {
       style: {
-        color: LEVEL_COLOR[p.level],
+        color: levelColor(p.skillIndex),
         fontWeight: 800,
         fontSize: 12
       }
@@ -4090,7 +4305,7 @@ function SummaryTab({
     }
   }, b.name, " ", /*#__PURE__*/React.createElement("span", {
     style: {
-      color: LEVEL_COLOR[b.level],
+      color: levelColor(b.skillIndex),
       fontWeight: 800,
       fontSize: 11.5
     }
@@ -4176,7 +4391,7 @@ function SummaryTab({
     }
   }, detailP.name, " ", /*#__PURE__*/React.createElement("span", {
     style: {
-      color: LEVEL_COLOR[detailP.level],
+      color: levelColor(detailP.skillIndex),
       fontSize: 13
     }
   }, "(", detailP.level, ")")), /*#__PURE__*/React.createElement("div", {
@@ -4763,7 +4978,7 @@ function TeamSide({
       style: {
         fontSize: compact ? 10 : 10.5,
         fontWeight: 800,
-        color: LEVEL_COLOR[p.level]
+        color: levelColor(p.skillIndex)
       }
     }, "(", p.level, ")")), editable && /*#__PURE__*/React.createElement("button", {
       onClick: toggle,
@@ -4917,7 +5132,7 @@ function PlayerPicker({
     }
   }, b.name, " ", /*#__PURE__*/React.createElement("span", {
     style: {
-      color: LEVEL_COLOR[b.level],
+      color: levelColor(b.skillIndex),
       fontWeight: 800,
       fontSize: 11.5
     }
@@ -5229,6 +5444,333 @@ function WheelPrizeEditor({
       marginTop: 6
     }
   }, "\u0E15\u0E31\u0E27\u0E40\u0E25\u0E02 \"\u0E42\u0E2D\u0E01\u0E32\u0E2A\" \u0E04\u0E37\u0E2D\u0E19\u0E49\u0E33\u0E2B\u0E19\u0E31\u0E01\u0E40\u0E17\u0E35\u0E22\u0E1A\u0E01\u0E31\u0E19 \u0E23\u0E30\u0E1A\u0E1A\u0E04\u0E34\u0E14\u0E40\u0E1B\u0E47\u0E19 % \u0E43\u0E2B\u0E49\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34\u0E08\u0E32\u0E01\u0E1C\u0E25\u0E23\u0E27\u0E21\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14"));
+}
+
+// preset picker + confirm-before-switch + (when custom is active) the custom level editor.
+// Switching preset only ever rewrites each player's cached DISPLAY label (via changeLevelPreset,
+// defined in App()) — skillIndex (matchmaking source of truth) never changes.
+function LevelPresetEditor({
+  settings,
+  changeLevelPreset,
+  setCustomLevels
+}) {
+  const currentId = settings.levelPresetId || "isan";
+  const [pendingPreset, setPendingPreset] = useState(null); // preset id awaiting confirm, or null
+  const [showSkillInfo, setShowSkillInfo] = useState(false);
+  const allPresets = [...LEVEL_PRESETS, getPresetMeta("custom")];
+  const pick = id => {
+    if (id !== currentId) setPendingPreset(id);
+  };
+  const confirm = () => {
+    changeLevelPreset(pendingPreset);
+    setPendingPreset(null);
+  };
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, allPresets.map(preset => {
+    const active = preset.id === currentId;
+    return /*#__PURE__*/React.createElement("button", {
+      key: preset.id,
+      onClick: () => pick(preset.id),
+      style: {
+        textAlign: "left",
+        padding: "10px 12px",
+        borderRadius: 11,
+        border: `1.5px solid ${active ? T.green : T.border}`,
+        background: active ? "#e2f5ec" : T.surface2,
+        display: "flex",
+        flexDirection: "column",
+        gap: 2
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontWeight: 800,
+        fontSize: 13.5,
+        color: active ? T.green : T.text
+      }
+    }, preset.name), active && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        fontWeight: 800,
+        color: T.green,
+        background: "#fff",
+        padding: "2px 7px",
+        borderRadius: 10
+      }
+    }, "\u0E43\u0E0A\u0E49\u0E2D\u0E22\u0E39\u0E48")), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: T.muted
+      }
+    }, preset.description));
+  })), currentId === "custom" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(CustomLevelEditor, {
+    customLevels: settings.customLevels || [],
+    setCustomLevels: setCustomLevels
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowSkillInfo(v => !v),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "9px 0",
+      borderRadius: 10,
+      background: "none",
+      border: `1px solid ${T.border}`,
+      color: T.muted,
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(Info, {
+    size: 14
+  }), " ", showSkillInfo ? "ซ่อน" : "ดู", "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22 Skill Index 1\u201311"), showSkillInfo && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      lineHeight: 1.6,
+      marginTop: 8
+    }
+  }, Array.from({
+    length: 11
+  }, (_, i) => i + 1).map(si => /*#__PURE__*/React.createElement("div", {
+    key: si,
+    style: {
+      marginBottom: 2
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 800,
+      color: levelColor(si)
+    }
+  }, "Skill ", si), " \u2014 ", SKILL_DESC[si]))), pendingPreset && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setPendingPreset(null),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.4)",
+      zIndex: 60,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E23\u0E30\u0E1A\u0E1A\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 16
+    }
+  }, "\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E08\u0E30\u0E16\u0E39\u0E01\u0E41\u0E1B\u0E25\u0E07\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34\u0E15\u0E32\u0E21\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D\u0E40\u0E14\u0E34\u0E21 \u0E2A\u0E16\u0E34\u0E15\u0E34 \u0E01\u0E32\u0E23\u0E08\u0E31\u0E1A\u0E04\u0E39\u0E48 \u0E41\u0E25\u0E30\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19\u0E08\u0E30\u0E44\u0E21\u0E48\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPendingPreset(null),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: confirm,
+    style: btnPrimary
+  }, "\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E23\u0E30\u0E1A\u0E1A")))));
+}
+function CustomLevelEditor({
+  customLevels,
+  setCustomLevels
+}) {
+  const [name, setName] = useState("");
+  const [skillIndex, setSkillIndex] = useState(6);
+  const [description, setDescription] = useState("");
+  const [error, setError] = useState("");
+  const sty = {
+    padding: "9px 8px",
+    borderRadius: 10,
+    background: T.surface,
+    border: `1px solid ${T.border}`,
+    color: T.text,
+    fontSize: 12.5
+  };
+  const sorted = [...customLevels].sort((a, b) => a.skillIndex - b.skillIndex);
+  const add = () => {
+    const n = name.trim();
+    if (!n) {
+      setError("ชื่อห้ามว่าง");
+      return;
+    }
+    setError("");
+    setCustomLevels(prev => [...(prev || []), {
+      id: uid(),
+      name: n,
+      skillIndex: Math.max(1, Math.min(11, Number(skillIndex) || 1)),
+      description: description.trim()
+    }]);
+    setName("");
+    setDescription("");
+  };
+  const remove = id => {
+    if (customLevels.length <= 2) {
+      setError("ต้องมีอย่างน้อย 2 ระดับ");
+      return;
+    }
+    setError("");
+    setCustomLevels(prev => (prev || []).filter(l => l.id !== id));
+  };
+  const editField = (id, field, value) => setCustomLevels(prev => (prev || []).map(l => l.id === id ? {
+    ...l,
+    [field]: value
+  } : l));
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface2,
+      borderRadius: 11,
+      padding: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E01\u0E33\u0E2B\u0E19\u0E14\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E40\u0E2D\u0E07 (", customLevels.length, " \u0E23\u0E30\u0E14\u0E31\u0E1A)"), sorted.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, sorted.map(l => /*#__PURE__*/React.createElement("div", {
+    key: l.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      background: "#fff",
+      borderRadius: 10,
+      padding: "7px 9px",
+      border: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    value: l.name,
+    onChange: e => editField(l.id, "name", e.target.value),
+    style: {
+      ...sty,
+      flex: 1,
+      minWidth: 0,
+      padding: "5px 7px"
+    }
+  }), /*#__PURE__*/React.createElement("select", {
+    value: l.skillIndex,
+    onChange: e => editField(l.id, "skillIndex", Number(e.target.value)),
+    style: {
+      ...sty,
+      flexShrink: 0,
+      padding: "5px 6px"
+    }
+  }, Array.from({
+    length: 11
+  }, (_, i) => i + 1).map(si => /*#__PURE__*/React.createElement("option", {
+    key: si,
+    value: si
+  }, "Skill ", si))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => remove(l.id),
+    style: {
+      background: "none",
+      border: "none",
+      color: T.muted,
+      display: "flex",
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement(Trash2, {
+    size: 14
+  }))))), /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => setName(e.target.value),
+    placeholder: "\u0E0A\u0E37\u0E48\u0E2D\u0E23\u0E30\u0E14\u0E31\u0E1A \u0E40\u0E0A\u0E48\u0E19 \u0E21\u0E37\u0E2D\u0E43\u0E2B\u0E21\u0E48",
+    style: {
+      ...sty,
+      width: "100%",
+      marginBottom: 6,
+      boxSizing: "border-box"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("select", {
+    value: skillIndex,
+    onChange: e => setSkillIndex(Number(e.target.value)),
+    style: {
+      ...sty,
+      flexShrink: 0
+    }
+  }, Array.from({
+    length: 11
+  }, (_, i) => i + 1).map(si => /*#__PURE__*/React.createElement("option", {
+    key: si,
+    value: si
+  }, "Skill ", si))), /*#__PURE__*/React.createElement("input", {
+    value: description,
+    onChange: e => setDescription(e.target.value),
+    placeholder: "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22 (\u0E44\u0E21\u0E48\u0E1A\u0E31\u0E07\u0E04\u0E31\u0E1A)",
+    style: {
+      ...sty,
+      flex: 1,
+      minWidth: 0
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    style: {
+      padding: "0 13px",
+      height: 36,
+      borderRadius: 10,
+      background: T.accent,
+      border: "none",
+      color: "#fff",
+      display: "flex",
+      alignItems: "center",
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement(Plus, {
+    size: 17
+  }))), error && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.accent,
+      marginTop: 6,
+      fontWeight: 700
+    }
+  }, error));
 }
 
 // custom spin wheel — picks a weighted-random prize, animates the wheel to land on it, then reports the result
