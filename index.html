@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.7";
+      var CURRENT_VERSION = "1.7.8";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.7";
+const APP_VERSION = "1.7.8";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -5274,6 +5274,7 @@ function SummaryTab({
     size: 18
   }), " \u0E1B\u0E34\u0E14")), wheelFor && /*#__PURE__*/React.createElement(SpinWheel, {
     prizes: settings.wheelPrizes || [],
+    remainingPlayers: played.filter(p => !p.spun).length,
     onFinish: prize => applyWheelPrize(wheelFor, prize),
     onClose: () => setWheelFor(null)
   }), confirmEnd && /*#__PURE__*/React.createElement("div", {
@@ -6787,41 +6788,95 @@ function BackupSettingsEditor({
     style: btnPrimary
   }, "\u0E22\u0E49\u0E2D\u0E19\u0E01\u0E25\u0E31\u0E1A")))));
 }
+const NONE_SLICE_COLOR = "#aab4ad"; // every "no prize" arc shares this one neutral color, whatever prize it's interspersed between
+// angleFromTop is degrees clockwise from 12 o'clock (matches the old CSS conic-gradient convention,
+// which the spin/rotation math below is built around) — converts to an SVG (x,y) point on that circle.
+function polarToCartesian(cx, cy, r, angleFromTop) {
+  const rad = (angleFromTop - 90) * Math.PI / 180;
+  return {
+    x: cx + r * Math.cos(rad),
+    y: cy + r * Math.sin(rad)
+  };
+}
+function describeSlicePath(cx, cy, r, startDeg, endDeg) {
+  const p1 = polarToCartesian(cx, cy, r, startDeg);
+  const p2 = polarToCartesian(cx, cy, r, endDeg);
+  const largeArc = endDeg - startDeg > 180 ? 1 : 0;
+  return `M ${cx} ${cy} L ${p1.x} ${p1.y} A ${r} ${r} 0 ${largeArc} 1 ${p2.x} ${p2.y} Z`;
+}
+function truncateLabel(s, n) {
+  return !s ? "" : s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
 
-// custom spin wheel — picks a weighted-random prize, animates the wheel to land on it, then reports the result
+// custom spin wheel — the real-prize slices together take up exactly (total remaining prize stock ÷
+// remainingPlayers) of the wheel, so the odds always reflect reality: e.g. 5 prizes left among 10
+// players still due to spin = a 50% chance to win THIS spin, and — because remainingPlayers/prize stock
+// both shrink by exactly one each time someone spins (win or miss) — the prizes are guaranteed to be
+// fully handed out across that group of players, never over- or under-allocated. The "no prize" portion
+// is split into several same-colored, unlabeled slices interleaved between the (labeled) prize slices
+// instead of one big block, so a miss doesn't look concentrated in one place on the wheel.
 function SpinWheel({
   prizes,
+  remainingPlayers,
   onFinish,
   onClose
 }) {
   const [rotation, setRotation] = useState(0);
   const [spinning, setSpinning] = useState(false);
   const [resultPrize, setResultPrize] = useState(null);
-  // wheel slice size is proportional to remaining stock — prizes that are running low get smaller
-  // slices and, once fully claimed (qty 0), drop off the wheel entirely; "ไม่ได้รางวัล" is unlimited.
-  const list = (prizes || []).filter(p => prizeQty(p) > 0);
-  const totalWeight = list.reduce((s, p) => s + prizeQty(p), 0) || 1;
   const colors = ["#12986a", "#2563eb", "#d97706", "#ef5a44", "#9333ea", "#0891b2", "#dc2626", "#65a30d", "#0d9488", "#ca8a04"];
+  const realPrizes = (prizes || []).filter(p => p.type !== "none" && prizeQty(p) > 0);
+  const totalPrizeQty = realPrizes.reduce((s, p) => s + prizeQty(p), 0);
+  // never let the math imply >100% win odds — total players due to spin is always at least the prize count
+  const totalPlayers = Math.max(totalPrizeQty, Number(remainingPlayers) || 0);
+  const noneTotal = Math.max(0, totalPlayers - totalPrizeQty);
+  const noneProto = (prizes || []).find(p => p.type === "none") || {
+    id: "__none__",
+    label: "ไม่ได้รางวัล",
+    type: "none",
+    amount: 0
+  };
+  let segs = [];
+  if (realPrizes.length === 0) {
+    if (noneTotal > 0 || totalPlayers > 0) segs = [{
+      ...noneProto,
+      span: 360,
+      isNone: true,
+      color: NONE_SLICE_COLOR
+    }];
+  } else {
+    const missPerGap = noneTotal / realPrizes.length; // spread evenly — one gap after each prize, same color throughout
+    realPrizes.forEach((p, i) => {
+      segs.push({
+        ...p,
+        span: prizeQty(p) / totalPlayers * 360,
+        color: colors[i % colors.length],
+        isNone: false
+      });
+      if (missPerGap > 0) segs.push({
+        ...noneProto,
+        span: missPerGap / totalPlayers * 360,
+        isNone: true,
+        color: NONE_SLICE_COLOR
+      });
+    });
+  }
   let acc = 0;
-  const segs = list.map((p, i) => {
-    const span = prizeQty(p) / totalWeight * 360;
+  segs = segs.map(s => {
     const seg = {
-      ...p,
-      start: acc,
-      span,
-      color: colors[i % colors.length]
+      ...s,
+      start: acc
     };
-    acc += span;
+    acc += s.span;
     return seg;
   });
-  const gradient = segs.length ? "conic-gradient(" + segs.map(s => `${s.color} ${s.start}deg ${s.start + s.span}deg`).join(", ") + ")" : T.surface2;
   const spin = () => {
     if (spinning || resultPrize || segs.length === 0) return;
-    const r = Math.random() * totalWeight;
+    const r = Math.random() * 360;
     let cum = 0,
-      chosen = segs[0];
+      chosen = segs[segs.length - 1];
     for (const s of segs) {
-      cum += s.span / 360 * totalWeight;
+      cum += s.span;
       if (r <= cum) {
         chosen = s;
         break;
@@ -6837,6 +6892,10 @@ function SpinWheel({
       onFinish(chosen);
     }, 4200);
   };
+  const R = 125,
+    CX = 125,
+    CY = 125,
+    LABEL_R = R * 0.64;
   return /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -6855,9 +6914,15 @@ function SpinWheel({
       color: "#fff",
       fontSize: 17,
       fontWeight: 800,
-      marginBottom: 18
+      marginBottom: 6
     }
-  }, "\uD83C\uDFA1 \u0E2B\u0E21\u0E38\u0E19\u0E27\u0E07\u0E25\u0E49\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25"), /*#__PURE__*/React.createElement("div", {
+  }, "\uD83C\uDFA1 \u0E2B\u0E21\u0E38\u0E19\u0E27\u0E07\u0E25\u0E49\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25"), totalPlayers > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: "#cbd5cf",
+      fontSize: 11.5,
+      marginBottom: 12
+    }
+  }, "\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 ", totalPrizeQty, " \u0E08\u0E32\u0E01 ", totalPlayers, " \u0E04\u0E19\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E2B\u0E21\u0E38\u0E19"), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "relative",
       width: 250,
@@ -6878,13 +6943,47 @@ function SpinWheel({
       width: 250,
       height: 250,
       borderRadius: "50%",
-      background: gradient,
-      border: "6px solid #fff",
       boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
       transition: "transform 4.2s cubic-bezier(0.17,0.67,0.24,1)",
-      transform: `rotate(${rotation}deg)`
+      transform: `rotate(${rotation}deg)`,
+      overflow: "hidden",
+      border: "6px solid #fff",
+      boxSizing: "border-box",
+      background: T.surface2
     }
-  }), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("svg", {
+    viewBox: "0 0 250 250",
+    width: "250",
+    height: "250"
+  }, segs.map((s, i) => /*#__PURE__*/React.createElement("path", {
+    key: i,
+    d: describeSlicePath(CX, CY, R, s.start, s.start + s.span),
+    fill: s.color,
+    stroke: "#fff",
+    strokeWidth: 1
+  })), segs.map((s, i) => {
+    if (s.isNone || s.span < 8) return null; // skip labels on miss slices, and on slivers too thin to hold text
+    const mid = s.start + s.span / 2;
+    const pt = polarToCartesian(CX, CY, LABEL_R, mid);
+    const rot = mid > 90 && mid < 270 ? mid + 180 : mid;
+    return /*#__PURE__*/React.createElement("text", {
+      key: "t" + i,
+      x: pt.x,
+      y: pt.y,
+      transform: `rotate(${rot} ${pt.x} ${pt.y})`,
+      textAnchor: "middle",
+      dominantBaseline: "middle",
+      fontSize: "9",
+      fontWeight: "800",
+      fill: "#fff",
+      stroke: "rgba(0,0,0,0.55)",
+      strokeWidth: "2.5",
+      paintOrder: "stroke",
+      style: {
+        fontFamily: "inherit"
+      }
+    }, truncateLabel(s.label, 10));
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "absolute",
       top: "50%",
