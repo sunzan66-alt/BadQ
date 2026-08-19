@@ -375,7 +375,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.4.1";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -469,7 +469,8 @@ const normPlayer = p => ({
   waitTotal: p.waitTotal || 0,
   waitCount: p.waitCount || 0,
   waitMax: p.waitMax || 0,
-  paid: p.paid || false
+  paid: p.paid || false,
+  discount: p.discount || 0
 });
 const uid = () => Math.random().toString(36).slice(2, 9);
 const keyOf = (a, b) => a < b ? a + "|" + b : b + "|" + a;
@@ -682,11 +683,11 @@ function computeBill(players, settings) {
   const payers = players.filter(p => p.status && p.status !== "absent");
   const n = payers.length || 1;
   const otherShare = (settings.other || 0) / n;
-  const discount = settings.discount || 0; // flat discount subtracted per person (฿/คน)
   return payers.map(p => {
     const court = settings.court || 0,
       shuttle = (p.games || 0) * (settings.shuttle || 0),
       other = otherShare;
+    const discount = p.discount || 0; // per-person discount, entered in the player's summary detail
     const total = Math.max(0, Math.round(court + shuttle + other - discount));
     return {
       ...p,
@@ -812,7 +813,6 @@ function App() {
     court: 65,
     shuttle: 25,
     other: 0,
-    discount: 0,
     rounds: 1,
     winScore: 21,
     deuce: true,
@@ -902,9 +902,14 @@ function App() {
       waitTotal: 0,
       waitCount: 0,
       waitMax: 0,
-      paid: false
+      paid: false,
+      discount: 0
     }]);
   };
+  const setPDiscount = (id, v) => setPlayers(prev => prev.map(p => p.id === id ? {
+    ...p,
+    discount: Math.max(0, Number(v) || 0)
+  } : p));
   const setStatus = (id, st) => setPlayers(prev => prev.map(p => p.id === id ? {
     ...p,
     status: st,
@@ -1358,6 +1363,7 @@ function App() {
       ...p,
       games: 0,
       paid: false,
+      discount: 0,
       waitingSince: Date.now(),
       lastPlayedRound: -1,
       waitTotal: 0,
@@ -1502,7 +1508,8 @@ function App() {
     settings,
     togglePaid,
     qrRef,
-    session
+    session,
+    setPDiscount
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -2386,17 +2393,6 @@ function SessionTab(props) {
     onChange: v => setSettings(s => ({
       ...s,
       other: v
-    }))
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 16
-    }
-  }, /*#__PURE__*/React.createElement(NumField, {
-    label: "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14/\u0E04\u0E19 (\u0E3F)",
-    value: settings.discount || 0,
-    onChange: v => setSettings(s => ({
-      ...s,
-      discount: v
     }))
   })), /*#__PURE__*/React.createElement(Label, null, "\u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48)"), /*#__PURE__*/React.createElement(LockPairEditor, {
     players,
@@ -3689,7 +3685,8 @@ function SummaryTab({
   settings,
   togglePaid,
   qrRef,
-  session
+  session,
+  setPDiscount
 }) {
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -4135,10 +4132,37 @@ function SummaryTab({
   }), /*#__PURE__*/React.createElement(BillRow, {
     label: "\u0E2D\u0E37\u0E48\u0E19 \u0E46",
     v: Math.round(detailBill.eOther)
-  }), detailBill.eDiscount > 0 && /*#__PURE__*/React.createElement(BillRow, {
-    label: "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14",
-    v: -Math.round(detailBill.eDiscount)
   }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      fontSize: 13,
+      padding: "3px 0",
+      color: T.green
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "-\u0E3F"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: detailP.discount || 0,
+    onChange: e => setPDiscount(detailP.id, e.target.value),
+    style: {
+      width: 64,
+      padding: "4px 6px",
+      borderRadius: 8,
+      border: `1px solid ${T.border}`,
+      textAlign: "right",
+      fontSize: 13,
+      fontWeight: 700,
+      color: T.green,
+      outline: "none"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
