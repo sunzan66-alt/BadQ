@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#12986a" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="ก๊วนแบต" />
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png" />
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+<link rel="apple-touch-icon" href="icon-180.png" />
+<link rel="manifest" href="manifest.webmanifest" />
+<title>ก๊วนแบต</title>
+<style>
+  html,body{margin:0;padding:0;background:#f3f6f4;-webkit-tap-highlight-color:transparent;}
+  *{ -webkit-touch-callout:none; }
+  #boot{font-family:ui-sans-serif,system-ui,sans-serif;color:#6b7d74;text-align:center;padding:60px 16px;font-size:14px;}
+</style>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin></script>
+<script>
+  // Persistence shim: same async API the app expects, backed by localStorage.
+  // Data is tied to this site's URL, so redeploying new code does NOT erase it.
+  window.storage = {
+    async get(k){ try{ const v = localStorage.getItem("bg:"+k); return v==null?null:{ value:v }; }catch(e){ return null; } },
+    async set(k,v){ try{ localStorage.setItem("bg:"+k, v); }catch(e){ /* quota */ } return { value:v }; },
+    async delete(k){ try{ localStorage.removeItem("bg:"+k); }catch(e){} return { deleted:true }; },
+  };
+</script>
+</head>
+<body>
+<div id="root"><div id="boot">กำลังโหลดก๊วนแบต…</div></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+// ---- inline lucide-style icons (so no bundler/imports needed) ----
+const __mk = (inner) => function Icon(props){
+  const p = props || {};
+  const size = p.size == null ? 24 : p.size;
+  return React.createElement("svg", {
+    width:size, height:size, viewBox:"0 0 24 24", fill:"none",
+    stroke:p.color||"currentColor", strokeWidth:p.strokeWidth||2,
+    strokeLinecap:"round", strokeLinejoin:"round", style:p.style,
+    dangerouslySetInnerHTML:{__html:inner}
+  });
+};
+const User=__mk('<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>');
+const Search=__mk('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>');
+const Camera=__mk('<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/>');
+const Plus=__mk('<path d="M5 12h14"/><path d="M12 5v14"/>');
+const Trash2=__mk('<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>');
+const Check=__mk('<path d="M20 6 9 17l-5-5"/>');
+const X=__mk('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>');
+const Shuffle=__mk('<path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="m4 4 5 5"/>');
+const Play=__mk('<polygon points="6 3 20 12 6 21 6 3"/>');
+const RotateCcw=__mk('<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>');
+const Minus=__mk('<path d="M5 12h14"/>');
+const ChevronDown=__mk('<path d="m6 9 6 6 6-6"/>');
+const ChevronRight=__mk('<path d="m9 18 6-6-6-6"/>');
+const Clock=__mk('<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>');
+const Lock=__mk('<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>');
+const Unlock=__mk('<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/>');
+const Calendar=__mk('<path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/>');
+const History=__mk('<path d="M3 12a9 9 0 1 0 3-7.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>');
+const ClipboardList=__mk('<rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/>');
+const Undo2=__mk('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"/>');
+const Info=__mk('<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>');
+const QrCode=__mk('<rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/>');
+const Maximize2=__mk('<path d="M15 3h6v6"/><path d="m21 3-7 7"/><path d="m3 21 7-7"/><path d="M9 21H3v-6"/>');
+const Wallet=__mk('<path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/>');
+const Trophy=__mk('<path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/>');
+const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/>');
+// ===================== APP =====================
+
+const APP_VERSION = "1.1.3";
+
+const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
+const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
+const LEVEL_COLOR = {
+  R: "#64748b", BG1: "#0284c7", BG2: "#0891b2", BG3: "#0d9488", "S-": "#16a34a",
+  S: "#65a30d", "N-": "#ca8a04", N: "#d97706", "P-": "#ea580c", P: "#dc2626", C: "#b91c1c",
+};
+const T = {
+  bg: "#f3f6f4", surface: "#ffffff", surface2: "#eef2f0", border: "#dde5e1",
+  text: "#16241d", muted: "#6b7d74", accent: "#ef5a44", green: "#12986a", blue: "#2563eb", amber: "#d97706",
+};
+const STATUS = {
+  next: { label: "เกมต่อไป", color: "#2563eb", bg: "#e7effd" },
+  playing: { label: "ระหว่างเกม", color: "#12986a", bg: "#e2f5ec" },
+  done: { label: "เกมจบ", color: "#6b7d74", bg: "#eef2f0" },
+};
+// player attendance status (playing = derived from active match, not stored)
+const PSTATUS = {
+  absent: { label: "ไม่ได้มา", color: "#6b7d74", bg: "#eef2f0" },
+  ready: { label: "พร้อมเล่น", color: "#12986a", bg: "#e2f5ec" },
+  playing: { label: "กำลังเล่น", color: "#2563eb", bg: "#e7effd" },
+  resting: { label: "พัก", color: "#d97706", bg: "#fef3ec" },
+  left: { label: "กลับแล้ว", color: "#9333ea", bg: "#f1eafd" },
+};
+const PSTATUS_OPTS = ["absent", "ready", "resting", "left"];
+const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
+// backward-compatible: old data used `present` boolean
+const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false });
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+const keyOf = (a, b) => (a < b ? a + "|" + b : b + "|" + a);
+const kcomb = (arr, k) => {
+  const res = [];
+  const rec = (start, cur) => {
+    if (cur.length === k) { res.push([...cur]); return; }
+    for (let i = start; i < arr.length; i++) { cur.push(arr[i]); rec(i + 1, cur); cur.pop(); }
+  };
+  rec(0, []);
+  return res;
+};
+
+function counts(matches) {
+  const partner = {}, opp = {};
+  for (const m of matches) {
+    const A = (m.teamA || []).filter(Boolean), B = (m.teamB || []).filter(Boolean);
+    for (const t of [A, B]) for (let i = 0; i < t.length; i++) for (let j = i + 1; j < t.length; j++) { const k = keyOf(t[i], t[j]); partner[k] = (partner[k] || 0) + 1; }
+    for (const x of A) for (const y of B) { const k = keyOf(x, y); opp[k] = (opp[k] || 0) + 1; }
+  }
+  return { partner, opp };
+}
+
+function buildMatch(pool, mode, lockPairs, players, stats) {
+  const need = mode === "doubles" ? 4 : 2;
+  if (pool.length < need) return null;
+  const w = (id) => WEIGHT[players.find((p) => p.id === id)?.level] || 0;
+  const anchor = pool[0].id;
+  const win = pool.slice(0, Math.min(pool.length, mode === "doubles" ? 8 : 6)).map((p) => p.id);
+  const idxOf = (id) => win.indexOf(id);
+  const pc = (a, b) => stats.partner[keyOf(a, b)] || 0;
+  const oc = (a, b) => stats.opp[keyOf(a, b)] || 0;
+
+  if (mode === "singles") {
+    let best = null;
+    for (const o of win) {
+      if (o === anchor) continue;
+      const score = Math.abs(w(anchor) - w(o)) * 2 + oc(anchor, o) * 3 + idxOf(o) * 0.6;
+      if (!best || score < best.score) best = { score, teamA: [anchor], teamB: [o] };
+    }
+    return best;
+  }
+
+  const others = win.filter((id) => id !== anchor);
+  let forced = null;
+  for (const [x, y] of lockPairs) { if (x === anchor && others.includes(y)) forced = y; if (y === anchor && others.includes(x)) forced = x; }
+  const lockOk = (A, B) => {
+    for (const [x, y] of lockPairs) {
+      const inFour = [...A, ...B];
+      if (inFour.includes(x) && inFour.includes(y)) {
+        const sameA = A.includes(x) && A.includes(y), sameB = B.includes(x) && B.includes(y);
+        if (!sameA && !sameB) return false;
+      }
+    }
+    return true;
+  };
+  let best = null;
+  for (const trio of kcomb(others, 3)) {
+    const four = [anchor, ...trio];
+    if (forced && !four.includes(forced)) continue;
+    const splits = [
+      [[four[0], four[1]], [four[2], four[3]]],
+      [[four[0], four[2]], [four[1], four[3]]],
+      [[four[0], four[3]], [four[1], four[2]]],
+    ];
+    for (const [A, B] of splits) {
+      if (forced && !(A.includes(anchor) && A.includes(forced))) continue;
+      if (!lockOk(A, B)) continue;
+      const bal = Math.abs(w(A[0]) + w(A[1]) - w(B[0]) - w(B[1]));
+      const pRep = pc(A[0], A[1]) + pc(B[0], B[1]);
+      const oRep = oc(A[0], B[0]) + oc(A[0], B[1]) + oc(A[1], B[0]) + oc(A[1], B[1]);
+      const waitPen = idxOf(trio[0]) + idxOf(trio[1]) + idxOf(trio[2]);
+      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4;
+      if (!best || score < best.score) best = { score, teamA: A, teamB: B };
+    }
+  }
+  return best;
+}
+
+function genRound(localPlayers, mode, courtCount, lockPairs, stats, roundIndex, reserved) {
+  const rs = reserved || new Set();
+  const order = localPlayers.filter((p) => p.status === "ready" && !rs.has(p.id)).sort(
+    (a, b) => (a.lastPlayedRound ?? -1) - (b.lastPlayedRound ?? -1) || a.games - b.games || (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order
+  );
+  const used = new Set(rs);
+  const matches = [];
+  for (let i = 0; i < courtCount; i++) {
+    const pool = order.filter((p) => !used.has(p.id));
+    const m = buildMatch(pool, mode, lockPairs, localPlayers, stats);
+    if (!m) break;
+    [...m.teamA, ...m.teamB].filter(Boolean).forEach((id) => {
+      used.add(id);
+      const lp = localPlayers.find((p) => p.id === id);
+      if (lp) lp.lastPlayedRound = roundIndex;
+    });
+    matches.push({ id: uid(), mode, teamA: m.teamA, teamB: m.teamB, status: "next", round: roundIndex, court: i + 1, locked: false });
+  }
+  return matches;
+}
+
+// fairness: 0-100, higher = more balanced. Uses existing team strength (weight sums).
+function fairnessPct(sA, sB) {
+  const hi = Math.max(sA, sB), lo = Math.min(sA, sB);
+  if (hi <= 0) return 100;
+  return Math.round((lo / hi) * 100);
+}
+function fairnessTag(pct) {
+  if (pct >= 90) return { emoji: "👍", label: "สูสี", color: "#12986a" };
+  if (pct >= 75) return { emoji: "⚖️", label: "พอสูสี", color: "#d97706" };
+  return { emoji: "⚠️", label: "ห่างกัน", color: "#ef5a44" };
+}
+
+// ---- scoring / stats (win/loss ONLY from matches that have a score) ----
+function hasScore(m) { return !!(m && m.scores && m.scores.some((r) => r && (r.a != null || r.b != null))); }
+function matchWinner(m) {
+  if (!hasScore(m)) return null;
+  let ca = 0, cb = 0;
+  for (const r of m.scores) {
+    if (!r || (r.a == null && r.b == null)) continue;
+    const a = Number(r.a) || 0, b = Number(r.b) || 0;
+    if (a === b) continue;
+    if (a > b) ca++; else cb++;
+  }
+  if (ca > cb) return "A";
+  if (cb > ca) return "B";
+  return null; // draw / undecided
+}
+function playerStats(pid, matches) {
+  let win = 0, loss = 0, noScore = 0; const partners = {}, opps = {};
+  for (const m of matches) {
+    const A = (m.teamA || []).filter(Boolean), B = (m.teamB || []).filter(Boolean);
+    const inA = A.includes(pid), inB = B.includes(pid);
+    if (!inA && !inB) continue;
+    (inA ? A : B).filter((id) => id !== pid).forEach((id) => (partners[id] = (partners[id] || 0) + 1));
+    (inA ? B : A).forEach((id) => (opps[id] = (opps[id] || 0) + 1));
+    if (!hasScore(m)) { noScore++; continue; }
+    const w = matchWinner(m);
+    if (w) { if (w === (inA ? "A" : "B")) win++; else loss++; }
+  }
+  const decided = win + loss;
+  return { win, loss, noScore, winRate: decided ? Math.round((win / decided) * 100) : null, partners, opps };
+}
+// expense: reuse existing court+shuttle logic; split "other" equally among attendees
+function computeBill(players, settings) {
+  const payers = players.filter((p) => p.status && p.status !== "absent");
+  const n = payers.length || 1;
+  const otherShare = (settings.other || 0) / n;
+  return payers.map((p) => {
+    const court = settings.court || 0, shuttle = (p.games || 0) * (settings.shuttle || 0), other = otherShare;
+    return { ...p, eCourt: court, eShuttle: shuttle, eOther: other, total: Math.round(court + shuttle + other) };
+  });
+}
+// read an image WITHOUT cropping (for QR — must stay scannable)
+function fileToDataURL(file) {
+  return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error("read")); r.readAsDataURL(file); });
+}
+function loadImg(src) {
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error("img")); i.src = src; });
+}
+// QR: keep full (no crop). Downscale if possible, else use raw data URL so it always shows.
+async function readImageFull(file) {
+  let dataUrl;
+  try { dataUrl = await fileToDataURL(file); } catch (e) { return null; }
+  try {
+    const img = await loadImg(dataUrl);
+    const max = 720; const sc = Math.min(1, max / Math.max(img.width, img.height));
+    const w = Math.max(1, Math.round(img.width * sc)), h = Math.max(1, Math.round(img.height * sc));
+    const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+    cv.getContext("2d").drawImage(img, 0, 0, w, h);
+    return cv.toDataURL("image/jpeg", 0.92);
+  } catch (e) { return dataUrl; }
+}
+function fmtMode(settings, mode) {
+  return `🏸 ${mode === "doubles" ? "ตีคู่" : "ตีเดี่ยว"} · ${settings.winScore || 21} แต้ม · ${settings.deuce ? "มีดิว" : "ไม่มีดิว"} · ${settings.rounds || 1} รอบ`;
+}
+// selection priority: longest since last played, fewest games, longest waiting
+const SORT = (a, b) => (a.lastPlayedRound ?? -1) - (b.lastPlayedRound ?? -1) || a.games - b.games || (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order;
+function matchScoreText(m) {
+  if (!hasScore(m)) return null;
+  return m.scores.filter((r) => r && (r.a != null || r.b != null)).map((r) => `${r.a ?? "-"}–${r.b ?? "-"}`).join(" · ");
+}
+
+async function resizePhoto(file) {
+  let dataUrl;
+  try { dataUrl = await fileToDataURL(file); } catch (e) { return null; }
+  try {
+    const img = await loadImg(dataUrl);
+    const s = 180, cv = document.createElement("canvas");
+    cv.width = s; cv.height = s;
+    const ctx = cv.getContext("2d");
+    const sc = Math.max(s / img.width, s / img.height);
+    const w = img.width * sc, h = img.height * sc;
+    ctx.drawImage(img, (s - w) / 2, (s - h) / 2, w, h);
+    return cv.toDataURL("image/jpeg", 0.8);
+  } catch (e) { return dataUrl; }
+}
+
+function App() {
+  const [tab, setTab] = useState("members");
+  const [players, setPlayers] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [current, setCurrent] = useState([]);
+  const [future, setFuture] = useState([]);
+  const [roundNo, setRoundNo] = useState(0);
+  const [courtCount, setCourtCount] = useState(2);
+  const [mode, setMode] = useState("doubles");
+  const [settings, setSettings] = useState({ court: 65, shuttle: 25, other: 0, rounds: 1, winScore: 21, deuce: true, qr: null, bank: "" });
+  const [session, setSession] = useState({ name: "", date: new Date().toISOString().slice(0, 10) });
+  const [lockPairs, setLockPairs] = useState([]);
+  const [sel, setSel] = useState(null);
+  const [now, setNow] = useState(Date.now());
+  const [loaded, setLoaded] = useState(false);
+  const fileRef = useRef();
+  const qrRef = useRef();
+  const photoTarget = useRef(null);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await window.storage.get("bg-v11");
+        if (r?.value) {
+          const s = JSON.parse(r.value);
+          s.players && setPlayers(s.players.map(normPlayer));
+          s.history && setHistory(s.history);
+          s.current && setCurrent(s.current);
+          s.future && setFuture(s.future);
+          typeof s.roundNo === "number" && setRoundNo(s.roundNo);
+          s.courtCount && setCourtCount(s.courtCount);
+          s.mode && setMode(s.mode);
+          s.settings && setSettings((d) => ({ ...d, ...s.settings }));
+          s.session && setSession(s.session);
+          s.lockPairs && setLockPairs(s.lockPairs);
+        }
+      } catch (e) {}
+      setLoaded(true);
+    })();
+  }, []);
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => { try { await window.storage.set("bg-v11", JSON.stringify({ players, history, current, future, roundNo, courtCount, mode, settings, session, lockPairs })); } catch (e) {} })();
+  }, [players, history, current, future, roundNo, courtCount, mode, settings, session, lockPairs, loaded]);
+  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(t); }, []);
+
+  const getP = (id) => players.find((p) => p.id === id);
+  const inPlay = useMemo(() => new Set(current.flatMap((m) => [...m.teamA, ...m.teamB].filter(Boolean))), [current]);
+  const waitQueue = useMemo(
+    () => players.filter((p) => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order),
+    [players, inPlay]
+  );
+
+  // members
+  const addPlayer = (name, level) => { const n = name.trim(); if (!n) return; setPlayers((prev) => [...prev, { id: uid(), name: n, level, status: "absent", games: 0, order: prev.length, photo: null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false }]); };
+  const setStatus = (id, st) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, status: st, waitingSince: st === "ready" && p.status !== "ready" ? Date.now() : p.waitingSince } : p)));
+  const setPLevel = (id, lv) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, level: lv } : p)));
+  const delPlayer = (id) => { setPlayers((prev) => prev.filter((p) => p.id !== id)); setLockPairs((prev) => prev.filter((lp) => !lp.includes(id))); };
+  const openPhoto = (id) => { photoTarget.current = id; fileRef.current.click(); };
+  const onPhotoFile = async (e) => { const f = e.target.files?.[0]; if (!f) return; const data = await resizePhoto(f); const id = photoTarget.current; if (data) setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photo: data } : p))); e.target.value = ""; };
+
+  // engine
+  const genStart = () => {
+    const base = players.map((p) => ({ ...p, lastPlayedRound: -1 }));
+    const cur = genRound(base, mode, courtCount, lockPairs, counts([]), 0);
+    const round0 = base.map((p) => ({ ...p }));
+    const enterIds = new Set(cur.flatMap((m) => [...m.teamA, ...m.teamB].filter(Boolean)));
+    const tnow = Date.now();
+    setPlayers((prev) => prev.map((p) => {
+      const b = round0.find((x) => x.id === p.id);
+      let x = b ? { ...p, lastPlayedRound: b.lastPlayedRound } : { ...p };
+      if (enterIds.has(p.id)) { const wms = Math.max(0, tnow - (p.waitingSince || tnow)); x.waitTotal = (p.waitTotal || 0) + wms; x.waitCount = (p.waitCount || 0) + 1; x.waitMax = Math.max(p.waitMax || 0, wms); x.waitingSince = tnow; }
+      return x;
+    }));
+    setHistory([]); setCurrent(cur); setFuture([]); setRoundNo(0); setSel(null);
+  };
+
+  const startGame = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, status: "playing" } : m)));
+  const endGame = (mid) => {
+    const m = current.find((x) => x.id === mid);
+    if (!m || m.status !== "playing") return;
+    const ids = [...m.teamA, ...m.teamB].filter(Boolean);
+    setPlayers((prev) => prev.map((p) => (ids.includes(p.id) ? { ...p, games: p.games + 1 } : p)));
+    setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "done" } : x)));
+  };
+
+  // INDEPENDENT per-court: finish a court's done match & prepare its own next match, others untouched
+  const nextCourt = (mid) => {
+    const m = current.find((x) => x.id === mid);
+    if (!m || m.status !== "done") return;
+    const court = m.court, t = Date.now(), seq = roundNo + 1;
+    const finIds = [...m.teamA, ...m.teamB].filter(Boolean);
+    let np = players.map((p) => (finIds.includes(p.id) ? { ...p, waitingSince: t, lastPlayedRound: seq } : { ...p }));
+    const others = current.filter((c) => c.id !== mid);
+    const reserved = new Set(others.flatMap((c) => [...c.teamA, ...c.teamB].filter(Boolean)));
+    const base = np.map((p) => ({ ...p }));
+    const stats = counts([...history, m, ...others]);
+    const order = base.filter((p) => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+    const nm = buildMatch(order, mode, lockPairs, base, stats);
+    let newMatch = null;
+    if (nm) {
+      const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
+      np = np.map((p) => { if (!ids.has(p.id)) return p; const wms = Math.max(0, t - (p.waitingSince || t)); return { ...p, lastPlayedRound: seq, waitingSince: t, waitTotal: (p.waitTotal || 0) + wms, waitCount: (p.waitCount || 0) + 1, waitMax: Math.max(p.waitMax || 0, wms) }; });
+      newMatch = { id: uid(), mode, teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false };
+    }
+    const newCurrent = current.map((c) => (c.id === mid ? newMatch : c)).filter(Boolean);
+    setPlayers(np); setHistory([...history, m]); setCurrent(newCurrent); setRoundNo(seq); setSel(null);
+  };
+
+  // regenerate a single not-started court (reserve other courts, don't touch playing/games)
+  const regenCourt = (mid) => {
+    const m = current.find((x) => x.id === mid);
+    if (!m || m.status !== "next" || m.locked) return;
+    const others = current.filter((c) => c.id !== mid);
+    const reserved = new Set(others.flatMap((c) => [...c.teamA, ...c.teamB].filter(Boolean)));
+    const base = players.map((p) => ({ ...p }));
+    const stats = counts([...history, ...others]);
+    const order = base.filter((p) => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+    const nm = buildMatch(order, mode, lockPairs, base, stats);
+    if (!nm) return;
+    setCurrent((prev) => prev.map((c) => (c.id === mid ? { ...c, teamA: nm.teamA, teamB: nm.teamB } : c)));
+    setSel(null);
+  };
+
+  // fill an empty court from the waiting pool
+  const fillCourt = (court) => {
+    const reserved = new Set(current.flatMap((c) => [...c.teamA, ...c.teamB].filter(Boolean)));
+    const base = players.map((p) => ({ ...p }));
+    const stats = counts([...history, ...current]);
+    const order = base.filter((p) => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+    const nm = buildMatch(order, mode, lockPairs, base, stats);
+    if (!nm) return;
+    const nc = { id: uid(), mode, teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
+    setCurrent((prev) => [...prev, nc].sort((a, b) => a.court - b.court));
+    setSel(null);
+  };
+
+  // regenerate all not-started courts at once (reserve playing + locked)
+  const regenFuture = () => {
+    const fixed = current.filter((c) => c.status === "playing" || c.locked);
+    const used = new Set(fixed.flatMap((c) => [...c.teamA, ...c.teamB].filter(Boolean)));
+    const base = players.map((p) => ({ ...p }));
+    const stats = counts([...history, ...fixed]);
+    const out = current.map((c) => {
+      if (c.status !== "next" || c.locked) return c;
+      const order = base.filter((p) => p.status === "ready" && !used.has(p.id)).sort(SORT);
+      const nm = buildMatch(order, mode, lockPairs, base, stats);
+      if (!nm) return c;
+      [...nm.teamA, ...nm.teamB].filter(Boolean).forEach((id) => used.add(id));
+      return { ...c, teamA: nm.teamA, teamB: nm.teamB };
+    });
+    setCurrent(out); setSel(null);
+  };
+
+  // score edit (does NOT change games played) — edits current OR history match in place
+  const setScore = (mid, ri, side, val) => {
+    const upd = (arr) => arr.map((m) => {
+      if (m.id !== mid) return m;
+      const rounds = settings.rounds || 1;
+      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: rounds }, () => ({ a: null, b: null }));
+      while (scores.length < rounds) scores.push({ a: null, b: null });
+      scores[ri] = { ...scores[ri], [side]: val === "" ? null : Number(val) };
+      return { ...m, scores };
+    });
+    setCurrent((prev) => upd(prev)); setHistory((prev) => upd(prev));
+  };
+  const clearScore = (mid) => { const upd = (arr) => arr.map((m) => (m.id === mid ? { ...m, scores: null } : m)); setCurrent((prev) => upd(prev)); setHistory((prev) => upd(prev)); };
+
+  const togglePaid = (id) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, paid: !p.paid } : p)));
+
+  // undo a mistakenly-finished match (only while still in current round, not yet advanced)
+  const undoFinish = (mid) => {
+    const m = current.find((x) => x.id === mid);
+    if (!m || m.status !== "done") return;
+    const ids = [...m.teamA, ...m.teamB].filter(Boolean);
+    setPlayers((prev) => prev.map((p) => (ids.includes(p.id) ? { ...p, games: Math.max(0, p.games - 1) } : p)));
+    setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "playing" } : x)));
+  };
+
+  const toggleCurrentLock = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, locked: !m.locked } : m)));
+  const onQRFile = async (e) => { const f = e.target.files?.[0]; if (!f) return; const data = await readImageFull(f); if (data) setSettings((s) => ({ ...s, qr: data })); e.target.value = ""; };
+
+  const tapSlot = (mid, team, idx, pid) => {
+    if (!sel) { if (pid) setSel({ playerId: pid, mid, team, idx }); return; }
+    setCurrent((prev) => {
+      const next = prev.map((m) => ({ ...m, teamA: [...m.teamA], teamB: [...m.teamB] }));
+      const dst = next.find((m) => m.id === mid); const dstArr = team === "A" ? dst.teamA : dst.teamB; const old = dstArr[idx];
+      dstArr[idx] = sel.playerId;
+      const src = next.find((m) => m.id === sel.mid); const srcArr = sel.team === "A" ? src.teamA : src.teamB; srcArr[sel.idx] = old;
+      return next;
+    });
+    setSel(null);
+  };
+
+  const addLockPair = (a, b) => { if (a && b && a !== b && !lockPairs.some((lp) => lp.includes(a) || lp.includes(b))) setLockPairs((prev) => [...prev, [a, b]]); };
+  const removeLockPair = (i) => setLockPairs((prev) => prev.filter((_, k) => k !== i));
+  const resetGames = () => setPlayers((prev) => prev.map((p) => ({ ...p, games: 0 })));
+  const isSel = (pid, mid, team, idx) => sel && sel.playerId === pid && sel.mid === mid && sel.team === team && sel.idx === idx;
+
+  return (
+    <div style={{ background: T.bg, color: T.text, minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      <input ref={fileRef} type="file" accept="image/*" onChange={onPhotoFile} style={{ display: "none" }} />
+      <input ref={qrRef} type="file" accept="image/*" onChange={onQRFile} style={{ display: "none" }} />
+      <div style={{ maxWidth: 520, margin: "0 auto", padding: "16px 14px 92px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
+          <div style={{ width: 32, height: 32, borderRadius: 9, background: T.green, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17 }}>🏸</div>
+          <div><div style={{ fontWeight: 800, fontSize: 18, letterSpacing: -0.3 }}>ก๊วนแบต</div><div style={{ fontSize: 11, color: T.muted }}>v{APP_VERSION}</div></div>
+        </div>
+
+        {tab === "members" && <MembersTab {...{ players, inPlay, addPlayer, setStatus, setPLevel, delPlayer, openPhoto }} />}
+        {tab === "session" && <SessionTab {...{ players, getP, history, current, roundNo, courtCount, setCourtCount, mode, setMode, settings, setSettings, session, setSession, lockPairs, addLockPair, removeLockPair, genStart, startGame, endGame, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, clearScore, tapSlot, isSel, sel, waitQueue, now, resetGames, qrRef }} />}
+        {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, togglePaid, qrRef }} />}
+      </div>
+
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}` }}>
+        <div style={{ maxWidth: 520, margin: "0 auto", display: "flex" }}>
+          <TabBtn active={tab === "members"} onClick={() => setTab("members")} label="ผู้เล่น"><User size={20} strokeWidth={tab === "members" ? 2.4 : 1.8} /></TabBtn>
+          <TabBtn active={tab === "session"} onClick={() => setTab("session")} label="วันนี้"><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
+          <TabBtn active={tab === "summary"} onClick={() => setTab("summary")} label="สรุป"><ClipboardList size={20} strokeWidth={tab === "summary" ? 2.4 : 1.8} /></TabBtn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TabBtn({ active, onClick, label, children }) {
+  return (
+    <button onClick={onClick} style={{ flex: 1, padding: "9px 0 11px", background: "none", border: "none", color: active ? T.green : T.muted, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+      {children}<span style={{ fontSize: 11.5, fontWeight: active ? 700 : 500 }}>{label}</span>
+    </button>
+  );
+}
+
+/* ============ MEMBERS ============ */
+function MembersTab({ players, inPlay, addPlayer, setStatus, setPLevel, delPlayer, openPhoto }) {
+  const [q, setQ] = useState(""); const [sort, setSort] = useState("levelDesc"); const [onlyPresent, setOnlyPresent] = useState(false);
+  const [name, setName] = useState(""); const [level, setLevel] = useState("N-"); const [showLevelInfo, setShowLevelInfo] = useState(false);
+  const list = useMemo(() => {
+    let l = players.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
+    if (onlyPresent) l = l.filter((p) => p.status !== "absent");
+    return [...l].sort((a, b) => sort === "levelDesc" ? WEIGHT[b.level] - WEIGHT[a.level] || a.name.localeCompare(b.name) : sort === "levelAsc" ? WEIGHT[a.level] - WEIGHT[b.level] || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
+  }, [players, q, sort, onlyPresent]);
+  const readyCount = players.filter((p) => p.status === "ready").length;
+  const submit = () => { addPlayer(name, level); setName(""); };
+  return (
+    <div>
+      <div style={{ position: "relative", marginBottom: 10 }}>
+        <Search size={17} style={{ position: "absolute", left: 12, top: 12, color: T.muted }} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อสมาชิก" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+        <div style={{ position: "relative", flex: 1 }}>
+          <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ width: "100%", appearance: "none", padding: "9px 30px 9px 12px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 600 }}>
+            <option value="levelDesc">ระดับ: เก่ง → เริ่มต้น</option><option value="levelAsc">ระดับ: เริ่มต้น → เก่ง</option><option value="name">ชื่อ (ก-ฮ)</option>
+          </select>
+          <ChevronDown size={16} style={{ position: "absolute", right: 10, top: 11, color: T.muted, pointerEvents: "none" }} />
+        </div>
+        <button onClick={() => setOnlyPresent((v) => !v)} style={{ padding: "9px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${onlyPresent ? T.green : T.border}`, background: onlyPresent ? "#e2f5ec" : T.surface, color: onlyPresent ? T.green : T.muted }}>เฉพาะที่มา</button>
+      </div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="เพิ่มสมาชิกใหม่" style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
+        <select value={level} onChange={(e) => setLevel(e.target.value)} style={{ padding: "0 8px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700 }}>{LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}</select>
+        <button onClick={() => setShowLevelInfo((v) => !v)} title="อธิบายระดับมือ" style={{ padding: "0 10px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: showLevelInfo ? T.green : T.muted, display: "flex", alignItems: "center" }}><Info size={17} /></button>
+        <button onClick={submit} style={{ padding: "0 15px", borderRadius: 11, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={19} /></button>
+      </div>
+      {showLevelInfo && <div style={{ fontSize: 12, color: T.muted, lineHeight: 1.6, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px", marginBottom: 12 }}>{LEVEL_HELP}</div>}
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: T.muted, marginBottom: 8 }}><span>สมาชิก {players.length} คน</span><span style={{ color: T.green, fontWeight: 700 }}>พร้อมเล่น {readyCount} คน</span></div>
+      {list.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>{players.length === 0 ? "ยังไม่มีสมาชิก" : "ไม่พบสมาชิก"}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        {list.map((p) => (
+          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 12px", borderRadius: 13, background: T.surface, border: `1px solid ${T.border}` }}>
+            <button onClick={() => openPhoto(p.id)} style={{ position: "relative", border: "none", background: "none", padding: 0, flexShrink: 0 }}>
+              <Avatar p={p} size={44} />
+              <span style={{ position: "absolute", right: -2, bottom: -2, width: 18, height: 18, borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={10} color={T.muted} /></span>
+            </button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 14.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+              <select value={p.level} onChange={(e) => setPLevel(p.id, e.target.value)} style={{ marginTop: 4, background: LEVEL_COLOR[p.level], color: "#fff", fontWeight: 800, fontSize: 11, border: "none", borderRadius: 7, padding: "3px 6px" }}>{LEVELS.map((l) => <option key={l} value={l} style={{ background: "#fff", color: "#000" }}>{l}</option>)}</select>
+            </div>
+            {inPlay && inPlay.has(p.id)
+              ? <span style={{ padding: "7px 12px", borderRadius: 20, fontSize: 12, fontWeight: 800, minWidth: 76, textAlign: "center", background: PSTATUS.playing.bg, color: PSTATUS.playing.color }}>กำลังเล่น</span>
+              : <select value={p.status || "absent"} onChange={(e) => setStatus(p.id, e.target.value)} style={{ appearance: "none", textAlign: "center", padding: "7px 10px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", minWidth: 76, background: PSTATUS[p.status || "absent"].bg, color: PSTATUS[p.status || "absent"].color }}>
+                  {PSTATUS_OPTS.map((s) => <option key={s} value={s} style={{ background: "#fff", color: "#000" }}>{PSTATUS[s].label}</option>)}
+                </select>}
+            <button onClick={() => delPlayer(p.id)} style={{ color: T.muted, background: "none", border: "none", display: "flex" }}><Trash2 size={15} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function Avatar({ p, size }) {
+  if (!p) return null;
+  if (p.photo) return <img src={p.photo} alt="" style={{ width: size, height: size, borderRadius: size / 2, objectFit: "cover" }} />;
+  return <div style={{ width: size, height: size, borderRadius: size / 2, background: LEVEL_COLOR[p.level], color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: size * 0.4 }}>{p.name.trim().charAt(0).toUpperCase()}</div>;
+}
+
+function Fairness({ sA, sB }) {
+  const pct = fairnessPct(sA, sB);
+  const tag = fairnessTag(pct);
+  return (
+    <div style={{ marginTop: 10, background: T.surface2, borderRadius: 10, padding: "8px 11px" }}>
+      <div style={{ display: "flex", alignItems: "center", fontSize: 12, marginBottom: 6 }}>
+        <span style={{ fontWeight: 700, color: T.muted }}>ความสมดุล</span>
+        <span style={{ marginLeft: 6, fontWeight: 800, color: tag.color }}>{pct}%</span>
+        <span style={{ marginLeft: "auto", fontWeight: 700, color: tag.color }}>{tag.emoji} {tag.label}</span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 42, textAlign: "right" }}>ทีม A {sA}</span>
+        <div style={{ flex: 1, height: 8, borderRadius: 6, overflow: "hidden", display: "flex", background: "#fff" }}>
+          <div style={{ flex: sA || 1, background: T.green }} />
+          <div style={{ flex: sB || 1, background: T.blue }} />
+        </div>
+        <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 42 }}>{sB} ทีม B</span>
+      </div>
+    </div>
+  );
+}
+
+/* ============ SESSION ============ */
+function SessionTab(props) {
+  const { players, getP, history, current, roundNo, courtCount, setCourtCount, mode, setMode, settings, setSettings, session, setSession, lockPairs, addLockPair, removeLockPair, genStart, startGame, endGame, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, clearScore, tapSlot, isSel, sel, waitQueue, now, resetGames, qrRef } = props;
+  const [openSettings, setOpenSettings] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
+  const started = current.length > 0;
+  const waitMin = (p) => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
+  const teamScore = (arr) => arr.reduce((s, id) => s + (id ? WEIGHT[getP(id)?.level] || 0 : 0), 0);
+  const byCourt = (a, b) => a.court - b.court;
+  const playing = current.filter((m) => m.status === "playing").sort(byCourt);
+  const nexts = current.filter((m) => m.status === "next").sort(byCourt);
+  const dones = current.filter((m) => m.status === "done").sort(byCourt);
+  const occupied = new Set(current.map((m) => m.court));
+  const empties = []; for (let c = 1; c <= courtCount; c++) if (!occupied.has(c)) empties.push(c);
+  const rounds = settings.rounds || 1;
+
+  const FullCard = (m) => {
+    const st = STATUS[m.status]; const editable = m.status === "next";
+    const sA = teamScore(m.teamA), sB = teamScore(m.teamB);
+    return (
+      <div key={m.id} style={{ background: T.surface, border: `1px solid ${m.locked ? T.accent : (m.status === "playing" ? T.green : T.border)}`, borderRadius: 16, padding: 14, marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
+          <span style={{ fontWeight: 800, fontSize: 15 }}>คอร์ท {m.court}</span>
+          {editable && <button onClick={() => toggleCurrentLock(m.id)} title="ล็อกคู่นี้ไว้" style={{ marginLeft: 8, background: "none", border: "none", color: m.locked ? T.accent : T.muted, display: "flex", padding: 0 }}>{m.locked ? <Lock size={15} /> : <Unlock size={15} />}</button>}
+          <span style={{ marginLeft: "auto", fontSize: 11.5, fontWeight: 800, color: st.color, background: st.bg, padding: "4px 10px", borderRadius: 20 }}>{m.status === "playing" ? "🔴 กำลังเล่น" : "🔵 เกมถัดไป"}</span>
+        </div>
+        <MatchTeams m={m} getP={getP} editable={editable} tapSlot={tapSlot} isSel={isSel} />
+        <Fairness sA={sA} sB={sB} />
+        <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+          {m.status === "next" && <>
+            <button onClick={() => regenCourt(m.id)} disabled={m.locked} style={{ ...btnSecondary, opacity: m.locked ? 0.4 : 1 }}><Shuffle size={15} /> จัดใหม่</button>
+            <button onClick={() => startGame(m.id)} style={btnPrimary}><Play size={15} /> เริ่มเกม</button>
+          </>}
+          {m.status === "playing" && <button onClick={() => endGame(m.id)} style={{ ...btnPrimary, background: T.accent }}><Check size={16} /> จบเกม</button>}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 12, marginBottom: 12 }}>
+        <input value={session.name} onChange={(e) => setSession((s) => ({ ...s, name: e.target.value }))} placeholder="ชื่อก๊วน เช่น ก๊วนวันอาทิตย์" style={{ width: "100%", border: "none", outline: "none", fontSize: 16, fontWeight: 800, background: "transparent", color: T.text, boxSizing: "border-box" }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: T.muted }}>
+          <Calendar size={15} />
+          <input type="date" value={session.date} onChange={(e) => setSession((s) => ({ ...s, date: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
+        </div>
+      </div>
+
+      {/* mode toggle + compact format badge */}
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        {[["doubles", "ตีคู่ (2v2)"], ["singles", "ตีเดี่ยว (1v1)"]].map(([k, lb]) => (
+          <button key={k} onClick={() => setMode(k)} style={{ flex: 1, padding: "10px 0", borderRadius: 11, fontSize: 13.5, fontWeight: 800, border: `1.5px solid ${mode === k ? T.green : T.border}`, background: mode === k ? "#e2f5ec" : T.surface, color: mode === k ? T.green : T.muted }}>{lb}</button>
+        ))}
+      </div>
+      <div style={{ textAlign: "center", fontSize: 12.5, color: T.muted, fontWeight: 600, marginBottom: 12 }}>{fmtMode(settings, mode)}</div>
+
+      {/* settings */}
+      <button onClick={() => setOpenSettings((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: openSettings ? 0 : 12 }}>
+        <Lock size={15} color={T.muted} /> ตั้งค่า (รูปแบบ · คอร์ท · ค่าใช้จ่าย · ล็อคคู่ · QR)
+        <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: openSettings ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {openSettings && (
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
+          <Label>รูปแบบการเล่น</Label>
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนรอบ</div>
+            <Seg options={[[1, "1 รอบ"], [2, "2 รอบ (สลับฝั่ง)"]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เล่นถึง</div>
+            <Seg options={[[9, "9"], [15, "15"], [21, "21"]]} value={settings.winScore || 21} onChange={(v) => setSettings((s) => ({ ...s, winScore: v }))} />
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>ดิว</div>
+            <Seg options={[[true, "มีดิว"], [false, "ไม่มีดิว"]]} value={!!settings.deuce} onChange={(v) => setSettings((s) => ({ ...s, deuce: v }))} />
+          </div>
+          <Label>จำนวนคอร์ท</Label>
+          <div style={{ marginBottom: 16 }}><Stepper value={courtCount} setValue={setCourtCount} min={1} max={12} /></div>
+          <Label>ค่าใช้จ่าย</Label>
+          <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+            <NumField label="ค่าสนาม/คน (฿)" value={settings.court} onChange={(v) => setSettings((s) => ({ ...s, court: v }))} />
+            <NumField label="ค่าลูก/เกม (฿)" value={settings.shuttle} onChange={(v) => setSettings((s) => ({ ...s, shuttle: v }))} />
+          </div>
+          <div style={{ marginBottom: 16 }}><NumField label="ค่าใช้จ่ายอื่น ๆ รวม (หารเท่ากัน) (฿)" value={settings.other || 0} onChange={(v) => setSettings((s) => ({ ...s, other: v }))} /></div>
+          <Label>ล็อคคู่ (เฉพาะโหมดตีคู่)</Label>
+          <LockPairEditor {...{ players, lockPairs, addLockPair, removeLockPair, getP }} />
+          <Label>QR รับเงิน</Label>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
+            {settings.qr
+              ? <img src={settings.qr} alt="QR" style={{ width: 72, height: 72, borderRadius: 10, objectFit: "contain", background: "#fff", border: `1px solid ${T.border}` }} />
+              : <div style={{ width: 72, height: 72, borderRadius: 10, background: T.surface2, border: `1px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", color: T.muted }}><QrCode size={26} /></div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <button onClick={() => qrRef.current.click()} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 700 }}><Upload size={14} /> {settings.qr ? "เปลี่ยน QR" : "แนบ QR"}</button>
+              {settings.qr && <button onClick={() => setSettings((s) => ({ ...s, qr: null }))} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, background: "none", border: `1px solid ${T.border}`, color: T.accent, fontSize: 12.5, fontWeight: 700 }}><Trash2 size={14} /> ลบ QR</button>}
+            </div>
+          </div>
+          <div style={{ marginBottom: 6 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เลขบัญชี / พร้อมเพย์ (สำหรับคนที่โอนเอง)</div>
+            <textarea value={settings.bank || ""} onChange={(e) => setSettings((s) => ({ ...s, bank: e.target.value }))} placeholder="เช่น ธ.กสิกร 123-4-56789-0 นาย A / พร้อมเพย์ 08x-xxx-xxxx" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, outline: "none", boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }} />
+          </div>
+          <button onClick={resetGames} style={{ marginTop: 12, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><RotateCcw size={14} /> รีเซ็ตจำนวนเกม</button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <button onClick={genStart} style={{ flex: 1, padding: "13px 0", borderRadius: 13, background: T.green, color: "#fff", border: "none", fontSize: 15, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+          <Shuffle size={17} /> {started ? "จัดก๊วนใหม่ทั้งหมด" : "เริ่มจัดก๊วน"}
+        </button>
+        {nexts.length > 1 && <button onClick={regenFuture} title="สุ่มคอร์ทที่ยังไม่เริ่มใหม่ทั้งหมด" style={{ padding: "0 15px", borderRadius: 13, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700 }}><Shuffle size={15} /></button>}
+      </div>
+      {!started && <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "0 0 18px" }}>ติ๊ก "พร้อมเล่น" ในแท็บผู้เล่น แล้วกดเริ่มจัดก๊วน</div>}
+
+      {/* 1. PLAYING */}
+      {playing.length > 0 && <SectionHead icon={<Play size={16} color={T.green} />} title="กำลังเล่น" />}
+      {playing.map(FullCard)}
+
+      {/* 2. READY / NEXT */}
+      {nexts.length > 0 && <SectionHead icon={<span style={{ fontSize: 15 }}>🔮</span>} title="พร้อมเริ่ม / เกมถัดไป" />}
+      {nexts.map(FullCard)}
+
+      {/* empty courts */}
+      {empties.map((c) => (
+        <div key={"e" + c} style={{ background: T.surface, border: `1px dashed ${T.border}`, borderRadius: 16, padding: 14, marginBottom: 12, display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontWeight: 800, fontSize: 15, color: T.muted }}>คอร์ท {c}</span>
+          <span style={{ fontSize: 12.5, color: T.muted }}>ว่าง</span>
+          {started && <button onClick={() => fillCourt(c)} style={{ marginLeft: "auto", ...btnSecondary, flex: "none", padding: "9px 14px" }}><Plus size={15} /> จัดเกม</button>}
+        </div>
+      ))}
+
+      {/* 3. WAITING */}
+      {started && (
+        <div style={{ marginTop: 8, marginBottom: 8 }}>
+          <SectionHead icon={<Clock size={16} color={T.amber} />} title={`รอเล่น — ${waitQueue.length} คน`} sub="เลือกคนรอนานก่อน" />
+          {waitQueue.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีคนรอ</div> : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {waitQueue.slice(0, 10).map((p, i) => (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+                  <span style={{ width: 20, textAlign: "center", fontWeight: 800, fontSize: 13, color: i < 3 ? T.amber : T.muted }}>{i + 1}</span>
+                  <Avatar p={p} size={30} />
+                  <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: LEVEL_COLOR[p.level], fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
+                  <span style={{ fontSize: 12, color: T.muted, fontWeight: 600, textAlign: "right" }}>รอ {waitMin(p)} น.<br /><span style={{ fontSize: 11 }}>{p.games || 0} เกม</span></span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 4. DONE on court — compact, awaiting next */}
+      {dones.length > 0 && <SectionHead icon={<Check size={16} color={T.green} />} title="เพิ่งจบ — เริ่มเกมถัดไปได้เลย" />}
+      {dones.map((m) => (
+        <div key={m.id} style={{ marginBottom: 8 }}>
+          <CompactMatch m={m} getP={getP} onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} />
+          {scoreOpen === m.id && <ScoreEditor m={m} rounds={rounds} setScore={setScore} clearScore={clearScore} />}
+          <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+            <button onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} style={{ ...btnSecondary, padding: "9px 0" }}><ClipboardList size={15} /> {hasScore(m) ? "แก้คะแนน" : "ใส่คะแนน"}</button>
+            <button onClick={() => undoFinish(m.id)} style={{ padding: "0 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700 }}><Undo2 size={15} /></button>
+            <button onClick={() => { setScoreOpen(null); nextCourt(m.id); }} style={{ ...btnPrimary }}><ChevronRight size={16} /> เริ่มเกมถัดไป</button>
+          </div>
+        </div>
+      ))}
+
+      {/* 5. HISTORY */}
+      {history.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <button onClick={() => setShowHistory((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 13, fontWeight: 700 }}>
+            <History size={15} /> ประวัติแมตช์ ({history.length})
+            <ChevronDown size={16} style={{ marginLeft: "auto", transform: showHistory ? "rotate(180deg)" : "none" }} />
+          </button>
+          {showHistory && (
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+              {history.map((m) => (
+                <div key={m.id}>
+                  <CompactMatch m={m} getP={getP} onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} />
+                  {scoreOpen === m.id && <ScoreEditor m={m} rounds={rounds} setScore={setScore} clearScore={clearScore} />}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {sel && <div style={{ marginTop: 12, fontSize: 12, color: T.green, textAlign: "center", fontWeight: 600 }}>เลือก {getP(sel.playerId)?.name} — แตะอีกคนเพื่อสลับ</div>}
+    </div>
+  );
+}
+
+function Seg({ options, value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 6 }}>
+      {options.map(([v, lb]) => (
+        <button key={String(v)} onClick={() => onChange(v)} style={{ flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 12.5, fontWeight: 800, border: `1.5px solid ${value === v ? T.green : T.border}`, background: value === v ? "#e2f5ec" : T.surface, color: value === v ? T.green : T.muted }}>{lb}</button>
+      ))}
+    </div>
+  );
+}
+
+function CompactMatch({ m, getP, onClick }) {
+  const nm = (id) => getP(id)?.name || "-";
+  const lv = (id) => getP(id)?.level || "";
+  const side = (arr) => arr.filter(Boolean).map((id) => `${nm(id)} (${lv(id)})`).join(" + ");
+  const sc = matchScoreText(m);
+  return (
+    <button onClick={onClick} style={{ width: "100%", textAlign: "left", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 11px", display: "flex", alignItems: "center", gap: 8 }}>
+      <Check size={14} color={T.green} style={{ flexShrink: 0 }} />
+      <span style={{ fontSize: 10.5, fontWeight: 800, color: T.muted, background: T.surface2, padding: "2px 6px", borderRadius: 6, flexShrink: 0 }}>R{(m.round ?? 0) + 1}·C{m.court}</span>
+      <span style={{ flex: 1, fontSize: 12.5, minWidth: 0 }}>
+        <span style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{side(m.teamA)} <span style={{ color: T.muted, fontWeight: 800 }}>{sc ? "" : "vs"}</span> {side(m.teamB)}</span>
+        {sc && <span style={{ display: "block", fontWeight: 800, color: T.text, marginTop: 2 }}>{sc}</span>}
+      </span>
+    </button>
+  );
+}
+
+function ScoreEditor({ m, rounds, setScore, clearScore }) {
+  return (
+    <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginTop: 6 }}>
+      {Array.from({ length: rounds }).map((_, ri) => {
+        const r = (m.scores && m.scores[ri]) || { a: null, b: null };
+        return (
+          <div key={ri} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: ri < rounds - 1 ? 8 : 0 }}>
+            {rounds > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 46 }}>รอบ {ri + 1}</span>}
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
+            <input type="number" value={r.a ?? ""} onChange={(e) => setScore(m.id, ri, "a", e.target.value)} style={scoreInput} />
+            <span style={{ color: T.muted, fontWeight: 800 }}>–</span>
+            <input type="number" value={r.b ?? ""} onChange={(e) => setScore(m.id, ri, "b", e.target.value)} style={scoreInput} />
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: T.blue }}>B</span>
+          </div>
+        );
+      })}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+        <span style={{ fontSize: 11, color: T.muted }}>คะแนนไม่บังคับ · แก้ภายหลังได้</span>
+        {hasScore(m) && <button onClick={() => clearScore(m.id)} style={{ background: "none", border: "none", color: T.accent, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><Trash2 size={13} /> ลบคะแนน</button>}
+      </div>
+    </div>
+  );
+}
+const scoreInput = { width: 54, padding: "8px 8px", borderRadius: 9, background: "#fff", border: `1px solid ${T.border}`, color: T.text, fontSize: 15, fontWeight: 800, textAlign: "center", outline: "none" };
+
+function SectionHead({ icon, title, sub }) {
+  return <div style={{ display: "flex", alignItems: "center", gap: 7, margin: "4px 0 10px" }}>{icon}<span style={{ fontWeight: 800, fontSize: 14 }}>{title}</span>{sub && <span style={{ fontSize: 11.5, color: T.muted }}>{sub}</span>}</div>;
+}
+
+/* ============ SUMMARY ============ */
+function SummaryTab({ players, history, current, getP, settings, togglePaid, qrRef }) {
+  const [detail, setDetail] = useState(null); // player id for detail
+  const [qrFull, setQrFull] = useState(null); // {name, amount}
+  const doneCurrent = current.filter((m) => m.status === "done");
+  const totalMatches = history.length + doneCurrent.length;
+  const played = players.filter((p) => (p.games || 0) > 0 || p.status !== "absent");
+  const gamesArr = played.map((p) => p.games || 0);
+  const minGames = gamesArr.length ? Math.min(...gamesArr) : 0;
+  const maxGames = gamesArr.length ? Math.max(...gamesArr) : 0;
+  const totalGames = gamesArr.reduce((s, g) => s + g, 0);
+  // session-long wait metrics accumulated when players entered a match
+  const wc = players.reduce((s, p) => s + (p.waitCount || 0), 0);
+  const wt = players.reduce((s, p) => s + (p.waitTotal || 0), 0);
+  const wmax = players.reduce((s, p) => Math.max(s, p.waitMax || 0), 0);
+  const avgWaitMin = wc > 0 ? Math.round(wt / wc / 60000) : null;
+  const maxWaitMin = wc > 0 ? Math.round(wmax / 60000) : null;
+  const ranking = [...played].sort((a, b) => (b.games || 0) - (a.games || 0) || a.name.localeCompare(b.name));
+  const allHist = [...history, ...doneCurrent];
+  const bill = computeBill(players, settings);
+  const billBy = (id) => bill.find((b) => b.id === id);
+  const grandTotal = bill.reduce((s, b) => s + b.total, 0);
+  const collected = bill.filter((b) => b.paid).reduce((s, b) => s + b.total, 0);
+  const paidCount = bill.filter((b) => b.paid).length;
+  const detailP = detail ? players.find((p) => p.id === detail) : null;
+  const detailStats = detailP ? playerStats(detailP.id, allHist) : null;
+  const detailBill = detailP ? billBy(detailP.id) : null;
+
+  const started = totalMatches > 0 || current.length > 0 || played.length > 0;
+  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "วันนี้" ก่อน</div>;
+
+  const Stat = ({ label, value }) => (
+    <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 10px", textAlign: "center" }}>
+      <div style={{ fontSize: 22, fontWeight: 800, color: T.green }}>{value}</div>
+      <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{label}</div>
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <Stat label="แมตช์ทั้งหมด" value={totalMatches} />
+        <Stat label="เกมรวม" value={totalGames} />
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <Stat label="เกมน้อยสุด" value={minGames} />
+        <Stat label="เกมมากสุด" value={maxGames} />
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <Stat label="รอเฉลี่ย (นาที)" value={avgWaitMin ?? "-"} />
+        <Stat label="รอนานสุด (นาที)" value={maxWaitMin ?? "-"} />
+      </div>
+
+      <SectionHead icon={<User size={16} color={T.green} />} title="จำนวนเกมของแต่ละคน" sub="แตะดูรายละเอียด" />
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
+        {ranking.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ยังไม่มีผู้เล่น</div> :
+          ranking.map((p) => {
+            const st = playerStats(p.id, allHist);
+            return (
+              <button key={p.id} onClick={() => setDetail(p.id)} style={{ textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+                <Avatar p={p} size={30} />
+                <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: LEVEL_COLOR[p.level], fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
+                {(st.win + st.loss) > 0 && <span style={{ fontSize: 11.5, color: T.muted }}>{st.win}-{st.loss}</span>}
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{p.games || 0} เกม</span>
+                <ChevronRight size={15} color={T.muted} />
+              </button>
+            );
+          })}
+      </div>
+
+      {/* PAYMENT */}
+      <SectionHead icon={<Wallet size={16} color={T.green} />} title="การชำระเงิน" sub="แตะเพื่อดู/รับเงิน" />
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
+          <div style={{ fontSize: 11, color: T.muted }}>จ่ายแล้ว</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{paidCount}/{bill.length} คน</div>
+        </div>
+        <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
+          <div style={{ fontSize: 11, color: T.muted }}>รับแล้ว</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>฿{collected} <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>/ ฿{grandTotal}</span></div>
+        </div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
+        {bill.map((b) => (
+          <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+            <button onClick={() => setDetail(b.id)} style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", textAlign: "left", padding: 0 }}>
+              <Avatar p={b} size={30} />
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: LEVEL_COLOR[b.level], fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>
+                <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{b.games || 0} เกม · ฿{b.total}</span>
+              </span>
+            </button>
+            <button onClick={() => togglePaid(b.id)} style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: b.paid ? "#e2f5ec" : "#fdecea", color: b.paid ? T.green : T.accent }}>{b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+          </div>
+        ))}
+      </div>
+
+      <SectionHead icon={<History size={16} color={T.muted} />} title="ประวัติแมตช์" sub={`${allHist.length} เกม`} />
+      {allHist.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ยังไม่มีเกมที่จบ</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {allHist.map((m) => <CompactMatch key={m.id} m={m} getP={getP} onClick={() => {}} />)}
+        </div>
+      )}
+
+      {/* PLAYER DETAIL */}
+      {detailP && detailStats && (
+        <Overlay onClose={() => setDetail(null)}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <Avatar p={detailP} size={44} />
+            <div><div style={{ fontSize: 16, fontWeight: 800 }}>{detailP.name} <span style={{ color: LEVEL_COLOR[detailP.level], fontSize: 13 }}>({detailP.level})</span></div><div style={{ fontSize: 12, color: T.muted }}>{PSTATUS[detailP.status || "absent"].label}</div></div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <MiniStat label="เกม" value={detailP.games || 0} />
+            <MiniStat label="ชนะ" value={detailStats.win} color={T.green} />
+            <MiniStat label="แพ้" value={detailStats.loss} color={T.accent} />
+            <MiniStat label="Win%" value={detailStats.winRate != null ? detailStats.winRate + "%" : "-"} />
+          </div>
+          <div style={{ fontSize: 12, color: T.muted, marginBottom: 12 }}>ไม่มีคะแนน {detailStats.noScore} เกม (นับเกมแต่ไม่นับแพ้ชนะ)</div>
+          <DetailList title="คู่ที่เล่นด้วย" map={detailStats.partners} getP={getP} />
+          <DetailList title="คู่ต่อสู้ที่พบ" map={detailStats.opps} getP={getP} />
+          {detailBill && (
+            <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginTop: 6 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 8 }}>ค่าใช้จ่าย</div>
+              <BillRow label="ค่าคอร์ท" v={detailBill.eCourt} />
+              <BillRow label="ค่าลูก" v={detailBill.eShuttle} />
+              <BillRow label="อื่น ๆ" v={Math.round(detailBill.eOther)} />
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}><span>รวม</span><span style={{ color: T.green }}>฿{detailBill.total}</span></div>
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button onClick={() => togglePaid(detailP.id)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", fontSize: 13.5, fontWeight: 800, background: detailBill.paid ? "#e2f5ec" : T.green, color: detailBill.paid ? T.green : "#fff" }}>{detailBill.paid ? "🟢 จ่ายแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าจ่ายแล้ว"}</button>
+              </div>
+              {settings.qr && (
+                <div style={{ marginTop: 12, textAlign: "center" }}>
+                  <div style={{ fontSize: 12, color: T.muted, marginBottom: 8 }}>สแกนเพื่อชำระเงิน ฿{detailBill.total}</div>
+                  <button onClick={() => setQrFull({ name: detailP.name, amount: detailBill.total })} style={{ border: "none", background: "#fff", borderRadius: 12, padding: 6, cursor: "pointer" }}>
+                    <img src={settings.qr} alt="QR" style={{ width: 168, height: 168, objectFit: "contain", display: "block" }} />
+                  </button>
+                  <div><button onClick={() => setQrFull({ name: detailP.name, amount: detailBill.total })} style={{ marginTop: 10, display: "inline-flex", alignItems: "center", gap: 7, padding: "11px 20px", borderRadius: 30, background: T.green, border: "none", color: "#fff", fontSize: 14, fontWeight: 800 }}><Maximize2 size={16} /> เปิด QR ให้สแกน (เต็มจอ)</button></div>
+                </div>
+              )}
+              {settings.bank && (
+                <div style={{ marginTop: 12, background: "#fff", border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 3 }}>หรือโอนเข้าบัญชี</div>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: "pre-wrap" }}>{settings.bank}</div>
+                </div>
+              )}
+              {!settings.qr && !settings.bank && <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted, textAlign: "center" }}>เพิ่ม QR / เลขบัญชีได้ในแท็บวันนี้ → ตั้งค่า</div>}
+            </div>
+          )}
+        </Overlay>
+      )}
+
+      {/* FULLSCREEN QR (no crop/filter) */}
+      {qrFull && settings.qr && (
+        <div onClick={() => setQrFull(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 50, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div style={{ color: "#fff", fontSize: 18, fontWeight: 800, marginBottom: 4 }}>ยอดชำระ ฿{qrFull.amount}</div>
+          <div style={{ color: "#cbd5cf", fontSize: 14, marginBottom: 18 }}>{qrFull.name}</div>
+          <img src={settings.qr} alt="QR" style={{ width: "min(84vw, 380px)", height: "min(84vw, 380px)", objectFit: "contain", background: "#fff", borderRadius: 14, padding: 10 }} />
+          {settings.bank && <div style={{ color: "#e5e7eb", fontSize: 13, marginTop: 16, textAlign: "center", whiteSpace: "pre-wrap", maxWidth: 340 }}>{settings.bank}</div>}
+          <button onClick={() => setQrFull(null)} style={{ marginTop: 22, display: "flex", alignItems: "center", gap: 7, padding: "13px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 15, fontWeight: 800 }}><X size={18} /> ปิด</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, color }) {
+  return <div style={{ flex: 1, background: T.surface2, borderRadius: 11, padding: "10px 6px", textAlign: "center" }}><div style={{ fontSize: 18, fontWeight: 800, color: color || T.text }}>{value}</div><div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{label}</div></div>;
+}
+function BillRow({ label, v }) {
+  return <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0", color: T.muted }}><span>{label}</span><span>฿{v}</span></div>;
+}
+function DetailList({ title, map, getP }) {
+  const entries = Object.entries(map || {}).sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 12, fontWeight: 800, color: T.muted, marginBottom: 6 }}>{title}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {entries.map(([id, n]) => <span key={id} style={{ fontSize: 12, fontWeight: 600, background: T.surface2, borderRadius: 8, padding: "4px 9px" }}>{getP(id)?.name || "-"} <span style={{ color: T.muted }}>×{n}</span></span>)}
+      </div>
+    </div>
+  );
+}
+function Overlay({ children, onClose }) {
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 40, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.bg, width: "100%", maxWidth: 520, maxHeight: "88vh", overflowY: "auto", borderRadius: "18px 18px 0 0", padding: 18, boxSizing: "border-box" }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}><button onClick={onClose} style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 20, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", color: T.muted }}><X size={17} /></button></div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function MatchTeams({ m, getP, editable, tapSlot, isSel }) {
+  const A = m.teamA, B = m.teamB;
+  return (
+    <div>
+      <TeamSide arr={A} team="A" m={m} getP={getP} editable={editable} tapSlot={tapSlot} isSel={isSel} />
+      <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "7px 0" }}><div style={{ flex: 1, height: 1, background: T.border }} /><span style={{ fontSize: 10.5, fontWeight: 800, color: T.muted }}>VS</span><div style={{ flex: 1, height: 1, background: T.border }} /></div>
+      <TeamSide arr={B} team="B" m={m} getP={getP} editable={editable} tapSlot={tapSlot} isSel={isSel} />
+    </div>
+  );
+}
+
+function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel }) {
+  return (
+    <div style={{ display: "flex", gap: 8 }}>
+      {arr.map((id, idx) => {
+        const p = id ? getP(id) : null;
+        const selected = isSel && isSel(id, m.id, team, idx);
+        return p ? (
+          <button key={idx} onClick={() => editable && tapSlot && tapSlot(m.id, team, idx, id)} style={{ flex: 1, display: "flex", alignItems: "center", gap: 7, padding: "8px 9px", borderRadius: 11, background: selected ? "#e2f5ec" : T.surface2, border: `1.5px solid ${selected ? T.green : "transparent"}`, minHeight: 46, textAlign: "left", cursor: editable ? "pointer" : "default" }}>
+            <Avatar p={p} size={30} />
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><span style={{ fontWeight: 700, fontSize: 13.5 }}>{p.name}</span> <span style={{ fontSize: 12, fontWeight: 800, color: LEVEL_COLOR[p.level] }}>({p.level})</span></span>
+          </button>
+        ) : (
+          <div key={idx} style={{ flex: 1, padding: "8px 9px", borderRadius: 11, border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, minHeight: 46, display: "flex", alignItems: "center", justifyContent: "center" }}>ว่าง</div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MiniMatch({ m, getP }) {
+  const nm = (id) => getP(id)?.name || "-";
+  const line = (arr) => arr.filter(Boolean).map(nm).join(" & ");
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12.5 }}>
+      <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, background: T.surface2, padding: "2px 7px", borderRadius: 6 }}>R{m.round + 1}·C{m.court}</span>
+      <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{line(m.teamA)} <span style={{ color: T.muted }}>vs</span> {line(m.teamB)}</span>
+    </div>
+  );
+}
+
+function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, getP }) {
+  const [a, setA] = useState(""); const [b, setB] = useState("");
+  const sty = { flex: 1, padding: "9px 8px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, minWidth: 0 };
+  return (
+    <div>
+      {lockPairs.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
+          {lockPairs.map((lp, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 10, background: "#fef3ec", border: `1px solid #f6d9c8` }}>
+              <Lock size={13} color={T.accent} /><span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{getP(lp[0])?.name} + {getP(lp[1])?.name}</span>
+              <button onClick={() => removeLockPair(i)} style={{ background: "none", border: "none", color: T.muted, display: "flex" }}><X size={15} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">เลือกคน</option>{players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+        <span style={{ color: T.muted, fontWeight: 800 }}>+</span>
+        <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+        <button onClick={() => { addLockPair(a, b); setA(""); setB(""); }} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={17} /></button>
+      </div>
+    </div>
+  );
+}
+
+function Label({ children }) { return <div style={{ fontSize: 12.5, fontWeight: 800, color: T.muted, marginBottom: 8 }}>{children}</div>; }
+function Stepper({ value, setValue, min, max }) {
+  const btn = { width: 38, height: 38, borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface2, color: T.text, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800 };
+  return <div style={{ display: "flex", alignItems: "center", gap: 12 }}><button onClick={() => setValue(Math.max(min, value - 1))} style={btn}><Minus size={17} /></button><span style={{ fontSize: 22, fontWeight: 800, minWidth: 26, textAlign: "center" }}>{value}</span><button onClick={() => setValue(Math.min(max, value + 1))} style={btn}><Plus size={17} /></button></div>;
+}
+function NumField({ label, value, onChange }) {
+  return <div style={{ flex: 1 }}><div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{label}</div><input type="number" value={value} onChange={(e) => onChange(Number(e.target.value) || 0)} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 15, fontWeight: 700, outline: "none", boxSizing: "border-box" }} /></div>;
+}
+const btnPrimary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 800 };
+const btnSecondary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700 };
+// ===================== MOUNT =====================
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
