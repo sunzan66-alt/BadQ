@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.6.1";
+      var CURRENT_VERSION = "1.6.2";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -398,7 +398,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.6.2";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -4656,7 +4656,13 @@ function MatchTeams({
   const [openSlot, setOpenSlot] = useState(null); // { team, idx } | null — shared between both team sides so only one picker is open at a time
   const A = m.teamA,
     B = m.teamB;
-  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(TeamSide, {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement(TeamSide, {
     arr: A,
     team: "A",
     m: m,
@@ -4668,32 +4674,15 @@ function MatchTeams({
     bench: bench,
     openSlot: openSlot,
     setOpenSlot: setOpenSlot
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      margin: "5px 0"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      height: 1,
-      background: T.border
-    }
   }), /*#__PURE__*/React.createElement("span", {
     style: {
-      fontSize: 10.5,
+      flex: "none",
+      fontSize: 10,
       fontWeight: 800,
-      color: T.muted
+      color: T.muted,
+      padding: "0 1px"
     }
-  }, "VS"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      height: 1,
-      background: T.border
-    }
-  })), /*#__PURE__*/React.createElement(TeamSide, {
+  }, "vs"), /*#__PURE__*/React.createElement(TeamSide, {
     arr: B,
     team: "B",
     m: m,
@@ -4720,10 +4709,13 @@ function TeamSide({
   openSlot,
   setOpenSlot
 }) {
+  const compact = arr.length > 1; // doubles: drop avatar + tighten so both teams fit on one line
   return /*#__PURE__*/React.createElement("div", {
     style: {
+      flex: 1,
+      minWidth: 0,
       display: "flex",
-      gap: 8
+      gap: 4
     }
   }, arr.map((id, idx) => {
     const p = id ? getP(id) : null;
@@ -4741,34 +4733,35 @@ function TeamSide({
       key: idx,
       style: {
         flex: 1,
+        minWidth: 0,
         position: "relative",
         display: "flex",
         alignItems: "center",
-        gap: 7,
-        padding: "6px 9px",
-        borderRadius: 11,
+        gap: compact ? 0 : 5,
+        padding: compact ? "5px 5px" : "5px 6px",
+        borderRadius: 10,
         background: selected ? "#e2f5ec" : T.surface2,
         border: `1.5px solid ${selected ? T.green : "transparent"}`,
-        minHeight: 40
+        minHeight: 34
       }
-    }, /*#__PURE__*/React.createElement(Avatar, {
+    }, !compact && /*#__PURE__*/React.createElement(Avatar, {
       p: p,
-      size: 28
+      size: 22
     }), /*#__PURE__*/React.createElement("span", {
       style: {
         overflow: "hidden",
         textOverflow: "ellipsis",
         whiteSpace: "nowrap",
-        flex: 1
+        minWidth: 0
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: {
         fontWeight: 700,
-        fontSize: 13.5
+        fontSize: compact ? 11.5 : 12
       }
-    }, p.name), " ", /*#__PURE__*/React.createElement("span", {
+    }, p.name), /*#__PURE__*/React.createElement("span", {
       style: {
-        fontSize: 12,
+        fontSize: compact ? 10 : 10.5,
         fontWeight: 800,
         color: LEVEL_COLOR[p.level]
       }
@@ -4788,19 +4781,21 @@ function TeamSide({
     }), isOpen && /*#__PURE__*/React.createElement(PlayerPicker, {
       bench: bench || [],
       allowClear: true,
+      align: team === "A" ? "left" : "right",
       onPick: pick,
       onClose: () => setOpenSlot(null)
     })) : /*#__PURE__*/React.createElement("div", {
       key: idx,
       style: {
         flex: 1,
+        minWidth: 0,
         position: "relative",
-        padding: "6px 9px",
-        borderRadius: 11,
+        padding: "5px 6px",
+        borderRadius: 10,
         border: `1.5px dashed ${editable ? T.green : T.border}`,
         color: editable ? T.green : T.muted,
-        fontSize: 12.5,
-        minHeight: 40,
+        fontSize: 11,
+        minHeight: 34,
         display: "flex",
         alignItems: "center",
         justifyContent: "center"
@@ -4815,12 +4810,16 @@ function TeamSide({
         background: "none",
         border: "none",
         color: T.green,
-        fontSize: 12.5,
+        fontSize: 11,
         fontWeight: 700,
-        cursor: "pointer"
+        cursor: "pointer",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
       }
-    }, "+ \u0E40\u0E25\u0E37\u0E2D\u0E01\u0E04\u0E19") : "ว่าง", isOpen && /*#__PURE__*/React.createElement(PlayerPicker, {
+    }, compact ? "+ เลือก" : "+ เลือกคน") : "ว่าง", isOpen && /*#__PURE__*/React.createElement(PlayerPicker, {
       bench: bench || [],
+      align: team === "A" ? "left" : "right",
       onPick: pick,
       onClose: () => setOpenSlot(null)
     }));
@@ -4831,9 +4830,11 @@ function TeamSide({
 function PlayerPicker({
   bench,
   allowClear,
+  align,
   onPick,
   onClose
 }) {
+  const alignRight = align === "right";
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     onClick: onClose,
     style: {
@@ -4847,9 +4848,15 @@ function PlayerPicker({
     style: {
       position: "absolute",
       top: "100%",
-      left: 0,
-      right: 0,
+      ...(alignRight ? {
+        right: 0,
+        left: "auto"
+      } : {
+        left: 0,
+        right: "auto"
+      }),
       marginTop: 4,
+      width: "max(100%, 210px)",
       background: T.surface,
       border: `1px solid ${T.border}`,
       borderRadius: 12,
