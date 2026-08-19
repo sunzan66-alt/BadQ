@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.8";
+      var CURRENT_VERSION = "1.7.9";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.8";
+const APP_VERSION = "1.7.9";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -6895,7 +6895,7 @@ function SpinWheel({
   const R = 125,
     CX = 125,
     CY = 125,
-    LABEL_R = R * 0.64;
+    LABEL_START_R = R * 0.27; // just past the fixed center hub badge (22px radius)
   return /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -6962,16 +6962,16 @@ function SpinWheel({
     stroke: "#fff",
     strokeWidth: 1
   })), segs.map((s, i) => {
-    if (s.isNone || s.span < 8) return null; // skip labels on miss slices, and on slivers too thin to hold text
-    const mid = s.start + s.span / 2;
-    const pt = polarToCartesian(CX, CY, LABEL_R, mid);
-    const rot = mid > 90 && mid < 270 ? mid + 180 : mid;
+    if (s.isNone || s.span < 6) return null; // skip labels on miss slices, and on slivers too thin to hold text
+    const mid = s.start + s.span / 2; // slice bisector angle — text runs straight along this line, so it's always centered within its own colored slice
+    const pt = polarToCartesian(CX, CY, LABEL_START_R, mid);
+    const rot = mid - 90; // radial orientation: first letter anchored near the hub (pt), text reads outward toward the rim
     return /*#__PURE__*/React.createElement("text", {
       key: "t" + i,
       x: pt.x,
       y: pt.y,
       transform: `rotate(${rot} ${pt.x} ${pt.y})`,
-      textAnchor: "middle",
+      textAnchor: "start",
       dominantBaseline: "middle",
       fontSize: "9",
       fontWeight: "800",
@@ -6982,7 +6982,7 @@ function SpinWheel({
       style: {
         fontFamily: "inherit"
       }
-    }, truncateLabel(s.label, 10));
+    }, truncateLabel(s.label, 12));
   }))), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "absolute",
