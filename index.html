@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.4";
+      var CURRENT_VERSION = "1.7.5";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -408,7 +408,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.4";
+const APP_VERSION = "1.7.5";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -959,27 +959,27 @@ function App() {
     wheelPrizes: [{
       id: uid(),
       label: "ส่วนลด 20฿ (ใช้ทันที)",
-      weight: 25,
       type: "now",
-      amount: 20
+      amount: 20,
+      qty: 5
     }, {
       id: uid(),
       label: "ส่วนลด 10฿ (ครั้งหน้า)",
-      weight: 25,
       type: "next",
-      amount: 10
+      amount: 10,
+      qty: 5
     }, {
       id: uid(),
       label: "ฟรีค่าคอร์ท! ส่วนลด 65฿ (ทันที)",
-      weight: 10,
       type: "now",
-      amount: 65
+      amount: 65,
+      qty: 2
     }, {
       id: uid(),
       label: "เสียใจด้วย ไม่ได้รางวัล",
-      weight: 40,
       type: "none",
-      amount: 0
+      amount: 0,
+      qty: 40
     }]
   });
   const [session, setSession] = useState({
@@ -1087,6 +1087,7 @@ function App() {
       let wheelDiscount = p.wheelDiscount || 0,
         pendingDiscount = p.pendingDiscount || 0;
       if (prize.type === "now") wheelDiscount += Number(prize.amount) || 0;else if (prize.type === "next") pendingDiscount += Number(prize.amount) || 0;
+      // "item" (non-discount prize, e.g. racket/shoes/water) touches neither — it's just recorded as wheelResult below
       return {
         ...p,
         spun: true,
@@ -1095,6 +1096,16 @@ function App() {
         pendingDiscount
       };
     }));
+    // consume one unit of stock for real prizes; "none" (no-prize slice) is unlimited and never decremented
+    if (prize.type !== "none") {
+      setSettings(s => ({
+        ...s,
+        wheelPrizes: (s.wheelPrizes || []).map(wp => wp.id === prize.id ? {
+          ...wp,
+          qty: Math.max(0, prizeQty(wp) - 1)
+        } : wp)
+      }));
+    }
   };
   const setStatus = (id, st) => setPlayers(prev => prev.map(p => p.id === id ? {
     ...p,
@@ -2288,6 +2299,7 @@ function Avatar({
     style: {
       width: size,
       height: size,
+      flexShrink: 0,
       borderRadius: size / 2,
       objectFit: "cover"
     }
@@ -2296,6 +2308,7 @@ function Avatar({
     style: {
       width: size,
       height: size,
+      flexShrink: 0,
       borderRadius: size / 2,
       background: levelColor(p.skillIndex),
       color: "#fff",
@@ -2513,7 +2526,8 @@ function SessionTab(props) {
       tapSlot: tapSlot,
       isSel: isSel,
       replaceSlot: replaceSlot,
-      bench: waitQueue
+      bench: waitQueue,
+      big: m.status === "playing"
     }), /*#__PURE__*/React.createElement(Fairness, {
       sA: sA,
       sB: sB
@@ -3176,80 +3190,7 @@ function SessionTab(props) {
     }
   }, /*#__PURE__*/React.createElement(Plus, {
     size: 15
-  }), " \u0E08\u0E31\u0E14\u0E40\u0E01\u0E21")))), started && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 8,
-      marginBottom: 8
-    }
-  }, /*#__PURE__*/React.createElement(SectionHead, {
-    icon: /*#__PURE__*/React.createElement(Clock, {
-      size: 16,
-      color: T.amber
-    }),
-    title: `รอเล่น — ${waitQueue.length} คน`,
-    sub: "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E04\u0E19\u0E23\u0E2D\u0E19\u0E32\u0E19\u0E01\u0E48\u0E2D\u0E19"
-  }), waitQueue.length === 0 ? /*#__PURE__*/React.createElement("div", {
-    style: {
-      color: T.muted,
-      fontSize: 13,
-      textAlign: "center",
-      padding: "8px 0"
-    }
-  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E19\u0E23\u0E2D") : /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 6
-    }
-  }, waitQueue.slice(0, 10).map((p, i) => /*#__PURE__*/React.createElement("div", {
-    key: p.id,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      padding: "7px 11px",
-      borderRadius: 11,
-      background: T.surface,
-      border: `1px solid ${T.border}`
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      width: 20,
-      textAlign: "center",
-      fontWeight: 800,
-      fontSize: 13,
-      color: i < 3 ? T.amber : T.muted
-    }
-  }, i + 1), /*#__PURE__*/React.createElement(Avatar, {
-    p: p,
-    size: 30
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      flex: 1,
-      fontSize: 13.5,
-      fontWeight: 600,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
-    }
-  }, p.name, " ", /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: levelColor(p.skillIndex),
-      fontWeight: 800,
-      fontSize: 12
-    }
-  }, "(", p.level, ")")), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 12,
-      color: T.muted,
-      fontWeight: 600,
-      textAlign: "right"
-    }
-  }, "\u0E23\u0E2D ", waitMin(p), " \u0E19.", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 11
-    }
-  }, p.games || 0, " \u0E40\u0E01\u0E21")))))), dones.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }), " \u0E08\u0E31\u0E14\u0E40\u0E01\u0E21")))), dones.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -3370,7 +3311,80 @@ function SessionTab(props) {
     rounds: rounds,
     setScore: setScore,
     clearScore: clearScore
-  }))))), sel && /*#__PURE__*/React.createElement("div", {
+  }))))), started && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(Clock, {
+      size: 16,
+      color: T.amber
+    }),
+    title: `รอเล่น — ${waitQueue.length} คน`,
+    sub: "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E04\u0E19\u0E23\u0E2D\u0E19\u0E32\u0E19\u0E01\u0E48\u0E2D\u0E19"
+  }), waitQueue.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "8px 0"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E19\u0E23\u0E2D") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, waitQueue.slice(0, 10).map((p, i) => /*#__PURE__*/React.createElement("div", {
+    key: p.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "7px 11px",
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 20,
+      textAlign: "center",
+      fontWeight: 800,
+      fontSize: 13,
+      color: i < 3 ? T.amber : T.muted
+    }
+  }, i + 1), /*#__PURE__*/React.createElement(Avatar, {
+    p: p,
+    size: 30
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontSize: 13.5,
+      fontWeight: 600,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, p.name, " ", /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: levelColor(p.skillIndex),
+      fontWeight: 800,
+      fontSize: 12
+    }
+  }, "(", p.level, ")")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: T.muted,
+      fontWeight: 600,
+      textAlign: "right"
+    }
+  }, "\u0E23\u0E2D ", waitMin(p), " \u0E19.", /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11
+    }
+  }, p.games || 0, " \u0E40\u0E01\u0E21")))))), sel && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 12,
       fontSize: 12,
@@ -5011,7 +5025,8 @@ function MatchTeams({
   tapSlot,
   isSel,
   replaceSlot,
-  bench
+  bench,
+  big
 }) {
   const [openSlot, setOpenSlot] = useState(null); // { team, idx } | null — shared between both team sides so only one picker is open at a time
   const A = m.teamA,
@@ -5033,7 +5048,8 @@ function MatchTeams({
     replaceSlot: replaceSlot,
     bench: bench,
     openSlot: openSlot,
-    setOpenSlot: setOpenSlot
+    setOpenSlot: setOpenSlot,
+    big: big
   }), /*#__PURE__*/React.createElement("span", {
     style: {
       flex: "none",
@@ -5053,7 +5069,8 @@ function MatchTeams({
     replaceSlot: replaceSlot,
     bench: bench,
     openSlot: openSlot,
-    setOpenSlot: setOpenSlot
+    setOpenSlot: setOpenSlot,
+    big: big
   }));
 }
 function TeamSide({
@@ -5067,9 +5084,11 @@ function TeamSide({
   replaceSlot,
   bench,
   openSlot,
-  setOpenSlot
+  setOpenSlot,
+  big
 }) {
   const compact = arr.length > 1; // doubles: tighten padding so both teams fit on one line
+  const avatarSize = big ? compact ? 26 : 32 : compact ? 18 : 22; // bigger photos on courts that are actively playing — easier to spot/call the right person
   return /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
@@ -5109,7 +5128,7 @@ function TeamSide({
       }
     }, /*#__PURE__*/React.createElement(Avatar, {
       p: p,
-      size: compact ? 18 : 22
+      size: avatarSize
     }), /*#__PURE__*/React.createElement("span", {
       style: {
         minWidth: 0,
@@ -5433,33 +5452,46 @@ function LockPairEditor({
 const WHEEL_TYPE_LABEL = {
   now: "ใช้ทันที",
   next: "ครั้งถัดไป",
+  item: "ของรางวัล",
   none: "ไม่ได้รางวัล"
 };
+// how many of this prize are left on the wheel. New prizes store this directly as `qty`; prizes saved
+// by an older version only have `weight` (a relative-odds number) — reused as-is for the initial stock
+// so upgrading never silently empties/changes anyone's existing wheel.
+function prizeQty(p) {
+  if (p.qty != null) return Math.max(0, Number(p.qty) || 0);
+  if (p.weight != null) return Math.max(0, Number(p.weight) || 0);
+  return 5;
+}
 function WheelPrizeEditor({
   prizes,
   setPrizes
 }) {
   const [label, setLabel] = useState("");
-  const [weight, setWeight] = useState(10);
+  const [qty, setQty] = useState(5);
   const [type, setType] = useState("now");
   const [amount, setAmount] = useState(10);
-  const totalWeight = (prizes || []).reduce((s, p) => s + (Number(p.weight) || 0), 0);
+  const needsAmount = type === "now" || type === "next";
   const add = () => {
     const n = label.trim();
     if (!n) return;
     setPrizes(prev => [...(prev || []), {
       id: uid(),
       label: n,
-      weight: Number(weight) || 0,
       type,
-      amount: type === "none" ? 0 : Number(amount) || 0
+      amount: needsAmount ? Number(amount) || 0 : 0,
+      qty: Math.max(0, Number(qty) || 0)
     }]);
     setLabel("");
-    setWeight(10);
+    setQty(5);
     setAmount(10);
     setType("now");
   };
   const remove = id => setPrizes(prev => (prev || []).filter(p => p.id !== id));
+  const editQty = (id, v) => setPrizes(prev => (prev || []).map(p => p.id === id ? {
+    ...p,
+    qty: Math.max(0, Number(v) || 0)
+  } : p));
   const sty = {
     padding: "9px 8px",
     borderRadius: 10,
@@ -5475,56 +5507,85 @@ function WheelPrizeEditor({
       gap: 6,
       marginBottom: 10
     }
-  }, prizes.map(p => /*#__PURE__*/React.createElement("div", {
-    key: p.id,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      padding: "8px 11px",
-      borderRadius: 10,
-      background: T.surface2
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      flex: 1,
-      fontSize: 13,
-      fontWeight: 600,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
-    }
-  }, p.label), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 10.5,
-      color: T.muted,
-      fontWeight: 700,
-      flexShrink: 0
-    }
-  }, WHEEL_TYPE_LABEL[p.type] || p.type), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 11.5,
-      fontWeight: 800,
-      color: T.green,
-      minWidth: 34,
-      textAlign: "right",
-      flexShrink: 0
-    }
-  }, totalWeight ? Math.round((Number(p.weight) || 0) / totalWeight * 100) : 0, "%"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => remove(p.id),
-    style: {
-      background: "none",
-      border: "none",
-      color: T.muted,
-      display: "flex",
-      flexShrink: 0
-    }
-  }, /*#__PURE__*/React.createElement(X, {
-    size: 15
-  }))))), /*#__PURE__*/React.createElement("input", {
+  }, prizes.map(p => {
+    const remaining = prizeQty(p);
+    const unlimited = p.type === "none"; // "no prize" slice never runs out
+    return /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 11px",
+        borderRadius: 10,
+        background: T.surface2,
+        opacity: !unlimited && remaining === 0 ? 0.55 : 1
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        fontSize: 13,
+        fontWeight: 600,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, p.label), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        color: T.muted,
+        fontWeight: 700,
+        flexShrink: 0
+      }
+    }, WHEEL_TYPE_LABEL[p.type] || p.type), unlimited ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        color: T.muted,
+        fontWeight: 700,
+        flexShrink: 0
+      }
+    }, "\u0E44\u0E21\u0E48\u0E08\u0E33\u0E01\u0E31\u0E14") : /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 3,
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      value: remaining,
+      onChange: e => editQty(p.id, e.target.value),
+      title: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E04\u0E07\u0E40\u0E2B\u0E25\u0E37\u0E2D \u2014 \u0E41\u0E01\u0E49\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E40\u0E15\u0E34\u0E21\u0E2A\u0E15\u0E47\u0E2D\u0E01",
+      style: {
+        ...sty,
+        width: 46,
+        padding: "5px 6px",
+        textAlign: "right",
+        color: remaining === 0 ? T.accent : T.text,
+        fontWeight: 800
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        color: T.muted
+      }
+    }, remaining === 0 ? "หมด" : "เหลือ")), /*#__PURE__*/React.createElement("button", {
+      onClick: () => remove(p.id),
+      style: {
+        background: "none",
+        border: "none",
+        color: T.muted,
+        display: "flex",
+        flexShrink: 0
+      }
+    }, /*#__PURE__*/React.createElement(X, {
+      size: 15
+    })));
+  })), /*#__PURE__*/React.createElement("input", {
     value: label,
     onChange: e => setLabel(e.target.value),
-    placeholder: "\u0E0A\u0E37\u0E48\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 \u0E40\u0E0A\u0E48\u0E19 \u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14 20\u0E3F",
+    placeholder: "\u0E0A\u0E37\u0E48\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 \u0E40\u0E0A\u0E48\u0E19 \u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14 10\u0E3F / \u0E41\u0E08\u0E01\u0E44\u0E21\u0E49\u0E41\u0E1A\u0E15",
     style: {
       ...sty,
       width: "100%",
@@ -5546,11 +5607,13 @@ function WheelPrizeEditor({
     }
   }, /*#__PURE__*/React.createElement("option", {
     value: "now"
-  }, "\u0E43\u0E0A\u0E49\u0E17\u0E31\u0E19\u0E17\u0E35"), /*#__PURE__*/React.createElement("option", {
+  }, "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14 \u0E43\u0E0A\u0E49\u0E17\u0E31\u0E19\u0E17\u0E35"), /*#__PURE__*/React.createElement("option", {
     value: "next"
-  }, "\u0E04\u0E23\u0E31\u0E49\u0E07\u0E16\u0E31\u0E14\u0E44\u0E1B"), /*#__PURE__*/React.createElement("option", {
+  }, "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14 \u0E04\u0E23\u0E31\u0E49\u0E07\u0E16\u0E31\u0E14\u0E44\u0E1B"), /*#__PURE__*/React.createElement("option", {
+    value: "item"
+  }, "\u0E02\u0E2D\u0E07\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 (\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14)"), /*#__PURE__*/React.createElement("option", {
     value: "none"
-  }, "\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25")), type !== "none" && /*#__PURE__*/React.createElement("input", {
+  }, "\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25")), needsAmount && /*#__PURE__*/React.createElement("input", {
     type: "number",
     value: amount,
     onChange: e => setAmount(e.target.value),
@@ -5560,11 +5623,12 @@ function WheelPrizeEditor({
       width: 58,
       flexShrink: 0
     }
-  }), /*#__PURE__*/React.createElement("input", {
+  }), type !== "none" && /*#__PURE__*/React.createElement("input", {
     type: "number",
-    value: weight,
-    onChange: e => setWeight(e.target.value),
-    placeholder: "\u0E42\u0E2D\u0E01\u0E32\u0E2A",
+    value: qty,
+    onChange: e => setQty(e.target.value),
+    placeholder: "\u0E08\u0E33\u0E19\u0E27\u0E19",
+    title: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14",
     style: {
       ...sty,
       width: 62,
@@ -5591,7 +5655,7 @@ function WheelPrizeEditor({
       color: T.muted,
       marginTop: 6
     }
-  }, "\u0E15\u0E31\u0E27\u0E40\u0E25\u0E02 \"\u0E42\u0E2D\u0E01\u0E32\u0E2A\" \u0E04\u0E37\u0E2D\u0E19\u0E49\u0E33\u0E2B\u0E19\u0E31\u0E01\u0E40\u0E17\u0E35\u0E22\u0E1A\u0E01\u0E31\u0E19 \u0E23\u0E30\u0E1A\u0E1A\u0E04\u0E34\u0E14\u0E40\u0E1B\u0E47\u0E19 % \u0E43\u0E2B\u0E49\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34\u0E08\u0E32\u0E01\u0E1C\u0E25\u0E23\u0E27\u0E21\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14"));
+  }, "\u0E15\u0E31\u0E27\u0E40\u0E25\u0E02 \"\u0E08\u0E33\u0E19\u0E27\u0E19\" \u0E04\u0E37\u0E2D\u0E08\u0E33\u0E19\u0E27\u0E19\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E17\u0E35\u0E48\u0E21\u0E35\u0E08\u0E23\u0E34\u0E07 \u2014 \u0E2B\u0E21\u0E38\u0E19\u0E16\u0E39\u0E01\u0E41\u0E25\u0E49\u0E27\u0E08\u0E30\u0E25\u0E14\u0E25\u0E07 1 \u0E17\u0E38\u0E01\u0E04\u0E23\u0E31\u0E49\u0E07 \u0E08\u0E19\u0E01\u0E27\u0E48\u0E32\u0E08\u0E30\u0E2B\u0E21\u0E14 (\u0E22\u0E01\u0E40\u0E27\u0E49\u0E19 \"\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\" \u0E17\u0E35\u0E48\u0E44\u0E21\u0E48\u0E08\u0E33\u0E01\u0E31\u0E14) \u2014 \u0E40\u0E25\u0E37\u0E2D\u0E01 \"\u0E02\u0E2D\u0E07\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\" \u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E02\u0E2D\u0E07\u0E17\u0E35\u0E48\u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14 \u0E40\u0E0A\u0E48\u0E19 \u0E44\u0E21\u0E49\u0E41\u0E1A\u0E15 \u0E23\u0E2D\u0E07\u0E40\u0E17\u0E49\u0E32 \u0E19\u0E49\u0E33\u0E14\u0E37\u0E48\u0E21"));
 }
 
 // preset picker + confirm-before-switch + (when custom is active) the custom level editor.
@@ -5930,12 +5994,14 @@ function SpinWheel({
   const [rotation, setRotation] = useState(0);
   const [spinning, setSpinning] = useState(false);
   const [resultPrize, setResultPrize] = useState(null);
-  const list = (prizes || []).filter(p => (Number(p.weight) || 0) > 0);
-  const totalWeight = list.reduce((s, p) => s + (Number(p.weight) || 0), 0) || 1;
+  // wheel slice size is proportional to remaining stock — prizes that are running low get smaller
+  // slices and, once fully claimed (qty 0), drop off the wheel entirely; "ไม่ได้รางวัล" is unlimited.
+  const list = (prizes || []).filter(p => prizeQty(p) > 0);
+  const totalWeight = list.reduce((s, p) => s + prizeQty(p), 0) || 1;
   const colors = ["#12986a", "#2563eb", "#d97706", "#ef5a44", "#9333ea", "#0891b2", "#dc2626", "#65a30d", "#0d9488", "#ca8a04"];
   let acc = 0;
   const segs = list.map((p, i) => {
-    const span = (Number(p.weight) || 0) / totalWeight * 360;
+    const span = prizeQty(p) / totalWeight * 360;
     const seg = {
       ...p,
       start: acc,
