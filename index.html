@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.1";
+      var CURRENT_VERSION = "1.7.3";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -398,7 +398,7 @@ const Upload=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d=
 const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>');
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.1";
+const APP_VERSION = "1.7.3";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -569,6 +569,7 @@ const normPlayer = p => ({
   discount: p.discount || 0,
   wheelDiscount: p.wheelDiscount || 0,
   pendingDiscount: p.pendingDiscount || 0,
+  carriedInDiscount: p.carriedInDiscount || 0,
   spun: p.spun || false,
   wheelResult: p.wheelResult || null,
   skillIndex: p.skillIndex || WEIGHT[p.level] || 1
@@ -790,6 +791,7 @@ function computeBill(players, settings) {
       other = otherShare;
     const discount = p.discount || 0; // per-person discount, entered manually in the player's summary detail
     const wheelDiscount = p.wheelDiscount || 0; // locked discount won from the spin wheel (not manually editable)
+    const carriedInDiscount = Math.min(p.carriedInDiscount || 0, wheelDiscount); // portion of wheelDiscount carried over from last session's "ครั้งหน้า" prize
     const total = Math.max(0, Math.round(court + shuttle + other - discount - wheelDiscount));
     return {
       ...p,
@@ -798,6 +800,7 @@ function computeBill(players, settings) {
       eOther: other,
       eDiscount: discount,
       eWheelDiscount: wheelDiscount,
+      eCarriedInDiscount: carriedInDiscount,
       total
     };
   });
@@ -1040,6 +1043,7 @@ function App() {
       discount: 0,
       wheelDiscount: 0,
       pendingDiscount: 0,
+      carriedInDiscount: 0,
       spun: false,
       wheelResult: null
     }]);
@@ -1595,7 +1599,8 @@ function App() {
       spun: false,
       wheelResult: null,
       wheelDiscount: p.pendingDiscount || 0,
-      pendingDiscount: 0
+      pendingDiscount: 0,
+      carriedInDiscount: p.pendingDiscount || 0
     })));
     setHistory([]);
     setCurrent([]);
@@ -1686,7 +1691,9 @@ function App() {
     setPLevel,
     delPlayer,
     openPhoto,
-    settings
+    settings,
+    changeLevelPreset,
+    setCustomLevels
   }), tab === "session" && /*#__PURE__*/React.createElement(SessionTab, {
     players,
     getP,
@@ -1826,7 +1833,9 @@ function MembersTab({
   setPLevel,
   delPlayer,
   openPhoto,
-  settings
+  settings,
+  changeLevelPreset,
+  setCustomLevels
 }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("levelDesc");
@@ -1836,6 +1845,8 @@ function MembersTab({
   const [name, setName] = useState("");
   const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
   const [showLevelInfo, setShowLevelInfo] = useState(false);
+  const [openPresetPicker, setOpenPresetPicker] = useState(false);
+  const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
   const list = useMemo(() => {
     let l = players.filter(p => p.name.toLowerCase().includes(q.trim().toLowerCase()));
     if (onlyPresent) l = l.filter(p => p.status !== "absent");
@@ -1874,6 +1885,73 @@ function MembersTab({
       outline: "none",
       boxSizing: "border-box"
     }
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenPresetPicker(v => !v),
+    style: {
+      width: "100%",
+      textAlign: "left",
+      padding: "9px 12px",
+      borderRadius: openPresetPicker ? "11px 11px 0 0" : 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderBottom: openPresetPicker ? "none" : undefined,
+      marginBottom: openPresetPicker ? 0 : 10,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: T.muted
+    }
+  }, "\u0E23\u0E30\u0E1A\u0E1A\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D:"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      color: T.text
+    }
+  }, currentPreset.name), /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 15,
+    color: T.muted,
+    style: {
+      marginLeft: "auto",
+      transform: openPresetPicker ? "rotate(180deg)" : "none",
+      transition: "transform .15s"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginTop: 2,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, levelOptions.map(o => o.label).join(" → "))), openPresetPicker && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 11px 11px",
+      padding: 12,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginBottom: 10
+    }
+  }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E23\u0E30\u0E1A\u0E1A\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49\u0E43\u0E19\u0E1E\u0E37\u0E49\u0E19\u0E17\u0E35\u0E48/\u0E01\u0E4A\u0E27\u0E19\u0E02\u0E2D\u0E07\u0E04\u0E38\u0E13"), /*#__PURE__*/React.createElement(LevelPresetEditor, {
+    settings: settings,
+    changeLevelPreset: changeLevelPreset,
+    setCustomLevels: setCustomLevels
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -2001,6 +2079,16 @@ function MembersTab({
       marginBottom: 12
     }
   }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 800,
+      color: T.text,
+      marginBottom: 2
+    }
+  }, "\u0E23\u0E30\u0E1A\u0E1A\u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49\u0E2D\u0E22\u0E39\u0E48: ", currentPreset.name), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, "\u0E25\u0E33\u0E14\u0E31\u0E1A\u0E23\u0E30\u0E14\u0E31\u0E1A: ", levelOptions.map(o => o.label).join(" → ")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontWeight: 800,
       color: T.text,
@@ -4489,7 +4577,7 @@ function SummaryTab({
       color: T.green,
       outline: "none"
     }
-  }))), detailBill.eWheelDiscount > 0 && /*#__PURE__*/React.createElement("div", {
+  }))), detailBill.eCarriedInDiscount > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -4497,7 +4585,15 @@ function SummaryTab({
       padding: "3px 0",
       color: T.green
     }
-  }, /*#__PURE__*/React.createElement("span", null, "\uD83C\uDFA1 \u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E27\u0E07\u0E25\u0E49\u0E2D"), /*#__PURE__*/React.createElement("span", null, "-\u0E3F", Math.round(detailBill.eWheelDiscount))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "\u0E2A\u0E48\u0E27\u0E19\u0E25\u0E14\u0E08\u0E32\u0E01\u0E23\u0E2D\u0E1A\u0E17\u0E35\u0E48\u0E41\u0E25\u0E49\u0E27"), /*#__PURE__*/React.createElement("span", null, "-\u0E3F", Math.round(detailBill.eCarriedInDiscount))), detailBill.eWheelDiscount - detailBill.eCarriedInDiscount > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 13,
+      padding: "3px 0",
+      color: T.green
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "\uD83C\uDFA1 \u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E27\u0E07\u0E25\u0E49\u0E2D"), /*#__PURE__*/React.createElement("span", null, "-\u0E3F", Math.round(detailBill.eWheelDiscount - detailBill.eCarriedInDiscount))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
