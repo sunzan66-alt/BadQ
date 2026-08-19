@@ -1,6 +1,6 @@
 {
-  "name": "ก๊วนแบต",
-  "short_name": "ก๊วนแบต",
+  "name": "BadQ",
+  "short_name": "BadQ",
   "description": "จัดก๊วนแบดมินตัน จับคู่อัตโนมัติ คิว คะแนน และค่าใช้จ่าย",
   "start_url": ".",
   "scope": ".",
