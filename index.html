@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.17";
+      var CURRENT_VERSION = "1.7.18";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.17";
+const APP_VERSION = "1.7.18";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -2273,6 +2273,7 @@ function App() {
     setSettings,
     session,
     setSession,
+    sessionHistory,
     lockPairs,
     addLockPair,
     removeLockPair,
@@ -2961,6 +2962,7 @@ function SessionTab(props) {
     setSettings,
     session,
     setSession,
+    sessionHistory,
     lockPairs,
     addLockPair,
     removeLockPair,
@@ -2988,6 +2990,9 @@ function SessionTab(props) {
     setCustomLevels
   } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
+  const [nameHistKey, setNameHistKey] = useState(0); // bumped after each pick to remount the picker <select> back to its placeholder
+  // unique quan names pulled from ประวัติก๊วน (sessionHistory is newest-first, so first occurrence = most recent use)
+  const pastQuanNames = [...new Set((sessionHistory || []).map(s => s.name).filter(Boolean))];
   const [showHistory, setShowHistory] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
@@ -3110,6 +3115,12 @@ function SessionTab(props) {
       padding: 12,
       marginBottom: 12
     }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
   }, /*#__PURE__*/React.createElement("input", {
     value: session.name,
     onChange: e => setSession(s => ({
@@ -3118,7 +3129,8 @@ function SessionTab(props) {
     })),
     placeholder: "\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \u0E40\u0E0A\u0E48\u0E19 \u0E01\u0E4A\u0E27\u0E19\u0E27\u0E31\u0E19\u0E2D\u0E32\u0E17\u0E34\u0E15\u0E22\u0E4C",
     style: {
-      width: "100%",
+      flex: 1,
+      minWidth: 0,
       border: "none",
       outline: "none",
       fontSize: 16,
@@ -3127,7 +3139,55 @@ function SessionTab(props) {
       color: T.text,
       boxSizing: "border-box"
     }
-  }), /*#__PURE__*/React.createElement("div", {
+  }), pastQuanNames.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "relative",
+      flexShrink: 0,
+      width: 28,
+      height: 28
+    },
+    title: "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E43\u0E0A\u0E49"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 28,
+      height: 28,
+      borderRadius: 8,
+      background: T.surface2,
+      color: T.muted,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 16
+  })), /*#__PURE__*/React.createElement("select", {
+    key: nameHistKey,
+    value: "",
+    onChange: e => {
+      if (e.target.value) {
+        setSession(s => ({
+          ...s,
+          name: e.target.value
+        }));
+        setNameHistKey(k => k + 1);
+      }
+    },
+    style: {
+      position: "absolute",
+      inset: 0,
+      width: "100%",
+      height: "100%",
+      opacity: 0,
+      border: "none",
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: "",
+    disabled: true
+  }, "\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E43\u0E0A\u0E49"), pastQuanNames.map(n => /*#__PURE__*/React.createElement("option", {
+    key: n,
+    value: n
+  }, n))))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
