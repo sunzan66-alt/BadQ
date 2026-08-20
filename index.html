@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.1";
+      var CURRENT_VERSION = "1.8.2";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.1";
+const APP_VERSION = "1.8.2";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -4214,9 +4214,23 @@ function SessionTab(props) {
     clearSessionPhoto
   } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
-  const [nameHistKey, setNameHistKey] = useState(0); // bumped after each pick to remount the picker <select> back to its placeholder
-  // unique quan names pulled from ประวัติก๊วน (sessionHistory is newest-first, so first occurrence = most recent use)
-  const pastQuanNames = [...new Set((sessionHistory || []).map(s => s.name).filter(Boolean))];
+  const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
+  // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
+  // newest-first, so the first occurrence of a name is also its most recent photo)
+  const pastQuans = useMemo(() => {
+    const seen = new Set(),
+      out = [];
+    (sessionHistory || []).forEach(s => {
+      if (s.name && !seen.has(s.name)) {
+        seen.add(s.name);
+        out.push({
+          name: s.name,
+          photo: s.photo || null
+        });
+      }
+    });
+    return out;
+  }, [sessionHistory]);
   const [showHistory, setShowHistory] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
@@ -4481,55 +4495,115 @@ function SessionTab(props) {
       color: T.text,
       boxSizing: "border-box"
     }
-  }), pastQuanNames.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }), pastQuans.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       position: "relative",
-      flexShrink: 0,
-      width: 28,
-      height: 28
-    },
-    title: "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E43\u0E0A\u0E49"
-  }, /*#__PURE__*/React.createElement("div", {
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowNameDropdown(v => !v),
+    title: "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E43\u0E0A\u0E49",
     style: {
       width: 28,
       height: 28,
       borderRadius: 8,
       background: T.surface2,
       color: T.muted,
+      border: "none",
       display: "flex",
       alignItems: "center",
       justifyContent: "center"
     }
   }, /*#__PURE__*/React.createElement(ChevronDown, {
     size: 16
-  })), /*#__PURE__*/React.createElement("select", {
-    key: nameHistKey,
-    value: "",
-    onChange: e => {
-      if (e.target.value) {
-        setSession(s => ({
-          ...s,
-          name: e.target.value
-        }));
-        setNameHistKey(k => k + 1);
-      }
-    },
+  })), showNameDropdown && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setShowNameDropdown(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 39
+    }
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "absolute",
-      inset: 0,
-      width: "100%",
-      height: "100%",
-      opacity: 0,
-      border: "none",
-      cursor: "pointer"
+      right: 0,
+      top: "calc(100% + 6px)",
+      zIndex: 40,
+      minWidth: 190,
+      maxHeight: 260,
+      overflowY: "auto",
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 13,
+      boxShadow: "0 6px 20px rgba(0,0,0,0.15)",
+      padding: 6
     }
-  }, /*#__PURE__*/React.createElement("option", {
-    value: "",
-    disabled: true
-  }, "\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E43\u0E0A\u0E49"), pastQuanNames.map(n => /*#__PURE__*/React.createElement("option", {
-    key: n,
-    value: n
-  }, n))))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      fontWeight: 700,
+      padding: "6px 8px 4px"
+    }
+  }, "\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E43\u0E0A\u0E49"), pastQuans.map(q => /*#__PURE__*/React.createElement("button", {
+    key: q.name,
+    onClick: () => {
+      setSession(s => ({
+        ...s,
+        name: q.name,
+        photo: q.photo
+      }));
+      setShowNameDropdown(false);
+    },
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "7px 8px",
+      borderRadius: 9,
+      background: "none",
+      border: "none",
+      textAlign: "left"
+    }
+  }, q.photo ? /*#__PURE__*/React.createElement("img", {
+    src: q.photo,
+    alt: "",
+    style: {
+      width: 26,
+      height: 26,
+      borderRadius: 8,
+      objectFit: "cover",
+      flexShrink: 0
+    }
+  }) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: 26,
+      height: 26,
+      borderRadius: 8,
+      background: T.surface2,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      fontSize: 13,
+      flexShrink: 0
+    }
+  }, "\uD83C\uDFF8"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 700,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, q.name), session.name === q.name && /*#__PURE__*/React.createElement(Check, {
+    size: 14,
+    color: T.green,
+    style: {
+      marginLeft: "auto",
+      flexShrink: 0
+    }
+  }))))))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
