@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.13";
+      var CURRENT_VERSION = "1.7.14";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.13";
+const APP_VERSION = "1.7.14";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -5852,7 +5852,10 @@ function TeamSide({
     }, /*#__PURE__*/React.createElement(Avatar, {
       p: p,
       size: avatarSize
-    }), /*#__PURE__*/React.createElement("span", {
+    }), isWide ?
+    /*#__PURE__*/
+    // wide screens have room to spare — name + level stay on one line, ellipsis only as a rare safety net
+    React.createElement("span", {
       style: {
         minWidth: 0,
         lineHeight: 1.2,
@@ -5868,6 +5871,28 @@ function TeamSide({
       }
     }, p.name), " ", /*#__PURE__*/React.createElement("span", {
       style: {
+        fontSize: lvlFs,
+        fontWeight: 800,
+        color: levelColor(p.skillIndex)
+      }
+    }, "(", p.level, ")")) :
+    /*#__PURE__*/
+    // narrow phone in portrait: never truncate/split the name — stack it above the level badge instead
+    React.createElement("span", {
+      style: {
+        minWidth: 0,
+        lineHeight: 1.25
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "block",
+        fontWeight: 700,
+        fontSize: nameFs,
+        whiteSpace: "nowrap"
+      }
+    }, p.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "block",
         fontSize: lvlFs,
         fontWeight: 800,
         color: levelColor(p.skillIndex)
@@ -7179,7 +7204,10 @@ function SpinWheel({
   const R = 125,
     CX = 125,
     CY = 125,
-    LABEL_START_R = R * 0.27; // just past the fixed center hub badge (22px radius)
+    LABEL_START_R = R * 0.27; // just past the fixed center hub badge (22px radius) — SVG drawing math stays in this fixed 250-unit space; only the on-screen CSS size below scales
+  // scale the wheel to fill most of the screen on any device (phone or tablet, portrait or landscape) while
+  // always leaving room for the title/subtitle above and the spin/close buttons below so nothing overflows
+  const wheelSize = "min(90vw, 58vh, 640px)";
   return /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -7209,8 +7237,8 @@ function SpinWheel({
   }, "\u0E40\u0E2B\u0E25\u0E37\u0E2D\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 ", totalPrizeQty, " \u0E08\u0E32\u0E01 ", totalPlayers, " \u0E04\u0E19\u0E17\u0E35\u0E48\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E2B\u0E21\u0E38\u0E19"), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "relative",
-      width: 250,
-      height: 250,
+      width: wheelSize,
+      height: wheelSize,
       flexShrink: 0
     }
   }, /*#__PURE__*/React.createElement("div", {
@@ -7220,12 +7248,12 @@ function SpinWheel({
       left: "50%",
       transform: "translateX(-50%)",
       zIndex: 2,
-      fontSize: 28
+      fontSize: "min(7vw, 32px)"
     }
   }, "\uD83D\uDD3B"), /*#__PURE__*/React.createElement("div", {
     style: {
-      width: 250,
-      height: 250,
+      width: "100%",
+      height: "100%",
       borderRadius: "50%",
       boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
       transition: "transform 4.2s cubic-bezier(0.17,0.67,0.24,1)",
@@ -7237,8 +7265,8 @@ function SpinWheel({
     }
   }, /*#__PURE__*/React.createElement("svg", {
     viewBox: "0 0 250 250",
-    width: "250",
-    height: "250"
+    width: "100%",
+    height: "100%"
   }, segs.map((s, i) => /*#__PURE__*/React.createElement("path", {
     key: i,
     d: describeSlicePath(CX, CY, R, s.start, s.start + s.span),
@@ -7273,15 +7301,15 @@ function SpinWheel({
       top: "50%",
       left: "50%",
       transform: "translate(-50%,-50%)",
-      width: 44,
-      height: 44,
+      width: "17.6%",
+      height: "17.6%",
       borderRadius: "50%",
       background: "#fff",
       boxShadow: "0 2px 8px rgba(0,0,0,0.3)",
       display: "flex",
       alignItems: "center",
       justifyContent: "center",
-      fontSize: 20
+      fontSize: "min(7vw, 32px)"
     }
   }, "\uD83C\uDFF8")), !resultPrize ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     onClick: spin,
