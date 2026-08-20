@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.2";
+      var CURRENT_VERSION = "1.8.3";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.2";
+const APP_VERSION = "1.8.3";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -603,6 +603,55 @@ function useIsWide() {
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
 const keyOf = (a, b) => a < b ? a + "|" + b : b + "|" + a;
+// pair-rule types: "lock" (force as partners, doubles only), "avoidPartner" (never on the same team),
+// "avoidOpponent" (never on opposing teams / never face each other), "avoidBoth" (never in the same
+// match at all). Backward-compat: old backups store lockPairs as plain [a,b] 2-element arrays, which
+// always meant "lock" — migrate those into the new {id,a,b,type} shape without losing any data.
+function migrateLockPairs(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(lp => {
+    if (Array.isArray(lp)) return lp[0] && lp[1] ? {
+      id: uid(),
+      a: lp[0],
+      b: lp[1],
+      type: "lock"
+    } : null;
+    if (lp && typeof lp === "object" && lp.a != null && lp.b != null) return {
+      id: lp.id || uid(),
+      a: lp.a,
+      b: lp.b,
+      type: lp.type || "lock"
+    };
+    return null;
+  }).filter(Boolean);
+}
+// find the (at most one) active rule between two specific players, order-independent
+function ruleBetween(lockPairs, a, b) {
+  return (lockPairs || []).find(r => r.a === a && r.b === b || r.a === b && r.b === a) || null;
+}
+
+// court/field DISPLAY labels — decoupled from the internal court INDEX (1..courtCount) that all
+// match/slot logic (occupied-sets, tapSlot, tStartMatch, etc.) still keys off unchanged. A venue may
+// number its physical courts non-sequentially (e.g. 1, 3, 5); courtLabels just maps index -> shown text.
+// Always returns a fresh array of exactly `count` entries, keeping any existing edited labels and
+// defaulting new/missing slots to sequential numbers.
+function syncCourtLabels(labels, count) {
+  const arr = Array.isArray(labels) ? labels.slice(0, count) : [];
+  while (arr.length < count) arr.push(String(arr.length + 1));
+  return arr;
+}
+function courtLabelFor(labels, idx) {
+  const v = Array.isArray(labels) ? labels[idx - 1] : null;
+  return v != null && String(v).trim() !== "" ? String(v) : String(idx);
+}
+// backward-compat for Tournament objects saved before per-court labels existed (or missing/short arrays)
+function ensureTournamentCourtLabels(t) {
+  if (!t || typeof t !== "object") return t;
+  return {
+    ...t,
+    courtLabels: syncCourtLabels(t.courtLabels, t.courtCount || 2)
+  };
+}
 const kcomb = (arr, k) => {
   const res = [];
   const rec = (start, cur) => {
@@ -652,6 +701,8 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
     let best = null;
     for (const o of win) {
       if (o === anchor) continue;
+      const r = ruleBetween(lockPairs, anchor, o);
+      if (r && (r.type === "avoidOpponent" || r.type === "avoidBoth")) continue; // hard filter: never face / never meet
       const score = Math.abs(w(anchor) - w(o)) * 2 + oc(anchor, o) * 3 + idxOf(o) * 0.6;
       if (!best || score < best.score) best = {
         score,
@@ -663,18 +714,29 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
   }
   const others = win.filter(id => id !== anchor);
   let forced = null;
-  for (const [x, y] of lockPairs) {
-    if (x === anchor && others.includes(y)) forced = y;
-    if (y === anchor && others.includes(x)) forced = x;
+  for (const r of lockPairs) {
+    if (r.type !== "lock") continue;
+    if (r.a === anchor && others.includes(r.b)) forced = r.b;
+    if (r.b === anchor && others.includes(r.a)) forced = r.a;
   }
   const lockOk = (A, B) => {
-    for (const [x, y] of lockPairs) {
+    for (const r of lockPairs) {
       const inFour = [...A, ...B];
-      if (inFour.includes(x) && inFour.includes(y)) {
-        const sameA = A.includes(x) && A.includes(y),
-          sameB = B.includes(x) && B.includes(y);
+      if (!inFour.includes(r.a) || !inFour.includes(r.b)) continue;
+      const sameA = A.includes(r.a) && A.includes(r.b),
+        sameB = B.includes(r.a) && B.includes(r.b);
+      if (r.type === "lock") {
         if (!sameA && !sameB) return false;
-      }
+      } // must be partnered together
+      else if (r.type === "avoidPartner") {
+        if (sameA || sameB) return false;
+      } // must not be partnered
+      else if (r.type === "avoidOpponent") {
+        if (!sameA && !sameB) return false;
+      } // must not face each other
+      else if (r.type === "avoidBoth") {
+        return false;
+      } // must not appear in the same match at all
     }
     return true;
   };
@@ -942,7 +1004,7 @@ function fmtMode(settings, mode) {
 function quanSettingsSummary(settings, mode, courtCount) {
   const modeLabel = mode === "singles" ? "1v1" : "2v2";
   const levelLabel = getPresetMeta(settings.levelPresetId || "isan").name;
-  return `${modeLabel} · ${courtCount} คอร์ท · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
+  return `${modeLabel} · ${courtCount} สนาม · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
 }
 // selection priority: longest since last played, fewest games, longest waiting
 const SORT = (a, b) => (a.lastPlayedRound ?? -1) - (b.lastPlayedRound ?? -1) || a.games - b.games || (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order;
@@ -1006,7 +1068,7 @@ function getDefaultSettings() {
       qty: 5
     }, {
       id: uid(),
-      label: "ฟรีค่าคอร์ท! ส่วนลด 65฿ (ทันที)",
+      label: "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)",
       type: "now",
       amount: 65,
       qty: 2
@@ -1180,6 +1242,7 @@ function buildBackupPayload(state) {
       future: state.future,
       roundNo: state.roundNo,
       courtCount: state.courtCount,
+      courtLabels: state.courtLabels,
       mode: state.mode,
       settings: state.settings,
       session: state.session,
@@ -1243,6 +1306,7 @@ function migrateBackupData(parsed) {
   data.future = Array.isArray(data.future) ? data.future : [];
   data.roundNo = typeof data.roundNo === "number" ? data.roundNo : 0;
   data.courtCount = data.courtCount || 2;
+  data.courtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
   data.mode = data.mode || "doubles";
   data.settings = {
     ...getDefaultSettings(),
@@ -1255,10 +1319,10 @@ function migrateBackupData(parsed) {
     name: "",
     date: new Date().toISOString().slice(0, 10)
   };
-  data.lockPairs = Array.isArray(data.lockPairs) ? data.lockPairs : [];
+  data.lockPairs = migrateLockPairs(data.lockPairs);
   data.sessionHistory = (Array.isArray(data.sessionHistory) ? data.sessionHistory : []).map(ensureSessionId); // e.g. no sessionHistory -> []
-  data.activeTournament = data.activeTournament && typeof data.activeTournament === "object" ? data.activeTournament : null; // no field at all (old backup) -> no active Tournament
-  data.tournamentHistory = Array.isArray(data.tournamentHistory) ? data.tournamentHistory : [];
+  data.activeTournament = ensureTournamentCourtLabels(data.activeTournament && typeof data.activeTournament === "object" ? data.activeTournament : null); // no field at all (old backup) -> no active Tournament
+  data.tournamentHistory = (Array.isArray(data.tournamentHistory) ? data.tournamentHistory : []).map(ensureTournamentCourtLabels);
   return {
     ...parsed,
     schemaVersion: SCHEMA_VERSION,
@@ -1363,6 +1427,7 @@ function makeTournament(overrides) {
     name: "",
     date: new Date().toISOString().slice(0, 10),
     courtCount: 2,
+    courtLabels: ["1", "2"],
     format: "knockout",
     teamEntryMode: "individual",
     teamBuildMode: "fixed",
@@ -2103,6 +2168,15 @@ function App() {
   const [future, setFuture] = useState([]);
   const [roundNo, setRoundNo] = useState(0);
   const [courtCount, setCourtCount] = useState(2);
+  const [courtLabels, setCourtLabelsRaw] = useState(["1", "2"]); // display numbers for each court/สนาม slot — index-aligned with courtCount, edited via setCourtLabel
+  useEffect(() => {
+    setCourtLabelsRaw(prev => syncCourtLabels(prev, courtCount));
+  }, [courtCount]);
+  const setCourtLabel = (i, value) => setCourtLabelsRaw(prev => {
+    const next = syncCourtLabels(prev, courtCount);
+    next[i] = value;
+    return next;
+  });
   const [mode, setMode] = useState("doubles");
   const [settings, setSettings] = useState(getDefaultSettings);
   const [session, setSession] = useState({
@@ -2136,6 +2210,7 @@ function App() {
           s.future && setFuture(s.future);
           typeof s.roundNo === "number" && setRoundNo(s.roundNo);
           s.courtCount && setCourtCount(s.courtCount);
+          setCourtLabelsRaw(syncCourtLabels(s.courtLabels, s.courtCount || 2)); // absent on old saves -> sequential default, backward-compatible
           s.mode && setMode(s.mode);
           s.settings && setSettings(d => ({
             ...d,
@@ -2145,10 +2220,10 @@ function App() {
             ...s.session,
             mode: s.session.mode || "casual"
           }); // old saves have no `mode` — default them to casual, backward-compatible
-          s.lockPairs && setLockPairs(s.lockPairs);
+          s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
           setSessionHistory(Array.isArray(s.sessionHistory) ? s.sessionHistory : []); // new field: default [] if absent (backward-compatible)
-          setActiveTournament(s.activeTournament || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
-          setTournamentHistory(Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []);
+          setActiveTournament(ensureTournamentCourtLabels(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
+          setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(ensureTournamentCourtLabels));
         }
       } catch (e) {}
       try {
@@ -2169,6 +2244,7 @@ function App() {
           future,
           roundNo,
           courtCount,
+          courtLabels,
           mode,
           settings,
           session,
@@ -2179,7 +2255,7 @@ function App() {
         }));
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, loaded]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, loaded]);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(t);
@@ -2190,7 +2266,7 @@ function App() {
   const waitQueue = useMemo(() => players.filter(p => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order), [players, inPlay]);
 
   // members
-  const addPlayer = (name, skillIndex) => {
+  const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim();
     if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
@@ -2202,7 +2278,7 @@ function App() {
       status: "absent",
       games: 0,
       order: prev.length,
-      photo: null,
+      photo: photo || null,
       waitingSince: Date.now(),
       lastPlayedRound: -1,
       waitTotal: 0,
@@ -2217,6 +2293,13 @@ function App() {
       wheelResult: null
     }]);
   };
+  // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
+  // distinct from endSession() (which archives + clears the whole session/history); this only touches
+  // status, leaving games/stats/paid/discount untouched so it's safe to use mid-session too.
+  const resetAllToAbsent = () => setPlayers(prev => prev.map(p => ({
+    ...p,
+    status: "absent"
+  })));
   const setPDiscount = (id, v) => setPlayers(prev => prev.map(p => p.id === id ? {
     ...p,
     discount: Math.max(0, Number(v) || 0)
@@ -2324,7 +2407,7 @@ function App() {
   };
   const delPlayer = id => {
     setPlayers(prev => prev.filter(p => p.id !== id));
-    setLockPairs(prev => prev.filter(lp => !lp.includes(id)));
+    setLockPairs(prev => prev.filter(r => r.a !== id && r.b !== id));
   };
   const openPhoto = id => {
     photoTarget.current = id;
@@ -2744,10 +2827,26 @@ function App() {
       };
     }));
   };
-  const addLockPair = (a, b) => {
-    if (a && b && a !== b && !lockPairs.some(lp => lp.includes(a) || lp.includes(b))) setLockPairs(prev => [...prev, [a, b]]);
+
+  // add/replace the rule between a and b. A given pair can only hold ONE active rule at a time (whatever
+  // its type), so adding a new one silently replaces any existing rule between the same two people.
+  // "lock" additionally stays exclusive per-player (as before v1.8.3) — locking a with b clears any other
+  // lock a or b had; "avoid*" rules don't have that restriction, so one player can avoid many others.
+  const addLockPair = (a, b, type) => {
+    if (!a || !b || a === b) return;
+    const t = type || "lock";
+    setLockPairs(prev => {
+      let next = prev.filter(r => !(r.a === a && r.b === b || r.a === b && r.b === a));
+      if (t === "lock") next = next.filter(r => !(r.type === "lock" && (r.a === a || r.b === a || r.a === b || r.b === b)));
+      return [...next, {
+        id: uid(),
+        a,
+        b,
+        type: t
+      }];
+    });
   };
-  const removeLockPair = i => setLockPairs(prev => prev.filter((_, k) => k !== i));
+  const removeLockPair = id => setLockPairs(prev => prev.filter(r => r.id !== id));
   const resetGames = () => setPlayers(prev => prev.map(p => ({
     ...p,
     games: 0
@@ -2860,6 +2959,16 @@ function App() {
       mode: "tournament"
     }));
   };
+  // rename one court's display number/label within the active Tournament (e.g. venue's courts are numbered 1,3,5) — purely cosmetic, never touches court INDEX (1..courtCount) used internally for match/slot logic
+  const tSetCourtLabel = (i, value) => setActiveTournament(t => {
+    if (!t) return t;
+    const labels = syncCourtLabels(t.courtLabels, t.courtCount);
+    labels[i] = value;
+    return {
+      ...t,
+      courtLabels: labels
+    };
+  });
   const tStartMatch = (matchId, court) => {
     setActiveTournament(t => {
       if (!t) return t;
@@ -3174,6 +3283,7 @@ function App() {
       future,
       roundNo,
       courtCount,
+      courtLabels,
       mode,
       settings,
       session,
@@ -3283,6 +3393,7 @@ function App() {
           future,
           roundNo,
           courtCount,
+          courtLabels,
           mode,
           settings,
           session,
@@ -3300,6 +3411,7 @@ function App() {
       setFuture(data.future);
       setRoundNo(data.roundNo);
       setCourtCount(data.courtCount);
+      setCourtLabelsRaw(syncCourtLabels(data.courtLabels, data.courtCount));
       setMode(data.mode);
       setSettings(data.settings);
       setSession({
@@ -3339,6 +3451,7 @@ function App() {
       setFuture(data.future || []);
       setRoundNo(data.roundNo || 0);
       setCourtCount(data.courtCount || 2);
+      setCourtLabelsRaw(syncCourtLabels(data.courtLabels, data.courtCount || 2));
       setMode(data.mode || "doubles");
       setSettings(data.settings || getDefaultSettings());
       setSession(data.session ? {
@@ -3349,10 +3462,10 @@ function App() {
         date: new Date().toISOString().slice(0, 10),
         mode: "casual"
       });
-      setLockPairs(data.lockPairs || []);
+      setLockPairs(migrateLockPairs(data.lockPairs));
       setSessionHistory(data.sessionHistory || []);
-      setActiveTournament(data.activeTournament || null);
-      setTournamentHistory(data.tournamentHistory || []);
+      setActiveTournament(ensureTournamentCourtLabels(data.activeTournament) || null);
+      setTournamentHistory((data.tournamentHistory || []).map(ensureTournamentCourtLabels));
       await window.storage.delete("bg-v11-prerestore");
       setHasPreRestoreBackup(false);
       return true;
@@ -3431,6 +3544,7 @@ function App() {
     players,
     inPlay,
     addPlayer,
+    resetAllToAbsent,
     setStatus,
     setPLevel,
     delPlayer,
@@ -3447,6 +3561,8 @@ function App() {
     roundNo,
     courtCount,
     setCourtCount,
+    courtLabels,
+    setCourtLabel,
     mode,
     setMode,
     settings,
@@ -3483,6 +3599,7 @@ function App() {
     tournamentHistory,
     startTournament,
     tStartMatch,
+    tSetCourtLabel,
     tSetScore,
     tClearScore,
     tFinishMatch,
@@ -3617,6 +3734,7 @@ function MembersTab({
   players,
   inPlay,
   addPlayer,
+  resetAllToAbsent,
   setStatus,
   setPLevel,
   delPlayer,
@@ -3634,6 +3752,9 @@ function MembersTab({
   const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
   const [showLevelInfo, setShowLevelInfo] = useState(false);
   const [openPresetPicker, setOpenPresetPicker] = useState(false);
+  const [draftPhoto, setDraftPhoto] = useState(null);
+  const newPlayerFileRef = useRef();
+  const [confirmResetAll, setConfirmResetAll] = useState(false);
   const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
   const list = useMemo(() => {
     let l = players.filter(p => p.name.toLowerCase().includes(q.trim().toLowerCase()));
@@ -3642,8 +3763,16 @@ function MembersTab({
   }, [players, q, sort, onlyPresent]);
   const readyCount = players.filter(p => p.status === "ready").length;
   const submit = () => {
-    addPlayer(name, skillIndex);
+    addPlayer(name, skillIndex, draftPhoto);
     setName("");
+    setDraftPhoto(null);
+  };
+  const onDraftPhotoFile = async e => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const data = await resizePhoto(f);
+    if (data) setDraftPhoto(data);
+    e.target.value = "";
   };
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3799,6 +3928,42 @@ function MembersTab({
       marginBottom: 12
     }
   }, /*#__PURE__*/React.createElement("input", {
+    ref: newPlayerFileRef,
+    type: "file",
+    accept: "image/*",
+    onChange: onDraftPhotoFile,
+    style: {
+      display: "none"
+    }
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => newPlayerFileRef.current.click(),
+    title: "\u0E40\u0E1E\u0E34\u0E48\u0E21/\u0E16\u0E48\u0E32\u0E22\u0E23\u0E39\u0E1B\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01\u0E43\u0E2B\u0E21\u0E48",
+    style: {
+      position: "relative",
+      border: `1px solid ${T.border}`,
+      background: T.surface,
+      borderRadius: 11,
+      padding: 0,
+      width: 42,
+      height: 42,
+      flexShrink: 0,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      overflow: "hidden"
+    }
+  }, draftPhoto ? /*#__PURE__*/React.createElement("img", {
+    src: draftPhoto,
+    alt: "",
+    style: {
+      width: "100%",
+      height: "100%",
+      objectFit: "cover"
+    }
+  }) : /*#__PURE__*/React.createElement(Camera, {
+    size: 17,
+    color: T.muted
+  })), /*#__PURE__*/React.createElement("input", {
     value: name,
     onChange: e => setName(e.target.value),
     onKeyDown: e => e.key === "Enter" && submit(),
@@ -3898,16 +4063,87 @@ function MembersTab({
     style: {
       display: "flex",
       justifyContent: "space-between",
+      alignItems: "center",
       fontSize: 12,
       color: T.muted,
       marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement("span", null, "\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01 ", players.length, " \u0E04\u0E19"), /*#__PURE__*/React.createElement("span", {
     style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
       color: T.green,
       fontWeight: 700
     }
-  }, "\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E25\u0E48\u0E19 ", readyCount, " \u0E04\u0E19")), list.length === 0 && /*#__PURE__*/React.createElement("div", {
+  }, "\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E25\u0E48\u0E19 ", readyCount, " \u0E04\u0E19"), players.length > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmResetAll(true),
+    title: "\u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E17\u0E38\u0E01\u0E04\u0E19\u0E40\u0E1B\u0E47\u0E19\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E21\u0E32 (\u0E40\u0E23\u0E34\u0E48\u0E21\u0E27\u0E31\u0E19\u0E43\u0E2B\u0E21\u0E48)",
+    style: {
+      padding: "5px 9px",
+      borderRadius: 8,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.muted,
+      fontSize: 11,
+      fontWeight: 700,
+      display: "flex",
+      alignItems: "center",
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement(RotateCcw, {
+    size: 12
+  }), " \u0E44\u0E21\u0E48\u0E21\u0E32\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14"))), confirmResetAll && /*#__PURE__*/React.createElement("div", {
+    onClick: () => setConfirmResetAll(false),
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "rgba(0,0,0,0.4)",
+      zIndex: 60,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 20
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onClick: e => e.stopPropagation(),
+    style: {
+      background: T.surface,
+      borderRadius: 16,
+      padding: 18,
+      maxWidth: 340,
+      width: "100%"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E2A\u0E16\u0E32\u0E19\u0E30\u0E17\u0E38\u0E01\u0E04\u0E19\u0E40\u0E1B\u0E47\u0E19 \"\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E21\u0E32\"?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 16
+    }
+  }, "\u0E40\u0E2B\u0E21\u0E37\u0E2D\u0E19\u0E40\u0E23\u0E34\u0E48\u0E21\u0E01\u0E4A\u0E27\u0E19\u0E43\u0E2B\u0E21\u0E48\u0E27\u0E31\u0E19\u0E43\u0E2B\u0E21\u0E48 \u2014 \u0E2A\u0E16\u0E34\u0E15\u0E34/\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E02\u0E2D\u0E07\u0E41\u0E15\u0E48\u0E25\u0E30\u0E04\u0E19\u0E08\u0E30\u0E44\u0E21\u0E48\u0E2B\u0E32\u0E22 \u0E41\u0E04\u0E48\u0E2A\u0E16\u0E32\u0E19\u0E30\u0E01\u0E32\u0E23\u0E21\u0E32\u0E08\u0E30\u0E16\u0E39\u0E01\u0E25\u0E49\u0E32\u0E07"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setConfirmResetAll(false),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setConfirmResetAll(false);
+      resetAllToAbsent();
+    },
+    style: btnPrimary
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E32\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14")))), list.length === 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       color: T.muted,
       fontSize: 13,
@@ -4161,6 +4397,8 @@ function SessionTab(props) {
     roundNo,
     courtCount,
     setCourtCount,
+    courtLabels,
+    setCourtLabel,
     mode,
     setMode,
     settings,
@@ -4197,6 +4435,7 @@ function SessionTab(props) {
     tournamentHistory,
     startTournament,
     tStartMatch,
+    tSetCourtLabel,
     tSetScore,
     tClearScore,
     tFinishMatch,
@@ -4270,7 +4509,7 @@ function SessionTab(props) {
         fontWeight: 800,
         fontSize: 15
       }
-    }, "\u0E04\u0E2D\u0E23\u0E4C\u0E17 ", m.court), editable && /*#__PURE__*/React.createElement("button", {
+    }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, m.court)), editable && /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleCurrentLock(m.id),
       title: m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)",
       style: {
@@ -4330,7 +4569,7 @@ function SessionTab(props) {
       }
     }, /*#__PURE__*/React.createElement(Shuffle, {
       size: 15
-    }), " ", settings.pairingMode === "manual" ? "ล้างคอร์ท" : "จัดใหม่"), /*#__PURE__*/React.createElement("button", {
+    }), " ", settings.pairingMode === "manual" ? "ล้างสนาม" : "จัดใหม่"), /*#__PURE__*/React.createElement("button", {
       onClick: () => startGame(m.id),
       style: btnPrimary
     }, /*#__PURE__*/React.createElement(Play, {
@@ -4399,6 +4638,7 @@ function SessionTab(props) {
       tournamentHistory,
       startTournament,
       tStartMatch,
+      tSetCourtLabel,
       tSetScore,
       tClearScore,
       tFinishMatch,
@@ -4693,6 +4933,8 @@ function SessionTab(props) {
     setMode: setMode,
     courtCount: courtCount,
     setCourtCount: setCourtCount,
+    courtLabels: courtLabels,
+    setCourtLabel: setCourtLabel,
     settings: settings,
     setSettings: setSettings,
     players: players,
@@ -4729,9 +4971,9 @@ function SessionTab(props) {
     }
   }, /*#__PURE__*/React.createElement(Shuffle, {
     size: 17
-  }), " ", started ? settings.pairingMode === "manual" ? "ล้างคอร์ททั้งหมด" : "จัดก๊วนใหม่ทั้งหมด" : settings.pairingMode === "manual" ? "เริ่มก๊วน (เลือกเอง)" : "เริ่มจัดก๊วน"), nexts.length > 1 && /*#__PURE__*/React.createElement("button", {
+  }), " ", started ? settings.pairingMode === "manual" ? "ล้างสนามทั้งหมด" : "จัดก๊วนใหม่ทั้งหมด" : settings.pairingMode === "manual" ? "เริ่มก๊วน (เลือกเอง)" : "เริ่มจัดก๊วน"), nexts.length > 1 && /*#__PURE__*/React.createElement("button", {
     onClick: regenFuture,
-    title: settings.pairingMode === "manual" ? "ล้างคอร์ทที่ยังไม่เริ่มทั้งหมด" : "สุ่มคอร์ทที่ยังไม่เริ่มใหม่ทั้งหมด",
+    title: settings.pairingMode === "manual" ? "ล้างสนามที่ยังไม่เริ่มทั้งหมด" : "สุ่มสนามที่ยังไม่เริ่มใหม่ทั้งหมด",
     style: {
       padding: "0 15px",
       borderRadius: 13,
@@ -4780,13 +5022,13 @@ function SessionTab(props) {
       fontWeight: 800,
       marginBottom: 8
     }
-  }, settings.pairingMode === "manual" ? "ล้างคู่ทุกคอร์ทที่ยังไม่เริ่ม?" : "จัดคู่ใหม่ทุกคอร์ท?"), /*#__PURE__*/React.createElement("div", {
+  }, settings.pairingMode === "manual" ? "ล้างคู่ทุกสนามที่ยังไม่เริ่ม?" : "จัดคู่ใหม่ทุกสนาม?"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
       color: T.muted,
       marginBottom: 16
     }
-  }, settings.pairingMode === "manual" ? "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะล้างเฉพาะคอร์ทที่ยังไม่เริ่มให้เลือกคนใหม่" : "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะจัดใหม่เฉพาะเกมที่ยังไม่เริ่ม"), /*#__PURE__*/React.createElement("div", {
+  }, settings.pairingMode === "manual" ? "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะล้างเฉพาะสนามที่ยังไม่เริ่มให้เลือกคนใหม่" : "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะจัดใหม่เฉพาะเกมที่ยังไม่เริ่ม"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -4831,7 +5073,7 @@ function SessionTab(props) {
       fontSize: 15,
       color: T.muted
     }
-  }, "\u0E04\u0E2D\u0E23\u0E4C\u0E17 ", c), /*#__PURE__*/React.createElement("span", {
+  }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, c)), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 12.5,
       color: T.muted
@@ -5333,6 +5575,9 @@ function TournamentWizard({
       name: name.trim() || "Tournament",
       date,
       courtCount,
+      courtLabels: Array.from({
+        length: courtCount
+      }, (_, i) => String(i + 1)),
       format,
       teamEntryMode,
       teamBuildMode,
@@ -5427,7 +5672,7 @@ function TournamentWizard({
       marginBottom: 12,
       boxSizing: "border-box"
     }
-  }), /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E04\u0E2D\u0E23\u0E4C\u0E17"), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E2A\u0E19\u0E32\u0E21"), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 12
     }
@@ -5972,7 +6217,7 @@ function TournamentWizard({
         fontSize: 12.5,
         lineHeight: 1.9
       }
-    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("b", null, name || "Tournament"), " \xB7 ", fmtThaiDate(date)), /*#__PURE__*/React.createElement("div", null, "\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A: ", format, " \xB7 ", matchMode === "doubles" ? "ตีคู่" : "ตีเดี่ยว", " \xB7 ", courtCount, " \u0E04\u0E2D\u0E23\u0E4C\u0E17"), /*#__PURE__*/React.createElement("div", null, "\u0E1C\u0E39\u0E49\u0E40\u0E02\u0E49\u0E32\u0E23\u0E48\u0E27\u0E21: ", teams.reduce((s, t) => s + t.playerIds.length, 0), " \u0E04\u0E19 \xB7 ", teams.length, " \u0E17\u0E35\u0E21"), /*#__PURE__*/React.createElement("div", null, "Division: ", divs.map(d => `${d.name}(${d.teamIds.length})`).join(", ") || "-"), /*#__PURE__*/React.createElement("div", null, "Seed: ", seedMode, seedMode === "advanced" ? ` (${advSeedKind})` : ""), /*#__PURE__*/React.createElement("div", null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E42\u0E14\u0E22\u0E1B\u0E23\u0E30\u0E21\u0E32\u0E13: ", estTotal)), /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("b", null, name || "Tournament"), " \xB7 ", fmtThaiDate(date)), /*#__PURE__*/React.createElement("div", null, "\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A: ", format, " \xB7 ", matchMode === "doubles" ? "ตีคู่" : "ตีเดี่ยว", " \xB7 ", courtCount, " \u0E2A\u0E19\u0E32\u0E21"), /*#__PURE__*/React.createElement("div", null, "\u0E1C\u0E39\u0E49\u0E40\u0E02\u0E49\u0E32\u0E23\u0E48\u0E27\u0E21: ", teams.reduce((s, t) => s + t.playerIds.length, 0), " \u0E04\u0E19 \xB7 ", teams.length, " \u0E17\u0E35\u0E21"), /*#__PURE__*/React.createElement("div", null, "Division: ", divs.map(d => `${d.name}(${d.teamIds.length})`).join(", ") || "-"), /*#__PURE__*/React.createElement("div", null, "Seed: ", seedMode, seedMode === "advanced" ? ` (${advSeedKind})` : ""), /*#__PURE__*/React.createElement("div", null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E42\u0E14\u0E22\u0E1B\u0E23\u0E30\u0E21\u0E32\u0E13: ", estTotal)), /*#__PURE__*/React.createElement("div", {
       style: {
         maxHeight: 200,
         overflowY: "auto"
@@ -6208,6 +6453,7 @@ function TournamentDashboard(props) {
     playersById,
     settings,
     tStartMatch,
+    tSetCourtLabel,
     tSetScore,
     tClearScore,
     tFinishMatch,
@@ -6223,6 +6469,8 @@ function TournamentDashboard(props) {
   const [confirmComplete, setConfirmComplete] = useState(false);
   const [editingMatch, setEditingMatch] = useState(null);
   const [pendingCascade, setPendingCascade] = useState(null);
+  const [editCourtLabels, setEditCourtLabels] = useState(false); // "แก้ไขเลขสนาม" — start sequential 1..N, renumber later to match the venue's actual court numbers
+
   const teamsById = Object.fromEntries(t.teams.map(tm => [tm.id, tm]));
   const peopleById = {
     ...playersById,
@@ -6279,7 +6527,7 @@ function TournamentDashboard(props) {
       color: T.muted,
       marginTop: 4
     }
-  }, t.format, " \xB7 ", t.courtCount, " \u0E04\u0E2D\u0E23\u0E4C\u0E17 \xB7 ", done, " / ", total, " \u0E41\u0E21\u0E15\u0E0A\u0E4C"), /*#__PURE__*/React.createElement("div", {
+  }, t.format, " \xB7 ", t.courtCount, " \u0E2A\u0E19\u0E32\u0E21 \xB7 ", done, " / ", total, " \u0E41\u0E21\u0E15\u0E0A\u0E4C"), /*#__PURE__*/React.createElement("div", {
     style: {
       height: 6,
       background: T.surface2,
@@ -6313,7 +6561,74 @@ function TournamentDashboard(props) {
       background: view === v ? "#e2f5ec" : T.surface,
       color: view === v ? T.green : T.muted
     }
-  }, l))), view === "courts" && /*#__PURE__*/React.createElement("div", null, playing.map(m => /*#__PURE__*/React.createElement("div", {
+  }, l))), view === "courts" && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditCourtLabels(v => !v),
+    style: {
+      width: "100%",
+      textAlign: "left",
+      padding: "8px 11px",
+      borderRadius: 10,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.muted,
+      fontSize: 12,
+      fontWeight: 700,
+      marginBottom: editCourtLabels ? 6 : 10,
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12
+    }
+  }, "\uD83D\uDD22"), " \u0E41\u0E01\u0E49\u0E44\u0E02\u0E40\u0E25\u0E02\u0E2A\u0E19\u0E32\u0E21", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 14,
+    style: {
+      marginLeft: "auto",
+      transform: editCourtLabels ? "rotate(180deg)" : "none"
+    }
+  })), editCourtLabels && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 10,
+      padding: "10px 11px",
+      borderRadius: 10,
+      background: T.surface,
+      border: `1px solid ${T.border}`
+    }
+  }, Array.from({
+    length: t.courtCount
+  }, (_, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      fontWeight: 700
+    }
+  }, "\u0E2A\u0E19\u0E32\u0E21\u0E17\u0E35\u0E48 ", i + 1, ":"), /*#__PURE__*/React.createElement("input", {
+    value: courtLabelFor(t.courtLabels, i + 1),
+    onChange: e => tSetCourtLabel(i, e.target.value),
+    style: {
+      width: 46,
+      padding: "6px 7px",
+      borderRadius: 8,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13,
+      fontWeight: 700,
+      textAlign: "center"
+    }
+  })))), playing.map(m => /*#__PURE__*/React.createElement("div", {
     key: m.id,
     style: {
       background: T.surface,
@@ -6333,7 +6648,7 @@ function TournamentDashboard(props) {
       fontWeight: 800,
       fontSize: 15
     }
-  }, "\u0E04\u0E2D\u0E23\u0E4C\u0E17 ", m.court), /*#__PURE__*/React.createElement("span", {
+  }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(t.courtLabels, m.court)), /*#__PURE__*/React.createElement("span", {
     style: {
       marginLeft: "auto",
       fontSize: 11,
@@ -6384,7 +6699,7 @@ function TournamentDashboard(props) {
       fontSize: 14,
       marginBottom: 6
     }
-  }, "\u0E04\u0E2D\u0E23\u0E4C\u0E17 ", c, " \u2014 \u0E27\u0E48\u0E32\u0E07"), suggested ? /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+  }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(t.courtLabels, c), " \u2014 \u0E27\u0E48\u0E32\u0E07"), suggested ? /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
       marginBottom: 8
@@ -6394,7 +6709,7 @@ function TournamentDashboard(props) {
     style: btnPrimary
   }, /*#__PURE__*/React.createElement(Play, {
     size: 15
-  }), " \u0E40\u0E23\u0E34\u0E48\u0E21\u0E17\u0E35\u0E48\u0E04\u0E2D\u0E23\u0E4C\u0E17\u0E19\u0E35\u0E49")) : /*#__PURE__*/React.createElement("div", {
+  }), " \u0E40\u0E23\u0E34\u0E48\u0E21\u0E17\u0E35\u0E48\u0E2A\u0E19\u0E32\u0E21\u0E19\u0E35\u0E49")) : /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: T.muted
@@ -6722,6 +7037,8 @@ function QuanSettingsSheet({
   setMode,
   courtCount,
   setCourtCount,
+  courtLabels,
+  setCourtLabel,
   settings,
   setSettings,
   players,
@@ -6736,6 +7053,7 @@ function QuanSettingsSheet({
   onClose
 }) {
   const [open, setOpen] = useState("play"); // "play" | "payment" | "prize" | "level" | null — one section open at a time
+  const [editCourtLabels, setEditCourtLabels] = useState(false);
   const toggle = key => setOpen(v => v === key ? null : key);
   return /*#__PURE__*/React.createElement(Overlay, {
     onClose: onClose
@@ -6857,16 +7175,83 @@ function QuanSettingsSheet({
       ...s,
       pairingMode: v
     }))
-  })), /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E04\u0E2D\u0E23\u0E4C\u0E17"), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E2A\u0E19\u0E32\u0E21"), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 16
+      marginBottom: 10
     }
   }, /*#__PURE__*/React.createElement(Stepper, {
     value: courtCount,
     setValue: setCourtCount,
     min: 1,
     max: 12
-  })), /*#__PURE__*/React.createElement(Label, null, "\u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48)"), /*#__PURE__*/React.createElement(LockPairEditor, {
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditCourtLabels(v => !v),
+    style: {
+      width: "100%",
+      textAlign: "left",
+      padding: "8px 11px",
+      borderRadius: 10,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.muted,
+      fontSize: 12,
+      fontWeight: 700,
+      marginBottom: 16,
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12
+    }
+  }, "\uD83D\uDD22"), " \u0E41\u0E01\u0E49\u0E44\u0E02\u0E40\u0E25\u0E02\u0E2A\u0E19\u0E32\u0E21 (\u0E40\u0E0A\u0E48\u0E19 \u0E21\u0E35 3 \u0E2A\u0E19\u0E32\u0E21 \u0E41\u0E15\u0E48\u0E40\u0E1B\u0E47\u0E19\u0E40\u0E1A\u0E2D\u0E23\u0E4C 1, 3, 5)", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 14,
+    style: {
+      marginLeft: "auto",
+      transform: editCourtLabels ? "rotate(180deg)" : "none"
+    }
+  })), editCourtLabels && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 16,
+      padding: "10px 11px",
+      borderRadius: 10,
+      background: T.surface2,
+      border: `1px solid ${T.border}`
+    }
+  }, Array.from({
+    length: courtCount
+  }, (_, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      fontWeight: 700
+    }
+  }, "\u0E2A\u0E19\u0E32\u0E21\u0E17\u0E35\u0E48 ", i + 1, ":"), /*#__PURE__*/React.createElement("input", {
+    value: courtLabelFor(courtLabels, i + 1),
+    onChange: e => setCourtLabel(i, e.target.value),
+    style: {
+      width: 46,
+      padding: "6px 7px",
+      borderRadius: 8,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13,
+      fontWeight: 700,
+      textAlign: "center"
+    }
+  })))), /*#__PURE__*/React.createElement(Label, null, "\u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 / \u0E40\u0E25\u0E35\u0E48\u0E22\u0E07\u0E04\u0E39\u0E48 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48 \u0E22\u0E01\u0E40\u0E27\u0E49\u0E19 \"\u0E44\u0E21\u0E48\u0E2D\u0E22\u0E32\u0E01\u0E2A\u0E39\u0E49/\u0E44\u0E21\u0E48\u0E2D\u0E22\u0E32\u0E01\u0E40\u0E08\u0E2D\u0E40\u0E25\u0E22\" \u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E31\u0E49\u0E07\u0E40\u0E14\u0E35\u0E48\u0E22\u0E27-\u0E04\u0E39\u0E48)"), /*#__PURE__*/React.createElement(LockPairEditor, {
     players,
     lockPairs,
     addLockPair,
@@ -7658,7 +8043,7 @@ function HistoryTab({
         fontSize: 12,
         color: T.muted
       }
-    }, /*#__PURE__*/React.createElement("span", null, (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.stats?.totalMatches ?? 0, " \u0E41\u0E21\u0E15\u0E0A\u0E4C \xB7 ", s.courtCount || 1, " \u0E04\u0E2D\u0E23\u0E4C\u0E17"), /*#__PURE__*/React.createElement("span", {
+    }, /*#__PURE__*/React.createElement("span", null, (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.stats?.totalMatches ?? 0, " \u0E41\u0E21\u0E15\u0E0A\u0E4C \xB7 ", s.courtCount || 1, " \u0E2A\u0E19\u0E32\u0E21"), /*#__PURE__*/React.createElement("span", {
       style: {
         marginLeft: "auto",
         fontWeight: 800,
@@ -7826,7 +8211,7 @@ function HistoricalDetail({
       color: T.muted,
       marginTop: 2
     }
-  }, fmtThaiDate(s.date), " \xB7 ", (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.courtCount || 1, " \u0E04\u0E2D\u0E23\u0E4C\u0E17 \xB7 ", fmtMode(s.settings || {}, s.mode)), s.photo && /*#__PURE__*/React.createElement("button", {
+  }, fmtThaiDate(s.date), " \xB7 ", (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.courtCount || 1, " \u0E2A\u0E19\u0E32\u0E21 \xB7 ", fmtMode(s.settings || {}, s.mode)), s.photo && /*#__PURE__*/React.createElement("button", {
     onClick: () => clearHistPhoto(s.id),
     style: {
       background: "none",
@@ -8154,7 +8539,7 @@ function TournamentHistoricalDetail({
       color: T.muted,
       marginTop: 2
     }
-  }, fmtThaiDate(t.date), " \xB7 ", (t.playerSnapshots || []).length, " \u0E04\u0E19 \xB7 ", (t.teams || []).length, " \u0E17\u0E35\u0E21 \xB7 ", t.courtCount || 1, " \u0E04\u0E2D\u0E23\u0E4C\u0E17 \xB7 ", TOURNAMENT_FORMAT_LABELS[t.format] || t.format)), /*#__PURE__*/React.createElement("button", {
+  }, fmtThaiDate(t.date), " \xB7 ", (t.playerSnapshots || []).length, " \u0E04\u0E19 \xB7 ", (t.teams || []).length, " \u0E17\u0E35\u0E21 \xB7 ", t.courtCount || 1, " \u0E2A\u0E19\u0E32\u0E21 \xB7 ", TOURNAMENT_FORMAT_LABELS[t.format] || t.format)), /*#__PURE__*/React.createElement("button", {
     onClick: () => shareSummary(`🏆 BadQ Tournament\n${t.name}\n${(t.teams || []).length} ทีม\n${TOURNAMENT_FORMAT_LABELS[t.format] || t.format}\n${t.matchCount || 0} แมตช์`),
     style: {
       width: "100%",
@@ -8864,7 +9249,7 @@ function PaymentTab({
       marginBottom: 8
     }
   }, "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22"), /*#__PURE__*/React.createElement(BillRow, {
-    label: "\u0E04\u0E48\u0E32\u0E04\u0E2D\u0E23\u0E4C\u0E17",
+    label: "\u0E04\u0E48\u0E32\u0E2A\u0E19\u0E32\u0E21",
     v: detailBill.eCourt
   }), /*#__PURE__*/React.createElement(BillRow, {
     label: "\u0E04\u0E48\u0E32\u0E25\u0E39\u0E01",
@@ -9635,6 +10020,38 @@ function MiniMatch({
     }
   }, "vs"), " ", line(m.teamB)));
 }
+
+// visual + label meta per pair-rule type, keyed the same as the `type` field on each lockPairs entry
+const PAIR_RULE_META = {
+  lock: {
+    label: "ล็อคคู่ (จับคู่กันแน่นอน)",
+    short: "ล็อคคู่",
+    bg: "#fef3ec",
+    border: "#f6d9c8",
+    color: "#c2650a"
+  },
+  avoidPartner: {
+    label: "ไม่อยากคู่ (ห้ามเป็นคู่กัน)",
+    short: "ไม่อยากคู่",
+    bg: "#fdecec",
+    border: "#f5c9c9",
+    color: "#c0392b"
+  },
+  avoidOpponent: {
+    label: "ไม่อยากสู้ (ห้ามอยู่คนละฝั่ง)",
+    short: "ไม่อยากสู้",
+    bg: "#eef1fd",
+    border: "#c9d3f5",
+    color: "#3d4fb0"
+  },
+  avoidBoth: {
+    label: "ไม่อยากเจอเลย (ทั้งคู่และสู้)",
+    short: "ไม่อยากเจอเลย",
+    bg: "#f3effb",
+    border: "#ddcff0",
+    color: "#6d3fa8"
+  }
+};
 function LockPairEditor({
   players,
   lockPairs,
@@ -9644,6 +10061,7 @@ function LockPairEditor({
 }) {
   const [a, setA] = useState("");
   const [b, setB] = useState("");
+  const [type, setType] = useState("lock");
   const sty = {
     flex: 1,
     padding: "9px 8px",
@@ -9661,41 +10079,54 @@ function LockPairEditor({
       gap: 6,
       marginBottom: 10
     }
-  }, lockPairs.map((lp, i) => /*#__PURE__*/React.createElement("div", {
-    key: i,
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      padding: "8px 11px",
-      borderRadius: 10,
-      background: "#fef3ec",
-      border: `1px solid #f6d9c8`
-    }
-  }, /*#__PURE__*/React.createElement(Lock, {
-    size: 13,
-    color: T.accent
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      flex: 1,
-      fontSize: 13,
-      fontWeight: 600
-    }
-  }, getP(lp[0])?.name, " + ", getP(lp[1])?.name), /*#__PURE__*/React.createElement("button", {
-    onClick: () => removeLockPair(i),
-    style: {
-      background: "none",
-      border: "none",
-      color: T.muted,
-      display: "flex"
-    }
-  }, /*#__PURE__*/React.createElement(X, {
-    size: 15
-  }))))), /*#__PURE__*/React.createElement("div", {
+  }, lockPairs.map(r => {
+    const meta = PAIR_RULE_META[r.type] || PAIR_RULE_META.lock;
+    return /*#__PURE__*/React.createElement("div", {
+      key: r.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 11px",
+        borderRadius: 10,
+        background: meta.bg,
+        border: `1px solid ${meta.border}`
+      }
+    }, r.type === "lock" ? /*#__PURE__*/React.createElement(Lock, {
+      size: 13,
+      color: meta.color
+    }) : /*#__PURE__*/React.createElement(Unlock, {
+      size: 13,
+      color: meta.color
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontSize: 13,
+        fontWeight: 600
+      }
+    }, getP(r.a)?.name, " + ", getP(r.b)?.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        fontWeight: 800,
+        color: meta.color
+      }
+    }, meta.short), /*#__PURE__*/React.createElement("button", {
+      onClick: () => removeLockPair(r.id),
+      style: {
+        background: "none",
+        border: "none",
+        color: T.muted,
+        display: "flex"
+      }
+    }, /*#__PURE__*/React.createElement(X, {
+      size: 15
+    })));
+  })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
-      alignItems: "center"
+      alignItems: "center",
+      marginBottom: 6
     }
   }, /*#__PURE__*/React.createElement("select", {
     value: a,
@@ -9720,9 +10151,26 @@ function LockPairEditor({
   }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E04\u0E19"), players.map(p => /*#__PURE__*/React.createElement("option", {
     key: p.id,
     value: p.id
-  }, p.name))), /*#__PURE__*/React.createElement("button", {
+  }, p.name)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("select", {
+    value: type,
+    onChange: e => setType(e.target.value),
+    style: {
+      ...sty,
+      flex: 1.6,
+      fontWeight: 700
+    }
+  }, Object.entries(PAIR_RULE_META).map(([k, m]) => /*#__PURE__*/React.createElement("option", {
+    key: k,
+    value: k
+  }, m.label))), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      addLockPair(a, b);
+      addLockPair(a, b, type);
       setA("");
       setB("");
     },
