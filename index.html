@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.7.11";
+      var CURRENT_VERSION = "1.7.12";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.7.11";
+const APP_VERSION = "1.7.12";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -2675,7 +2675,7 @@ function MembersTab({
       color: T.text,
       marginBottom: 4
     }
-  }, "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22 Skill Index 1\u201311 (\u0E43\u0E0A\u0E49\u0E15\u0E31\u0E14\u0E2A\u0E34\u0E19\u0E01\u0E32\u0E23\u0E08\u0E31\u0E1A\u0E04\u0E39\u0E48 \u0E44\u0E21\u0E48\u0E02\u0E36\u0E49\u0E19\u0E01\u0E31\u0E1A\u0E0A\u0E37\u0E48\u0E2D\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E17\u0E35\u0E48\u0E41\u0E2A\u0E14\u0E07)"), Array.from({
+  }, "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E41\u0E15\u0E48\u0E25\u0E30\u0E23\u0E30\u0E14\u0E31\u0E1A (Skill Index 1\u201311 \u0E43\u0E0A\u0E49\u0E15\u0E31\u0E14\u0E2A\u0E34\u0E19\u0E01\u0E32\u0E23\u0E08\u0E31\u0E1A\u0E04\u0E39\u0E48\u0E20\u0E32\u0E22\u0E43\u0E19 \u0E41\u0E2A\u0E14\u0E07\u0E0A\u0E37\u0E48\u0E2D\u0E15\u0E32\u0E21\u0E23\u0E30\u0E1A\u0E1A\u0E17\u0E35\u0E48\u0E40\u0E25\u0E37\u0E2D\u0E01)"), Array.from({
     length: 11
   }, (_, i) => i + 1).map(si => /*#__PURE__*/React.createElement("div", {
     key: si,
@@ -2687,7 +2687,7 @@ function MembersTab({
       fontWeight: 800,
       color: levelColor(si)
     }
-  }, "Skill ", si), " \u2014 ", SKILL_DESC[si]))), /*#__PURE__*/React.createElement("div", {
+  }, levelOptions.find(o => o.skillIndex === si)?.label || `Skill ${si}`), " \u2014 ", SKILL_DESC[si]))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -2985,7 +2985,6 @@ function SessionTab(props) {
     changeLevelPreset,
     setCustomLevels
   } = props;
-  const isWide = useIsWide(); // landscape phone / tablet — lay court cards out in a grid instead of one long column
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showHistory, setShowHistory] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
@@ -3013,7 +3012,7 @@ function SessionTab(props) {
         border: `1px solid ${m.locked ? T.accent : m.status === "playing" ? T.green : T.border}`,
         borderRadius: 14,
         padding: 11,
-        marginBottom: isWide ? 0 : 9
+        marginBottom: 9
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: {
@@ -3319,42 +3318,21 @@ function SessionTab(props) {
       color: T.green
     }),
     title: "\u0E01\u0E33\u0E25\u0E31\u0E07\u0E40\u0E25\u0E48\u0E19"
-  }), playing.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: isWide ? {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-      gap: 9,
-      marginBottom: 9
-    } : undefined
-  }, playing.map(FullCard)), nexts.length > 0 && /*#__PURE__*/React.createElement(SectionHead, {
+  }), playing.length > 0 && /*#__PURE__*/React.createElement("div", null, playing.map(FullCard)), nexts.length > 0 && /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 15
       }
     }, "\uD83D\uDD2E"),
     title: "\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E23\u0E34\u0E48\u0E21 / \u0E40\u0E01\u0E21\u0E16\u0E31\u0E14\u0E44\u0E1B"
-  }), nexts.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: isWide ? {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-      gap: 9,
-      marginBottom: 9
-    } : undefined
-  }, nexts.map(FullCard)), empties.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: isWide ? {
-      display: "grid",
-      gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-      gap: 9,
-      marginBottom: 9
-    } : undefined
-  }, empties.map(c => /*#__PURE__*/React.createElement("div", {
+  }), nexts.length > 0 && /*#__PURE__*/React.createElement("div", null, nexts.map(FullCard)), empties.length > 0 && /*#__PURE__*/React.createElement("div", null, empties.map(c => /*#__PURE__*/React.createElement("div", {
     key: "e" + c,
     style: {
       background: T.surface,
       border: `1px dashed ${T.border}`,
       borderRadius: 14,
       padding: 11,
-      marginBottom: isWide ? 0 : 9,
+      marginBottom: 9,
       display: "flex",
       alignItems: "center",
       gap: 10
@@ -5832,7 +5810,7 @@ function TeamSide({
   big
 }) {
   const compact = arr.length > 1; // doubles: tighten padding so both teams fit on one line
-  const avatarSize = big ? compact ? 26 : 32 : compact ? 18 : 22; // bigger photos on courts that are actively playing — easier to spot/call the right person
+  const avatarSize = big ? compact ? 34 : 40 : compact ? 26 : 30; // bigger photos on courts that are actively playing — easier to spot/call the right person
   return /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
@@ -5853,8 +5831,8 @@ function TeamSide({
       setOpenSlot(null);
     };
     const nameLong = p && p.name.length > 7;
-    const nameFs = nameLong ? compact ? 10 : 10.5 : compact ? 11.5 : 12;
-    const lvlFs = nameLong ? 9 : compact ? 10 : 10.5;
+    const nameFs = nameLong ? compact ? 12.5 : 13 : compact ? 14 : 15;
+    const lvlFs = nameLong ? 11 : compact ? 12 : 13;
     return p ? /*#__PURE__*/React.createElement("div", {
       key: idx,
       style: {
@@ -5863,12 +5841,12 @@ function TeamSide({
         position: "relative",
         display: "flex",
         alignItems: "center",
-        gap: compact ? 4 : 5,
-        padding: compact ? "4px 5px" : "5px 6px",
+        gap: compact ? 6 : 7,
+        padding: compact ? "6px 7px" : "7px 8px",
         borderRadius: 10,
         background: selected ? "#e2f5ec" : T.surface2,
         border: `1.5px solid ${selected ? T.green : "transparent"}`,
-        minHeight: 34
+        minHeight: 46
       }
     }, /*#__PURE__*/React.createElement(Avatar, {
       p: p,
@@ -5916,12 +5894,12 @@ function TeamSide({
         flex: 1,
         minWidth: 0,
         position: "relative",
-        padding: "5px 6px",
+        padding: "7px 8px",
         borderRadius: 10,
         border: `1.5px dashed ${editable ? T.green : T.border}`,
         color: editable ? T.green : T.muted,
-        fontSize: 11,
-        minHeight: 34,
+        fontSize: 13,
+        minHeight: 46,
         display: "flex",
         alignItems: "center",
         justifyContent: "center"
@@ -5936,7 +5914,7 @@ function TeamSide({
         background: "none",
         border: "none",
         color: T.green,
-        fontSize: 11,
+        fontSize: 13,
         fontWeight: 700,
         cursor: "pointer",
         overflow: "hidden",
@@ -6414,6 +6392,7 @@ function LevelPresetEditor({
   const [pendingPreset, setPendingPreset] = useState(null); // preset id awaiting confirm, or null
   const [showSkillInfo, setShowSkillInfo] = useState(false);
   const allPresets = [...LEVEL_PRESETS, getPresetMeta("custom")];
+  const levelOptions = activeLevelOptions(settings); // preset-specific labels (R/BG1/... for อีสาน, etc.) for the skill-index legend below
   const pick = id => {
     if (id !== currentId) setPendingPreset(id);
   };
@@ -6495,7 +6474,7 @@ function LevelPresetEditor({
     }
   }, /*#__PURE__*/React.createElement(Info, {
     size: 14
-  }), " ", showSkillInfo ? "ซ่อน" : "ดู", "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22 Skill Index 1\u201311"), showSkillInfo && /*#__PURE__*/React.createElement("div", {
+  }), " ", showSkillInfo ? "ซ่อน" : "ดู", "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E41\u0E15\u0E48\u0E25\u0E30\u0E23\u0E30\u0E14\u0E31\u0E1A"), showSkillInfo && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11.5,
       color: T.muted,
@@ -6514,7 +6493,7 @@ function LevelPresetEditor({
       fontWeight: 800,
       color: levelColor(si)
     }
-  }, "Skill ", si), " \u2014 ", SKILL_DESC[si]))), pendingPreset && /*#__PURE__*/React.createElement("div", {
+  }, levelOptions.find(o => o.skillIndex === si)?.label || `Skill ${si}`), " \u2014 ", SKILL_DESC[si]))), pendingPreset && /*#__PURE__*/React.createElement("div", {
     onClick: () => setPendingPreset(null),
     style: {
       position: "fixed",
