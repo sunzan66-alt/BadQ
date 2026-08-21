@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.4";
+      var CURRENT_VERSION = "1.9.5";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.4";
+const APP_VERSION = "1.9.5";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3448,26 +3448,41 @@ function App() {
     const reserved = reservedIdsFromCurrent(current);
     return players.filter(p => p.status === "ready" && !reserved.has(p.id));
   };
-  // manual slot edit inside a court's queued match — bench is already reservation-filtered, so any pick
-  // here is guaranteed to be a genuinely free player (no true-swap logic needed, unlike replaceSlot).
+  // manual slot edit inside a court's queued match. The bench here (waitQueue, see SessionTab) deliberately
+  // includes players already soft-reserved into SOME court's .queued (own or another's) — a queued
+  // reservation is meant to stay organizer-editable (Requirement 3/9). So picking one of those isn't a
+  // plain assign: it's a MOVE — clear that player out of wherever else they're queued first, mirroring how
+  // replaceSlot true-swaps a player pulled from another not-yet-started court's live slots. This also
+  // naturally handles picking a player who's already in THIS SAME match's other slot (self-dedup).
   const setQueuedSlot = (mid, team, idx, newPid) => {
-    setCurrent(prev => prev.map(m => {
-      if (m.id !== mid) return m;
-      const q = m.queued || {
+    setCurrent(prev => {
+      const next = prev.map(m => m.queued ? {
+        ...m,
+        queued: {
+          teamA: [...m.queued.teamA],
+          teamB: [...m.queued.teamB]
+        }
+      } : m);
+      const dst = next.find(m => m.id === mid);
+      if (!dst) return prev;
+      if (!dst.queued) dst.queued = {
         teamA: emptyTeam(),
         teamB: emptyTeam()
       };
-      const teamA = [...q.teamA],
-        teamB = [...q.teamB];
-      if (team === "A") teamA[idx] = newPid || null;else teamB[idx] = newPid || null;
-      return {
-        ...m,
-        queued: {
-          teamA,
-          teamB
-        }
-      };
-    }));
+      if (newPid) {
+        next.forEach(m => {
+          if (!m.queued) return;
+          ["teamA", "teamB"].forEach(tm => {
+            const arr = m.queued[tm];
+            const i = arr.indexOf(newPid);
+            if (i !== -1 && !(m.id === mid && tm === team && i === idx)) arr[i] = null;
+          });
+        });
+      }
+      const dstArr = team === "A" ? dst.queued.teamA : dst.queued.teamB;
+      dstArr[idx] = newPid || null;
+      return next;
+    });
   };
   // auto-fills a court's queued next match using the fairness-weighted SORT + existing balance engine,
   // from ONLY the reservation-eligible pool. Returns false (creates nothing) when fewer than 4 eligible
@@ -6089,12 +6104,17 @@ function SessionTab(props) {
   }), queueSheetFor && (() => {
     const qm = current.find(x => x.id === queueSheetFor);
     if (!qm) return null;
-    const reservedElsewhere = queueEligiblePool(); // ready players not currently playing/queued anywhere
+    // MANUAL picking (this sheet) intentionally shows every "พร้อมเล่น" player, i.e. the same waitQueue
+    // used everywhere else in the app for "not currently seated on a live court" — this includes players
+    // already soft-reserved into some court's .queued next-match, since that reservation is meant to be
+    // organizer-editable. setQueuedSlot below does the actual dedup/move if such a player gets picked
+    // (mirrors replaceSlot's cross-court swap for live "next" courts). สุ่มอัตโนมัติ still uses the
+    // stricter queueEligiblePool() (excludes ALL reservations) so AUTO-fill never silently double-books.
     return /*#__PURE__*/React.createElement(QueueNextSheet, {
       court: qm,
       courtLabel: courtLabelFor(courtLabels, qm.court),
       getP: getP,
-      pool: reservedElsewhere,
+      pool: waitQueue,
       autoQueueNext: autoQueueNext,
       setQueuedSlot: setQueuedSlot,
       clearQueuedNext: clearQueuedNext,
@@ -12716,8 +12736,9 @@ function QueueNextSheet({
       zIndex: 71,
       background: T.surface,
       borderRadius: "18px 18px 0 0",
-      padding: "14px 14px calc(16px + env(safe-area-inset-bottom))",
-      maxHeight: "80vh",
+      padding: `14px 14px calc(${manual ? 240 : 16}px + env(safe-area-inset-bottom))`,
+      maxHeight: "94vh",
+      minHeight: manual ? "60vh" : "auto",
       overflowY: "auto"
     }
   }, /*#__PURE__*/React.createElement("div", {

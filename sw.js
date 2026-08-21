@@ -1,7 +1,7 @@
 // BadQ service worker — enables offline use.
 // Bump CACHE_NAME (kept in lockstep with APP_VERSION) on every deploy so old shells are dropped
 // automatically; the app itself already handles cache-busted reloads when a new version is live.
-const CACHE_NAME = "badq-cache-v1.9.4";
+const CACHE_NAME = "badq-cache-v1.9.5";
 const SHELL_URL = self.registration.scope; // e.g. https://<user>.github.io/BadQ/ — the app's own index.html
 const ASSETS = [
   SHELL_URL,
