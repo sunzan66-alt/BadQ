@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.6";
+      var CURRENT_VERSION = "1.8.7";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.6";
+const APP_VERSION = "1.8.7";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -816,20 +816,30 @@ function fairnessTag(pct) {
   };
 }
 
-// ---- scoring / stats (win/loss ONLY from matches that have a score) ----
+// ---- scoring / stats (win/loss from matches that have a score OR an explicit win/lose pick) ----
+// a round counts as "scored" if it has a numeric a/b OR a manually-picked win side (no numbers needed).
 function hasScore(m) {
-  return !!(m && m.scores && m.scores.some(r => r && (r.a != null || r.b != null)));
+  return !!(m && m.scores && m.scores.some(r => r && (r.a != null || r.b != null || r.win != null)));
+}
+// per-round winner: numeric a/b (when both present) always wins out and auto-decides the round;
+// only falls back to the organizer's manual win/lose pick when no numeric score was entered.
+function roundWinner(r) {
+  if (!r) return null;
+  if (r.a != null && r.b != null) {
+    const a = Number(r.a) || 0,
+      b = Number(r.b) || 0;
+    if (a === b) return null;
+    return a > b ? "A" : "B";
+  }
+  return r.win || null;
 }
 function matchWinner(m) {
   if (!hasScore(m)) return null;
   let ca = 0,
     cb = 0;
   for (const r of m.scores) {
-    if (!r || r.a == null && r.b == null) continue;
-    const a = Number(r.a) || 0,
-      b = Number(r.b) || 0;
-    if (a === b) continue;
-    if (a > b) ca++;else cb++;
+    const w = roundWinner(r);
+    if (w === "A") ca++;else if (w === "B") cb++;
   }
   if (ca > cb) return "A";
   if (cb > ca) return "B";
@@ -1086,7 +1096,10 @@ function financeSettingsSummary(settings) {
 const SORT = (a, b) => (a.lastPlayedRound ?? -1) - (b.lastPlayedRound ?? -1) || a.games - b.games || (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order;
 function matchScoreText(m) {
   if (!hasScore(m)) return null;
-  return m.scores.filter(r => r && (r.a != null || r.b != null)).map(r => `${r.a ?? "-"}–${r.b ?? "-"}`).join(" · ");
+  return m.scores.filter(r => r && (r.a != null || r.b != null || r.win != null)).map(r => {
+    if (r.a != null || r.b != null) return `${r.a ?? "-"}–${r.b ?? "-"}`;
+    return r.win === "A" ? "A ชนะ" : r.win === "B" ? "B ชนะ" : "-";
+  }).join(" · ");
 }
 async function resizePhoto(file) {
   let dataUrl;
@@ -2704,6 +2717,101 @@ function App() {
     setSel(null);
   };
 
+  // one-tap "จบเกม" — finishes the match AND immediately pairs + starts that same court's next match
+  // (fuses endGame+nextCourt+startGame into a single atomic action) so the organizer never has to leave
+  // the court sitting in "เพิ่งจบ" and tap "เริ่มเกมถัดไป" separately just to keep the court moving. Falls
+  // back to the old finish-only behavior (leaves it in "เพิ่งจบ" for manual retry) when no next match can
+  // be built right now (e.g. not enough free players) — auto pairing mode only; manual mode still opens
+  // an empty "next" slot for the organizer to hand-pick, same as the existing เริ่มเกมถัดไป flow.
+  const finishAndAdvance = mid => {
+    const m = current.find(x => x.id === mid);
+    if (!m || m.status !== "playing") return;
+    const finIds = [...m.teamA, ...m.teamB].filter(Boolean);
+    const court = m.court,
+      t = Date.now(),
+      seq = roundNo + 1;
+    const doneM = {
+      ...m,
+      status: "done"
+    };
+    let np = players.map(p => finIds.includes(p.id) ? {
+      ...p,
+      games: p.games + 1,
+      waitingSince: t,
+      lastPlayedRound: seq
+    } : {
+      ...p
+    });
+    let newMatch = null;
+    if (settings.pairingMode === "manual") {
+      newMatch = {
+        id: uid(),
+        mode,
+        source: "casual",
+        teamA: emptyTeam(),
+        teamB: emptyTeam(),
+        status: "next",
+        round: seq,
+        court,
+        locked: false
+      };
+    } else {
+      const others = current.filter(c => c.id !== mid);
+      const reserved = new Set(others.flatMap(c => [...c.teamA, ...c.teamB].filter(Boolean)));
+      const base = np.map(p => ({
+        ...p
+      }));
+      const stats = counts([...history, doneM, ...others]);
+      const order = base.filter(p => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+      const nm = buildMatch(order, mode, lockPairs, base, stats);
+      if (nm) {
+        const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
+        np = np.map(p => {
+          if (!ids.has(p.id)) return p;
+          const wms = Math.max(0, t - (p.waitingSince || t));
+          return {
+            ...p,
+            lastPlayedRound: seq,
+            waitingSince: t,
+            waitTotal: (p.waitTotal || 0) + wms,
+            waitCount: (p.waitCount || 0) + 1,
+            waitMax: Math.max(p.waitMax || 0, wms)
+          };
+        });
+        newMatch = {
+          id: uid(),
+          mode,
+          source: "casual",
+          teamA: nm.teamA,
+          teamB: nm.teamB,
+          status: "playing",
+          round: seq,
+          court,
+          locked: false
+        };
+      }
+    }
+    if (!newMatch) {
+      // no eligible next match right now — fall back to the plain finish (same as endGame), so the
+      // court still shows up in "เพิ่งจบ" for the organizer to advance manually once possible
+      setPlayers(prev => prev.map(p => finIds.includes(p.id) ? {
+        ...p,
+        games: p.games + 1
+      } : p));
+      setCurrent(prev => prev.map(x => x.id === mid ? {
+        ...x,
+        status: "done"
+      } : x));
+      return;
+    }
+    const newCurrent = current.map(c => c.id === mid ? newMatch : c);
+    setPlayers(np);
+    setHistory([...history, doneM]);
+    setCurrent(newCurrent);
+    setRoundNo(seq);
+    setSel(null);
+  };
+
   // regenerate a single not-started court (reserve other courts, don't touch playing/games)
   // in manual pairing mode this just clears the court back to empty slots for re-picking
   const regenCourt = mid => {
@@ -2821,15 +2929,50 @@ function App() {
         length: rounds
       }, () => ({
         a: null,
-        b: null
+        b: null,
+        win: null
       }));
       while (scores.length < rounds) scores.push({
         a: null,
-        b: null
+        b: null,
+        win: null
       });
       scores[ri] = {
         ...scores[ri],
         [side]: val === "" ? null : Number(val)
+      };
+      return {
+        ...m,
+        scores
+      };
+    });
+    setCurrent(prev => upd(prev));
+    setHistory(prev => upd(prev));
+  };
+  // manual win/lose pick for a round with no numeric score (e.g. organizer just wants to log who won).
+  // side is "A" | "B" | null (null clears the pick). Ignored for display once numeric a/b are both filled —
+  // roundWinner() always prefers the numeric result when present.
+  const setWin = (mid, ri, side) => {
+    const upd = arr => arr.map(m => {
+      if (m.id !== mid) return m;
+      const rounds = settings.rounds || 1;
+      const scores = m.scores ? m.scores.map(r => ({
+        ...r
+      })) : Array.from({
+        length: rounds
+      }, () => ({
+        a: null,
+        b: null,
+        win: null
+      }));
+      while (scores.length < rounds) scores.push({
+        a: null,
+        b: null,
+        win: null
+      });
+      scores[ri] = {
+        ...scores[ri],
+        win: side
       };
       return {
         ...m,
@@ -3169,15 +3312,45 @@ function App() {
         length: rounds
       }, () => ({
         a: null,
-        b: null
+        b: null,
+        win: null
       }));
       while (scores.length < rounds) scores.push({
         a: null,
-        b: null
+        b: null,
+        win: null
       });
       scores[ri] = {
         ...scores[ri],
         [side]: val === "" ? null : Number(val)
+      };
+      return {
+        ...m,
+        scores
+      };
+    }));
+  };
+  // manual win/lose pick for a round with no numeric score — see casual setWin() for the same behavior.
+  const tSetWin = (matchId, ri, side) => {
+    setActiveTournament(t => updateTournamentMatch(t, matchId, m => {
+      const rounds = settings.rounds || 1;
+      const scores = m.scores ? m.scores.map(r => ({
+        ...r
+      })) : Array.from({
+        length: rounds
+      }, () => ({
+        a: null,
+        b: null,
+        win: null
+      }));
+      while (scores.length < rounds) scores.push({
+        a: null,
+        b: null,
+        win: null
+      });
+      scores[ri] = {
+        ...scores[ri],
+        win: side
       };
       return {
         ...m,
@@ -3757,6 +3930,7 @@ function App() {
     genStart,
     startGame,
     endGame,
+    finishAndAdvance,
     undoFinish,
     nextCourt,
     regenCourt,
@@ -3764,6 +3938,7 @@ function App() {
     regenFuture,
     toggleCurrentLock,
     setScore,
+    setWin,
     clearScore,
     tapSlot,
     isSel,
@@ -3781,6 +3956,7 @@ function App() {
     tStartMatch,
     tSetCourtLabel,
     tSetScore,
+    tSetWin,
     tClearScore,
     tFinishMatch,
     tEditAffectsDownstream,
@@ -4621,6 +4797,7 @@ function SessionTab(props) {
     genStart,
     startGame,
     endGame,
+    finishAndAdvance,
     undoFinish,
     nextCourt,
     regenCourt,
@@ -4628,6 +4805,7 @@ function SessionTab(props) {
     regenFuture,
     toggleCurrentLock,
     setScore,
+    setWin,
     clearScore,
     tapSlot,
     isSel,
@@ -4645,6 +4823,7 @@ function SessionTab(props) {
     tStartMatch,
     tSetCourtLabel,
     tSetScore,
+    tSetWin,
     tClearScore,
     tFinishMatch,
     tEditAffectsDownstream,
@@ -4783,7 +4962,7 @@ function SessionTab(props) {
     }, /*#__PURE__*/React.createElement(Play, {
       size: 15
     }), " \u0E40\u0E23\u0E34\u0E48\u0E21\u0E40\u0E01\u0E21")), m.status === "playing" && /*#__PURE__*/React.createElement("button", {
-      onClick: () => endGame(m.id),
+      onClick: () => finishAndAdvance(m.id),
       style: {
         ...btnPrimary,
         background: T.accent
@@ -4848,6 +5027,7 @@ function SessionTab(props) {
       tStartMatch,
       tSetCourtLabel,
       tSetScore,
+      tSetWin,
       tClearScore,
       tFinishMatch,
       tEditAffectsDownstream,
@@ -5330,6 +5510,7 @@ function SessionTab(props) {
     m: m,
     rounds: rounds,
     setScore: setScore,
+    setWin: setWin,
     clearScore: clearScore
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -5415,6 +5596,7 @@ function SessionTab(props) {
     m: m,
     rounds: rounds,
     setScore: setScore,
+    setWin: setWin,
     clearScore: clearScore
   }))))), started && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -6662,6 +6844,7 @@ function TournamentDashboard(props) {
     tStartMatch,
     tSetCourtLabel,
     tSetScore,
+    tSetWin,
     tClearScore,
     tFinishMatch,
     tEditAffectsDownstream,
@@ -6822,8 +7005,11 @@ function TournamentDashboard(props) {
       fontWeight: 700
     }
   }, "\u0E2A\u0E19\u0E32\u0E21\u0E17\u0E35\u0E48 ", i + 1, ":"), /*#__PURE__*/React.createElement("input", {
-    value: courtLabelFor(t.courtLabels, i + 1),
+    value: (t.courtLabels && t.courtLabels[i]) ?? "",
     onChange: e => tSetCourtLabel(i, e.target.value),
+    onBlur: () => {
+      if (!String((t.courtLabels && t.courtLabels[i]) ?? "").trim()) tSetCourtLabel(i, String(i + 1));
+    },
     style: {
       width: 46,
       padding: "6px 7px",
@@ -6880,6 +7066,7 @@ function TournamentDashboard(props) {
     m: m,
     rounds: settings.rounds || 1,
     setScore: tSetScore,
+    setWin: tSetWin,
     clearScore: tClearScore
   }), /*#__PURE__*/React.createElement("button", {
     onClick: () => tFinishMatch(m.id),
@@ -7089,6 +7276,7 @@ function TournamentDashboard(props) {
     m: m,
     rounds: settings.rounds || 1,
     setScore: tSetScore,
+    setWin: tSetWin,
     clearScore: tClearScore
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7446,8 +7634,11 @@ function QuanSettingsSheet({
       fontWeight: 700
     }
   }, "\u0E2A\u0E19\u0E32\u0E21\u0E17\u0E35\u0E48 ", i + 1, ":"), /*#__PURE__*/React.createElement("input", {
-    value: courtLabelFor(courtLabels, i + 1),
+    value: courtLabels[i] ?? "",
     onChange: e => setCourtLabel(i, e.target.value),
+    onBlur: () => {
+      if (!String(courtLabels[i] ?? "").trim()) setCourtLabel(i, String(i + 1));
+    },
     style: {
       width: 46,
       padding: "6px 7px",
@@ -7877,10 +8068,47 @@ function CompactMatch({
     }
   }, side(m.teamB))));
 }
+
+// win/lose dropdown for one side of one round. `state` is "win" | "lose" | "" (undetermined).
+// Locked (disabled, greyed) once a numeric score decides the round automatically — see roundWinner().
+function WinLoseSelect({
+  state,
+  onPick,
+  locked
+}) {
+  const bg = state === "win" ? "#e2f5ec" : state === "lose" ? "#fdeae7" : T.surface;
+  const border = state === "win" ? T.green : state === "lose" ? T.accent : T.border;
+  const color = state === "win" ? T.green : state === "lose" ? T.accent : T.muted;
+  return /*#__PURE__*/React.createElement("select", {
+    value: state,
+    disabled: locked,
+    onChange: e => onPick(e.target.value),
+    style: {
+      width: 54,
+      padding: "7px 2px",
+      borderRadius: 9,
+      background: bg,
+      border: `1px solid ${border}`,
+      color,
+      fontSize: 11,
+      fontWeight: 800,
+      textAlign: "center",
+      outline: "none",
+      opacity: locked ? 0.75 : 1
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "-"), /*#__PURE__*/React.createElement("option", {
+    value: "win"
+  }, "\u0E0A\u0E19\u0E30"), /*#__PURE__*/React.createElement("option", {
+    value: "lose"
+  }, "\u0E41\u0E1E\u0E49"));
+}
 function ScoreEditor({
   m,
   rounds,
   setScore,
+  setWin,
   clearScore
 }) {
   return /*#__PURE__*/React.createElement("div", {
@@ -7896,14 +8124,22 @@ function ScoreEditor({
   }).map((_, ri) => {
     const r = m.scores && m.scores[ri] || {
       a: null,
-      b: null
+      b: null,
+      win: null
+    };
+    const auto = r.a != null && r.b != null ? Number(r.a) === Number(r.b) ? null : Number(r.a) > Number(r.b) ? "A" : "B" : null;
+    const eff = auto || r.win || null; // "A" | "B" | null — effective round winner (auto beats manual pick)
+    const locked = !!auto; // once both scores are in, the dropdowns just reflect the auto result
+    const stateFor = side => eff === side ? "win" : eff && eff !== side ? "lose" : "";
+    const pick = side => v => {
+      if (v === "win") setWin(m.id, ri, side);else if (v === "lose") setWin(m.id, ri, side === "A" ? "B" : "A");else setWin(m.id, ri, null);
     };
     return /*#__PURE__*/React.createElement("div", {
       key: ri,
       style: {
         display: "flex",
         alignItems: "center",
-        gap: 8,
+        gap: 6,
         marginBottom: ri < rounds - 1 ? 8 : 0
       }
     }, rounds > 1 && /*#__PURE__*/React.createElement("span", {
@@ -7911,9 +8147,13 @@ function ScoreEditor({
         fontSize: 11,
         fontWeight: 800,
         color: T.muted,
-        minWidth: 46
+        minWidth: 40
       }
-    }, "\u0E23\u0E2D\u0E1A ", ri + 1), /*#__PURE__*/React.createElement("span", {
+    }, "\u0E23\u0E2D\u0E1A ", ri + 1), setWin && /*#__PURE__*/React.createElement(WinLoseSelect, {
+      state: stateFor("A"),
+      onPick: pick("A"),
+      locked: locked
+    }), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 11.5,
         fontWeight: 700,
@@ -7940,7 +8180,11 @@ function ScoreEditor({
         fontWeight: 700,
         color: T.blue
       }
-    }, "B"));
+    }, "B"), setWin && /*#__PURE__*/React.createElement(WinLoseSelect, {
+      state: stateFor("B"),
+      onPick: pick("B"),
+      locked: locked
+    }));
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
