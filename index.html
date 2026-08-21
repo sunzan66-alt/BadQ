@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.3";
+      var CURRENT_VERSION = "1.8.4";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.3";
+const APP_VERSION = "1.8.4";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -927,6 +927,115 @@ function computeBill(players, settings) {
     };
   });
 }
+// ===================== FINANCE (v1.8.4) =====================
+// Accounting model kept deliberately simple:
+//   รายได้ (Revenue)   = sum of what's billed to players this session (computeBill's `total`, regardless of payment status)
+//   รับแล้ว (Collected) = sum of `total` for players actually marked paid
+//   ค้างรับ (Receivable)= Revenue - Collected (money still owed — NOT an expense)
+//   ค่าใช้จ่าย (Expense) = organizer's real out-of-pocket costs, an editable line-item list per session.
+//                         "now"/"next" wheel-prize discounts are NOT counted here — they already reduce
+//                         Revenue directly via computeBill, so counting them again here would double-count.
+//   กำไร/ขาดทุน (Profit) = Revenue - Expense
+const EXPENSE_CATEGORIES = ["ค่าคอร์ท", "ค่าลูกแบด", "รางวัล", "อาหาร/น้ำ", "ค่าเดินทาง", "อื่น ๆ"];
+// best-effort default expense breakdown, derived from what was actually CHARGED to players (settings x
+// games played) — used only as a fallback DISPLAY when a session has no explicit `expenses` list yet (an
+// old session from before this feature, or a brand-new one nobody has itemized costs for). Never persisted
+// until the organizer actually adds/edits/removes an expense — see the addHistExpense-style functions.
+function defaultExpensesFrom(payerCount, totalGames, settings, date) {
+  const s = settings || {};
+  const eCourt = Math.round((s.court || 0) * payerCount);
+  const eShuttle = Math.round((s.shuttle || 0) * totalGames);
+  const eOther = Math.round(s.other || 0);
+  const out = [];
+  if (eCourt > 0) out.push({
+    id: "auto-court",
+    category: "ค่าคอร์ท",
+    description: "",
+    amount: eCourt,
+    date: date || null,
+    sourceType: "casual",
+    auto: true
+  });
+  if (eShuttle > 0) out.push({
+    id: "auto-shuttle",
+    category: "ค่าลูกแบด",
+    description: "",
+    amount: eShuttle,
+    date: date || null,
+    sourceType: "casual",
+    auto: true
+  });
+  if (eOther > 0) out.push({
+    id: "auto-other",
+    category: "อื่น ๆ",
+    description: "",
+    amount: eOther,
+    date: date || null,
+    sourceType: "casual",
+    auto: true
+  });
+  return out;
+}
+// the effective expense list for an archived session: the explicit list if the organizer has entered one, otherwise the derived default
+function sessionExpenseList(s) {
+  if (s.expenses && s.expenses.length) return s.expenses;
+  const payerCount = (s.bill || []).length;
+  const totalGames = s.stats?.totalGames ?? (s.bill || []).reduce((sum, b) => sum + (b.games || 0), 0);
+  return defaultExpensesFrom(payerCount, totalGames, s.settings, s.date);
+}
+function sessionRevenue(s) {
+  return (s.bill || []).reduce((sum, b) => sum + (b.total || 0), 0);
+}
+function sessionCollected(s) {
+  return (s.bill || []).filter(b => b.paid).reduce((sum, b) => sum + (b.total || 0), 0);
+}
+function sessionReceivable(s) {
+  return sessionRevenue(s) - sessionCollected(s);
+}
+function sessionExpenseTotal(s) {
+  return sessionExpenseList(s).reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+}
+function sessionProfit(s) {
+  return sessionRevenue(s) - sessionExpenseTotal(s);
+}
+// period filter — dates are plain "YYYY-MM-DD" strings throughout the app, so string range comparison is safe
+function periodRange(period, custom) {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  const iso = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  if (period === "today") {
+    const t = iso(now);
+    return {
+      from: t,
+      to: t
+    };
+  }
+  if (period === "month") return {
+    from: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-01`,
+    to: iso(now)
+  };
+  if (period === "lastMonth") {
+    const lm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const lastDay = new Date(now.getFullYear(), now.getMonth(), 0);
+    return {
+      from: iso(lm),
+      to: iso(lastDay)
+    };
+  }
+  if (period === "year") return {
+    from: `${now.getFullYear()}-01-01`,
+    to: iso(now)
+  };
+  if (period === "custom" && custom && custom.from && custom.to) return custom;
+  return {
+    from: "0000-01-01",
+    to: "9999-12-31"
+  }; // "all"
+}
+function inPeriod(dateStr, range) {
+  return !!dateStr && dateStr >= range.from && dateStr <= range.to;
+}
+
 // build the plain-text summary used by the Web Share API (with clipboard/alert fallback)
 function buildShareText({
   name,
@@ -1005,6 +1114,13 @@ function quanSettingsSummary(settings, mode, courtCount) {
   const modeLabel = mode === "singles" ? "1v1" : "2v2";
   const levelLabel = getPresetMeta(settings.levelPresetId || "isan").name;
   return `${modeLabel} · ${courtCount} สนาม · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
+}
+// dynamic subtitle for the "ตั้งค่าค่าก๊วนและรางวัล" compact entry point on the ชำระเงิน tab
+function financeSettingsSummary(settings) {
+  const parts = [`ค่าสนาม ฿${settings.court || 0}/คน`, `ค่าลูก ฿${settings.shuttle || 0}/เกม`];
+  if (settings.other) parts.push(`อื่นๆ ฿${settings.other}`);
+  parts.push(settings.wheelEnabled !== false ? "รางวัลเปิด" : "ไม่มีรางวัล");
+  return parts.join(" · ");
 }
 // selection priority: longest since last played, fewest games, longest waiting
 const SORT = (a, b) => (a.lastPlayedRound ?? -1) - (b.lastPlayedRound ?? -1) || a.games - b.games || (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order;
@@ -1226,6 +1342,13 @@ function ensureSessionId(s) {
     id: "legacy-" + stableHash(`${s?.name || ""}|${s?.date || ""}|${s?.endedAt || ""}`)
   };
 }
+// backward-compat for sessionHistory entries saved before per-session expense tracking existed
+function ensureSessionExpenses(s) {
+  return {
+    ...s,
+    expenses: Array.isArray(s.expenses) ? s.expenses : []
+  };
+}
 
 // wraps the currently-persisted state shape into the exportable envelope
 function buildBackupPayload(state) {
@@ -1248,6 +1371,8 @@ function buildBackupPayload(state) {
       session: state.session,
       lockPairs: state.lockPairs,
       sessionHistory: state.sessionHistory,
+      generalExpenses: state.generalExpenses || [],
+      otherIncome: state.otherIncome || [],
       activeTournament: state.activeTournament || null,
       tournamentHistory: state.tournamentHistory || []
     }
@@ -1263,7 +1388,8 @@ function backupStats(data) {
     hasPayment: (data.players || []).some(p => p.paid) || (data.sessionHistory || []).some(s => (s.bill || []).some(b => b.paid)),
     hasQR: !!(data.settings && data.settings.qr),
     tournamentHistoryCount: (data.tournamentHistory || []).length,
-    hasActiveTournament: !!data.activeTournament
+    hasActiveTournament: !!data.activeTournament,
+    hasFinanceData: (data.generalExpenses || []).length > 0 || (data.otherIncome || []).length > 0 || (data.sessionHistory || []).some(s => (s.expenses || []).length > 0)
   };
 }
 // cheap structural check — catches "this isn't even a BadQ backup" before we try to migrate/use it
@@ -1320,7 +1446,9 @@ function migrateBackupData(parsed) {
     date: new Date().toISOString().slice(0, 10)
   };
   data.lockPairs = migrateLockPairs(data.lockPairs);
-  data.sessionHistory = (Array.isArray(data.sessionHistory) ? data.sessionHistory : []).map(ensureSessionId); // e.g. no sessionHistory -> []
+  data.sessionHistory = (Array.isArray(data.sessionHistory) ? data.sessionHistory : []).map(ensureSessionId).map(ensureSessionExpenses); // e.g. no sessionHistory -> []
+  data.generalExpenses = Array.isArray(data.generalExpenses) ? data.generalExpenses : []; // no field at all (old backup) -> []
+  data.otherIncome = Array.isArray(data.otherIncome) ? data.otherIncome : [];
   data.activeTournament = ensureTournamentCourtLabels(data.activeTournament && typeof data.activeTournament === "object" ? data.activeTournament : null); // no field at all (old backup) -> no active Tournament
   data.tournamentHistory = (Array.isArray(data.tournamentHistory) ? data.tournamentHistory : []).map(ensureTournamentCourtLabels);
   return {
@@ -2187,6 +2315,11 @@ function App() {
   const [lockPairs, setLockPairs] = useState([]);
   const [sel, setSel] = useState(null);
   const [sessionHistory, setSessionHistory] = useState([]); // archived (ended) sessions — see endSession()
+  // Finance (v1.8.4): costs/income NOT tied to any one ก๊วน session — "ค่าใช้จ่ายทั่วไป"/"รายได้อื่น" on the
+  // การเงิน tab (e.g. buying a box of shuttles, sponsor money). Per-session expenses instead live on each
+  // sessionHistory entry's own `expenses` field (added lazily — see addHistExpense below).
+  const [generalExpenses, setGeneralExpenses] = useState([]);
+  const [otherIncome, setOtherIncome] = useState([]);
   const [activeTournament, setActiveTournament] = useState(null); // the one Tournament being run right now (or null) — see TOURNAMENT ENGINE block
   const [tournamentHistory, setTournamentHistory] = useState([]); // archived/completed Tournaments — separate from sessionHistory
   const [now, setNow] = useState(Date.now());
@@ -2221,7 +2354,9 @@ function App() {
             mode: s.session.mode || "casual"
           }); // old saves have no `mode` — default them to casual, backward-compatible
           s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
-          setSessionHistory(Array.isArray(s.sessionHistory) ? s.sessionHistory : []); // new field: default [] if absent (backward-compatible)
+          setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
+          setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
+          setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
           setActiveTournament(ensureTournamentCourtLabels(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
           setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(ensureTournamentCourtLabels));
         }
@@ -2250,12 +2385,14 @@ function App() {
           session,
           lockPairs,
           sessionHistory,
+          generalExpenses,
+          otherIncome,
           activeTournament,
           tournamentHistory
         }));
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, loaded]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, activeTournament, tournamentHistory, loaded]);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(t);
@@ -2949,6 +3086,84 @@ function App() {
   };
   const deleteSessionHistory = sessId => setSessionHistory(prev => prev.filter(s => s.id !== sessId));
 
+  // ---- Finance (v1.8.4) ----
+  // Historical per-session expenses: an archived session usually starts with NO explicit `expenses` list
+  // (it just shows sessionExpenseList()'s derived default). The first time the organizer actually adds,
+  // edits, or removes a line, we "materialize" that derived default into a real editable array first, so
+  // their one change doesn't silently wipe the other auto-derived lines they were looking at.
+  const materializedExpenses = s => s.expenses && s.expenses.length ? s.expenses : sessionExpenseList(s);
+  const addHistExpense = (sessId, item) => {
+    setSessionHistory(prev => prev.map(s => {
+      if (s.id !== sessId) return s;
+      const base = materializedExpenses(s);
+      return {
+        ...s,
+        expenses: [...base, {
+          id: uid(),
+          category: item.category || "อื่น ๆ",
+          description: item.description || "",
+          amount: Number(item.amount) || 0,
+          date: item.date || s.date,
+          sourceType: "casual",
+          sourceId: s.id
+        }]
+      };
+    }));
+  };
+  const updateHistExpense = (sessId, expId, patch) => {
+    setSessionHistory(prev => prev.map(s => {
+      if (s.id !== sessId) return s;
+      const base = materializedExpenses(s);
+      return {
+        ...s,
+        expenses: base.map(e => e.id === expId ? {
+          ...e,
+          ...patch,
+          amount: patch.amount != null ? Number(patch.amount) || 0 : e.amount,
+          auto: false
+        } : e)
+      };
+    }));
+  };
+  const removeHistExpense = (sessId, expId) => {
+    setSessionHistory(prev => prev.map(s => {
+      if (s.id !== sessId) return s;
+      const base = materializedExpenses(s);
+      return {
+        ...s,
+        expenses: base.filter(e => e.id !== expId)
+      };
+    }));
+  };
+  // ค่าใช้จ่ายทั่วไป / รายได้อื่น — not tied to any one session (buying a box of shuttles, sponsor money, etc.)
+  const addGeneralExpense = item => setGeneralExpenses(prev => [{
+    id: uid(),
+    category: item.category || "อื่น ๆ",
+    description: item.description || "",
+    amount: Number(item.amount) || 0,
+    date: item.date || new Date().toISOString().slice(0, 10),
+    sourceType: "general"
+  }, ...prev]);
+  const updateGeneralExpense = (id, patch) => setGeneralExpenses(prev => prev.map(e => e.id === id ? {
+    ...e,
+    ...patch,
+    amount: patch.amount != null ? Number(patch.amount) || 0 : e.amount
+  } : e));
+  const removeGeneralExpense = id => setGeneralExpenses(prev => prev.filter(e => e.id !== id));
+  const addOtherIncome = item => setOtherIncome(prev => [{
+    id: uid(),
+    description: item.description || "",
+    amount: Number(item.amount) || 0,
+    date: item.date || new Date().toISOString().slice(0, 10),
+    sourceType: "general"
+  }, ...prev]);
+  const updateOtherIncome = (id, patch) => setOtherIncome(prev => prev.map(e => e.id === id ? {
+    ...e,
+    ...patch,
+    amount: patch.amount != null ? Number(patch.amount) || 0 : e.amount
+  } : e));
+  const removeOtherIncome = id => setOtherIncome(prev => prev.filter(e => e.id !== id));
+
   // ---- Tournament ----
   // Tournament objects are assembled fully-formed by TournamentWizard (which calls the pure engine
   // functions above directly) and handed here just to be activated — keeps App()'s own surface small.
@@ -3290,7 +3505,9 @@ function App() {
       lockPairs,
       sessionHistory,
       activeTournament,
-      tournamentHistory
+      tournamentHistory,
+      generalExpenses,
+      otherIncome
     });
     const json = JSON.stringify(payload);
     const filename = `BadQ_Backup_${fmtBackupStamp(new Date())}.json`;
@@ -3400,7 +3617,9 @@ function App() {
           lockPairs,
           sessionHistory,
           activeTournament,
-          tournamentHistory
+          tournamentHistory,
+          generalExpenses,
+          otherIncome
         });
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
@@ -3422,6 +3641,8 @@ function App() {
       setSessionHistory(data.sessionHistory);
       setActiveTournament(data.activeTournament || null);
       setTournamentHistory(data.tournamentHistory || []);
+      setGeneralExpenses(data.generalExpenses || []);
+      setOtherIncome(data.otherIncome || []);
     } else if (restoreMode === "mergeHistory") {
       setSessionHistory(prev => {
         const existing = new Set(prev.map(s => s.id));
@@ -3466,6 +3687,8 @@ function App() {
       setSessionHistory(data.sessionHistory || []);
       setActiveTournament(ensureTournamentCourtLabels(data.activeTournament) || null);
       setTournamentHistory((data.tournamentHistory || []).map(ensureTournamentCourtLabels));
+      setGeneralExpenses(data.generalExpenses || []);
+      setOtherIncome(data.otherIncome || []);
       await window.storage.delete("bg-v11-prerestore");
       setHasPreRestoreBackup(false);
       return true;
@@ -3591,7 +3814,6 @@ function App() {
     waitQueue,
     now,
     resetGames,
-    qrRef,
     endSession,
     changeLevelPreset,
     setCustomLevels,
@@ -3628,7 +3850,10 @@ function App() {
     lastBackupAt: settings.lastBackupAt,
     hasPreRestoreBackup,
     openHistPhoto,
-    clearHistPhoto
+    clearHistPhoto,
+    addHistExpense,
+    updateHistExpense,
+    removeHistExpense
   }), tab === "summary" && /*#__PURE__*/React.createElement(SummaryTab, {
     players,
     history,
@@ -3642,11 +3867,28 @@ function App() {
     history,
     current,
     settings,
+    setSettings,
     togglePaid,
     session,
     setPDiscount,
     applyWheelPrize,
-    endSession
+    endSession,
+    qrRef
+  }), tab === "finance" && /*#__PURE__*/React.createElement(FinanceTab, {
+    sessionHistory,
+    generalExpenses,
+    otherIncome,
+    addHistExpense,
+    updateHistExpense,
+    removeHistExpense,
+    addGeneralExpense,
+    updateGeneralExpense,
+    removeGeneralExpense,
+    addOtherIncome,
+    updateOtherIncome,
+    removeOtherIncome,
+    openHistPhoto,
+    clearHistPhoto
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -3700,7 +3942,16 @@ function App() {
   }, /*#__PURE__*/React.createElement(History, {
     size: 20,
     strokeWidth: tab === "history" ? 2.4 : 1.8
-  })))));
+  })), /*#__PURE__*/React.createElement(TabBtn, {
+    active: tab === "finance",
+    onClick: () => setTab("finance"),
+    label: "\u0E01\u0E32\u0E23\u0E40\u0E07\u0E34\u0E19"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 19,
+      lineHeight: "20px"
+    }
+  }, "\uD83D\uDCB0")))));
 }
 function TabBtn({
   active,
@@ -4427,7 +4678,6 @@ function SessionTab(props) {
     waitQueue,
     now,
     resetGames,
-    qrRef,
     endSession,
     changeLevelPreset,
     setCustomLevels,
@@ -4943,7 +5193,6 @@ function SessionTab(props) {
     removeLockPair: removeLockPair,
     getP: getP,
     resetGames: resetGames,
-    qrRef: qrRef,
     changeLevelPreset: changeLevelPreset,
     setCustomLevels: setCustomLevels,
     onClose: () => setOpenQuanSettings(false)
@@ -7047,12 +7296,13 @@ function QuanSettingsSheet({
   removeLockPair,
   getP,
   resetGames,
-  qrRef,
   changeLevelPreset,
   setCustomLevels,
   onClose
 }) {
-  const [open, setOpen] = useState("play"); // "play" | "payment" | "prize" | "level" | null — one section open at a time
+  // v1.8.4: ค่าใช้จ่าย (💳) and รางวัล (🏆) moved out of this sheet into FinanceSettingsSheet, opened from the
+  // ชำระเงิน tab instead — Today/ตั้งค่าก๊วน is now Game Operations only, money settings live with money UI.
+  const [open, setOpen] = useState("play"); // "play" | "level" | null — one section open at a time
   const [editCourtLabels, setEditCourtLabels] = useState(false);
   const toggle = key => setOpen(v => v === key ? null : key);
   return /*#__PURE__*/React.createElement(Overlay, {
@@ -7277,6 +7527,67 @@ function QuanSettingsSheet({
   }, /*#__PURE__*/React.createElement(RotateCcw, {
     size: 14
   }), " \u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => toggle("level"),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "11px 14px",
+      borderRadius: 12,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13.5,
+      fontWeight: 700,
+      marginBottom: open === "level" ? 0 : 4
+    }
+  }, /*#__PURE__*/React.createElement(ClipboardList, {
+    size: 15,
+    color: T.muted
+  }), " \uD83C\uDFF8 \u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D (", getPresetMeta(settings.levelPresetId || "isan").name, ")", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 17,
+    color: T.muted,
+    style: {
+      marginLeft: "auto",
+      transform: open === "level" ? "rotate(180deg)" : "none",
+      transition: "transform .15s"
+    }
+  })), open === "level" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 12px 12px",
+      padding: 14
+    }
+  }, /*#__PURE__*/React.createElement(LevelPresetEditor, {
+    settings: settings,
+    changeLevelPreset: changeLevelPreset,
+    setCustomLevels: setCustomLevels
+  })));
+}
+
+// v1.8.4: ค่าใช้จ่ายก๊วน + รางวัล — moved here from QuanSettingsSheet (formerly the "💳"/"🏆" accordions
+// inside Today's ตั้งค่าก๊วน) so money settings live with the money UI (ชำระเงิน tab), not the play UI.
+// Same fields, same state (settings.court/shuttle/other/qr/bank/wheelEnabled/wheelPrizes), just relocated.
+function FinanceSettingsSheet({
+  settings,
+  setSettings,
+  qrRef,
+  onClose
+}) {
+  const [open, setOpen] = useState("payment"); // "payment" | "prize" | null
+  const toggle = key => setOpen(v => v === key ? null : key);
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 800,
+      marginBottom: 14
+    }
+  }, "\u2699\uFE0F \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E25\u0E30\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25"), /*#__PURE__*/React.createElement("button", {
     onClick: () => toggle("payment"),
     style: {
       width: "100%",
@@ -7295,7 +7606,7 @@ function QuanSettingsSheet({
   }, /*#__PURE__*/React.createElement(Wallet, {
     size: 15,
     color: T.muted
-  }), " \uD83D\uDCB3 \u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22", /*#__PURE__*/React.createElement(ChevronDown, {
+  }), " \uD83D\uDCB3 \u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E01\u0E4A\u0E27\u0E19", /*#__PURE__*/React.createElement(ChevronDown, {
     size: 17,
     color: T.muted,
     style: {
@@ -7461,12 +7772,12 @@ function QuanSettingsSheet({
       color: T.text,
       fontSize: 13.5,
       fontWeight: 700,
-      marginBottom: open === "prize" ? 0 : 8
+      marginBottom: open === "prize" ? 0 : 4
     }
   }, /*#__PURE__*/React.createElement(Trophy, {
     size: 15,
     color: T.muted
-  }), " \uD83C\uDFC6 \u0E23\u0E32\u0E07\u0E27\u0E31\u0E25", /*#__PURE__*/React.createElement(ChevronDown, {
+  }), " \uD83C\uDF81 \u0E23\u0E32\u0E07\u0E27\u0E31\u0E25", /*#__PURE__*/React.createElement(ChevronDown, {
     size: 17,
     color: T.muted,
     style: {
@@ -7480,8 +7791,7 @@ function QuanSettingsSheet({
       border: `1px solid ${T.border}`,
       borderTop: "none",
       borderRadius: "0 0 12px 12px",
-      padding: 14,
-      marginBottom: 8
+      padding: 14
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7508,46 +7818,7 @@ function QuanSettingsSheet({
       ...s,
       wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater
     }))
-  }))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => toggle("level"),
-    style: {
-      width: "100%",
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      padding: "11px 14px",
-      borderRadius: 12,
-      background: T.surface2,
-      border: `1px solid ${T.border}`,
-      color: T.text,
-      fontSize: 13.5,
-      fontWeight: 700,
-      marginBottom: open === "level" ? 0 : 4
-    }
-  }, /*#__PURE__*/React.createElement(ClipboardList, {
-    size: 15,
-    color: T.muted
-  }), " \uD83C\uDFF8 \u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D (", getPresetMeta(settings.levelPresetId || "isan").name, ")", /*#__PURE__*/React.createElement(ChevronDown, {
-    size: 17,
-    color: T.muted,
-    style: {
-      marginLeft: "auto",
-      transform: open === "level" ? "rotate(180deg)" : "none",
-      transition: "transform .15s"
-    }
-  })), open === "level" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      borderTop: "none",
-      borderRadius: "0 0 12px 12px",
-      padding: 14
-    }
-  }, /*#__PURE__*/React.createElement(LevelPresetEditor, {
-    settings: settings,
-    changeLevelPreset: changeLevelPreset,
-    setCustomLevels: setCustomLevels
-  })));
+  }))));
 }
 function Seg({
   options,
@@ -7777,6 +8048,250 @@ function SectionHead({
   }, sub));
 }
 
+/* ============ FINANCE — reusable expense / income list editors (v1.8.4) ============
+   Used by: HistoricalDetail (per-session ค่าใช้จ่าย), FinanceTab (ค่าใช้จ่ายทั่วไป + รายได้อื่น).
+   `categories` present → expense mode (category select shown, no sign). `categories` absent → income mode. */
+function ExpenseListEditor({
+  items,
+  onAdd,
+  onUpdate,
+  onRemove,
+  categories
+}) {
+  const [adding, setAdding] = useState(false);
+  const blank = () => ({
+    category: categories ? categories[0] : undefined,
+    description: "",
+    amount: "",
+    date: new Date().toISOString().slice(0, 10)
+  });
+  const [draft, setDraft] = useState(blank());
+  const submit = () => {
+    const amt = Number(draft.amount) || 0;
+    if (amt <= 0) return;
+    onAdd({
+      ...draft,
+      amount: amt
+    });
+    setDraft(blank());
+    setAdding(false);
+  };
+  return /*#__PURE__*/React.createElement("div", null, items.length === 0 && !adding && /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 12.5,
+      textAlign: "center",
+      padding: "8px 0"
+    }
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23"), items.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 8
+    }
+  }, items.map(it => /*#__PURE__*/React.createElement("div", {
+    key: it.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "8px 10px",
+      borderRadius: 10,
+      background: T.surface,
+      border: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, categories && /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "block",
+      fontSize: 11,
+      color: T.muted,
+      fontWeight: 700
+    }
+  }, it.category, it.auto ? " · ประมาณการ" : ""), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "block",
+      fontSize: 13,
+      fontWeight: 700,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, it.description || (categories ? "-" : "ไม่มีรายละเอียด"))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 3,
+      fontSize: 13,
+      fontWeight: 800
+    }
+  }, "\u0E3F", /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    value: it.amount,
+    onChange: e => onUpdate(it.id, {
+      amount: e.target.value
+    }),
+    style: {
+      width: 64,
+      padding: "6px 6px",
+      borderRadius: 8,
+      border: `1px solid ${T.border}`,
+      textAlign: "right",
+      fontSize: 13,
+      fontWeight: 800,
+      outline: "none"
+    }
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => onRemove(it.id),
+    style: {
+      background: "none",
+      border: "none",
+      color: T.accent,
+      padding: 4,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement(Trash2, {
+    size: 14
+  }))))), adding ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      borderRadius: 11,
+      padding: 10
+    }
+  }, categories && /*#__PURE__*/React.createElement("select", {
+    value: draft.category,
+    onChange: e => setDraft(d => ({
+      ...d,
+      category: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "8px 10px",
+      borderRadius: 9,
+      border: `1px solid ${T.border}`,
+      fontSize: 13,
+      marginBottom: 8,
+      background: "#fff"
+    }
+  }, categories.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c,
+    value: c
+  }, c))), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    placeholder: "\u0E23\u0E32\u0E22\u0E25\u0E30\u0E40\u0E2D\u0E35\u0E22\u0E14 (\u0E44\u0E21\u0E48\u0E1A\u0E31\u0E07\u0E04\u0E31\u0E1A)",
+    value: draft.description,
+    onChange: e => setDraft(d => ({
+      ...d,
+      description: e.target.value
+    })),
+    style: {
+      width: "100%",
+      padding: "8px 10px",
+      borderRadius: 9,
+      border: `1px solid ${T.border}`,
+      fontSize: 13,
+      marginBottom: 8,
+      boxSizing: "border-box",
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    placeholder: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E07\u0E34\u0E19 (\u0E3F)",
+    value: draft.amount,
+    onChange: e => setDraft(d => ({
+      ...d,
+      amount: e.target.value
+    })),
+    style: {
+      flex: 1,
+      padding: "8px 10px",
+      borderRadius: 9,
+      border: `1px solid ${T.border}`,
+      fontSize: 13,
+      boxSizing: "border-box",
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: draft.date,
+    onChange: e => setDraft(d => ({
+      ...d,
+      date: e.target.value
+    })),
+    style: {
+      flex: 1,
+      padding: "8px 10px",
+      borderRadius: 9,
+      border: `1px solid ${T.border}`,
+      fontSize: 13,
+      boxSizing: "border-box",
+      outline: "none"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    style: {
+      flex: 1,
+      padding: "9px 0",
+      borderRadius: 9,
+      background: T.green,
+      border: "none",
+      color: "#fff",
+      fontSize: 12.5,
+      fontWeight: 800
+    }
+  }, "\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setAdding(false);
+      setDraft(blank());
+    },
+    style: {
+      flex: 1,
+      padding: "9px 0",
+      borderRadius: 9,
+      background: "none",
+      border: `1px solid ${T.border}`,
+      color: T.muted,
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"))) : /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAdding(true),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "9px 0",
+      borderRadius: 10,
+      background: "none",
+      border: `1.5px dashed ${T.border}`,
+      color: T.muted,
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(Plus, {
+    size: 14
+  }), " \u0E40\u0E1E\u0E34\u0E48\u0E21\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23"));
+}
+
 /* ============ SESSION HISTORY (archived / ended sessions) ============ */
 function fmtThaiDate(iso) {
   if (!iso) return "-";
@@ -7798,7 +8313,10 @@ function HistoryTab({
   lastBackupAt,
   hasPreRestoreBackup,
   openHistPhoto,
-  clearHistPhoto
+  clearHistPhoto,
+  addHistExpense,
+  updateHistExpense,
+  removeHistExpense
 }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
@@ -8063,7 +8581,10 @@ function HistoryTab({
     toggleHistoricalPaid: toggleHistoricalPaid,
     onDelete: () => setConfirmDeleteId(open.id),
     openHistPhoto: openHistPhoto,
-    clearHistPhoto: clearHistPhoto
+    clearHistPhoto: clearHistPhoto,
+    addHistExpense: addHistExpense,
+    updateHistExpense: updateHistExpense,
+    removeHistExpense: removeHistExpense
   })), openT && /*#__PURE__*/React.createElement(Overlay, {
     onClose: () => setOpenTId(null)
   }, /*#__PURE__*/React.createElement(TournamentHistoricalDetail, {
@@ -8130,13 +8651,20 @@ function HistoricalDetail({
   toggleHistoricalPaid,
   onDelete,
   openHistPhoto,
-  clearHistPhoto
+  clearHistPhoto,
+  addHistExpense,
+  updateHistExpense,
+  removeHistExpense
 }) {
   const stats = s.stats || {};
   const bill = s.bill || [];
   const grandTotal = bill.reduce((sum, b) => sum + (b.total || 0), 0);
   const collected = bill.filter(b => b.paid).reduce((sum, b) => sum + (b.total || 0), 0);
   const paidCount = bill.filter(b => b.paid).length;
+  const receivable = sessionReceivable(s);
+  const expenseList = sessionExpenseList(s);
+  const expenseTotal = sessionExpenseTotal(s);
+  const profit = sessionProfit(s);
   const getSP = id => (s.players || []).find(p => p.id === id);
   const ranking = [...(s.players || [])].sort((a, b) => (b.games || 0) - (a.games || 0) || a.name.localeCompare(b.name));
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
@@ -8463,6 +8991,62 @@ function HistoricalDetail({
       color: b.paid ? T.green : T.accent
     }
   }, b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย")))), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(Wallet, {
+      size: 16,
+      color: T.green
+    }),
+    title: "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22",
+    sub: "\u0E41\u0E01\u0E49\u0E44\u0E02\u0E44\u0E14\u0E49 \u2014 \u0E40\u0E1E\u0E34\u0E48\u0E21\u0E22\u0E2D\u0E14\u0E08\u0E23\u0E34\u0E07\u0E17\u0E35\u0E48\u0E21\u0E32\u0E17\u0E35\u0E2B\u0E25\u0E31\u0E07\u0E44\u0E14\u0E49"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+    items: expenseList,
+    categories: EXPENSE_CATEGORIES,
+    onAdd: item => addHistExpense(s.id, item),
+    onUpdate: (id, patch) => updateHistExpense(s.id, id, patch),
+    onRemove: id => removeHistExpense(s.id, id)
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface2,
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E2A\u0E23\u0E38\u0E1B\u0E01\u0E33\u0E44\u0E23\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19"), /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E23\u0E32\u0E22\u0E44\u0E14\u0E49 (\u0E22\u0E2D\u0E14\u0E40\u0E23\u0E35\u0E22\u0E01\u0E40\u0E01\u0E47\u0E1A)",
+    v: grandTotal
+  }), /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E23\u0E31\u0E1A\u0E41\u0E25\u0E49\u0E27\u0E08\u0E23\u0E34\u0E07",
+    v: collected
+  }), /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E04\u0E49\u0E32\u0E07\u0E23\u0E31\u0E1A",
+    v: receivable
+  }), /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E23\u0E27\u0E21",
+    v: expenseTotal
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 15,
+      fontWeight: 800,
+      marginTop: 6,
+      paddingTop: 8,
+      borderTop: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", null, profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: profit >= 0 ? T.green : T.accent
+    }
+  }, "\u0E3F", Math.abs(profit)))), /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(History, {
       size: 16,
       color: T.muted
@@ -8508,6 +9092,480 @@ function HistoricalDetail({
   }, /*#__PURE__*/React.createElement(Trash2, {
     size: 15
   }), " \u0E25\u0E1A\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19"));
+}
+
+/* ============ FINANCE (v1.8.4) — dashboard scoped to sessionHistory + general income/expense ============ */
+const FINANCE_PERIODS = [["today", "วันนี้"], ["month", "เดือนนี้"], ["lastMonth", "เดือนก่อน"], ["year", "ปีนี้"], ["all", "ทั้งหมด"]];
+
+// drill-down detail for one archived session's finances only (revenue/collected/receivable + editable
+// expenses + profit) — a narrower view than HistoricalDetail (which also shows matches/player photos/etc.)
+function SessionFinancialDetail({
+  s,
+  addHistExpense,
+  updateHistExpense,
+  removeHistExpense,
+  onClose
+}) {
+  const revenue = sessionRevenue(s);
+  const collected = sessionCollected(s);
+  const receivable = sessionReceivable(s);
+  const expenseList = sessionExpenseList(s);
+  const expenseTotal = sessionExpenseTotal(s);
+  const profit = sessionProfit(s);
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 800,
+      marginBottom: 2
+    }
+  }, s.name || "ก๊วนไม่มีชื่อ"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 14
+    }
+  }, fmtThaiDate(s.date)), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(Wallet, {
+      size: 16,
+      color: T.green
+    }),
+    title: "\u0E23\u0E32\u0E22\u0E44\u0E14\u0E49"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface2,
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E22\u0E2D\u0E14\u0E40\u0E23\u0E35\u0E22\u0E01\u0E40\u0E01\u0E47\u0E1A",
+    v: revenue
+  }), /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E23\u0E31\u0E1A\u0E08\u0E23\u0E34\u0E07",
+    v: collected
+  }), /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E04\u0E49\u0E32\u0E07\u0E23\u0E31\u0E1A",
+    v: receivable
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(Wallet, {
+      size: 16,
+      color: T.accent
+    }),
+    title: "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22",
+    sub: "\u0E41\u0E01\u0E49\u0E44\u0E02\u0E44\u0E14\u0E49"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+    items: expenseList,
+    categories: EXPENSE_CATEGORIES,
+    onAdd: item => addHistExpense(s.id, item),
+    onUpdate: (id, patch) => updateHistExpense(s.id, id, patch),
+    onRemove: id => removeHistExpense(s.id, id)
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface2,
+      borderRadius: 12,
+      padding: 12
+    }
+  }, /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E23\u0E27\u0E21",
+    v: expenseTotal
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 15,
+      fontWeight: 800,
+      marginTop: 6,
+      paddingTop: 8,
+      borderTop: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", null, profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: profit >= 0 ? T.green : T.accent
+    }
+  }, "\u0E3F", Math.abs(profit)))));
+}
+function FinanceTab({
+  sessionHistory,
+  generalExpenses,
+  otherIncome,
+  addHistExpense,
+  updateHistExpense,
+  removeHistExpense,
+  addGeneralExpense,
+  updateGeneralExpense,
+  removeGeneralExpense,
+  addOtherIncome,
+  updateOtherIncome,
+  removeOtherIncome
+}) {
+  const [period, setPeriod] = useState("month");
+  const [openId, setOpenId] = useState(null); // sessionHistory id opened in SessionFinancialDetail
+  const range = periodRange(period);
+  const sessionsInRange = useMemo(() => (sessionHistory || []).filter(s => inPeriod(s.date, range)).sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0)), [sessionHistory, range.from, range.to]);
+  const genExpInRange = (generalExpenses || []).filter(e => inPeriod(e.date, range));
+  const otherIncInRange = (otherIncome || []).filter(e => inPeriod(e.date, range));
+  const sessionRevenueTotal = sessionsInRange.reduce((sum, s) => sum + sessionRevenue(s), 0);
+  const sessionCollectedTotal = sessionsInRange.reduce((sum, s) => sum + sessionCollected(s), 0);
+  const sessionExpenseSum = sessionsInRange.reduce((sum, s) => sum + sessionExpenseTotal(s), 0);
+  const otherIncomeTotal = otherIncInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const genExpenseTotal = genExpInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const revenue = sessionRevenueTotal + otherIncomeTotal; // รายได้ = ยอดเรียกเก็บ + รายได้อื่น
+  const collected = sessionCollectedTotal + otherIncomeTotal; // รายได้อื่นถือว่าได้รับจริงทันที
+  const expense = sessionExpenseSum + genExpenseTotal;
+  const profit = revenue - expense; // กำไร/ขาดทุน = รายได้ - ค่าใช้จ่าย เสมอ (ไม่ใช่ รับแล้ว - ค่าใช้จ่าย)
+
+  const catTotals = useMemo(() => {
+    const m = {};
+    sessionsInRange.forEach(s => sessionExpenseList(s).forEach(e => {
+      m[e.category] = (m[e.category] || 0) + (Number(e.amount) || 0);
+    }));
+    genExpInRange.forEach(e => {
+      m[e.category] = (m[e.category] || 0) + (Number(e.amount) || 0);
+    });
+    return m;
+  }, [sessionsInRange, genExpInRange]);
+  const txns = useMemo(() => {
+    const list = [...sessionsInRange.map(s => ({
+      id: "rev-" + s.id,
+      date: s.date,
+      label: `ค่าก๊วน — ${s.name || "ก๊วน"}`,
+      amount: sessionRevenue(s),
+      sign: 1,
+      ts: s.endedAt || 0
+    })), ...sessionsInRange.flatMap(s => sessionExpenseList(s).map(e => ({
+      id: "exp-" + s.id + "-" + e.id,
+      date: e.date || s.date,
+      label: `${e.category} — ${s.name || "ก๊วน"}`,
+      amount: e.amount,
+      sign: -1,
+      ts: s.endedAt || 0
+    }))), ...genExpInRange.map(e => ({
+      id: "genexp-" + e.id,
+      date: e.date,
+      label: `${e.category}${e.description ? " — " + e.description : ""}`,
+      amount: e.amount,
+      sign: -1,
+      ts: 0
+    })), ...otherIncInRange.map(e => ({
+      id: "inc-" + e.id,
+      date: e.date,
+      label: e.description || "รายได้อื่น",
+      amount: e.amount,
+      sign: 1,
+      ts: 0
+    }))];
+    return list.sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.ts - a.ts).slice(0, 30);
+  }, [sessionsInRange, genExpInRange, otherIncInRange]);
+  const openSession = openId ? (sessionHistory || []).find(s => s.id === openId) : null;
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 16
+      }
+    }, "\uD83D\uDCB0"),
+    title: "\u0E01\u0E32\u0E23\u0E40\u0E07\u0E34\u0E19",
+    sub: "\u0E23\u0E32\u0E22\u0E23\u0E31\u0E1A-\u0E23\u0E32\u0E22\u0E08\u0E48\u0E32\u0E22\u0E02\u0E2D\u0E07\u0E01\u0E4A\u0E27\u0E19"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement(Seg, {
+    options: FINANCE_PERIODS,
+    value: period,
+    onChange: setPeriod
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: "1 1 45%",
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, "\u0E23\u0E32\u0E22\u0E44\u0E14\u0E49"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800
+    }
+  }, "\u0E3F", revenue)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: "1 1 45%",
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, "\u0E23\u0E31\u0E1A\u0E40\u0E07\u0E34\u0E19\u0E08\u0E23\u0E34\u0E07"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      color: T.green
+    }
+  }, "\u0E3F", collected)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: "1 1 45%",
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      color: T.accent
+    }
+  }, "\u0E3F", expense)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: "1 1 45%",
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, profit >= 0 ? "กำไร" : "ขาดทุน"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      color: profit >= 0 ? T.green : T.accent
+    }
+  }, "\u0E3F", Math.abs(profit)))), /*#__PURE__*/React.createElement(SectionHead, {
+    title: "\u0E2A\u0E23\u0E38\u0E1B\u0E01\u0E33\u0E44\u0E23\u0E02\u0E32\u0E14\u0E17\u0E38\u0E19"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface2,
+      borderRadius: 12,
+      padding: 12,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E23\u0E32\u0E22\u0E44\u0E14\u0E49 (\u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19)",
+    v: sessionRevenueTotal
+  }), otherIncomeTotal > 0 && /*#__PURE__*/React.createElement(BillRow, {
+    label: "\u0E23\u0E32\u0E22\u0E44\u0E14\u0E49\u0E2D\u0E37\u0E48\u0E19",
+    v: otherIncomeTotal
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      height: 4
+    }
+  }), Object.keys(catTotals).length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: T.muted,
+      padding: "3px 0"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E43\u0E19\u0E0A\u0E48\u0E27\u0E07\u0E19\u0E35\u0E49") : Object.entries(catTotals).map(([cat, amt]) => /*#__PURE__*/React.createElement(BillRow, {
+    key: cat,
+    label: `หัก ${cat}`,
+    v: -amt
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 13,
+      fontWeight: 700,
+      padding: "3px 0",
+      borderTop: `1px solid ${T.border}`,
+      marginTop: 4,
+      paddingTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E23\u0E27\u0E21"), /*#__PURE__*/React.createElement("span", null, "-\u0E3F", expense)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      fontSize: 15,
+      fontWeight: 800,
+      marginTop: 6,
+      paddingTop: 8,
+      borderTop: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", null, profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: profit >= 0 ? T.green : T.accent
+    }
+  }, "\u0E3F", Math.abs(profit)))), /*#__PURE__*/React.createElement(SectionHead, {
+    title: "\u0E23\u0E32\u0E22\u0E01\u0E4A\u0E27\u0E19",
+    sub: `${sessionsInRange.length} ก๊วน`
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      marginBottom: 18
+    }
+  }, sessionsInRange.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "8px 0"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E01\u0E4A\u0E27\u0E19\u0E43\u0E19\u0E0A\u0E48\u0E27\u0E07\u0E19\u0E35\u0E49") : sessionsInRange.map(s => {
+    const rev = sessionRevenue(s),
+      exp = sessionExpenseTotal(s),
+      prof = sessionProfit(s);
+    return /*#__PURE__*/React.createElement("button", {
+      key: s.id,
+      onClick: () => setOpenId(s.id),
+      style: {
+        width: "100%",
+        textAlign: "left",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 12px",
+        borderRadius: 11,
+        background: T.surface,
+        border: `1px solid ${T.border}`
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "block",
+        fontSize: 13.5,
+        fontWeight: 700,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap"
+      }
+    }, s.name || "ก๊วนไม่มีชื่อ"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "block",
+        fontSize: 11.5,
+        color: T.muted
+      }
+    }, fmtThaiDate(s.date), " \xB7 \u0E23\u0E32\u0E22\u0E44\u0E14\u0E49 \u0E3F", rev, " \xB7 \u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22 \u0E3F", exp)), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 13,
+        fontWeight: 800,
+        color: prof >= 0 ? T.green : T.accent,
+        flexShrink: 0
+      }
+    }, prof >= 0 ? "+" : "-", "\u0E3F", Math.abs(prof)), /*#__PURE__*/React.createElement(ChevronRight, {
+      size: 16,
+      color: T.muted,
+      style: {
+        flexShrink: 0
+      }
+    }));
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    title: "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E17\u0E31\u0E48\u0E27\u0E44\u0E1B",
+    sub: "\u0E44\u0E21\u0E48\u0E1C\u0E39\u0E01\u0E01\u0E31\u0E1A\u0E01\u0E4A\u0E27\u0E19"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+    items: generalExpenses || [],
+    categories: EXPENSE_CATEGORIES,
+    onAdd: addGeneralExpense,
+    onUpdate: updateGeneralExpense,
+    onRemove: removeGeneralExpense
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    title: "\u0E23\u0E32\u0E22\u0E44\u0E14\u0E49\u0E2D\u0E37\u0E48\u0E19",
+    sub: "\u0E2A\u0E1B\u0E2D\u0E19\u0E40\u0E0B\u0E2D\u0E23\u0E4C / \u0E23\u0E32\u0E22\u0E44\u0E14\u0E49\u0E19\u0E2D\u0E01\u0E01\u0E4A\u0E27\u0E19"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+    items: otherIncome || [],
+    onAdd: addOtherIncome,
+    onUpdate: updateOtherIncome,
+    onRemove: removeOtherIncome
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    title: "\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 5,
+      marginBottom: 10
+    }
+  }, txns.length === 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "8px 0"
+    }
+  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E23\u0E32\u0E22\u0E01\u0E32\u0E23") : txns.map(t => /*#__PURE__*/React.createElement("div", {
+    key: t.id,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "7px 10px",
+      borderRadius: 9,
+      background: T.surface,
+      border: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      minWidth: 62,
+      flexShrink: 0
+    }
+  }, fmtThaiDate(t.date)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontSize: 12.5,
+      fontWeight: 600,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, t.label), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: t.sign > 0 ? T.green : T.accent,
+      flexShrink: 0
+    }
+  }, t.sign > 0 ? "+" : "-", "\u0E3F", t.amount)))), openSession && /*#__PURE__*/React.createElement(SessionFinancialDetail, {
+    s: openSession,
+    addHistExpense: addHistExpense,
+    updateHistExpense: updateHistExpense,
+    removeHistExpense: removeHistExpense,
+    onClose: () => setOpenId(null)
+  }));
 }
 
 // Read-only snapshot view of an archived Tournament from tournamentHistory. Player display level /
@@ -9016,23 +10074,27 @@ function PaymentTab({
   history,
   current,
   settings,
+  setSettings,
   togglePaid,
   session,
   setPDiscount,
   applyWheelPrize,
-  endSession
+  endSession,
+  qrRef
 }) {
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
   const [payFilter, setPayFilter] = useState("unpaid"); // "all" | "unpaid" | "paid"
   const [wheelFor, setWheelFor] = useState(null); // player id currently spinning the wheel
   const [confirmEnd, setConfirmEnd] = useState(false);
+  const [openFinanceSettings, setOpenFinanceSettings] = useState(false);
   const doneCurrent = current.filter(m => m.status === "done");
   const played = players.filter(p => (p.games || 0) > 0 || p.status !== "absent");
   const bill = computeBill(players, settings);
   const billBy = id => bill.find(b => b.id === id);
   const grandTotal = bill.reduce((s, b) => s + b.total, 0);
   const collected = bill.filter(b => b.paid).reduce((s, b) => s + b.total, 0);
+  const receivable = grandTotal - collected;
   const paidCount = bill.filter(b => b.paid).length;
   const allPaid = bill.length > 0 && paidCount === bill.length;
   const detailP = detail ? players.find(p => p.id === detail) : null;
@@ -9053,6 +10115,54 @@ function PaymentTab({
     }),
     title: "\u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19",
     sub: "\u0E41\u0E15\u0E30\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E14\u0E39/\u0E23\u0E31\u0E1A\u0E40\u0E07\u0E34\u0E19"
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOpenFinanceSettings(true),
+    style: {
+      width: "100%",
+      textAlign: "left",
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "12px 14px",
+      borderRadius: 12,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 17
+    }
+  }, "\u2699\uFE0F"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "block",
+      fontSize: 14,
+      fontWeight: 800,
+      color: T.text
+    }
+  }, "\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E25\u0E30\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "block",
+      fontSize: 12,
+      color: T.muted,
+      fontWeight: 600,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    }
+  }, financeSettingsSummary(settings))), /*#__PURE__*/React.createElement(ChevronRight, {
+    size: 18,
+    color: T.muted
+  })), openFinanceSettings && /*#__PURE__*/React.createElement(FinanceSettingsSheet, {
+    settings: settings,
+    setSettings: setSettings,
+    qrRef: qrRef,
+    onClose: () => setOpenFinanceSettings(false)
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -9103,7 +10213,26 @@ function PaymentTab({
       color: T.muted,
       fontWeight: 600
     }
-  }, "/ \u0E3F", grandTotal)))), /*#__PURE__*/React.createElement("div", {
+  }, "/ \u0E3F", grandTotal))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, "\u0E04\u0E49\u0E32\u0E07\u0E23\u0E31\u0E1A"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      color: receivable > 0 ? T.accent : T.green
+    }
+  }, "\u0E3F", receivable))), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10
     }
@@ -9415,7 +10544,7 @@ function PaymentTab({
       color: T.muted,
       textAlign: "center"
     }
-  }, "\u0E40\u0E1E\u0E34\u0E48\u0E21 QR / \u0E40\u0E25\u0E02\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E44\u0E14\u0E49\u0E43\u0E19\u0E41\u0E17\u0E47\u0E1A\u0E27\u0E31\u0E19\u0E19\u0E35\u0E49 \u2192 \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32"))), qrFull && settings.qr && /*#__PURE__*/React.createElement("div", {
+  }, "\u0E40\u0E1E\u0E34\u0E48\u0E21 QR / \u0E40\u0E25\u0E02\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E44\u0E14\u0E49\u0E17\u0E35\u0E48 \u2699\uFE0F \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E25\u0E30\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 \u0E14\u0E49\u0E32\u0E19\u0E1A\u0E19"))), qrFull && settings.qr && /*#__PURE__*/React.createElement("div", {
     onClick: () => setQrFull(null),
     style: {
       position: "fixed",
