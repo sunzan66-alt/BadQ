@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.9";
+      var CURRENT_VERSION = "1.9.0";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.9";
+const APP_VERSION = "1.9.0";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -2372,7 +2372,12 @@ function App() {
   }, []);
   const getP = id => players.find(p => p.id === id);
   const playersById = useMemo(() => Object.fromEntries(players.map(p => [p.id, p])), [players]);
+  // ANY current-match slot (next/playing/done) — used only to keep waitQueue (the truly-free "รอเล่น"
+  // pool) from double-listing someone who's already seated on a court, whatever that court's status.
   const inPlay = useMemo(() => new Set(current.flatMap(m => [...m.teamA, ...m.teamB].filter(Boolean))), [current]);
+  // players actually mid-game right now — used for the Members-tab badge, which should read "พร้อมเล่น"
+  // (still editable) for anyone sitting in a paired-but-not-started "next" court, not just free players.
+  const playingIds = useMemo(() => new Set(current.filter(m => m.status === "playing").flatMap(m => [...m.teamA, ...m.teamB].filter(Boolean))), [current]);
   const waitQueue = useMemo(() => players.filter(p => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order), [players, inPlay]);
 
   // members
@@ -3053,21 +3058,50 @@ function App() {
     setSel(null);
   };
 
-  // set a slot's player from the waiting bench (dropdown-based substitution / manual pick). newPid === null clears the slot.
+  // set a slot's player from the bench dropdown (dropdown-based substitution / manual pick). newPid === null
+  // clears the slot. The bench for a "next" (not-yet-started) court now also offers players who are already
+  // paired into ANOTHER not-yet-started court (see nextPoolFor below) — swapping one of THOSE in must also
+  // vacate their old seat, or the same player would end up on two courts at once. So: if newPid is currently
+  // seated anywhere in `current` (any match/slot), this is a true SWAP — they trade places with whoever (if
+  // anyone) is in the destination slot. If newPid is a genuinely free/waiting player, it's a plain assign.
   const replaceSlot = (mid, team, idx, newPid) => {
-    setCurrent(prev => prev.map(m => {
-      if (m.id !== mid) return m;
-      const arr = (team === "A" ? m.teamA : m.teamB).slice();
-      if (arr[idx] === newPid) return m;
-      arr[idx] = newPid || null;
-      return team === "A" ? {
+    setCurrent(prev => {
+      const next = prev.map(m => ({
         ...m,
-        teamA: arr
-      } : {
-        ...m,
-        teamB: arr
-      };
-    }));
+        teamA: [...m.teamA],
+        teamB: [...m.teamB]
+      }));
+      const dst = next.find(m => m.id === mid);
+      if (!dst) return prev;
+      const dstArr = team === "A" ? dst.teamA : dst.teamB;
+      if (dstArr[idx] === newPid) return prev;
+      if (newPid) {
+        for (const m of next) {
+          for (const tm of ["A", "B"]) {
+            const arr = tm === "A" ? m.teamA : m.teamB;
+            const srcIdx = arr.indexOf(newPid);
+            if (srcIdx !== -1 && !(m.id === mid && tm === team && srcIdx === idx)) {
+              const old = dstArr[idx];
+              arr[srcIdx] = old;
+              dstArr[idx] = newPid;
+              return next;
+            }
+          }
+        }
+      }
+      dstArr[idx] = newPid || null;
+      return next;
+    });
+  };
+  // players already paired into ANOTHER "next" (not-yet-started) court — still fair game to swap across
+  // courts before either one actually starts, per the organizer's request. Playing/done-match players are
+  // excluded (those games are already underway or over).
+  const nextPoolFor = mid => {
+    const ids = new Set();
+    current.forEach(c => {
+      if (c.status === "next" && c.id !== mid) [...c.teamA, ...c.teamB].forEach(id => id && ids.add(id));
+    });
+    return players.filter(p => ids.has(p.id));
   };
 
   // add/replace the rule between a and b. A given pair can only hold ONE active rule at a time (whatever
@@ -3148,8 +3182,12 @@ function App() {
       }))
     };
     setSessionHistory(prev => [snapshot, ...prev]);
+    // จบก๊วน also clears everyone's attendance back to "ไม่ได้มา" — the next session starts from a
+    // clean slate and the organizer marks people "พร้อมเล่น" again as they actually show up, instead of
+    // carrying over today's roster as still-checked-in into a brand new quan.
     setPlayers(prev => prev.map(p => ({
       ...p,
+      status: "absent",
       games: 0,
       paid: false,
       discount: 0,
@@ -3898,7 +3936,7 @@ function App() {
     }
   }, "v", APP_VERSION))), tab === "members" && /*#__PURE__*/React.createElement(MembersTab, {
     players,
-    inPlay,
+    playingIds,
     addPlayer,
     resetAllToAbsent,
     setStatus,
@@ -3946,6 +3984,7 @@ function App() {
     isSel,
     sel,
     replaceSlot,
+    nextPoolFor,
     waitQueue,
     now,
     resetGames,
@@ -4119,7 +4158,7 @@ function TabBtn({
 /* ============ MEMBERS ============ */
 function MembersTab({
   players,
-  inPlay,
+  playingIds,
   addPlayer,
   resetAllToAbsent,
   setStatus,
@@ -4616,7 +4655,7 @@ function MembersTab({
       background: "#fff",
       color: "#000"
     }
-  }, o.label)))), inPlay && inPlay.has(p.id) ? /*#__PURE__*/React.createElement("span", {
+  }, o.label)))), playingIds && playingIds.has(p.id) ? /*#__PURE__*/React.createElement("span", {
     style: {
       padding: "7px 12px",
       borderRadius: 20,
@@ -4813,6 +4852,7 @@ function SessionTab(props) {
     isSel,
     sel,
     replaceSlot,
+    nextPoolFor,
     waitQueue,
     now,
     resetGames,
@@ -4932,6 +4972,10 @@ function SessionTab(props) {
     const sA = teamScore(m.teamA),
       sB = teamScore(m.teamB);
     const badgeText = m.status === "playing" ? "🔴 กำลังเล่น" : m.status === "done" ? "✅ จบแล้ว" : "🔵 เกมถัดไป";
+    // a "next" court's swap dropdown also offers players already paired into OTHER not-yet-started
+    // courts (not just the free/waiting pool) — see nextPoolFor/replaceSlot for how the actual swap
+    // avoids duplicating anyone onto two courts at once.
+    const bench = editable ? [...waitQueue, ...nextPoolFor(m.id)] : waitQueue;
     return /*#__PURE__*/React.createElement("div", {
       key: m.id,
       style: {
@@ -4987,7 +5031,7 @@ function SessionTab(props) {
       tapSlot: tapSlot,
       isSel: isSel,
       replaceSlot: replaceSlot,
-      bench: waitQueue,
+      bench: bench,
       big: m.status === "playing"
     }), /*#__PURE__*/React.createElement(Fairness, {
       sA: sA,
