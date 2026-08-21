@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.5";
+      var CURRENT_VERSION = "1.8.6";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.5";
+const APP_VERSION = "1.8.6";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -937,51 +937,11 @@ function computeBill(players, settings) {
 //                         Revenue directly via computeBill, so counting them again here would double-count.
 //   กำไร/ขาดทุน (Profit) = Revenue - Expense
 const EXPENSE_CATEGORIES = ["ค่าคอร์ท", "ค่าลูกแบด", "รางวัล", "อาหาร/น้ำ", "ค่าเดินทาง", "อื่น ๆ"];
-// best-effort default expense breakdown, derived from what was actually CHARGED to players (settings x
-// games played) — used only as a fallback DISPLAY when a session has no explicit `expenses` list yet (an
-// old session from before this feature, or a brand-new one nobody has itemized costs for). Never persisted
-// until the organizer actually adds/edits/removes an expense — see the addHistExpense-style functions.
-function defaultExpensesFrom(payerCount, totalGames, settings, date) {
-  const s = settings || {};
-  const eCourt = Math.round((s.court || 0) * payerCount);
-  const eShuttle = Math.round((s.shuttle || 0) * totalGames);
-  const eOther = Math.round(s.other || 0);
-  const out = [];
-  if (eCourt > 0) out.push({
-    id: "auto-court",
-    category: "ค่าคอร์ท",
-    description: "",
-    amount: eCourt,
-    date: date || null,
-    sourceType: "casual",
-    auto: true
-  });
-  if (eShuttle > 0) out.push({
-    id: "auto-shuttle",
-    category: "ค่าลูกแบด",
-    description: "",
-    amount: eShuttle,
-    date: date || null,
-    sourceType: "casual",
-    auto: true
-  });
-  if (eOther > 0) out.push({
-    id: "auto-other",
-    category: "อื่น ๆ",
-    description: "",
-    amount: eOther,
-    date: date || null,
-    sourceType: "casual",
-    auto: true
-  });
-  return out;
-}
-// the effective expense list for an archived session: the explicit list if the organizer has entered one, otherwise the derived default
+// Expense is ONLY what the organizer actually records — never auto-guessed from the ค่าสนาม/ค่าลูก billing
+// rate settings (those set what's CHARGED to players, i.e. Revenue — not what the organizer actually paid
+// out). A session with no recorded expense items shows ฿0 expense until the organizer adds real ones here.
 function sessionExpenseList(s) {
-  if (s.expenses && s.expenses.length) return s.expenses;
-  const payerCount = (s.bill || []).length;
-  const totalGames = s.stats?.totalGames ?? (s.bill || []).reduce((sum, b) => sum + (b.games || 0), 0);
-  return defaultExpensesFrom(payerCount, totalGames, s.settings, s.date);
+  return s.expenses || [];
 }
 function sessionRevenue(s) {
   return (s.bill || []).reduce((sum, b) => sum + (b.total || 0), 0);
@@ -3086,11 +3046,9 @@ function App() {
   };
   const deleteSessionHistory = sessId => setSessionHistory(prev => prev.filter(s => s.id !== sessId));
 
-  // ---- Finance (v1.8.4) ----
-  // Historical per-session expenses: an archived session usually starts with NO explicit `expenses` list
-  // (it just shows sessionExpenseList()'s derived default). The first time the organizer actually adds,
-  // edits, or removes a line, we "materialize" that derived default into a real editable array first, so
-  // their one change doesn't silently wipe the other auto-derived lines they were looking at.
+  // ---- Finance (v1.8.5) ----
+  // Historical per-session expenses: an archived session starts with an empty `expenses` list — Expense is
+  // never auto-guessed from the ค่าสนาม/ค่าลูก billing-rate settings, only recorded by the organizer here.
   const materializedExpenses = s => s.expenses && s.expenses.length ? s.expenses : sessionExpenseList(s);
   const addHistExpense = (sessId, item) => {
     setSessionHistory(prev => prev.map(s => {
