@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.7";
+      var CURRENT_VERSION = "1.8.8";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.7";
+const APP_VERSION = "1.8.8";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -2717,12 +2717,14 @@ function App() {
     setSel(null);
   };
 
-  // one-tap "จบเกม" — finishes the match AND immediately pairs + starts that same court's next match
-  // (fuses endGame+nextCourt+startGame into a single atomic action) so the organizer never has to leave
-  // the court sitting in "เพิ่งจบ" and tap "เริ่มเกมถัดไป" separately just to keep the court moving. Falls
-  // back to the old finish-only behavior (leaves it in "เพิ่งจบ" for manual retry) when no next match can
-  // be built right now (e.g. not enough free players) — auto pairing mode only; manual mode still opens
-  // an empty "next" slot for the organizer to hand-pick, same as the existing เริ่มเกมถัดไป flow.
+  // one-tap "จบเกม" — finishes the match AND immediately pairs that same court's next match, landing it
+  // in "next" status (พร้อมเริ่ม / เกมถัดไป — same card as regenCourt/startGame use, editable + "เริ่มเกม"
+  // button) so the organizer never has to leave the court sitting in "เพิ่งจบ" and tap "เริ่มเกมถัดไป"
+  // separately just to see who's up next. Does NOT auto-start it as "playing" — the organizer still gets
+  // to review/swap players and press "เริ่มเกม" themselves before it actually starts (fuses endGame+nextCourt
+  // only, not startGame). Falls back to the old finish-only behavior (leaves it in "เพิ่งจบ" for manual
+  // retry) when no next match can be built right now (e.g. not enough free players) — auto pairing mode
+  // only; manual mode still opens an empty "next" slot for the organizer to hand-pick, same as before.
   const finishAndAdvance = mid => {
     const m = current.find(x => x.id === mid);
     if (!m || m.status !== "playing") return;
@@ -2784,7 +2786,7 @@ function App() {
           source: "casual",
           teamA: nm.teamA,
           teamB: nm.teamB,
-          status: "playing",
+          status: "next",
           round: seq,
           court,
           locked: false
