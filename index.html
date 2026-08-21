@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.6";
+      var CURRENT_VERSION = "1.9.7";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.6";
+const APP_VERSION = "1.9.7";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3670,6 +3670,15 @@ function App() {
     ...m,
     queued: null
   } : m));
+  // swap Team A <-> Team B inside a court's queued next match (Requirement 6: "สลับทีม" inside edit mode).
+  // Pure relabeling within the same match — no cross-match reservation to worry about, unlike setQueuedSlot.
+  const swapQueuedTeams = mid => setCurrent(prev => prev.map(m => m.id === mid && m.queued ? {
+    ...m,
+    queued: {
+      teamA: m.queued.teamB,
+      teamB: m.queued.teamA
+    }
+  } : m));
 
   // add/replace the rule between a and b. A given pair can only hold ONE active rule at a time (whatever
   // its type), so adding a new one silently replaces any existing rule between the same two people.
@@ -4579,6 +4588,7 @@ function App() {
     setQueuedSlot,
     autoQueueNext,
     clearQueuedNext,
+    swapQueuedTeams,
     queueEligiblePool,
     activeTournament,
     tournamentHistory,
@@ -5459,6 +5469,7 @@ function SessionTab(props) {
     setQueuedSlot,
     autoQueueNext,
     clearQueuedNext,
+    swapQueuedTeams,
     queueEligiblePool,
     activeTournament,
     tournamentHistory,
@@ -5551,10 +5562,13 @@ function SessionTab(props) {
     }
   }, "สนาม ", courtLabelFor(courtLabels, c));
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
-  const [queueSheetFor, setQueueSheetFor] = useState(null); // court/match id whose "เกมถัดไป" (next-match queue) sheet is open
+  const [queueEditFor, setQueueEditFor] = useState(null); // court/match id currently in inline "แก้ไข" (Edit Next Match Mode) — replaces the old modal-based queueSheetFor
   const started = current.length > 0;
   const waitMin = p => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
   const teamScore = arr => arr.reduce((s, id) => s + (id ? getP(id)?.skillIndex || 0 : 0), 0);
+  // Requirement 16: block starting a match with unfilled slots — surfaced as a disabled+dimmed button
+  // rather than a silent no-op, plus a short hint line under the action row.
+  const startReady = m => [...m.teamA, ...m.teamB].every(Boolean);
   const byCourt = (a, b) => a.court - b.court;
   const playing = current.filter(m => m.status === "playing").sort(byCourt);
   const nexts = current.filter(m => m.status === "next").sort(byCourt);
@@ -5636,76 +5650,22 @@ function SessionTab(props) {
       bench: bench,
       big: m.status === "playing",
       now: now
-    }), /*#__PURE__*/React.createElement(Fairness, {
+    }), m.status !== "playing" && /*#__PURE__*/React.createElement(Fairness, {
       sA: sA,
       sB: sB
-    }), m.status === "playing" && (
-    // compact "เกมถัดไป" prep row (Requirement 3/7) — small secondary row, never a large new card.
-    // Shown only while this court is playing; once done/next it's irrelevant (queued match promotes
-    // automatically via finishAndAdvance/nextCourt, or stays cleared).
-    m.queued ? /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 7,
-        marginTop: 8,
-        padding: "7px 9px",
-        borderRadius: 10,
-        background: T.surface2,
-        fontSize: 12
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontWeight: 800,
-        color: T.muted,
-        flex: "none"
-      }
-    }, "🔵 เกมถัดไป"), /*#__PURE__*/React.createElement("span", {
-      style: {
-        flex: 1,
-        minWidth: 0,
-        overflow: "hidden",
-        textOverflow: "ellipsis",
-        whiteSpace: "nowrap",
-        fontWeight: 700
-      }
-    }, queuedSummary(m.queued, getP)), /*#__PURE__*/React.createElement("button", {
-      onClick: () => setQueueSheetFor(m.id),
-      style: {
-        flex: "none",
-        background: "none",
-        border: "none",
-        color: T.accent,
-        fontSize: 11.5,
-        fontWeight: 800,
-        padding: "2px 4px"
-      }
-    }, "แก้ไข"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => clearQueuedNext(m.id),
-      style: {
-        flex: "none",
-        background: "none",
-        border: "none",
-        color: T.muted,
-        fontSize: 11.5,
-        fontWeight: 800,
-        padding: "2px 4px"
-      }
-    }, "ยกเลิก")) : /*#__PURE__*/React.createElement("button", {
-      onClick: () => setQueueSheetFor(m.id),
-      style: {
-        display: "block",
-        width: "100%",
-        marginTop: 8,
-        background: "none",
-        border: `1px dashed ${T.border}`,
-        borderRadius: 10,
-        padding: "6px 0",
-        color: T.muted,
-        fontSize: 11.5,
-        fontWeight: 700
-      }
-    }, "+ จัดเกมถัดไป")), /*#__PURE__*/React.createElement("div", {
+    }), m.status === "playing" && /*#__PURE__*/React.createElement(NextMatchBlock, {
+      m: m,
+      getP: getP,
+      pool: waitQueue,
+      autoQueueNext: autoQueueNext,
+      setQueuedSlot: setQueuedSlot,
+      swapQueuedTeams: swapQueuedTeams,
+      clearQueuedNext: clearQueuedNext,
+      now: now,
+      editing: queueEditFor === m.id,
+      onEdit: () => setQueueEditFor(m.id),
+      onDone: () => setQueueEditFor(null)
+    }), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 8,
@@ -5722,7 +5682,11 @@ function SessionTab(props) {
       size: 15
     }), " ", settings.pairingMode === "manual" ? "ล้างสนาม" : "จัดใหม่"), /*#__PURE__*/React.createElement("button", {
       onClick: () => startGame(m.id),
-      style: btnPrimary
+      disabled: !startReady(m),
+      style: {
+        ...btnPrimary,
+        opacity: startReady(m) ? 1 : 0.4
+      }
     }, /*#__PURE__*/React.createElement(Play, {
       size: 15
     }), " เริ่มเกม")), m.status === "playing" && /*#__PURE__*/React.createElement("button", {
@@ -5765,7 +5729,15 @@ function SessionTab(props) {
       style: btnPrimary
     }, /*#__PURE__*/React.createElement(ChevronRight, {
       size: 16
-    }), " เริ่มเกมถัดไป"))), m.status === "done" && scoreOpen === m.id && /*#__PURE__*/React.createElement(ScoreEditor, {
+    }), " เริ่มเกมถัดไป"))), m.status === "next" && !startReady(m) && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: T.accent,
+        fontWeight: 700,
+        marginTop: 6,
+        textAlign: "center"
+      }
+    }, "เลือกผู้เล่นให้ครบก่อนเริ่มเกม"), m.status === "done" && scoreOpen === m.id && /*#__PURE__*/React.createElement(ScoreEditor, {
       m: m,
       rounds: rounds,
       setScore: setScore,
@@ -6264,27 +6236,7 @@ function SessionTab(props) {
     }, /*#__PURE__*/React.createElement(Plus, {
       size: 15
     }), " จัดเกม"));
-  }), queueSheetFor && (() => {
-    const qm = current.find(x => x.id === queueSheetFor);
-    if (!qm) return null;
-    // MANUAL picking (this sheet) intentionally shows every "พร้อมเล่น" player, i.e. the same waitQueue
-    // used everywhere else in the app for "not currently seated on a live court" — this includes players
-    // already soft-reserved into some court's .queued next-match, since that reservation is meant to be
-    // organizer-editable. setQueuedSlot below does the actual dedup/move if such a player gets picked
-    // (mirrors replaceSlot's cross-court swap for live "next" courts). สุ่มอัตโนมัติ still uses the
-    // stricter queueEligiblePool() (excludes ALL reservations) so AUTO-fill never silently double-books.
-    return /*#__PURE__*/React.createElement(QueueNextSheet, {
-      court: qm,
-      courtLabel: courtLabelFor(courtLabels, qm.court),
-      getP: getP,
-      pool: waitQueue,
-      autoQueueNext: autoQueueNext,
-      setQueuedSlot: setQueuedSlot,
-      clearQueuedNext: clearQueuedNext,
-      now: now,
-      onClose: () => setQueueSheetFor(null)
-    });
-  })(), history.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }), history.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 12
     }
@@ -13164,140 +13116,186 @@ function PlayerPicker({
   }, "รอ ", Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000)), " นาที · เล่น ", b.games || 0, " เกม"))))));
 }
 
-// ===================== NEXT-MATCH QUEUE SHEET (v1.9.4) — "+ จัดเกมถัดไป" =====================
-// bottom-sheet overlay for one court's `.queued` next-match prep. Two states: empty (offer
-// สุ่มอัตโนมัติ / เลือกผู้เล่นเอง) or already-queued (reuse MatchTeams verbatim as a 4-slot editor,
-// since TeamSide/PlayerPicker are entirely self-contained and don't actually need tapSlot/isSel).
-function QueueNextSheet({
-  court,
-  courtLabel,
+// ===================== INLINE NEXT-MATCH EDITOR (v1.9.7) — replaces the old QueueNextSheet modal =====================
+// Renders directly inside a "playing" court's FullCard, right below Current Match, in the SAME card
+// (Requirement 1). Three states:
+//   1) no m.queued, not editing -> compact dashed empty state "+ จัดเกมถัดไป" (Requirement 10) — tapping
+//      it goes straight into edit mode, no modal ever opens (Requirement 5).
+//   2) m.queued exists, not editing -> compact read-only avatar/name row + Balance (or "พร้อม X/N คน" if
+//      partial, Requirement 9) + a single "แก้ไข" button (Requirement 3/6).
+//   3) editing -> the SAME MatchTeams/TeamSide/PlayerPicker slots used everywhere else become editable
+//      in place (tap a slot -> small inline PlayerPicker dropdown, never a big modal — Requirement 5),
+//      plus "สุ่มใหม่" (reuses the existing autoQueueNext fairness algorithm, Requirement 7), "สลับทีม"
+//      (Requirement 6), "ยกเลิก" and "เสร็จสิ้น". No data-layer changes here — setQueuedSlot/autoQueueNext/
+//      clearQueuedNext/swapQueuedTeams are 100% reused, so the existing PLANNED_NEXT-style cross-court
+//      reservation/dedup guarantees (Requirement 15/16) hold automatically.
+function NextMatchBlock({
+  m,
   getP,
   pool,
   autoQueueNext,
   setQueuedSlot,
+  swapQueuedTeams,
   clearQueuedNext,
   now,
-  onClose
+  editing,
+  onEdit,
+  onDone
 }) {
   const [autoFailed, setAutoFailed] = useState(false);
-  const [manual, setManual] = useState(!!court.queued); // once a queued match exists (auto or manual), always show the editor
-  const doAuto = () => {
-    const ok = autoQueueNext(court.id);
-    if (ok) setManual(true);else setAutoFailed(true);
-  };
+  const q = m.queued;
+  // mode-aware team size (fixes the old QueueNextSheet's hardcoded [null,null] singles-mode bug) — a
+  // court's queued match is always the same mode as its current match.
+  const teamSize = m.mode === "doubles" ? 2 : 1;
+  const emptyArr = () => Array(teamSize).fill(null);
   const synthM = {
-    id: court.id,
-    teamA: court.queued && court.queued.teamA || [null, null],
-    teamB: court.queued && court.queued.teamB || [null, null]
+    id: m.id,
+    teamA: q && q.teamA || emptyArr(),
+    teamB: q && q.teamB || emptyArr()
   };
-  const replaceSlotQueued = (mid, team, idx, newId) => setQueuedSlot(mid, team, idx, newId);
+  const total = teamSize * 2;
   const filled = [...synthM.teamA, ...synthM.teamB].filter(Boolean).length;
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    onClick: onClose,
+  const full = filled === total;
+  const sA = full ? synthM.teamA.reduce((s, id) => s + (getP(id)?.skillIndex || 0), 0) : 0;
+  const sB = full ? synthM.teamB.reduce((s, id) => s + (getP(id)?.skillIndex || 0), 0) : 0;
+  const replaceSlotQueued = (mid, team, idx, newId) => setQueuedSlot(mid, team, idx, newId);
+  const doAuto = () => {
+    const ok = autoQueueNext(m.id);
+    setAutoFailed(!ok);
+  };
+  if (!q && !editing) {
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: onEdit,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        width: "100%",
+        marginTop: 8,
+        background: "#f2f6ff",
+        border: `1px dashed #c7d7f5`,
+        borderRadius: 10,
+        padding: "7px 0",
+        color: "#3d63c4",
+        fontSize: 11.5,
+        fontWeight: 700
+      }
+    }, "🔵 เกมถัดไป ", /*#__PURE__*/React.createElement("span", null, "+ จัดเกมถัดไป"));
+  }
+  return /*#__PURE__*/React.createElement("div", {
     style: {
-      position: "fixed",
-      inset: 0,
-      zIndex: 70,
-      background: "rgba(0,0,0,0.4)"
-    }
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      position: "fixed",
-      left: 0,
-      right: 0,
-      bottom: 0,
-      zIndex: 71,
-      background: T.surface,
-      borderRadius: "18px 18px 0 0",
-      padding: `14px 14px calc(${manual ? 240 : 16}px + env(safe-area-inset-bottom))`,
-      maxHeight: "94vh",
-      minHeight: manual ? "60vh" : "auto",
-      overflowY: "auto"
+      marginTop: 8,
+      padding: "8px 9px 9px",
+      borderRadius: 10,
+      background: "#f2f6ff",
+      border: `1px solid #c7d7f5`
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
-      marginBottom: 10
+      marginBottom: 6
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
       fontWeight: 800,
-      fontSize: 14.5
+      fontSize: 12,
+      color: "#3d63c4"
     }
-  }, "เกมถัดไป · สนาม ", courtLabel), /*#__PURE__*/React.createElement("button", {
-    onClick: onClose,
+  }, "🔵 เกมถัดไป"), !full && /*#__PURE__*/React.createElement("span", {
+    style: {
+      marginLeft: 8,
+      fontSize: 10.5,
+      fontWeight: 700,
+      color: T.muted
+    }
+  }, "พร้อม ", filled, "/", total, " คน"), editing ? /*#__PURE__*/React.createElement("button", {
+    onClick: onDone,
     style: {
       marginLeft: "auto",
       background: "none",
       border: "none",
-      color: T.muted,
-      padding: 4
+      color: T.green,
+      fontSize: 11.5,
+      fontWeight: 800,
+      padding: "2px 4px"
     }
-  }, /*#__PURE__*/React.createElement(X, {
-    size: 18
-  }))), !manual && !court.queued ? /*#__PURE__*/React.createElement("div", {
+  }, "เสร็จสิ้น") : /*#__PURE__*/React.createElement("button", {
+    onClick: onEdit,
+    style: {
+      marginLeft: "auto",
+      background: "none",
+      border: "none",
+      color: T.accent,
+      fontSize: 11.5,
+      fontWeight: 800,
+      padding: "2px 4px"
+    }
+  }, "แก้ไข")), /*#__PURE__*/React.createElement(MatchTeams, {
+    m: synthM,
+    getP: getP,
+    editable: editing,
+    bench: pool,
+    replaceSlot: replaceSlotQueued,
+    big: false,
+    now: now
+  }), editing && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      flexDirection: "column",
-      gap: 8
+      gap: 6,
+      marginTop: 8
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: doAuto,
     style: {
-      ...btnPrimary,
-      padding: "11px 0"
+      ...btnSecondary,
+      padding: "7px 0",
+      fontSize: 11.5
     }
   }, /*#__PURE__*/React.createElement(Shuffle, {
-    size: 15
-  }), " สุ่มอัตโนมัติ"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setManual(true),
-    style: btnSecondary
-  }, "เลือกผู้เล่นเอง"), autoFailed && /*#__PURE__*/React.createElement("div", {
+    size: 13
+  }), " สุ่มใหม่"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => swapQueuedTeams(m.id),
+    disabled: !q,
     style: {
-      fontSize: 12,
+      ...btnSecondary,
+      padding: "7px 0",
+      fontSize: 11.5,
+      opacity: q ? 1 : 0.4
+    }
+  }, "⇄ สลับทีม"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      clearQueuedNext(m.id);
+      onDone();
+    },
+    disabled: !q,
+    style: {
+      ...btnSecondary,
+      padding: "7px 0",
+      fontSize: 11.5,
+      color: T.accent,
+      opacity: q ? 1 : 0.4
+    }
+  }, "ยกเลิก")), autoFailed && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
       fontWeight: 700,
       color: T.accent,
       textAlign: "center",
-      padding: "4px 0"
+      padding: "5px 0 0"
     }
-  }, "ผู้เล่นว่างไม่พอ (ต้องการอย่างน้อย 4 คน)")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(MatchTeams, {
-    m: synthM,
-    getP: getP,
-    editable: true,
-    bench: pool,
-    replaceSlot: replaceSlotQueued,
-    now: now
-  }), /*#__PURE__*/React.createElement("div", {
+  }, "ผู้เล่นว่างไม่พอ (ต้องการอย่างน้อย ", total, " คน)")), !editing && (full ? /*#__PURE__*/React.createElement(Fairness, {
+    sA: sA,
+    sB: sB
+  }) : /*#__PURE__*/React.createElement("div", {
     style: {
-      display: "flex",
-      gap: 8,
-      marginTop: 11
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: doAuto,
-    style: btnSecondary
-  }, /*#__PURE__*/React.createElement(Shuffle, {
-    size: 15
-  }), " สุ่มใหม่"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      clearQueuedNext(court.id);
-      onClose();
-    },
-    style: {
-      ...btnSecondary,
-      color: T.accent
-    }
-  }, "ยกเลิกเกมถัดไป"), /*#__PURE__*/React.createElement("button", {
-    onClick: onClose,
-    style: btnPrimary
-  }, "เสร็จสิ้น")), filled < 4 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
+      fontSize: 11,
       color: T.muted,
-      marginTop: 7
+      marginTop: 6,
+      textAlign: "center"
     }
-  }, "เลือกให้ครบ 4 คนเพื่อเริ่มเกมถัดไปได้ทันทีเมื่อจบเกมนี้"))));
+  }, "เลือกให้ครบ ", total, " คนเพื่อดูความสมดุล")));
 }
 function MiniMatch({
   m,
