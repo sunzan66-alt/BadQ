@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.12";
+      var CURRENT_VERSION = "1.9.13";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.12";
+const APP_VERSION = "1.9.13";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1484,6 +1484,273 @@ async function resizePhoto(file) {
   } catch (e) {
     return dataUrl;
   }
+}
+
+// v1.9.13: interactive "move & scale" crop step, shared by every photo-upload flow (player profile photo,
+// ก๊วน photo, QR code) — lets the organizer drag to pan and pinch/slide to zoom a fixed square frame over
+// the picked image before it's saved, instead of always auto-centering. Always exports a SQUARE image (the
+// existing Avatar component already applies its own border-radius for circular display, so no shape-specific
+// output is needed) — circleGuide only changes the on-screen preview mask, not the underlying crop math or
+// the exported result. Pure presentation/input step: does not touch how/where the result is ultimately saved
+// (each caller's onConfirm decides that, exactly as before this existed).
+function ImageCropper({
+  src,
+  circleGuide,
+  title,
+  onCancel,
+  onConfirm
+}) {
+  const FRAME = 300;
+  const MAX_ZOOM = 4;
+  const [natSize, setNatSize] = useState(null); // { w, h } once the picked image has loaded
+  const [baseScale, setBaseScale] = useState(1); // scale at which the image just covers the frame (zoom=1)
+  const [zoom, setZoom] = useState(1); // multiplier on top of baseScale, 1..MAX_ZOOM
+  const [offset, setOffset] = useState({
+    x: 0,
+    y: 0
+  }); // top-left of the displayed image, relative to the frame
+  const imgElRef = useRef(null); // the actual loaded Image object, used for the final canvas draw
+  const dragRef = useRef(null); // { sx, sy, ox, oy } while a mouse/single-touch drag is active
+  const pinchRef = useRef(null); // { startDist, startZoom } while a two-finger pinch is active
+
+  useEffect(() => {
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      const w = img.naturalWidth || 1,
+        h = img.naturalHeight || 1;
+      const bs = FRAME / Math.min(w, h);
+      setNatSize({
+        w,
+        h
+      });
+      setBaseScale(bs);
+      setZoom(1);
+      setOffset({
+        x: (FRAME - w * bs) / 2,
+        y: (FRAME - h * bs) / 2
+      });
+    };
+    img.src = src;
+    imgElRef.current = img;
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+  const scale = baseScale * zoom;
+  const dispW = natSize ? natSize.w * scale : 0;
+  const dispH = natSize ? natSize.h * scale : 0;
+  const clampOffset = (off, dw, dh) => {
+    const minX = Math.min(0, FRAME - dw),
+      minY = Math.min(0, FRAME - dh);
+    return {
+      x: Math.min(0, Math.max(minX, off.x)),
+      y: Math.min(0, Math.max(minY, off.y))
+    };
+  };
+  const setZoomClamped = z => {
+    if (!natSize) return;
+    const nz = Math.min(MAX_ZOOM, Math.max(1, z));
+    const ndw = natSize.w * baseScale * nz,
+      ndh = natSize.h * baseScale * nz;
+    setZoom(nz);
+    setOffset(o => clampOffset(o, ndw, ndh));
+  };
+  const onMouseDown = e => {
+    dragRef.current = {
+      sx: e.clientX,
+      sy: e.clientY,
+      ox: offset.x,
+      oy: offset.y
+    };
+  };
+  const onMouseMove = e => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.sx,
+      dy = e.clientY - dragRef.current.sy;
+    setOffset(clampOffset({
+      x: dragRef.current.ox + dx,
+      y: dragRef.current.oy + dy
+    }, dispW, dispH));
+  };
+  const onMouseUp = () => {
+    dragRef.current = null;
+  };
+  const touchDist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const onTouchStart = e => {
+    if (e.touches.length === 1) {
+      dragRef.current = {
+        sx: e.touches[0].clientX,
+        sy: e.touches[0].clientY,
+        ox: offset.x,
+        oy: offset.y
+      };
+      pinchRef.current = null;
+    } else if (e.touches.length === 2) {
+      pinchRef.current = {
+        startDist: touchDist(e.touches),
+        startZoom: zoom
+      };
+      dragRef.current = null;
+    }
+  };
+  const onTouchMove = e => {
+    e.preventDefault();
+    if (e.touches.length === 1 && dragRef.current) {
+      const dx = e.touches[0].clientX - dragRef.current.sx,
+        dy = e.touches[0].clientY - dragRef.current.sy;
+      setOffset(clampOffset({
+        x: dragRef.current.ox + dx,
+        y: dragRef.current.oy + dy
+      }, dispW, dispH));
+    } else if (e.touches.length === 2 && pinchRef.current) {
+      setZoomClamped(pinchRef.current.startZoom * (touchDist(e.touches) / pinchRef.current.startDist));
+    }
+  };
+  const onTouchEnd = e => {
+    if (e.touches.length === 0) {
+      dragRef.current = null;
+      pinchRef.current = null;
+    }
+  };
+  const confirm = () => {
+    if (!natSize || !imgElRef.current) return;
+    const OUT = 640;
+    const sx = -offset.x / scale,
+      sy = -offset.y / scale,
+      sw = FRAME / scale,
+      sh = FRAME / scale;
+    const cv = document.createElement("canvas");
+    cv.width = OUT;
+    cv.height = OUT;
+    cv.getContext("2d").drawImage(imgElRef.current, sx, sy, sw, sh, 0, 0, OUT, OUT);
+    onConfirm(cv.toDataURL("image/jpeg", 0.88));
+  };
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      inset: 0,
+      background: "#000",
+      zIndex: 90,
+      display: "flex",
+      flexDirection: "column"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      padding: "14px 16px",
+      paddingTop: "calc(14px + env(safe-area-inset-top))"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onCancel,
+    style: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      background: "rgba(255,255,255,0.15)",
+      border: "none",
+      color: "#fff",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement(X, {
+    size: 18
+  })), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#fff",
+      fontSize: 14,
+      fontWeight: 700
+    }
+  }, title || "จัดตำแหน่งรูป"), /*#__PURE__*/React.createElement("button", {
+    onClick: confirm,
+    style: {
+      width: 34,
+      height: 34,
+      borderRadius: 17,
+      background: T.accent,
+      border: "none",
+      color: "#fff",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement(Check, {
+    size: 18
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      minHeight: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    onMouseDown: onMouseDown,
+    onMouseMove: onMouseMove,
+    onMouseUp: onMouseUp,
+    onMouseLeave: onMouseUp,
+    onTouchStart: onTouchStart,
+    onTouchMove: onTouchMove,
+    onTouchEnd: onTouchEnd,
+    style: {
+      position: "relative",
+      width: FRAME,
+      height: FRAME,
+      overflow: "hidden",
+      borderRadius: circleGuide ? "50%" : 14,
+      touchAction: "none",
+      background: "#151515",
+      cursor: "grab",
+      boxShadow: "0 0 0 2000px rgba(0,0,0,0.55)"
+    }
+  }, natSize && /*#__PURE__*/React.createElement("img", {
+    src: src,
+    draggable: false,
+    alt: "",
+    style: {
+      position: "absolute",
+      left: offset.x,
+      top: offset.y,
+      width: dispW,
+      height: dispH,
+      maxWidth: "none",
+      userSelect: "none",
+      pointerEvents: "none"
+    }
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: "10px 24px calc(20px + env(safe-area-inset-bottom))",
+      display: "flex",
+      alignItems: "center",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, "🔍"), /*#__PURE__*/React.createElement("input", {
+    type: "range",
+    min: 1,
+    max: MAX_ZOOM,
+    step: 0.01,
+    value: zoom,
+    onChange: e => setZoomClamped(Number(e.target.value)),
+    style: {
+      flex: 1
+    },
+    disabled: !natSize
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      color: "rgba(255,255,255,0.55)",
+      fontSize: 11,
+      paddingBottom: 10
+    }
+  }, "ลากเพื่อเลื่อน · บีบนิ้ว/เลื่อนแถบเพื่อซูม"));
 }
 
 // fresh defaults for `settings` — pulled out into a function (instead of an inline useState() object
@@ -2712,7 +2979,11 @@ function App() {
   const photoTarget = useRef(null);
   const sessionPhotoFileRef = useRef(); // dedicated file input for the current ก๊วน's own photo (separate from per-player photos)
   const histPhotoTarget = useRef(null); // sessionHistory id currently being (re)photographed via HistoricalDetail
-
+  // v1.9.13: interactive crop/position step before ANY photo (player profile, ก๊วน photo, QR) is actually
+  // saved — { src (raw picked image), circleGuide, title, onDone(croppedDataUrl) } | null. The file input's
+  // onChange now only reads the raw file and opens this; the actual state write happens in onDone once the
+  // user confirms the crop, so no existing save logic/shape changes — only WHEN the save happens moves later.
+  const [cropJob, setCropJob] = useState(null);
   useEffect(() => {
     (async () => {
       try {
@@ -3000,14 +3271,20 @@ function App() {
   };
   const onPhotoFile = async e => {
     const f = e.target.files?.[0];
-    if (!f) return;
-    const data = await resizePhoto(f);
-    const id = photoTarget.current;
-    if (data) setPlayers(prev => prev.map(p => p.id === id ? {
-      ...p,
-      photo: data
-    } : p));
     e.target.value = "";
+    if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null);
+    if (!raw) return;
+    const id = photoTarget.current;
+    setCropJob({
+      src: raw,
+      circleGuide: true,
+      title: "จัดตำแหน่งรูปโปรไฟล์",
+      onDone: data => setPlayers(prev => prev.map(p => p.id === id ? {
+        ...p,
+        photo: data
+      } : p))
+    });
   };
   // ก๊วน (session) photo — shown on the History list/detail instead of the default 🏸 icon when set.
   // Shared file input: histPhotoTarget=null -> photo goes on the CURRENT live session; a sessionHistory
@@ -3022,18 +3299,25 @@ function App() {
   };
   const onSessionPhotoFile = async e => {
     const f = e.target.files?.[0];
-    if (!f) return;
-    const data = await resizePhoto(f);
     e.target.value = "";
-    if (!data) return;
+    if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null);
+    if (!raw) return;
     const target = histPhotoTarget.current;
-    if (target) setSessionHistory(prev => prev.map(s => s.id === target ? {
-      ...s,
-      photo: data
-    } : s));else setSession(s => ({
-      ...s,
-      photo: data
-    }));
+    setCropJob({
+      src: raw,
+      circleGuide: true,
+      title: "จัดตำแหน่งรูปก๊วน",
+      onDone: data => {
+        if (target) setSessionHistory(prev => prev.map(s => s.id === target ? {
+          ...s,
+          photo: data
+        } : s));else setSession(s => ({
+          ...s,
+          photo: data
+        }));
+      }
+    });
   };
   const clearSessionPhoto = () => setSession(s => ({
     ...s,
@@ -3522,13 +3806,19 @@ function App() {
   } : m));
   const onQRFile = async e => {
     const f = e.target.files?.[0];
-    if (!f) return;
-    const data = await readImageFull(f);
-    if (data) setSettings(s => ({
-      ...s,
-      qr: data
-    }));
     e.target.value = "";
+    if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null);
+    if (!raw) return;
+    setCropJob({
+      src: raw,
+      circleGuide: false,
+      title: "จัดตำแหน่งคิวอาร์โค้ด",
+      onDone: data => setSettings(s => ({
+        ...s,
+        qr: data
+      }))
+    });
   };
   const tapSlot = (mid, team, idx, pid) => {
     if (!sel) {
@@ -4493,6 +4783,15 @@ function App() {
     style: {
       display: "none"
     }
+  }), cropJob && /*#__PURE__*/React.createElement(ImageCropper, {
+    src: cropJob.src,
+    circleGuide: cropJob.circleGuide,
+    title: cropJob.title,
+    onCancel: () => setCropJob(null),
+    onConfirm: data => {
+      cropJob.onDone(data);
+      setCropJob(null);
+    }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       maxWidth: isWide ? 860 : 520,
@@ -4783,14 +5082,17 @@ function MembersTab({
   const readyCount = players.filter(p => p.status === "ready").length;
   // v1.9.11: brought the photo-at-creation control back into Quick Add (per explicit request) — lets the
   // organizer snap/attach a photo right when adding a new member, instead of only after via tap-to-edit.
+  // v1.9.13: picking a file now opens the same crop/position step used everywhere else, instead of an
+  // auto-centered crop — see cropJob below.
   const [draftPhoto, setDraftPhoto] = useState(null);
   const newPlayerFileRef = useRef();
+  const [cropJob, setCropJob] = useState(null); // raw picked-image src awaiting crop, or null
   const onDraftPhotoFile = async e => {
     const f = e.target.files?.[0];
-    if (!f) return;
-    const data = await resizePhoto(f);
-    if (data) setDraftPhoto(data);
     e.target.value = "";
+    if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null);
+    if (raw) setCropJob(raw);
   };
   const submit = () => {
     addPlayer(name, skillIndex, draftPhoto);
@@ -4867,6 +5169,15 @@ function MembersTab({
     changeLevelPreset: changeLevelPreset,
     setCustomLevels: setCustomLevels,
     onClose: () => setLevelSheetOpen(false)
+  }), cropJob && /*#__PURE__*/React.createElement(ImageCropper, {
+    src: cropJob,
+    circleGuide: true,
+    title: "จัดตำแหน่งรูปโปรไฟล์",
+    onCancel: () => setCropJob(null),
+    onConfirm: data => {
+      setDraftPhoto(data);
+      setCropJob(null);
+    }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
