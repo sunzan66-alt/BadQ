@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.8.4";
+      var CURRENT_VERSION = "1.8.5";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.8.4";
+const APP_VERSION = "1.8.5";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -7606,7 +7606,7 @@ function FinanceSettingsSheet({
   }, /*#__PURE__*/React.createElement(Wallet, {
     size: 15,
     color: T.muted
-  }), " \uD83D\uDCB3 \u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E01\u0E4A\u0E27\u0E19", /*#__PURE__*/React.createElement(ChevronDown, {
+  }), " \uD83D\uDCB3 \u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19 (\u0E40\u0E23\u0E35\u0E22\u0E01\u0E40\u0E01\u0E47\u0E1A\u0E08\u0E32\u0E01\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19)", /*#__PURE__*/React.createElement(ChevronDown, {
     size: 17,
     color: T.muted,
     style: {
@@ -7623,7 +7623,7 @@ function FinanceSettingsSheet({
       padding: 14,
       marginBottom: 8
     }
-  }, /*#__PURE__*/React.createElement(Label, null, "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(Label, null, "\u0E2D\u0E31\u0E15\u0E23\u0E32\u0E40\u0E23\u0E35\u0E22\u0E01\u0E40\u0E01\u0E47\u0E1A\u0E08\u0E32\u0E01\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 10,
@@ -7648,7 +7648,7 @@ function FinanceSettingsSheet({
       marginBottom: 16
     }
   }, /*#__PURE__*/React.createElement(NumField, {
-    label: "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22\u0E2D\u0E37\u0E48\u0E19 \u0E46 \u0E23\u0E27\u0E21 (\u0E2B\u0E32\u0E23\u0E40\u0E17\u0E48\u0E32\u0E01\u0E31\u0E19) (\u0E3F)",
+    label: "\u0E2D\u0E37\u0E48\u0E19 \u0E46 \u0E17\u0E35\u0E48\u0E40\u0E23\u0E35\u0E22\u0E01\u0E40\u0E01\u0E47\u0E1A\u0E23\u0E27\u0E21 (\u0E2B\u0E32\u0E23\u0E40\u0E17\u0E48\u0E32\u0E01\u0E31\u0E19) (\u0E3F)",
     value: settings.other || 0,
     onChange: v => setSettings(s => ({
       ...s,
@@ -10377,7 +10377,7 @@ function PaymentTab({
       fontWeight: 800,
       marginBottom: 8
     }
-  }, "\u0E04\u0E48\u0E32\u0E43\u0E0A\u0E49\u0E08\u0E48\u0E32\u0E22"), /*#__PURE__*/React.createElement(BillRow, {
+  }, "\u0E23\u0E32\u0E22\u0E25\u0E30\u0E40\u0E2D\u0E35\u0E22\u0E14\u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19"), /*#__PURE__*/React.createElement(BillRow, {
     label: "\u0E04\u0E48\u0E32\u0E2A\u0E19\u0E32\u0E21",
     v: detailBill.eCourt
   }), /*#__PURE__*/React.createElement(BillRow, {
