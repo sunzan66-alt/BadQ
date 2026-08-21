@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.11";
+      var CURRENT_VERSION = "1.9.12";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.11";
+const APP_VERSION = "1.9.12";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -5229,8 +5229,10 @@ function LevelSettingsSheet({
   setCustomLevels,
   onClose
 }) {
-  const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
-  const levelOptions = activeLevelOptions(settings);
+  // v1.9.12 fix: LevelPresetEditor already renders its own "ดู/ซ่อนคำอธิบายแต่ละระดับ" toggle + the same
+  // per-skill-index (1-11) list — the sheet used to ALSO render that list again unconditionally below it,
+  // showing the exact same descriptions twice. Removed the duplicate block; LevelPresetEditor's own toggle
+  // is the single source for it now.
   return /*#__PURE__*/React.createElement(Overlay, {
     onClose: onClose
   }, /*#__PURE__*/React.createElement("div", {
@@ -5249,46 +5251,7 @@ function LevelSettingsSheet({
     settings: settings,
     changeLevelPreset: changeLevelPreset,
     setCustomLevels: setCustomLevels
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: T.muted,
-      lineHeight: 1.6,
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      borderRadius: 11,
-      padding: "10px 12px",
-      marginTop: 14
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontWeight: 800,
-      color: T.text,
-      marginBottom: 2
-    }
-  }, "ระบบที่ใช้อยู่: ", currentPreset.name), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 10
-    }
-  }, "ลำดับระดับ: ", levelOptions.map(o => o.label).join(" → ")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontWeight: 800,
-      color: T.text,
-      marginBottom: 4
-    }
-  }, "คำอธิบายแต่ละระดับ (Skill Index 1–11 ใช้ตัดสินการจับคู่ภายใน แสดงชื่อตามระบบที่เลือก)"), Array.from({
-    length: 11
-  }, (_, i) => i + 1).map(si => /*#__PURE__*/React.createElement("div", {
-    key: si,
-    style: {
-      marginBottom: 2
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontWeight: 800,
-      color: levelColor(si)
-    }
-  }, levelOptions.find(o => o.skillIndex === si)?.label || `Skill ${si}`), " — ", SKILL_DESC[si]))));
+  }));
 }
 function Avatar({
   p,
