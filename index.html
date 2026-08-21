@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.5";
+      var CURRENT_VERSION = "1.9.6";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.5";
+const APP_VERSION = "1.9.6";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1135,6 +1135,169 @@ function periodRange(period, custom) {
 }
 function inPeriod(dateStr, range) {
   return !!dateStr && dateStr >= range.from && dateStr <= range.to;
+}
+function lastDayOfMonth(ym) {
+  const [y, m] = ym.split("-").map(Number);
+  return new Date(y, m, 0).getDate();
+}
+function todayYm() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// ===================== FINANCE PERIOD AGGREGATION (v1.9.6) =====================
+// Single financial calculation source for the whole Finance page — รายวัน/รายเดือน/ภาพรวม all read through
+// these instead of each computing its own totals, per the redesign's IMPLEMENTATION PRINCIPLE. Every function
+// here reuses the EXISTING sessionRevenue/sessionExpenseTotal/etc — no parallel accounting, no duplicated data.
+function computeFinanceForRange(range, sessionHistory, generalExpenses, otherIncome) {
+  const sessionsInRange = (sessionHistory || []).filter(s => inPeriod(s.date, range)).sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
+  const genExpInRange = (generalExpenses || []).filter(e => inPeriod(e.date, range));
+  const otherIncInRange = (otherIncome || []).filter(e => inPeriod(e.date, range));
+  const sessionRevenueTotal = sessionsInRange.reduce((sum, s) => sum + sessionRevenue(s), 0);
+  const sessionCollectedTotal = sessionsInRange.reduce((sum, s) => sum + sessionCollected(s), 0);
+  const sessionExpenseSum = sessionsInRange.reduce((sum, s) => sum + sessionExpenseTotal(s), 0);
+  const otherIncomeTotal = otherIncInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const genExpenseTotal = genExpInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  const revenue = sessionRevenueTotal + otherIncomeTotal; // รายได้ = ยอดเรียกเก็บ + รายได้อื่น
+  const collected = sessionCollectedTotal + otherIncomeTotal;
+  const expense = sessionExpenseSum + genExpenseTotal;
+  const profit = revenue - expense; // กำไร/ขาดทุน = รายได้ - ค่าใช้จ่าย เสมอ (ไม่ใช่ รับแล้ว - ค่าใช้จ่าย)
+  const catTotals = {};
+  sessionsInRange.forEach(s => sessionExpenseList(s).forEach(e => {
+    catTotals[e.category] = (catTotals[e.category] || 0) + (Number(e.amount) || 0);
+  }));
+  genExpInRange.forEach(e => {
+    catTotals[e.category] = (catTotals[e.category] || 0) + (Number(e.amount) || 0);
+  });
+  return {
+    range,
+    sessionsInRange,
+    genExpInRange,
+    otherIncInRange,
+    sessionRevenueTotal,
+    sessionCollectedTotal,
+    otherIncomeTotal,
+    genExpenseTotal,
+    revenue,
+    collected,
+    expense,
+    profit,
+    catTotals
+  };
+}
+function getFinanceForDate(dateStr, sessionHistory, generalExpenses, otherIncome) {
+  return computeFinanceForRange({
+    from: dateStr,
+    to: dateStr
+  }, sessionHistory, generalExpenses, otherIncome);
+}
+function getFinanceForMonth(ym, sessionHistory, generalExpenses, otherIncome) {
+  return computeFinanceForRange({
+    from: `${ym}-01`,
+    to: `${ym}-${String(lastDayOfMonth(ym)).padStart(2, "0")}`
+  }, sessionHistory, generalExpenses, otherIncome);
+}
+function getFinanceForYear(year, sessionHistory, generalExpenses, otherIncome) {
+  return computeFinanceForRange({
+    from: `${year}-01-01`,
+    to: `${year}-12-31`
+  }, sessionHistory, generalExpenses, otherIncome);
+}
+function getFinanceAllTime(sessionHistory, generalExpenses, otherIncome) {
+  return computeFinanceForRange({
+    from: "0000-01-01",
+    to: "9999-12-31"
+  }, sessionHistory, generalExpenses, otherIncome);
+}
+// every "YYYY-MM-DD" with ANY financial activity — a ก๊วน session OR a standalone general-expense/other-income
+// entry. A standalone expense with no group still needs to be reachable in รายวัน (Requirement 16), so this is
+// NOT just sessionHistory's dates.
+function activeDateSet(sessionHistory, generalExpenses, otherIncome) {
+  const set = new Set();
+  (sessionHistory || []).forEach(s => {
+    if (s.date) set.add(s.date);
+  });
+  (generalExpenses || []).forEach(e => {
+    if (e.date) set.add(e.date);
+  });
+  (otherIncome || []).forEach(e => {
+    if (e.date) set.add(e.date);
+  });
+  return set;
+}
+function getActiveDates(ym, sessionHistory, generalExpenses, otherIncome) {
+  const set = activeDateSet(sessionHistory, generalExpenses, otherIncome);
+  return [...set].filter(d => d.slice(0, 7) === ym).sort().reverse(); // newest -> oldest
+}
+// every "YYYY-MM" with activity, across ALL years, newest first — the single list that powers both รายวัน's
+// and รายเดือน's month-nav arrows, so "previous" can skip straight over an empty month (or empty year).
+function getActiveMonths(sessionHistory, generalExpenses, otherIncome) {
+  const set = activeDateSet(sessionHistory, generalExpenses, otherIncome);
+  const months = new Set([...set].map(d => d.slice(0, 7)));
+  return [...months].sort().reverse();
+}
+function getActiveYears(sessionHistory, generalExpenses, otherIncome) {
+  const months = getActiveMonths(sessionHistory, generalExpenses, otherIncome);
+  const years = new Set(months.map(m => m.slice(0, 4)));
+  return [...years].sort().reverse();
+}
+// nearest active month strictly before ("prev") or after ("next") ym, from a pre-sorted-descending list —
+// works whether or not `ym` itself has data, so month-nav never gets stuck on an empty "current month".
+function adjacentActiveMonth(ym, dir, months) {
+  if (dir === "prev") {
+    const hit = months.find(m => m < ym);
+    return hit || null;
+  }
+  const greater = months.filter(m => m > ym);
+  return greater.length ? greater[greater.length - 1] : null;
+}
+// per-day breakdown for one month — powers รายเดือน's "ผลประกอบการรายวัน" drill-down list
+function financeByDay(ym, sessionHistory, generalExpenses, otherIncome) {
+  return getActiveDates(ym, sessionHistory, generalExpenses, otherIncome).map(d => {
+    const f = getFinanceForDate(d, sessionHistory, generalExpenses, otherIncome);
+    return {
+      date: d,
+      sessionCount: f.sessionsInRange.length,
+      revenue: f.revenue,
+      expense: f.expense,
+      profit: f.profit
+    };
+  });
+}
+// per-month breakdown for one year (or "all" for lifetime) — powers ภาพรวม's "ผลประกอบการรายเดือน" list
+function financeByMonthForYear(year, sessionHistory, generalExpenses, otherIncome) {
+  const months = getActiveMonths(sessionHistory, generalExpenses, otherIncome).filter(m => year === "all" || m.slice(0, 4) === String(year));
+  return months.map(ym => {
+    const f = getFinanceForMonth(ym, sessionHistory, generalExpenses, otherIncome);
+    return {
+      ym,
+      sessionCount: f.sessionsInRange.length,
+      revenue: f.revenue,
+      expense: f.expense,
+      profit: f.profit
+    };
+  });
+}
+function fmtThaiMonthFull(ym) {
+  if (!ym) return "-";
+  const MO = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
+  const [y, m] = ym.split("-").map(Number);
+  if (!y || !m) return ym;
+  return `${MO[m - 1]} ${y + 543}`;
+}
+function fmtThaiDateFull(iso) {
+  if (!iso) return "-";
+  const MO = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"];
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d.getTime())) return iso;
+  return `${d.getDate()} ${MO[d.getMonth()]} ${d.getFullYear() + 543}`;
+}
+function fmtThaiMonthDay(iso) {
+  if (!iso) return "-";
+  const MO = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+  const d = new Date(iso + "T00:00:00");
+  if (isNaN(d.getTime())) return iso;
+  return `${d.getDate()} ${MO[d.getMonth()]}`;
 }
 
 // ===================== DISCOUNT CREDITS (v1.9.1) =====================
@@ -10084,16 +10247,6 @@ function HistoricalDetail({
 }
 
 /* ============ FINANCE (v1.8.4) — dashboard scoped to sessionHistory + general income/expense ============ */
-const FINANCE_PERIODS = [["today", "วันนี้"], ["month", "เดือนนี้"], ["lastMonth", "เดือนก่อน"], ["year", "ปีนี้"], ["all", "ทั้งหมด"], ["custom", "เลือกวัน"]];
-function lastDayOfMonth(ym) {
-  const [y, m] = ym.split("-").map(Number);
-  return new Date(y, m, 0).getDate();
-}
-function todayYm() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-
 // drill-down detail for one archived session's finances only (revenue/collected/receivable + editable
 // expenses + profit) — a narrower view than HistoricalDetail (which also shows matches/player photos/etc.)
 function SessionFinancialDetail({
@@ -10187,6 +10340,11 @@ function SessionFinancialDetail({
     }
   }, formatCurrency(Math.abs(profit))))));
 }
+
+// ===================== FINANCE TAB (v1.9.6) — 3-level drill-down redesign =====================
+// ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
+// All figures come from the computeFinanceForRange family above — this component only picks a period and
+// renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
 function FinanceTab({
   sessionHistory,
   session,
@@ -10205,85 +10363,83 @@ function FinanceTab({
   applyDiscountCredits,
   cancelDiscountCredit
 }) {
-  const [period, setPeriod] = useState("month");
+  const [mode, setMode] = useState("day"); // "day" | "month" | "overview"
   const [openId, setOpenId] = useState(null); // sessionHistory id opened in SessionFinancialDetail
-  const [discountSheetOpen, setDiscountSheetOpen] = useState(false); // ส่วนลดคงเหลือ detail sheet (v1.9.1)
-  // เลือกวัน (v1.9.3): pick any month, drill into a single day — only days with actual sessionHistory show up.
-  const [monthPick, setMonthPick] = useState(todayYm());
-  const [dayPick, setDayPick] = useState(null); // "YYYY-MM-DD" — null means "whole month" while period === "custom"
-  const range = period === "custom" ? dayPick ? {
-    from: dayPick,
-    to: dayPick
-  } : {
-    from: `${monthPick}-01`,
-    to: `${monthPick}-${String(lastDayOfMonth(monthPick)).padStart(2, "0")}`
-  } : periodRange(period);
-  // days within monthPick that actually have an archived ก๊วน — the day-chip row only ever shows these
-  const daysWithHistory = useMemo(() => {
-    const set = new Set((sessionHistory || []).filter(s => (s.date || "").slice(0, 7) === monthPick).map(s => s.date));
-    return [...set].sort();
-  }, [sessionHistory, monthPick]);
-  // "ส่วนลดคงเหลือ" summary — ONLY status:"available" credits count; ยอดรวม/จำนวนคน derived from the same set
-  // (does NOT respect the period filter above — a discount credit's availability isn't a date-ranged fact).
+  const [discountSheetOpen, setDiscountSheetOpen] = useState(false);
+  const [pickerOpen, setPickerOpen] = useState(null); // "day-month" | "month-month" | "year" | null
+
+  const allMonths = useMemo(() => getActiveMonths(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
+  const allYears = useMemo(() => getActiveYears(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
+  const defaultYm = allMonths[0] || todayYm();
+  const [dayYm, setDayYm] = useState(defaultYm); // month currently shown by รายวัน's date-chip row
+  const [selectedDate, setSelectedDate] = useState(null); // explicit pick within dayYm; auto-falls back to newest below
+  const [monthYm, setMonthYm] = useState(defaultYm); // month currently shown by รายเดือน
+  const [year, setYear] = useState(allYears[0] || "all"); // "YYYY" or "all" — ภาพรวม's selected period
+
+  const datesInDayYm = useMemo(() => getActiveDates(dayYm, sessionHistory, generalExpenses, otherIncome), [dayYm, sessionHistory, generalExpenses, otherIncome]);
+  const effectiveDate = datesInDayYm.includes(selectedDate) ? selectedDate : datesInDayYm[0] || null;
+
+  // drill-down: รายเดือน's daily-performance row -> รายวัน with that exact date selected (Requirement 8/11)
+  const goDay = dateStr => {
+    setMode("day");
+    setDayYm(dateStr.slice(0, 7));
+    setSelectedDate(dateStr);
+  };
+  // drill-down: ภาพรวม's monthly-performance row -> รายเดือน with that exact month selected (Requirement 10/11)
+  const goMonth = ym => {
+    setMode("month");
+    setMonthYm(ym);
+  };
+
+  // ส่วนลดคงเหลือ (Requirement 12) — an outstanding future credit is NOT a period expense, so this summary
+  // deliberately ignores mode/dayYm/monthYm/year entirely; it only ever reflects live status:"available" credits.
   const availCredits = (discountCredits || []).filter(c => c.status === "available");
   const availCreditTotal = availCredits.reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const availCreditPeople = new Set(availCredits.map(c => c.playerId || c.playerNameSnapshot)).size;
-  const sessionsInRange = useMemo(() => (sessionHistory || []).filter(s => inPeriod(s.date, range)).sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0)), [sessionHistory, range.from, range.to]);
-  const genExpInRange = (generalExpenses || []).filter(e => inPeriod(e.date, range));
-  const otherIncInRange = (otherIncome || []).filter(e => inPeriod(e.date, range));
-  const sessionRevenueTotal = sessionsInRange.reduce((sum, s) => sum + sessionRevenue(s), 0);
-  const sessionCollectedTotal = sessionsInRange.reduce((sum, s) => sum + sessionCollected(s), 0);
-  const sessionExpenseSum = sessionsInRange.reduce((sum, s) => sum + sessionExpenseTotal(s), 0);
-  const otherIncomeTotal = otherIncInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-  const genExpenseTotal = genExpInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-  const revenue = sessionRevenueTotal + otherIncomeTotal; // รายได้ = ยอดเรียกเก็บ + รายได้อื่น
-  const collected = sessionCollectedTotal + otherIncomeTotal; // รายได้อื่นถือว่าได้รับจริงทันที
-  const expense = sessionExpenseSum + genExpenseTotal;
-  const profit = revenue - expense; // กำไร/ขาดทุน = รายได้ - ค่าใช้จ่าย เสมอ (ไม่ใช่ รับแล้ว - ค่าใช้จ่าย)
-
-  const catTotals = useMemo(() => {
-    const m = {};
-    sessionsInRange.forEach(s => sessionExpenseList(s).forEach(e => {
-      m[e.category] = (m[e.category] || 0) + (Number(e.amount) || 0);
-    }));
-    genExpInRange.forEach(e => {
-      m[e.category] = (m[e.category] || 0) + (Number(e.amount) || 0);
-    });
-    return m;
-  }, [sessionsInRange, genExpInRange]);
-  const txns = useMemo(() => {
-    const list = [...sessionsInRange.map(s => ({
-      id: "rev-" + s.id,
-      date: s.date,
-      label: `ค่าก๊วน — ${s.name || "ก๊วน"}`,
-      amount: sessionRevenue(s),
-      sign: 1,
-      ts: s.endedAt || 0
-    })), ...sessionsInRange.flatMap(s => sessionExpenseList(s).map(e => ({
-      id: "exp-" + s.id + "-" + e.id,
-      date: e.date || s.date,
-      label: `${e.category} — ${s.name || "ก๊วน"}`,
-      amount: e.amount,
-      sign: -1,
-      ts: s.endedAt || 0
-    }))), ...genExpInRange.map(e => ({
-      id: "genexp-" + e.id,
-      date: e.date,
-      label: `${e.category}${e.description ? " — " + e.description : ""}`,
-      amount: e.amount,
-      sign: -1,
-      ts: 0
-    })), ...otherIncInRange.map(e => ({
-      id: "inc-" + e.id,
-      date: e.date,
-      label: e.description || "รายได้อื่น",
-      amount: e.amount,
-      sign: 1,
-      ts: 0
-    }))];
-    return list.sort((a, b) => (b.date || "").localeCompare(a.date || "") || b.ts - a.ts).slice(0, 30);
-  }, [sessionsInRange, genExpInRange, otherIncInRange]);
+  const discountRow = availCredits.length > 0 ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDiscountSheetOpen(true),
+    style: {
+      width: "100%",
+      textAlign: "left",
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      padding: "10px 12px",
+      borderRadius: 12,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 15
+    }
+  }, "🎁"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      flex: 1,
+      fontSize: 13,
+      fontWeight: 700
+    }
+  }, "ส่วนลดคงเหลือ — ", availCreditPeople, " คน · ", formatCurrency(availCreditTotal)), /*#__PURE__*/React.createElement(ChevronRight, {
+    size: 16,
+    color: T.muted
+  })) : (discountCredits || []).length > 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      padding: "0 2px 14px"
+    }
+  }, "ไม่มีส่วนลดคงเหลือ") : null;
   const openSession = openId ? (sessionHistory || []).find(s => s.id === openId) : null;
+  const noDataAtAll = allMonths.length === 0;
+  const emptyBlock = msg => /*#__PURE__*/React.createElement("div", {
+    style: {
+      color: T.muted,
+      fontSize: 13,
+      textAlign: "center",
+      padding: "30px 0"
+    }
+  }, msg);
   return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement("span", {
       style: {
@@ -10294,150 +10450,414 @@ function FinanceTab({
     sub: "รายรับ-รายจ่ายของก๊วน"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 12
+      marginBottom: 16
     }
   }, /*#__PURE__*/React.createElement(Seg, {
-    options: FINANCE_PERIODS,
-    value: period,
-    onChange: p => {
-      setPeriod(p);
-      if (p === "custom") setDayPick(null);
-    }
-  })), period === "custom" && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 14
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    type: "month",
-    value: monthPick,
-    onChange: e => {
-      if (e.target.value) {
-        setMonthPick(e.target.value);
-        setDayPick(null);
-      }
+    options: [["day", "รายวัน"], ["month", "รายเดือน"], ["overview", "ภาพรวม"]],
+    value: mode,
+    onChange: setMode
+  })), mode === "day" && (noDataAtAll ? emptyBlock("ยังไม่มีข้อมูลการเงิน") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(MonthNav, {
+    ym: dayYm,
+    months: allMonths,
+    onChange: ym => {
+      setDayYm(ym);
+      setSelectedDate(null);
     },
+    onOpenPicker: () => setPickerOpen("day-month")
+  }), datesInDayYm.length === 0 ? emptyBlock("ไม่มีรายการในเดือนนี้") : (() => {
+    const f = getFinanceForDate(effectiveDate, sessionHistory, generalExpenses, otherIncome);
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(DayChipRow, {
+      dates: datesInDayYm,
+      selected: effectiveDate,
+      onSelect: setSelectedDate
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        fontWeight: 800,
+        color: T.muted,
+        marginBottom: 8
+      }
+    }, fmtThaiDateFull(effectiveDate)), /*#__PURE__*/React.createElement(FinanceSummaryCard, {
+      revenue: f.revenue,
+      expense: f.expense,
+      profit: f.profit
+    }), /*#__PURE__*/React.createElement(FinancePL, {
+      sessionRevenueTotal: f.sessionRevenueTotal,
+      otherIncomeTotal: f.otherIncomeTotal,
+      catTotals: f.catTotals,
+      expense: f.expense,
+      profit: f.profit
+    }), discountRow, /*#__PURE__*/React.createElement(FinanceGroupsList, {
+      title: "ก๊วนในวันนี้",
+      sessions: f.sessionsInRange,
+      onOpen: setOpenId
+    }), /*#__PURE__*/React.createElement(SectionHead, {
+      title: "ค่าใช้จ่ายทั่วไป",
+      sub: "ไม่ผูกกับก๊วน"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 18
+      }
+    }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+      items: f.genExpInRange,
+      categories: EXPENSE_CATEGORIES,
+      onAdd: addGeneralExpense,
+      onUpdate: updateGeneralExpense,
+      onRemove: removeGeneralExpense
+    })), /*#__PURE__*/React.createElement(SectionHead, {
+      title: "รายได้อื่น",
+      sub: "สปอนเซอร์ / รายได้นอกก๊วน"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+      items: f.otherIncInRange,
+      onAdd: addOtherIncome,
+      onUpdate: updateOtherIncome,
+      onRemove: removeOtherIncome
+    })));
+  })())), mode === "month" && (noDataAtAll ? emptyBlock("ยังไม่มีข้อมูลการเงิน") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(MonthNav, {
+    ym: monthYm,
+    months: allMonths,
+    onChange: setMonthYm,
+    onOpenPicker: () => setPickerOpen("month-month")
+  }), (() => {
+    const f = getFinanceForMonth(monthYm, sessionHistory, generalExpenses, otherIncome);
+    const empty = f.sessionsInRange.length === 0 && f.genExpInRange.length === 0 && f.otherIncInRange.length === 0;
+    if (empty) return emptyBlock("ไม่มีรายการในเดือนนี้");
+    const days = financeByDay(monthYm, sessionHistory, generalExpenses, otherIncome);
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(FinanceSummaryCard, {
+      revenue: f.revenue,
+      expense: f.expense,
+      profit: f.profit
+    }), /*#__PURE__*/React.createElement(FinancePL, {
+      sessionRevenueTotal: f.sessionRevenueTotal,
+      otherIncomeTotal: f.otherIncomeTotal,
+      catTotals: f.catTotals,
+      expense: f.expense,
+      profit: f.profit
+    }), discountRow, /*#__PURE__*/React.createElement(FinancePerformanceList, {
+      title: "ผลประกอบการรายวัน",
+      rows: days.map(d => ({
+        key: d.date,
+        label: fmtThaiMonthDay(d.date),
+        count: d.sessionCount,
+        profit: d.profit
+      })),
+      onPick: goDay
+    }), /*#__PURE__*/React.createElement(SectionHead, {
+      title: "ค่าใช้จ่ายทั่วไป",
+      sub: "ไม่ผูกกับก๊วน"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 18
+      }
+    }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+      items: f.genExpInRange,
+      categories: EXPENSE_CATEGORIES,
+      onAdd: addGeneralExpense,
+      onUpdate: updateGeneralExpense,
+      onRemove: removeGeneralExpense
+    })), /*#__PURE__*/React.createElement(SectionHead, {
+      title: "รายได้อื่น",
+      sub: "สปอนเซอร์ / รายได้นอกก๊วน"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+      items: f.otherIncInRange,
+      onAdd: addOtherIncome,
+      onUpdate: updateOtherIncome,
+      onRemove: removeOtherIncome
+    })));
+  })())), mode === "overview" && (allYears.length === 0 ? emptyBlock("ยังไม่มีข้อมูลการเงิน") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
-      width: "100%",
-      padding: "10px 12px",
-      borderRadius: 11,
-      border: `1px solid ${T.border}`,
-      background: T.surface,
-      color: T.text,
-      fontSize: 14,
-      fontWeight: 700,
-      outline: "none",
-      boxSizing: "border-box",
-      marginBottom: 10
-    }
-  }), daysWithHistory.length === 0 ? /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: T.muted,
-      padding: "2px 2px 4px"
-    }
-  }, "ไม่มีประวัติก๊วนในเดือน ", fmtThaiMonthLabel(monthPick)) : /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 6
+      textAlign: "center"
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setDayPick(null),
+    onClick: () => setPickerOpen("year"),
     style: {
-      padding: "7px 13px",
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 6,
+      margin: "0 auto 16px",
+      padding: "8px 16px",
       borderRadius: 20,
-      border: `1.5px solid ${!dayPick ? T.green : T.border}`,
-      background: !dayPick ? "#e2f5ec" : T.surface,
-      color: !dayPick ? T.green : T.text,
-      fontSize: 12.5,
-      fontWeight: 700
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 15,
+      fontWeight: 800,
+      color: T.text
     }
-  }, "ทั้งเดือน"), daysWithHistory.map(d => {
+  }, year === "all" ? "ทั้งหมด" : Number(year) + 543, " ", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 16,
+    color: T.muted
+  }))), (() => {
+    const f = year === "all" ? getFinanceAllTime(sessionHistory, generalExpenses, otherIncome) : getFinanceForYear(year, sessionHistory, generalExpenses, otherIncome);
+    const months = financeByMonthForYear(year, sessionHistory, generalExpenses, otherIncome);
+    return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(FinanceSummaryCard, {
+      revenue: f.revenue,
+      expense: f.expense,
+      profit: f.profit
+    }), /*#__PURE__*/React.createElement(FinancePL, {
+      sessionRevenueTotal: f.sessionRevenueTotal,
+      otherIncomeTotal: f.otherIncomeTotal,
+      catTotals: f.catTotals,
+      expense: f.expense,
+      profit: f.profit
+    }), discountRow, /*#__PURE__*/React.createElement(FinancePerformanceList, {
+      title: "ผลประกอบการรายเดือน",
+      rows: months.map(m => ({
+        key: m.ym,
+        label: fmtThaiMonthLabel(m.ym),
+        count: null,
+        profit: m.profit
+      })),
+      onPick: goMonth
+    }), /*#__PURE__*/React.createElement(SectionHead, {
+      title: "ค่าใช้จ่ายทั่วไป",
+      sub: "ไม่ผูกกับก๊วน"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 18
+      }
+    }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+      items: f.genExpInRange,
+      categories: EXPENSE_CATEGORIES,
+      onAdd: addGeneralExpense,
+      onUpdate: updateGeneralExpense,
+      onRemove: removeGeneralExpense
+    })), /*#__PURE__*/React.createElement(SectionHead, {
+      title: "รายได้อื่น",
+      sub: "สปอนเซอร์ / รายได้นอกก๊วน"
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginBottom: 10
+      }
+    }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
+      items: f.otherIncInRange,
+      onAdd: addOtherIncome,
+      onUpdate: updateOtherIncome,
+      onRemove: removeOtherIncome
+    })));
+  })())), openSession && /*#__PURE__*/React.createElement(SessionFinancialDetail, {
+    s: openSession,
+    addHistExpense: addHistExpense,
+    updateHistExpense: updateHistExpense,
+    removeHistExpense: removeHistExpense,
+    onClose: () => setOpenId(null)
+  }), discountSheetOpen && /*#__PURE__*/React.createElement(DiscountCreditSheet, {
+    discountCredits: discountCredits,
+    session: session,
+    sessionHistory: sessionHistory,
+    applyDiscountCredits: applyDiscountCredits,
+    cancelDiscountCredit: cancelDiscountCredit,
+    onClose: () => setDiscountSheetOpen(false)
+  }), pickerOpen === "day-month" && /*#__PURE__*/React.createElement(MonthPickerSheet, {
+    months: allMonths,
+    onPick: ym => {
+      setDayYm(ym);
+      setSelectedDate(null);
+    },
+    onClose: () => setPickerOpen(null)
+  }), pickerOpen === "month-month" && /*#__PURE__*/React.createElement(MonthPickerSheet, {
+    months: allMonths,
+    onPick: setMonthYm,
+    onClose: () => setPickerOpen(null)
+  }), pickerOpen === "year" && /*#__PURE__*/React.createElement(YearPickerSheet, {
+    years: allYears,
+    onPick: setYear,
+    onClose: () => setPickerOpen(null)
+  }));
+}
+
+// ‹ month › nav shared by รายวัน and รายเดือน — arrows jump to the nearest ACTIVE month (can skip empty
+// months/years entirely, Requirement 3); tapping the label opens the compact picker sheet instead of a
+// full calendar (Requirement 3/19).
+function MonthNav({
+  ym,
+  months,
+  onChange,
+  onOpenPicker
+}) {
+  const prev = adjacentActiveMonth(ym, "prev", months);
+  const next = adjacentActiveMonth(ym, "next", months);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 10,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => prev && onChange(prev),
+    disabled: !prev,
+    style: {
+      background: "none",
+      border: "none",
+      padding: 8,
+      fontSize: 20,
+      fontWeight: 700,
+      color: prev ? T.text : T.border,
+      cursor: prev ? "pointer" : "default"
+    }
+  }, "‹"), /*#__PURE__*/React.createElement("button", {
+    onClick: onOpenPicker,
+    style: {
+      background: "none",
+      border: "none",
+      fontSize: 15,
+      fontWeight: 800,
+      color: T.text,
+      padding: "4px 8px",
+      minWidth: 140,
+      textAlign: "center"
+    }
+  }, fmtThaiMonthFull(ym)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => next && onChange(next),
+    disabled: !next,
+    style: {
+      background: "none",
+      border: "none",
+      padding: 8,
+      fontSize: 20,
+      fontWeight: 700,
+      color: next ? T.text : T.border,
+      cursor: next ? "pointer" : "default"
+    }
+  }, "›"));
+}
+
+// only the DATES that actually have financial activity — never a 1–31 calendar grid (Requirement 2/16)
+function DayChipRow({
+  dates,
+  selected,
+  onSelect
+}) {
+  if (!dates.length) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      overflowX: "auto",
+      paddingBottom: 4,
+      marginBottom: 14
+    }
+  }, dates.map(d => {
     const dayNum = Number(d.slice(8, 10));
-    const active = dayPick === d;
+    const active = d === selected;
     return /*#__PURE__*/React.createElement("button", {
       key: d,
-      onClick: () => setDayPick(d),
+      onClick: () => onSelect(d),
       style: {
-        padding: "7px 13px",
-        borderRadius: 20,
+        flexShrink: 0,
+        minWidth: 42,
+        padding: "8px 4px",
+        borderRadius: 12,
         border: `1.5px solid ${active ? T.green : T.border}`,
         background: active ? "#e2f5ec" : T.surface,
         color: active ? T.green : T.text,
-        fontSize: 12.5,
-        fontWeight: 700
+        fontSize: 13.5,
+        fontWeight: 800
       }
     }, dayNum);
-  })), dayPick && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: T.muted,
-      marginTop: 8
-    }
-  }, "กำลังดูวันที่ ", fmtThaiDate(dayPick))), /*#__PURE__*/React.createElement("div", {
+  }));
+}
+
+// ONE compact row — รายได้ | ค่าใช้จ่าย | กำไร/ขาดทุน — replaces the old 3 stacked cards (Requirement 4/14)
+function FinanceSummaryCard({
+  revenue,
+  expense,
+  profit
+}) {
+  const loss = profit < 0;
+  const col = {
+    flex: 1,
+    padding: "12px 4px",
+    textAlign: "center",
+    minWidth: 0
+  };
+  return /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      flexWrap: "wrap",
-      gap: 8,
-      marginBottom: 18
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 14,
+      marginBottom: 16,
+      overflow: "hidden"
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: "1 1 45%",
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      borderRadius: 12,
-      padding: "10px 12px"
+      ...col,
+      borderRight: `1px solid ${T.border}`
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
-      color: T.muted
+      color: T.muted,
+      marginBottom: 3
     }
   }, "รายได้"), /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 16,
-      fontWeight: 800
+      fontSize: 14.5,
+      fontWeight: 800,
+      color: T.text,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
     }
   }, formatCurrency(revenue))), /*#__PURE__*/React.createElement("div", {
     style: {
-      flex: "1 1 45%",
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      borderRadius: 12,
-      padding: "10px 12px"
+      ...col,
+      borderRight: `1px solid ${T.border}`
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
-      color: T.muted
+      color: T.muted,
+      marginBottom: 3
     }
   }, "ค่าใช้จ่าย"), /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 16,
+      fontSize: 14.5,
       fontWeight: 800,
-      color: T.accent
+      color: T.accent,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
     }
   }, formatCurrency(expense))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: "1 1 45%",
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      borderRadius: 12,
-      padding: "10px 12px"
-    }
+    style: col
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
-      color: T.muted
+      color: T.muted,
+      marginBottom: 3
     }
-  }, profit >= 0 ? "กำไร" : "ขาดทุน"), /*#__PURE__*/React.createElement("div", {
+  }, loss ? "ขาดทุน" : "กำไร"), /*#__PURE__*/React.createElement("div", {
     style: {
-      fontSize: 16,
+      fontSize: 14.5,
       fontWeight: 800,
-      color: profit >= 0 ? T.green : T.accent
+      color: loss ? T.accent : T.green,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
     }
-  }, formatCurrency(Math.abs(profit))))), /*#__PURE__*/React.createElement(SectionHead, {
+  }, formatCurrency(Math.abs(profit)))));
+}
+
+// สรุปกำไรขาดทุน — same P&L shape at every period level (Requirement 5/7/10), one shared renderer
+function FinancePL({
+  sessionRevenueTotal,
+  otherIncomeTotal,
+  catTotals,
+  expense,
+  profit
+}) {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionHead, {
     title: "สรุปกำไรขาดทุน"
   }), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -10449,7 +10869,7 @@ function FinanceTab({
   }, /*#__PURE__*/React.createElement(BillRow, {
     label: "รายได้ (ค่าก๊วน)",
     v: sessionRevenueTotal
-  }), otherIncomeTotal > 0 && /*#__PURE__*/React.createElement(BillRow, {
+  }), /*#__PURE__*/React.createElement(BillRow, {
     label: "รายได้อื่น",
     v: otherIncomeTotal
   }), /*#__PURE__*/React.createElement("div", {
@@ -10491,42 +10911,18 @@ function FinanceTab({
     style: {
       color: profit >= 0 ? T.green : T.accent
     }
-  }, formatCurrency(Math.abs(profit))))), availCredits.length > 0 ? /*#__PURE__*/React.createElement("button", {
-    onClick: () => setDiscountSheetOpen(true),
-    style: {
-      width: "100%",
-      textAlign: "left",
-      display: "flex",
-      alignItems: "center",
-      gap: 10,
-      padding: "10px 12px",
-      borderRadius: 12,
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      marginBottom: 18
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 15
-    }
-  }, "🎁"), /*#__PURE__*/React.createElement("span", {
-    style: {
-      flex: 1,
-      fontSize: 13,
-      fontWeight: 700
-    }
-  }, "ส่วนลดคงเหลือ — ", availCreditPeople, " คน · ", formatCurrency(availCreditTotal)), /*#__PURE__*/React.createElement(ChevronRight, {
-    size: 16,
-    color: T.muted
-  })) : (discountCredits || []).length > 0 ? /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      color: T.muted,
-      padding: "0 2px 14px"
-    }
-  }, "ไม่มีส่วนลดคงเหลือ") : null, /*#__PURE__*/React.createElement(SectionHead, {
-    title: "รายก๊วน",
-    sub: `${sessionsInRange.length} ก๊วน`
+  }, formatCurrency(Math.abs(profit))))));
+}
+
+// ก๊วนในวันนี้ — tapping a row opens the EXISTING SessionFinancialDetail overlay, never a duplicate screen
+function FinanceGroupsList({
+  title,
+  sessions,
+  onOpen
+}) {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionHead, {
+    title: title,
+    sub: `${sessions.length} ก๊วน`
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -10534,20 +10930,20 @@ function FinanceTab({
       gap: 6,
       marginBottom: 18
     }
-  }, sessionsInRange.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, sessions.length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       color: T.muted,
       fontSize: 13,
       textAlign: "center",
       padding: "8px 0"
     }
-  }, "ไม่มีก๊วนในช่วงนี้") : sessionsInRange.map(s => {
+  }, "ไม่มีก๊วนในวันนี้") : sessions.map(s => {
     const rev = sessionRevenue(s),
       exp = sessionExpenseTotal(s),
       prof = sessionProfit(s);
     return /*#__PURE__*/React.createElement("button", {
       key: s.id,
-      onClick: () => setOpenId(s.id),
+      onClick: () => onOpen(s.id),
       style: {
         width: "100%",
         textAlign: "left",
@@ -10579,7 +10975,7 @@ function FinanceTab({
         fontSize: 11.5,
         color: T.muted
       }
-    }, fmtThaiDate(s.date), " · รายได้ ", formatCurrency(rev), " · ค่าใช้จ่าย ", formatCurrency(exp))), /*#__PURE__*/React.createElement("span", {
+    }, "รายได้ ", formatCurrency(rev), " · ค่าใช้จ่าย ", formatCurrency(exp))), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 13,
         fontWeight: 800,
@@ -10593,95 +10989,172 @@ function FinanceTab({
         flexShrink: 0
       }
     }));
-  })), /*#__PURE__*/React.createElement(SectionHead, {
-    title: "ค่าใช้จ่ายทั่วไป",
-    sub: "ไม่ผูกกับก๊วน"
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 18
-    }
-  }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
-    items: generalExpenses || [],
-    categories: EXPENSE_CATEGORIES,
-    onAdd: addGeneralExpense,
-    onUpdate: updateGeneralExpense,
-    onRemove: removeGeneralExpense
-  })), /*#__PURE__*/React.createElement(SectionHead, {
-    title: "รายได้อื่น",
-    sub: "สปอนเซอร์ / รายได้นอกก๊วน"
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginBottom: 18
-    }
-  }, /*#__PURE__*/React.createElement(ExpenseListEditor, {
-    items: otherIncome || [],
-    onAdd: addOtherIncome,
-    onUpdate: updateOtherIncome,
-    onRemove: removeOtherIncome
-  })), /*#__PURE__*/React.createElement(SectionHead, {
-    title: "รายการล่าสุด"
+  })));
+}
+
+// generic drill-down row list — powers both "ผลประกอบการรายวัน" (รายเดือน, has a count) and
+// "ผลประกอบการรายเดือน" (ภาพรวม, no count) per Requirement 8/10. Only ACTIVE periods are ever passed in.
+function FinancePerformanceList({
+  title,
+  rows,
+  onPick
+}) {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionHead, {
+    title: title
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
-      gap: 5,
-      marginBottom: 10
+      gap: 6,
+      marginBottom: 18
     }
-  }, txns.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, rows.length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       color: T.muted,
       fontSize: 13,
       textAlign: "center",
       padding: "8px 0"
     }
-  }, "ไม่มีรายการ") : txns.map(t => /*#__PURE__*/React.createElement("div", {
-    key: t.id,
+  }, "ไม่มีรายการ") : rows.map(r => /*#__PURE__*/React.createElement("button", {
+    key: r.key,
+    onClick: () => onPick(r.key),
     style: {
+      width: "100%",
+      textAlign: "left",
       display: "flex",
       alignItems: "center",
-      gap: 8,
-      padding: "7px 10px",
-      borderRadius: 9,
+      gap: 10,
+      padding: "10px 12px",
+      borderRadius: 11,
       background: T.surface,
       border: `1px solid ${T.border}`
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
+      fontSize: 13.5,
+      fontWeight: 700,
+      flexShrink: 0,
+      minWidth: r.count != null ? 60 : "auto"
+    }
+  }, r.label), r.count != null && /*#__PURE__*/React.createElement("span", {
+    style: {
       fontSize: 11.5,
       color: T.muted,
-      minWidth: 62,
-      flexShrink: 0
+      flex: 1
     }
-  }, fmtThaiDate(t.date)), /*#__PURE__*/React.createElement("span", {
+  }, r.count, " ก๊วน"), r.count == null && /*#__PURE__*/React.createElement("span", {
     style: {
-      flex: 1,
-      fontSize: 12.5,
-      fontWeight: 600,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
+      flex: 1
     }
-  }, t.label), /*#__PURE__*/React.createElement("span", {
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
-      fontSize: 12.5,
+      fontSize: 13,
       fontWeight: 800,
-      color: t.sign > 0 ? T.green : T.accent,
+      color: r.profit >= 0 ? T.green : T.accent,
       flexShrink: 0
     }
-  }, t.sign > 0 ? "+" : "-", formatCurrency(t.amount))))), openSession && /*#__PURE__*/React.createElement(SessionFinancialDetail, {
-    s: openSession,
-    addHistExpense: addHistExpense,
-    updateHistExpense: updateHistExpense,
-    removeHistExpense: removeHistExpense,
-    onClose: () => setOpenId(null)
-  }), discountSheetOpen && /*#__PURE__*/React.createElement(DiscountCreditSheet, {
-    discountCredits: discountCredits,
-    session: session,
-    sessionHistory: sessionHistory,
-    applyDiscountCredits: applyDiscountCredits,
-    cancelDiscountCredit: cancelDiscountCredit,
-    onClose: () => setDiscountSheetOpen(false)
-  }));
+  }, r.profit >= 0 ? "+" : "-", formatCurrency(Math.abs(r.profit))), /*#__PURE__*/React.createElement(ChevronRight, {
+    size: 16,
+    color: T.muted,
+    style: {
+      flexShrink: 0
+    }
+  })))));
+}
+
+// compact "tap the title" alternative to the ‹ › arrows — lists ONLY months/years that actually have data,
+// never a full calendar (Requirement 3/9/19)
+function MonthPickerSheet({
+  months,
+  onPick,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 12
+    }
+  }, "เลือกเดือน"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, months.map(m => /*#__PURE__*/React.createElement("button", {
+    key: m,
+    onClick: () => {
+      onPick(m);
+      onClose();
+    },
+    style: {
+      width: "100%",
+      textAlign: "left",
+      padding: "11px 14px",
+      borderRadius: 11,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 14,
+      fontWeight: 700,
+      color: T.text
+    }
+  }, fmtThaiMonthFull(m)))));
+}
+function YearPickerSheet({
+  years,
+  onPick,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 12
+    }
+  }, "เลือกช่วงเวลา"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      onPick("all");
+      onClose();
+    },
+    style: {
+      width: "100%",
+      textAlign: "left",
+      padding: "11px 14px",
+      borderRadius: 11,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 14,
+      fontWeight: 700,
+      color: T.text
+    }
+  }, "ทั้งหมด (ตลอดกาล)"), years.map(y => /*#__PURE__*/React.createElement("button", {
+    key: y,
+    onClick: () => {
+      onPick(y);
+      onClose();
+    },
+    style: {
+      width: "100%",
+      textAlign: "left",
+      padding: "11px 14px",
+      borderRadius: 11,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 14,
+      fontWeight: 700,
+      color: T.text
+    }
+  }, "ปี ", Number(y) + 543))));
 }
 
 // ===================== DISCOUNT CREDIT SHEET (v1.9.1) =====================
