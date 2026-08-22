@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.14";
+      var CURRENT_VERSION = "1.9.15";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.14";
+const APP_VERSION = "1.9.15";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3608,37 +3608,80 @@ function App() {
   // entire app render (see the early return right after this component's other hooks) so bottom nav / tabs /
   // edit buttons are simply never mounted while printing, instead of being CSS-hidden. `null` = not open.
   const [financePrintReport, setFinancePrintReport] = useState(null);
+  // ===== PERSISTENCE SAFETY GUARD (v1.9.15) =====
+  // Bug this fixes: the app saves its ENTIRE state as one localStorage blob on every change. If two
+  // instances are open at once (e.g. the Home Screen icon + a separate Safari tab — iOS keeps these as
+  // two completely separate in-memory contexts even though they share the same localStorage), and one
+  // instance finishes a ก๊วน/Tournament while the other still has an older, history-less state sitting in
+  // memory, then merely touching that stale instance used to silently overwrite the newer data with the
+  // old data (unrelated fields like `players` looked unaffected, but `sessionHistory`/`tournamentHistory`
+  // vanished — exactly the symptom reported).
+  //
+  // Fix: every save now carries a `savedAt` timestamp, and `lastKnownSavedAtRef` tracks the `savedAt` of
+  // whatever THIS instance's in-memory state currently reflects. Before every write we re-check storage;
+  // if someone else has saved something newer than what we last loaded/saved, we pull THEIR data in
+  // instead of clobbering it, and skip our own write. We also proactively re-check the moment the app
+  // becomes active again (tab focus/visibility, iOS bfcache restore) so a stale instance heals itself
+  // before the user can even touch anything.
+  const lastKnownSavedAtRef = useRef(0);
+  const [staleSyncNotice, setStaleSyncNotice] = useState(null); // brief banner text, or null when hidden
+  // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
+  // below so the two can never silently drift apart on which fields they read/default.
+  const applyPersistedState = s => {
+    if (!s) return;
+    s.players && setPlayers(s.players.map(normPlayer));
+    s.history && setHistory(s.history);
+    s.current && setCurrent(s.current);
+    s.future && setFuture(s.future);
+    typeof s.roundNo === "number" && setRoundNo(s.roundNo);
+    s.courtCount && setCourtCount(s.courtCount);
+    setCourtLabelsRaw(syncCourtLabels(s.courtLabels, s.courtCount || 2)); // absent on old saves -> sequential default, backward-compatible
+    s.mode && setMode(s.mode);
+    s.settings && setSettings(d => ({
+      ...d,
+      ...s.settings
+    }));
+    s.session && setSession({
+      ...s.session,
+      mode: s.session.mode || "casual",
+      id: s.session.id || uid()
+    }); // old saves have no `mode`/`id` — default them, backward-compatible
+    s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
+    setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
+    setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
+    setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
+    setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
+    setActiveTournament(ensureTournamentCourtLabels(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
+    setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(ensureTournamentCourtLabels));
+    // old saves (pre-v1.9.15) have no `savedAt` — treat them as "current as of right now" rather than 0,
+    // so upgrading doesn't itself trigger a false "newer data elsewhere" flag on the very next save.
+    lastKnownSavedAtRef.current = typeof s.savedAt === "number" ? s.savedAt : Date.now();
+  };
+  // Re-reads "bg-v11"; if its `savedAt` is newer than what THIS instance's memory reflects, pulls it in
+  // (instead of letting this instance later write stale data over it) and, optionally, tells the user.
+  // Returns true iff a newer save was found and applied.
+  const refreshFromStorageIfNewer = async announce => {
+    try {
+      const r = await window.storage.get("bg-v11");
+      if (!r?.value) return false;
+      const s = JSON.parse(r.value);
+      const storedSavedAt = typeof s.savedAt === "number" ? s.savedAt : 0;
+      if (storedSavedAt > lastKnownSavedAtRef.current) {
+        applyPersistedState(s);
+        if (announce) {
+          setStaleSyncNotice("มีข้อมูลใหม่กว่าจากอุปกรณ์/แท็บอื่น — รีเฟรชให้แล้ว");
+          setTimeout(() => setStaleSyncNotice(null), 4000);
+        }
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  };
   useEffect(() => {
     (async () => {
       try {
         const r = await window.storage.get("bg-v11");
-        if (r?.value) {
-          const s = JSON.parse(r.value);
-          s.players && setPlayers(s.players.map(normPlayer));
-          s.history && setHistory(s.history);
-          s.current && setCurrent(s.current);
-          s.future && setFuture(s.future);
-          typeof s.roundNo === "number" && setRoundNo(s.roundNo);
-          s.courtCount && setCourtCount(s.courtCount);
-          setCourtLabelsRaw(syncCourtLabels(s.courtLabels, s.courtCount || 2)); // absent on old saves -> sequential default, backward-compatible
-          s.mode && setMode(s.mode);
-          s.settings && setSettings(d => ({
-            ...d,
-            ...s.settings
-          }));
-          s.session && setSession({
-            ...s.session,
-            mode: s.session.mode || "casual",
-            id: s.session.id || uid()
-          }); // old saves have no `mode`/`id` — default them, backward-compatible
-          s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
-          setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
-          setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
-          setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
-          setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
-          setActiveTournament(ensureTournamentCourtLabels(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
-          setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(ensureTournamentCourtLabels));
-        }
+        if (r?.value) applyPersistedState(JSON.parse(r.value));
       } catch (e) {}
       try {
         const pr = await window.storage.get("bg-v11-prerestore");
@@ -3647,10 +3690,34 @@ function App() {
       setLoaded(true);
     })();
   }, []);
+  // Proactively re-check freshness the moment this instance becomes active again — catches a stale
+  // instance BEFORE the user touches anything, not just reactively at the next save.
+  useEffect(() => {
+    if (!loaded) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshFromStorageIfNewer(true);
+    };
+    const onPageShow = e => {
+      if (e.persisted) refreshFromStorageIfNewer(true); // bfcache restore (common on iOS Safari)
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [loaded]);
   useEffect(() => {
     if (!loaded) return;
     (async () => {
       try {
+        // Guard: never write this instance's in-memory state over a newer save made elsewhere — pull
+        // that newer data in instead (see refreshFromStorageIfNewer above) and skip this write. The
+        // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
+        if (await refreshFromStorageIfNewer(true)) return;
+        const savedAt = Date.now();
         await window.storage.set("bg-v11", JSON.stringify({
           players,
           history,
@@ -3668,8 +3735,10 @@ function App() {
           otherIncome,
           discountCredits,
           activeTournament,
-          tournamentHistory
+          tournamentHistory,
+          savedAt
         }));
+        lastKnownSavedAtRef.current = savedAt;
       } catch (e) {}
     })();
   }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, loaded]);
@@ -5393,7 +5462,24 @@ function App() {
       fontFamily: "ui-sans-serif, system-ui, sans-serif",
       paddingTop: "env(safe-area-inset-top)"
     }
-  }, /*#__PURE__*/React.createElement("input", {
+  }, staleSyncNotice && /*#__PURE__*/React.createElement("div", {
+    style: {
+      position: "fixed",
+      top: "calc(env(safe-area-inset-top) + 8px)",
+      left: "50%",
+      transform: "translateX(-50%)",
+      zIndex: 9999,
+      background: T.green,
+      color: "#fff",
+      padding: "8px 14px",
+      borderRadius: 10,
+      fontSize: 13,
+      fontWeight: 600,
+      boxShadow: "0 4px 14px rgba(0,0,0,.18)",
+      maxWidth: "90vw",
+      textAlign: "center"
+    }
+  }, staleSyncNotice), /*#__PURE__*/React.createElement("input", {
     ref: fileRef,
     type: "file",
     accept: "image/*",
