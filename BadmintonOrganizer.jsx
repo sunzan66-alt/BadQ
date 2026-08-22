@@ -7778,7 +7778,11 @@ function NextMatchBlock({ m, getP, pool, autoQueueNext, setQueuedSlot, swapQueue
         </>
       )}
 
-      {!editing && (full ? <Fairness sA={sA} sB={sB} /> : <div style={{ fontSize: 11, color: T.muted, marginTop: 6, textAlign: "center" }}>เลือกให้ครบ {total} คนเพื่อดูความสมดุล</div>)}
+      {/* v1.11.5: Balance is intentionally NOT shown once เสร็จสิ้น has been pressed (editing === false)
+          — per explicit request, to save screen space once the queued next match is confirmed. While
+          still actively editing, the exact same full-gated Fairness above (line ~7766) already covers
+          the "as a decision aid" need, so nothing is lost — this only removes the redundant second copy
+          that used to also render in the read-only/confirmed view. */}
     </div>
   );
 }
