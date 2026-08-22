@@ -125,7 +125,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.25";
+      var CURRENT_VERSION = "1.9.26";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -500,7 +500,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.25";
+const APP_VERSION = "1.9.26";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3789,6 +3789,12 @@ function App() {
   // session-only (not persisted) so a still-overdue reminder resurfaces on the next full app open instead
   // of being silenced forever by one tap.
   const [backupNoticeDismissed, setBackupNoticeDismissed] = useState(false);
+  // v1.9.26: true only when the boot load found a "bg-v11" value that existed but failed to JSON.parse
+  // (real corruption — not "first ever launch, nothing saved yet"). While true, the save effect below
+  // refuses to write anything, so the app can never silently paper over corrupted-but-still-technically-
+  // present data with a fresh empty save. Cleared once the user restores from a checkpoint/backup, or
+  // explicitly acknowledges starting fresh (see the recovery banner near the top of the render).
+  const [loadCorrupted, setLoadCorrupted] = useState(false);
   // v1.9.25: the head script's update-check no longer force-reloads on its own (see <head> comment) —
   // it just records a newer version exists. This picks that up (either via the event, if React was
   // already mounted when the check resolved, or via the window.__badqNewVersion flag directly, in case
@@ -3934,15 +3940,31 @@ function App() {
     (async () => {
       let loadedSavedAt = null,
         playerCount = 0,
-        sessionHistoryCount = 0;
+        sessionHistoryCount = 0,
+        corrupted = false;
       try {
         const r = await window.storage.get("bg-v11");
         if (r?.value) {
-          const s = JSON.parse(r.value);
-          applyPersistedState(s);
-          loadedSavedAt = typeof s.savedAt === "number" ? s.savedAt : null;
-          playerCount = Array.isArray(s.players) ? s.players.length : 0;
-          sessionHistoryCount = Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0;
+          // v1.9.26: a value being PRESENT but failing to parse is a fundamentally different situation
+          // from there being no value at all — it means real data exists but got corrupted (most likely
+          // an interrupted/partial write from the OS killing the app mid-save, which — given BadQ saves
+          // on nearly every state change — is disproportionately likely to be "bg-v11" specifically,
+          // vs. the far-less-frequently-written bg-v11-autobackups/bootlog keys, which is exactly the
+          // asymmetric pattern Sun's repro showed: the main save gone, the auto-backup checkpoint intact).
+          // Treating a parse failure the same as "nothing saved yet" would boot the app on empty defaults
+          // and then — the moment `loaded` flips true below — the save effect would silently WRITE that
+          // empty state back over the corrupted-but-till-then-recoverable string, permanently destroying
+          // it. So a parse failure gets its own path: block the save effect entirely (see `loadCorrupted`)
+          // until the user resolves it, instead of ever silently overwriting.
+          try {
+            const s = JSON.parse(r.value);
+            applyPersistedState(s);
+            loadedSavedAt = typeof s.savedAt === "number" ? s.savedAt : null;
+            playerCount = Array.isArray(s.players) ? s.players.length : 0;
+            sessionHistoryCount = Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0;
+          } catch (parseErr) {
+            corrupted = true;
+          }
         }
       } catch (e) {}
       try {
@@ -3960,15 +3982,17 @@ function App() {
         setBootLog(Array.isArray(list) ? list : []);
       } catch (e) {}
       // record this boot — was it a manual update-tap reload (?_v=…)? what savedAt/counts did we
-      // actually load?
+      // actually load? corrupted=true means a "bg-v11" value existed but failed to parse (see above).
       pushBootLog({
         event: "boot",
         appVersion: APP_VERSION,
         loadedSavedAt,
         playerCount,
         sessionHistoryCount,
+        corrupted,
         viaUpdateReload: !!new URLSearchParams(location.search).get("_v")
       });
+      setLoadCorrupted(corrupted);
       setLoaded(true);
     })();
   }, []);
@@ -4007,7 +4031,10 @@ function App() {
     if (grew) saveAutoBackup(reason);
   }, [sessionHistory, tournamentHistory, loaded]);
   useEffect(() => {
-    if (!loaded) return;
+    // v1.9.26: also refuse to save while loadCorrupted is true — see its declaration above. Without this,
+    // the very first fire of this effect (triggered by `loaded` flipping true) would write the still-
+    // default-empty React state over the corrupted-but-recoverable raw string, permanently losing it.
+    if (!loaded || loadCorrupted) return;
     (async () => {
       try {
         // Guard: never write this instance's in-memory state over a newer save made elsewhere — pull
@@ -4038,7 +4065,7 @@ function App() {
         lastKnownSavedAtRef.current = savedAt;
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, loaded]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, loaded, loadCorrupted]);
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(t);
@@ -5875,7 +5902,68 @@ function App() {
       fontSize: 11,
       color: T.muted
     }
-  }, "v", APP_VERSION))), updateAvailable && /*#__PURE__*/React.createElement("div", {
+  }, "v", APP_VERSION))), loadCorrupted && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#fdecea",
+      border: "1px solid #f0a8a0",
+      borderRadius: 12,
+      padding: "10px 11px",
+      marginBottom: 14,
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 17,
+      flexShrink: 0,
+      lineHeight: "20px"
+    }
+  }, "⚠️"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 800
+    }
+  }, "ข้อมูลเดิมเสียหาย ระบบไม่บันทึกทับให้เพื่อกันข้อมูลหายซ้ำ"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginTop: 2
+    }
+  }, "น่าจะเกิดจากแอปถูกปิดกลางคันตอนกำลังบันทึก — ไปที่ \"ประวัติ\" แล้วเปิด \"ข้อมูลและการสำรอง\" เพื่อกู้คืนจากจุดสำรองอัตโนมัติ หรือไฟล์สำรองที่เคยเก็บไว้"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginTop: 7
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setTab("history"),
+    style: {
+      padding: "7px 13px",
+      borderRadius: 9,
+      background: T.accent,
+      border: "none",
+      color: "#fff",
+      fontSize: 12,
+      fontWeight: 800
+    }
+  }, "ไปกู้คืนข้อมูล"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setLoadCorrupted(false),
+    style: {
+      padding: "7px 13px",
+      borderRadius: 9,
+      background: "none",
+      border: `1px solid ${T.border}`,
+      color: T.muted,
+      fontSize: 12,
+      fontWeight: 700
+    }
+  }, "เริ่มต้นใหม่ (ไม่กู้คืน)")))), updateAvailable && /*#__PURE__*/React.createElement("div", {
     style: {
       background: "#eaf3ff",
       border: "1px solid #a9cdf0",
