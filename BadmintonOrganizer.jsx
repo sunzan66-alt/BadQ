@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.2";
+const APP_VERSION = "1.11.3";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5620,15 +5620,25 @@ function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHist
               const champTm = champTeam ? (t.teams || []).find((tm) => tm.id === champTeam) : null;
               const champName = champTm ? tTeamName(champTm, playersById) : null;
               return (
-                <button key={"t" + t.id} onClick={() => setOpenTId(t.id)} style={{ textAlign: "left", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 14px" }}>
-                  <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
-                    <span style={{ fontWeight: 800, fontSize: 14.5 }}>🏆 {t.name || "Tournament ไม่มีชื่อ"}</span>
-                    <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontWeight: 700 }}>{fmtThaiDate(t.date)}</span>
+                <button key={"t" + t.id} onClick={() => setOpenTId(t.id)} style={{ textAlign: "left", display: "flex", alignItems: "flex-start", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 14px" }}>
+                  {/* v1.11.3: Tournament rows now show their logo, exactly like ก๊วน sessions show s.photo
+                      just below — previously this row skipped straight to the 🏆 emoji even when the
+                      organizer had set a logo (see the wizard's step-1 logo picker, added in v1.11.1). */}
+                  {t.logo ? (
+                    <img src={t.logo} alt="" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                  ) : (
+                    <div style={{ width: 34, height: 34, borderRadius: 10, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0 }}>🏆</div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
+                      <span style={{ fontWeight: 800, fontSize: 14.5 }}>{t.name || "Tournament ไม่มีชื่อ"}</span>
+                      <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontWeight: 700 }}>{fmtThaiDate(t.date)}</span>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: T.muted }}>
+                      <span>{playerCount} คน · {teamCount} ทีม · {TOURNAMENT_FORMAT_LABELS[t.format] || t.format}</span>
+                    </div>
+                    {champName && <div style={{ marginTop: 4, fontSize: 11, color: T.green, fontWeight: 700 }}>🏆 {champName}</div>}
                   </div>
-                  <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: T.muted }}>
-                    <span>{playerCount} คน · {teamCount} ทีม · {TOURNAMENT_FORMAT_LABELS[t.format] || t.format}</span>
-                  </div>
-                  {champName && <div style={{ marginTop: 4, fontSize: 11, color: T.green, fontWeight: 700 }}>🏆 {champName}</div>}
                 </button>
               );
             }
