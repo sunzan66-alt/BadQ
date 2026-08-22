@@ -109,42 +109,32 @@
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
 </script>
 <script>
-  // Auto-update check: on every launch, fetch the live index.html (bypassing any
-  // browser/PWA cache) and compare its embedded APP_VERSION with the one that's
-  // currently running. If a newer version has been deployed, force a cache-busted
-  // reload so the app updates itself — without ever touching localStorage (data
-  // lives in a separate storage area and is never affected by this).
+  // Update check: on every launch, fetch the live index.html (bypassing any browser/PWA cache) and
+  // compare its embedded APP_VERSION with the one that's currently running.
   //
-  // v1.9.18: the actual reload is now gated behind window.__badqStorageReady — a flag the React app
-  // sets (and "badq:storage-ready" event it fires) only once it has finished its OWN initial load from
-  // localStorage and safety-guard self-heal pass (see the persistence effects further down). This closes
-  // a theoretical race: on a long-backgrounded ("zombie") tab that still has old in-memory data, this
-  // version-triggered navigation used to fire the instant the network check resolved — potentially before
-  // React had even mounted — with no guarantee the tab's own state had been reconciled with the freshest
-  // localStorage first. Reported symptom this targets: "data looks reverted right after I update the app".
-  // A hard 8s fallback timeout still fires the reload even if React never finishes loading, so an update
-  // can never be permanently stuck.
+  // v1.9.25: this NO LONGER force-reloads the page on its own. Earlier versions (back through v1.9.18)
+  // did an automatic location.replace() the moment a newer deployed version was detected — gated behind
+  // a storage-ready flag to avoid racing the app's own load, but still a forced navigation happening as
+  // a side effect of simply opening the app. Direct evidence this session pointed at that mechanism as a
+  // real contributing cause of "data wiped after swiping the app away and reopening": Sun's other,
+  // similarly-built standalone PWA (Werewolf Party) has NO auto-reload code at all and has never once
+  // shown this symptom — even on a day she redeployed it just as rapidly as BadQ was redeployed today.
+  // Auto-reload-on-launch was the one clear structural difference, so it's removed rather than
+  // re-tuned again. Now a version mismatch only records that an update exists; the React app shows a
+  // small tap-to-update banner (see updateAvailable state) and the reload happens ONLY from that
+  // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.24";
+      var CURRENT_VERSION = "1.9.25";
       var qs = new URLSearchParams(location.search);
-      if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
+      if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
         .then(function(r){ return r.text(); })
         .then(function(html){
           var m = html.match(/APP_VERSION\s*=\s*"([^"]+)"/);
           if (m && m[1] && m[1] !== CURRENT_VERSION) {
-            var fired = false;
-            var doReload = function(){
-              if (fired) return;
-              fired = true;
-              location.replace(location.pathname + "?_v=" + Date.now());
-            };
-            if (window.__badqStorageReady) doReload();
-            else {
-              window.addEventListener("badq:storage-ready", doReload, { once: true });
-              setTimeout(doReload, 8000); // safety net: never wait forever
-            }
+            window.__badqNewVersion = m[1];
+            try { window.dispatchEvent(new CustomEvent("badq:update-available", { detail: { version: m[1] } })); } catch(e) {}
           }
         })
         .catch(function(){ /* offline: keep running current cached version */ });
@@ -510,7 +500,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.24";
+const APP_VERSION = "1.9.25";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3799,6 +3789,22 @@ function App() {
   // session-only (not persisted) so a still-overdue reminder resurfaces on the next full app open instead
   // of being silenced forever by one tap.
   const [backupNoticeDismissed, setBackupNoticeDismissed] = useState(false);
+  // v1.9.25: the head script's update-check no longer force-reloads on its own (see <head> comment) —
+  // it just records a newer version exists. This picks that up (either via the event, if React was
+  // already mounted when the check resolved, or via the window.__badqNewVersion flag directly, in case
+  // the fetch resolved before this effect had a chance to attach its listener) and shows a small banner
+  // the user taps to actually reload. The reload itself is unchanged (?_v= cache-busted navigation) —
+  // only WHEN it happens changed, from automatic to explicitly user-initiated.
+  const [updateAvailable, setUpdateAvailable] = useState(null); // new version string, or null when none
+  useEffect(() => {
+    if (window.__badqNewVersion) setUpdateAvailable(window.__badqNewVersion);
+    const onUpdate = e => setUpdateAvailable((e && e.detail && e.detail.version) || "ใหม่");
+    window.addEventListener("badq:update-available", onUpdate);
+    return () => window.removeEventListener("badq:update-available", onUpdate);
+  }, []);
+  const applyUpdateNow = () => {
+    try { location.replace(location.pathname + "?_v=" + Date.now()); } catch (e) {}
+  };
   // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
   // below so the two can never silently drift apart on which fields they read/default.
   const applyPersistedState = s => {
@@ -3953,9 +3959,8 @@ function App() {
         const list = bl?.value ? JSON.parse(bl.value) : [];
         setBootLog(Array.isArray(list) ? list : []);
       } catch (e) {}
-      // v1.9.18: record this boot — was it a version-update-triggered reload (?_v=…)? what savedAt/counts
-      // did we actually load? — BEFORE flipping the storage-ready flag below, so the log always has an
-      // entry even if something after this point throws.
+      // record this boot — was it a manual update-tap reload (?_v=…)? what savedAt/counts did we
+      // actually load?
       pushBootLog({
         event: "boot",
         appVersion: APP_VERSION,
@@ -3965,15 +3970,6 @@ function App() {
         viaUpdateReload: !!new URLSearchParams(location.search).get("_v")
       });
       setLoaded(true);
-      // v1.9.18: signal the pre-React auto-update script (see the top of <head>) that THIS tab's own
-      // load-from-storage + safety-guard pass has completed, so it never force-reloads (for a newer
-      // deployed version) before this tab has had a chance to load/heal its own state first — closes a
-      // theoretical race on a long-backgrounded tab where a version-triggered navigation could otherwise
-      // preempt that initial reconciliation.
-      try {
-        window.__badqStorageReady = true;
-        window.dispatchEvent(new Event("badq:storage-ready"));
-      } catch (e) {}
     })();
   }, []);
   // Proactively re-check freshness the moment this instance becomes active again — catches a stale
@@ -5879,7 +5875,43 @@ function App() {
       fontSize: 11,
       color: T.muted
     }
-  }, "v", APP_VERSION))), showBackupReminder && /*#__PURE__*/React.createElement("div", {
+  }, "v", APP_VERSION))), updateAvailable && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#eaf3ff",
+      border: "1px solid #a9cdf0",
+      borderRadius: 12,
+      padding: "10px 11px",
+      marginBottom: 14,
+      display: "flex",
+      alignItems: "center",
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 17,
+      flexShrink: 0,
+      lineHeight: "20px"
+    }
+  }, "🔄"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, "มีเวอร์ชั่นใหม่ (v", updateAvailable, ") พร้อมใช้งาน"), /*#__PURE__*/React.createElement("button", {
+    onClick: applyUpdateNow,
+    style: {
+      flexShrink: 0,
+      padding: "7px 13px",
+      borderRadius: 9,
+      background: T.blue,
+      border: "none",
+      color: "#fff",
+      fontSize: 12,
+      fontWeight: 800
+    }
+  }, "อัปเดตเลย")), showBackupReminder && /*#__PURE__*/React.createElement("div", {
     style: {
       background: "#fff7e6",
       border: "1px solid #f0c96b",
