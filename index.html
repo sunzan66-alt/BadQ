@@ -19,15 +19,89 @@
   #boot{font-family:ui-sans-serif,system-ui,sans-serif;color:#6b7d74;text-align:center;padding:60px 16px;font-size:14px;}
 </style>
 <script>
-  // Persistence shim: same async API the app expects, backed by localStorage.
-  // Data is tied to this site's URL, so redeploying new code does NOT erase it.
+  // v1.9.24: IndexedDB shadow-mirror, added specifically for the confirmed repro "swiped the app away
+  // in the switcher, reopened it — all data gone". This is a real, documented WebKit platform behavior:
+  // "Add to Home Screen" standalone web apps run in their own isolated storage container, separate from
+  // regular Safari tabs, and that container has repeatedly been reported (WebKit bug 181849; Apple dev
+  // forum threads 125041/742037/737827; live 2025-26 reports e.g. MudBlazor#12557) to lose localStorage
+  // on a kill+relaunch cycle — not just after long inactivity. It is not something BadQ's own code causes
+  // and cannot be fixed from here, but localStorage and IndexedDB are separate underlying OS-level
+  // containers on iOS that are NOT guaranteed to get wiped together, so mirroring into a second backend
+  // meaningfully lowers (not eliminates — IndexedDB has its own reports of the same bug) the odds that a
+  // single relaunch loses everything. localStorage stays PRIMARY (get/set from it first, unchanged), and
+  // every write is also mirrored into IndexedDB; a read that finds localStorage empty falls back to the
+  // IndexedDB copy and restores localStorage from it before returning.
+  var IDB_NAME = "badq-shadow-store", IDB_STORE = "kv";
+  function idbOpen(){
+    return new Promise(function(resolve){
+      try{
+        if (!window.indexedDB) { resolve(null); return; }
+        var req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = function(){ try{ req.result.createObjectStore(IDB_STORE); }catch(e){} };
+        req.onsuccess = function(){ resolve(req.result); };
+        req.onerror = function(){ resolve(null); };
+      }catch(e){ resolve(null); }
+    });
+  }
+  function idbGet(k){
+    return idbOpen().then(function(db){
+      if(!db) return null;
+      return new Promise(function(resolve){
+        try{
+          var tx = db.transaction(IDB_STORE, "readonly");
+          var req = tx.objectStore(IDB_STORE).get(k);
+          req.onsuccess = function(){ resolve(req.result == null ? null : req.result); };
+          req.onerror = function(){ resolve(null); };
+        }catch(e){ resolve(null); }
+      });
+    });
+  }
+  function idbSet(k, v){
+    return idbOpen().then(function(db){
+      if(!db) return;
+      return new Promise(function(resolve){
+        try{
+          var tx = db.transaction(IDB_STORE, "readwrite");
+          tx.objectStore(IDB_STORE).put(v, k);
+          tx.oncomplete = function(){ resolve(); };
+          tx.onerror = function(){ resolve(); };
+        }catch(e){ resolve(); }
+      });
+    });
+  }
+  function idbDelete(k){
+    return idbOpen().then(function(db){
+      if(!db) return;
+      try{ var tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).delete(k); }catch(e){}
+    });
+  }
+  // Persistence shim: same async API the app expects. Data is tied to this site's URL/origin, so
+  // redeploying new code does NOT erase it.
   window.storage = {
-    async get(k){ try{ const v = localStorage.getItem("bg:"+k); return v==null?null:{ value:v }; }catch(e){ return null; } },
-    async set(k,v){ try{ localStorage.setItem("bg:"+k, v); }catch(e){ /* quota */ } return { value:v }; },
-    async delete(k){ try{ localStorage.removeItem("bg:"+k); }catch(e){} return { deleted:true }; },
+    async get(k){
+      try{
+        var v = localStorage.getItem("bg:"+k);
+        if (v != null) { idbSet(k, v).catch(function(){}); return { value: v }; }
+        var shadow = await idbGet(k);
+        if (shadow != null) {
+          try { localStorage.setItem("bg:"+k, shadow); } catch(e) {}
+          return { value: shadow };
+        }
+        return null;
+      }catch(e){ return null; }
+    },
+    async set(k,v){
+      try{ localStorage.setItem("bg:"+k, v); }catch(e){ /* quota */ }
+      idbSet(k, v).catch(function(){});
+      return { value:v };
+    },
+    async delete(k){
+      try{ localStorage.removeItem("bg:"+k); }catch(e){}
+      idbDelete(k).catch(function(){});
+      return { deleted:true };
+    },
   };
-  // v1.9.23: best-effort request that the browser NOT evict this site's storage under pressure/inactivity
-  // — reported symptom this targets: "swiped the app away in the switcher, reopened it, all data gone".
+  // v1.9.23: best-effort request that the browser NOT evict this site's storage under pressure/inactivity.
   // This is a real (if imperfect) browser API for exactly that failure mode; iOS Safari does not currently
   // implement it (calling it there is a silent no-op, not an error), so it helps on Chrome/Android and
   // costs nothing where it's unsupported. It can never fail loudly — wrapped defensively since some
@@ -52,7 +126,7 @@
   // can never be permanently stuck.
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.23";
+      var CURRENT_VERSION = "1.9.24";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -436,7 +510,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.23";
+const APP_VERSION = "1.9.24";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
