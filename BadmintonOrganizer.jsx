@@ -7176,7 +7176,15 @@ function TournamentPodium({ podium, teamsById, peopleById }) {
   );
 }
 function TournamentHistoricalDetail({ t, playersById, onOpenTournamentPrint }) {
-  const snapById = Object.fromEntries((t.playerSnapshots || []).map((p) => [p.id, p]));
+  // v1.11.4 fix: playerSnapshots only ever froze {id, name, level, skillIndex} (by design — so the
+  // archived tournament always shows the player's skill/level AS OF completion, never a later edit).
+  // The old merge (`{...playersById, ...snapById}`) replaced each player's ENTIRE live record with the
+  // bare snapshot object, silently dropping `photo` (and anything else not captured in the snapshot)
+  // for every real registered player in every completed tournament — the Podium then had no choice but
+  // to fall back to initial-letter circles. Fixed by merging the snapshot's frozen fields ON TOP OF the
+  // live record per player, instead of replacing it outright, so `photo` survives while level/skillIndex
+  // still come from the frozen snapshot exactly as before.
+  const snapById = Object.fromEntries((t.playerSnapshots || []).map((p) => [p.id, { ...playersById[p.id], ...p }]));
   const peopleById = { ...playersById, ...snapById, ...Object.fromEntries((t.guestPlayers || []).map((g) => [g.id, g])) };
   const teamsById = Object.fromEntries((t.teams || []).map((tm) => [tm.id, tm]));
   // v1.11.4: podium/totals are recomputed fresh from the live bracket/match data every render (never
