@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.9.7";
+const APP_VERSION = "1.9.22";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -68,18 +68,33 @@ const STATUS = {
   done: { label: "เกมจบ", color: "#6b7d74", bg: "#eef2f0" },
 };
 // player attendance status (playing = derived from active match, not stored)
+// v1.9.17: "registered" (ลงทะเบียน) sits between "absent" and "ready" — means "said they're coming, not
+// here/eligible yet". It is NOT matchmaking-eligible: every eligibility filter in this file checks
+// `status === "ready"` specifically, so simply not being "ready" already keeps "registered" out of Auto
+// Matchmaking with zero further changes there. It IS session-scoped exactly like every other status here
+// (endSession()/resetAllToAbsent() already reset ALL statuses back to "absent" uniformly).
 const PSTATUS = {
   absent: { label: "ไม่ได้มา", color: "#6b7d74", bg: "#eef2f0" },
+  registered: { label: "ลงทะเบียน", color: "#4f46e5", bg: "#eef0fd" },
   ready: { label: "พร้อมเล่น", color: "#12986a", bg: "#e2f5ec" },
   playing: { label: "กำลังเล่น", color: "#2563eb", bg: "#e7effd" },
   resting: { label: "พัก", color: "#d97706", bg: "#fef3ec" },
   left: { label: "กลับแล้ว", color: "#9333ea", bg: "#f1eafd" },
 };
-const PSTATUS_OPTS = ["absent", "ready", "resting", "left"];
+const PSTATUS_OPTS = ["absent", "registered", "ready", "resting", "left"];
+// v1.9.17: handedness badge on the Player Card — a violet distinct from every skill-level color
+// (LEVEL_COLORS_BY_INDEX has no purple), every PSTATUS color, T.blue, and T.accent, as specified.
+const HAND_BADGE = { color: "#7c3aed", bg: "#efe7fc" };
+const HAND_LABEL = { left: "ซ้าย", right: "ขวา" };
 const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
 // backward-compatible: old data used `present` boolean; old data also has no skillIndex yet — derive it
 // from the (isan-based) label so matchmaking strength is 100% preserved across the upgrade.
-const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1 });
+// v1.9.17: `handedness` ("left"|"right") is PERMANENT player data (unlike `status`, which is
+// session-scoped) — old players/backups have no such field at all, so default/migrate them to "right"
+// here, same as a brand-new player (see addPlayer). `handPref` ("preferLeft"|"avoidLeft"|null) is the
+// optional SOFT matchmaking preference "อยากคู่/ไม่อยากคู่กับมือซ้าย" — set via the existing lock-pair
+// editor (see setHandPref/LockPairEditor), never a value the UI writes directly onto a fresh player.
+const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null });
 
 // true once the viewport is wide enough to benefit from a landscape/tablet layout (multi-column court
 // cards, wider content column) — re-evaluated live on rotate/resize, no page reload needed.
@@ -95,6 +110,11 @@ function useIsWide() {
   return isWide;
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
+// v1.9.17: weight for the SOFT "อยากคู่/ไม่อยากคู่กับมือซ้าย" preference inside buildMatch's doubles
+// scoring (see handPrefNudge) — small relative to balance(*2)/partner-repeat(*3)/opponent-repeat(*1.2)
+// terms, so it nudges which otherwise-similar split gets picked without ever overriding real match
+// quality or blocking a match from forming (that's what makes it a soft, not hard, constraint).
+const HAND_PREF_WEIGHT = 1;
 const keyOf = (a, b) => (a < b ? a + "|" + b : b + "|" + a);
 // pair-rule types: "lock" (force as partners, doubles only), "avoidPartner" (never on the same team),
 // "avoidOpponent" (never on opposing teams / never face each other), "avoidBoth" (never in the same
@@ -191,6 +211,15 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
     }
     return true;
   };
+  // v1.9.17: "อยากคู่/ไม่อยากคู่กับมือถนัดซ้าย" — a SOFT preference, never a hard filter (unlike lockOk
+  // above). Nudges the score for a candidate partnership x+y up/down; if NO split satisfies anyone's
+  // preference the match still forms normally, just picking whichever split scores lowest overall.
+  const handPrefNudge = (x, y) => {
+    const px = players.find((pp) => pp.id === x), py = players.find((pp) => pp.id === y);
+    if (!px || !py) return 0;
+    const of = (pref, partner) => (pref === "preferLeft" ? (partner.handedness === "left" ? -HAND_PREF_WEIGHT : 0) : pref === "avoidLeft" ? (partner.handedness === "left" ? HAND_PREF_WEIGHT : 0) : 0);
+    return of(px.handPref, py) + of(py.handPref, px);
+  };
   let best = null;
   for (const trio of kcomb(others, 3)) {
     const four = [anchor, ...trio];
@@ -207,7 +236,8 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
       const pRep = pc(A[0], A[1]) + pc(B[0], B[1]);
       const oRep = oc(A[0], B[0]) + oc(A[0], B[1]) + oc(A[1], B[0]) + oc(A[1], B[1]);
       const waitPen = idxOf(trio[0]) + idxOf(trio[1]) + idxOf(trio[2]);
-      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4;
+      const handPen = handPrefNudge(A[0], A[1]) + handPrefNudge(B[0], B[1]);
+      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4 + handPen;
       if (!best || score < best.score) best = { score, teamA: A, teamB: B };
     }
   }
@@ -304,6 +334,30 @@ function matchWinner(m) {
   if (cb > ca) return "B";
   return null; // draw / undecided
 }
+// "rounds" (the จำนวนเซต setting) means "sets needed to win", matching real badminton scoring:
+// 1 = single set decides it, 2 = best-of-3 (win 2 of 3), 3 = best-of-5 (win 3 of 5). maxSetsFor() is
+// the hard cap on sets a match could ever need; visibleSetCount() is how many set rows ScoreEditor
+// should show right now — a new set is revealed only once the previous one is decided, and revealing
+// stops the moment either side has already clinched the needed wins (so a 2-0 match never shows a
+// pointless 3rd set, but a 1-1 match does).
+function maxSetsFor(neededWins) { return Math.max(1, (neededWins || 1) * 2 - 1); }
+function visibleSetCount(m, neededWins) {
+  const need = neededWins || 1;
+  const maxSets = maxSetsFor(need);
+  let wa = 0, wb = 0, visible = 1;
+  for (let i = 0; i < maxSets; i++) {
+    visible = i + 1;
+    const w = roundWinner(m && m.scores && m.scores[i]);
+    if (w === "A") wa++; else if (w === "B") wb++;
+    if (wa >= need || wb >= need) break;
+    if (!w) break; // this set isn't decided yet — don't reveal the next one early
+  }
+  return visible;
+}
+function roundsLabel(rounds) {
+  const r = rounds || 1;
+  return r <= 1 ? "1 เซต" : `${r} ใน ${maxSetsFor(r)} เซต`;
+}
 function playerStats(pid, matches) {
   let win = 0, loss = 0, draw = 0, noScore = 0; const partners = {}, opps = {};
   for (const m of matches) {
@@ -353,7 +407,9 @@ function formatCurrency(amount, opts) {
 }
 // expense: reuse existing court+shuttle logic; split "other" equally among attendees
 function computeBill(players, settings) {
-  const payers = players.filter((p) => p.status && p.status !== "absent");
+  // v1.9.17: "registered" (said they're coming, not arrived/eligible yet) is excluded from billing same
+  // as "absent" — only players who actually attended in some capacity (ready/resting/left) are payers.
+  const payers = players.filter((p) => p.status && p.status !== "absent" && p.status !== "registered");
   const n = payers.length || 1;
   const otherShare = (settings.other || 0) / n;
   // model D (รายคน) is the ONLY cost model that changes REVENUE — it overrides the flat per-person court
@@ -576,6 +632,448 @@ function resolveSessionLabel(sessId, session, sessionHistory) {
   return "ก๊วนที่ผ่านมา";
 }
 
+// ===================== FINANCIAL REPORT EXPORT (v1.9.14) =====================
+// Single normalized report builder — reused byTXT/PDF-print/XLSX exporters so every export format shows
+// EXACTLY the same numbers as the Finance page (no parallel accounting, per the task's #3/#4 requirements).
+// `period` describes what range is being exported (see financePeriodMeta below); `ctx` bundles the raw
+// state the report is built from. This function only READS state — never mutates anything (Requirement #19).
+function fmtGeneratedAt(ts) {
+  const d = new Date(ts);
+  const MO = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getDate()} ${MO[d.getMonth()]} ${d.getFullYear() + 543} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+// describes which period is currently selected on the Finance page (or a custom override chosen inside the
+// export sheet itself) — one shared shape consumed by buildFinancialReport() AND the filename builder, so
+// the exported data and the exported filename can never disagree about what range they cover.
+function financePeriodMeta(mode, effectiveDate, monthYm, year, custom) {
+  if (custom && custom.from && custom.to) {
+    const from = custom.from <= custom.to ? custom.from : custom.to;
+    const to = custom.from <= custom.to ? custom.to : custom.from;
+    return { kind: "custom", range: { from, to }, label: `${fmtThaiDateFull(from)} – ${fmtThaiDateFull(to)}`, filenameStub: `${from}_to_${to}` };
+  }
+  if (mode === "day") {
+    if (!effectiveDate) return null;
+    return { kind: "day", range: { from: effectiveDate, to: effectiveDate }, label: fmtThaiDateFull(effectiveDate), filenameStub: effectiveDate };
+  }
+  if (mode === "month") {
+    if (!monthYm) return null;
+    return { kind: "month", range: { from: `${monthYm}-01`, to: `${monthYm}-${String(lastDayOfMonth(monthYm)).padStart(2, "0")}` }, label: fmtThaiMonthFull(monthYm), filenameStub: monthYm };
+  }
+  // mode === "overview" -> follows the ภาพรวม tab's year selector ("YYYY" | "all")
+  if (year === "all") return { kind: "all", range: { from: "0000-01-01", to: "9999-12-31" }, label: "ทั้งหมด", filenameStub: "All" };
+  return { kind: "year", range: { from: `${year}-01-01`, to: `${year}-12-31` }, label: `ปี ${Number(year) + 543}`, filenameStub: String(year) };
+}
+// every outstanding (not fully paid) player row across the sessions in range — Requirement #10
+function outstandingPaymentsForSessions(sessionsInRange) {
+  const rows = [];
+  sessionsInRange.forEach((s) => {
+    (s.bill || []).forEach((b) => {
+      const due = Number(b.total) || 0;
+      const collected = b.paid ? due : 0;
+      const outstanding = due - collected;
+      if (outstanding > 0) rows.push({ date: s.date, sessionName: s.name || "ก๊วนไม่มีชื่อ", playerName: b.name || "ผู้เล่น", due, collected, outstanding });
+    });
+  });
+  return rows;
+}
+// per-session + per-line-item transaction detail — DISPLAY ONLY (Requirement #9): totals in `summary`/`pnl`
+// always come from computeFinanceForRange, never re-summed from this list, so detail and totals can't drift.
+function buildTransactionDetail(f) {
+  const rows = [];
+  f.sessionsInRange.forEach((s) => {
+    const rev = sessionRevenue(s);
+    if (rev > 0) rows.push({ date: s.date, type: "revenue", category: "ค่าก๊วน", description: s.name || "ก๊วนไม่มีชื่อ", session: s.name || "-", amount: rev });
+    sessionExpenseList(s).forEach((e) => rows.push({ date: e.date || s.date, type: "expense", category: e.category || "อื่น ๆ", description: e.description || e.category || "รายการ", session: s.name || "-", amount: Number(e.amount) || 0 }));
+  });
+  f.otherIncInRange.forEach((e) => rows.push({ date: e.date, type: "revenue", category: "รายได้อื่น", description: e.description || "รายได้อื่น", session: "-", amount: Number(e.amount) || 0 }));
+  f.genExpInRange.forEach((e) => rows.push({ date: e.date, type: "expense", category: e.category || "อื่น ๆ", description: e.description || e.category || "รายการ", session: "-", amount: Number(e.amount) || 0 }));
+  rows.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  return rows;
+}
+// THE single normalized report object — TXT/PDF/XLSX all render straight from this, never recompute totals themselves.
+function buildFinancialReport(period, ctx) {
+  const { sessionHistory, generalExpenses, otherIncome, discountCredits } = ctx;
+  const f = computeFinanceForRange(period.range, sessionHistory, generalExpenses, otherIncome);
+  const sessions = f.sessionsInRange.map((s) => ({
+    date: s.date,
+    name: s.name || "ก๊วนไม่มีชื่อ",
+    playerCount: (s.players || []).length,
+    matchCount: s.stats && typeof s.stats.totalMatches === "number" ? s.stats.totalMatches : (s.matches || []).length,
+    courtCount: s.courtCount || 0,
+    revenue: sessionRevenue(s),
+    collected: sessionCollected(s),
+    receivable: sessionReceivable(s),
+    expense: sessionExpenseTotal(s),
+    profit: sessionProfit(s),
+  }));
+  // ส่วนลดคงเหลือ (Requirement #11) — only "available" credits by default; a player who no longer exists
+  // in the live roster still shows via the frozen playerNameSnapshot, never dropped/crashed on.
+  const discountCreditRows = (discountCredits || []).filter((c) => c.status === "available").map((c) => ({
+    playerName: c.playerNameSnapshot || "ผู้เล่น",
+    amount: Number(c.amount) || 0,
+    sourceSession: resolveSessionLabel(c.sourceSessionId, null, sessionHistory) || "-",
+    createdAt: c.createdAt || null,
+    status: c.status,
+  }));
+  return {
+    period,
+    generatedAt: Date.now(),
+    summary: { revenue: f.revenue, collected: f.collected, receivable: f.revenue - f.collected, expense: f.expense, profit: f.profit },
+    pnl: { groupRevenue: f.sessionRevenueTotal, otherIncome: f.otherIncomeTotal, totalRevenue: f.revenue, expenseByCategory: f.catTotals, totalExpense: f.expense, netProfit: f.profit },
+    sessions,
+    transactions: buildTransactionDetail(f),
+    outstandingPayments: outstandingPaymentsForSessions(f.sessionsInRange),
+    discountCredits: discountCreditRows,
+  };
+}
+// filename per Requirement #17 — always the Gregorian year, even though the UI displays พ.ศ. everywhere else
+function financeExportFilename(periodMeta, ext) {
+  return `BadQ_Finance_${periodMeta.filenameStub}.${ext}`;
+}
+// shared save/share path for every export format (Requirement #18) — same Web Share API (files) + direct-
+// download fallback already proven by the JSON backup export; never throws, always resolves with an outcome.
+async function shareOrDownloadBlob(blob, filename, mimeType) {
+  if (navigator.share && navigator.canShare) {
+    try {
+      const file = new File([blob], filename, { type: mimeType });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return "done";
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return "cancelled";
+      // any other share failure: fall through to the direct-download fallback below
+    }
+  }
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return "done";
+  } catch (e) {
+    try {
+      window.open(URL.createObjectURL(blob), "_blank");
+      return "done";
+    } catch (e2) {
+      return "failed";
+    }
+  }
+}
+
+// ===================== TXT EXPORT (Requirement #12) =====================
+// Plain readable text, UTF-8. Deliberately NOT fixed-width-column aligned (Thai glyph widths vary by font/
+// app, so exact alignment breaks) — just consistent left-label/right-value spacing, good enough to scan.
+function padTxtRow(label, value) {
+  const width = 22;
+  const gap = Math.max(1, width - label.length);
+  return label + " ".repeat(gap) + value;
+}
+function buildFinancialReportTxt(report) {
+  const L = [];
+  const sep = "==============================";
+  L.push("BadQ — รายงานการเงิน");
+  L.push(report.period.label);
+  L.push(`สร้างเมื่อ ${fmtGeneratedAt(report.generatedAt)}`);
+  L.push(""); L.push(sep); L.push("");
+  L.push("สรุป"); L.push("");
+  L.push(padTxtRow("รายได้", formatCurrency(report.summary.revenue)));
+  L.push(padTxtRow("รับแล้ว", formatCurrency(report.summary.collected)));
+  L.push(padTxtRow("ค้างรับ", formatCurrency(report.summary.receivable)));
+  L.push(padTxtRow("ค่าใช้จ่าย", formatCurrency(report.summary.expense)));
+  L.push(padTxtRow(report.summary.profit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.summary.profit))));
+  L.push(""); L.push(sep); L.push("");
+  L.push("กำไรขาดทุน"); L.push("");
+  L.push(padTxtRow("รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)));
+  L.push(padTxtRow("รายได้อื่น", formatCurrency(report.pnl.otherIncome)));
+  L.push(padTxtRow("รายได้รวม", formatCurrency(report.pnl.totalRevenue)));
+  L.push(""); L.push("ค่าใช้จ่าย");
+  Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => { L.push(padTxtRow(cat, formatCurrency(amt))); });
+  L.push(""); L.push(padTxtRow("ค่าใช้จ่ายรวม", formatCurrency(report.pnl.totalExpense)));
+  L.push(""); L.push(padTxtRow(report.pnl.netProfit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.pnl.netProfit))));
+  L.push(""); L.push(sep); L.push("");
+  L.push("รายก๊วน"); L.push("");
+  if (report.sessions.length === 0) {
+    L.push("ไม่มีก๊วนในช่วงเวลานี้");
+  } else {
+    report.sessions.forEach((s) => {
+      L.push(`${fmtThaiDateFull(s.date)} | ${s.name}`);
+      L.push(`ผู้เล่น ${s.playerCount} คน · ${s.matchCount} แมตช์ · ${s.courtCount} สนาม`);
+      L.push(`รายได้ ${formatCurrency(s.revenue)}`);
+      L.push(`ค่าใช้จ่าย ${formatCurrency(s.expense)}`);
+      L.push(`กำไร ${formatCurrency(s.profit)}`);
+      L.push("");
+    });
+  }
+  L.push(sep); L.push("");
+  L.push("รายรับรายจ่าย"); L.push("");
+  if (report.transactions.length === 0) {
+    L.push("ไม่มีรายการ");
+  } else {
+    report.transactions.forEach((t) => {
+      L.push(`${fmtThaiDateFull(t.date)} | ${t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย"} | ${t.category} | ${t.description} | ${t.session} | ${formatCurrency(t.amount)}`);
+    });
+  }
+  L.push(""); L.push(sep); L.push("");
+  L.push("ค้างชำระ"); L.push("");
+  if (report.outstandingPayments.length === 0) {
+    L.push("ไม่มีรายการค้างชำระ");
+  } else {
+    report.outstandingPayments.forEach((o) => {
+      L.push(`${fmtThaiDateFull(o.date)} | ${o.sessionName} | ${o.playerName} | ต้องชำระ ${formatCurrency(o.due)} | รับแล้ว ${formatCurrency(o.collected)} | ค้าง ${formatCurrency(o.outstanding)}`);
+    });
+  }
+  L.push(""); L.push(sep); L.push("");
+  L.push("ส่วนลดคงเหลือ"); L.push("");
+  if (report.discountCredits.length === 0) {
+    L.push("ไม่มีส่วนลดคงเหลือ");
+  } else {
+    report.discountCredits.forEach((c) => { L.push(`${c.playerName} | ${formatCurrency(c.amount)} | จาก ${c.sourceSession} | ${c.status}`); });
+  }
+  L.push(""); L.push(sep); L.push("");
+  L.push("สร้างจาก BadQ");
+  return L.join("\n");
+}
+function downloadFinancialReportTxt(report) {
+  const text = buildFinancialReportTxt(report);
+  const blob = new Blob(["﻿" + text], { type: "text/plain;charset=utf-8" });
+  return shareOrDownloadBlob(blob, financeExportFilename(report.period, "txt"), "text/plain");
+}
+
+// ===================== MINIMAL ZIP WRITER (Requirement #13 — real .xlsx, no external library) =====================
+// A .xlsx IS a zip archive of XML parts. This app is one self-contained HTML file with no build step and no
+// external script loading (that's what makes offline PWA caching work), so a real xlsx needs its own tiny
+// zip writer rather than vendoring a library. STORE (uncompressed) entries are fully valid zip/xlsx — every
+// spreadsheet app accepts them — so no compression algorithm is needed either.
+function crc32Bytes(bytes) {
+  if (!crc32Bytes.table) {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    crc32Bytes.table = t;
+  }
+  const table = crc32Bytes.table;
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = table[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return (crc ^ 0xffffffff) >>> 0;
+}
+function strToBytes(str) {
+  return new TextEncoder().encode(str);
+}
+function dosDateTimeNow() {
+  const d = new Date();
+  const dosTime = ((d.getHours() & 0x1f) << 11) | ((d.getMinutes() & 0x3f) << 5) | ((d.getSeconds() >> 1) & 0x1f);
+  const dosDate = (((d.getFullYear() - 1980) & 0x7f) << 9) | (((d.getMonth() + 1) & 0xf) << 5) | (d.getDate() & 0x1f);
+  return { dosTime, dosDate };
+}
+// files: [{ name, data: Uint8Array }] -> a complete, valid .zip as Uint8Array
+function buildZipArchive(files) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const { dosTime, dosDate } = dosDateTimeNow();
+  files.forEach((f) => {
+    const nameBytes = encoder.encode(f.name);
+    const data = f.data;
+    const crc = crc32Bytes(data);
+    const size = data.length;
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+    localParts.push(local, data);
+    const central = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    central.set(nameBytes, 46);
+    centralParts.push(central);
+    offset += local.length + data.length;
+  });
+  const centralStart = offset;
+  const centralSize = centralParts.reduce((s, p) => s + p.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, centralStart, true);
+  ev.setUint16(20, 0, true);
+  const allParts = [...localParts, ...centralParts, eocd];
+  const total = allParts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  allParts.forEach((p) => { out.set(p, pos); pos += p.length; });
+  return out;
+}
+
+// ===================== XLSX EXPORT (Requirement #13/#14) =====================
+function xmlEscape(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function xlsxColLetter(n) {
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+// "YYYY-MM-DD" -> Excel's day-count serial (days since the fake epoch 1899-12-30) — a REAL date value
+// (Requirement #14 "Recommended"), not just display text, so it sorts/filters like a date in Excel.
+function excelSerialDate(dateStr) {
+  if (!dateStr) return null;
+  const [y, m, d] = String(dateStr).split("-").map(Number);
+  if (!y || !m || !d) return null;
+  const utcMs = Date.UTC(y, m - 1, d);
+  const epochMs = Date.UTC(1899, 11, 30);
+  return Math.round((utcMs - epochMs) / 86400000);
+}
+// cellXfs indices — defined once in buildFinancialXlsxStylesXml() below, referenced by index everywhere else
+const XLSX_STYLE = { normal: 0, headerBold: 1, money: 2, boldText: 3, boldMoney: 4, date: 5 };
+function xlsxCell(ref, value, styleIdx, kind) {
+  if (kind === "text") return `<c r="${ref}" s="${styleIdx}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+  const n = Number(value);
+  return `<c r="${ref}" s="${styleIdx}"><v>${isFinite(n) ? n : 0}</v></c>`;
+}
+// generic data-table worksheet — used by all 4 detail sheets (รายก๊วน / รายรับรายจ่าย / ค้างชำระ / ส่วนลดคงเหลือ).
+// colTypes[i]: "text" | "int" | "money" | "date". Money cells are REAL numbers with a currency numFmt
+// (Requirement #14 — never a formatted string like "฿13,235") so SUM/sort/filter/pivot all work in Excel.
+function buildFinancialXlsxTableSheet(headers, colTypes, rows, opts) {
+  const o = opts || {};
+  const lines = [`<row r="1">${headers.map((h, i) => xlsxCell(`${xlsxColLetter(i + 1)}1`, h, XLSX_STYLE.headerBold, "text")).join("")}</row>`];
+  rows.forEach((r, ri) => {
+    const rn = ri + 2;
+    const cells = r.map((val, ci) => {
+      const ref = `${xlsxColLetter(ci + 1)}${rn}`;
+      const type = colTypes[ci];
+      if (type === "money") return xlsxCell(ref, val, XLSX_STYLE.money, "number");
+      if (type === "int") return xlsxCell(ref, val, XLSX_STYLE.normal, "number");
+      if (type === "date") {
+        const serial = excelSerialDate(val);
+        return serial == null ? xlsxCell(ref, val || "", XLSX_STYLE.normal, "text") : xlsxCell(ref, serial, XLSX_STYLE.date, "number");
+      }
+      return xlsxCell(ref, val, XLSX_STYLE.normal, "text");
+    }).join("");
+    lines.push(`<row r="${rn}">${cells}</row>`);
+  });
+  let lastRow = rows.length + 1;
+  if (rows.length === 0 && o.emptyMessage) {
+    lines.push(`<row r="2">${xlsxCell("A2", o.emptyMessage, XLSX_STYLE.normal, "text")}</row>`);
+    lastRow = 2;
+  }
+  const lastCol = xlsxColLetter(headers.length);
+  const dim = `A1:${lastCol}${lastRow}`;
+  const cols = `<cols>${headers.map((h, i) => `<col min="${i + 1}" max="${i + 1}" width="${(o.widths && o.widths[i]) || 14}" customWidth="1"/>`).join("")}</cols>`;
+  const sheetView = `<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>`;
+  const autoFilter = rows.length > 0 ? `<autoFilter ref="${dim}"/>` : "";
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="${dim}"/>${sheetView}${cols}<sheetData>${lines.join("")}</sheetData>${autoFilter}</worksheet>`;
+}
+// สรุป sheet — a key/value summary + P&L breakdown (not a filterable table, so it's built by hand rather than
+// through buildFinancialXlsxTableSheet).
+function buildFinancialXlsxSummarySheet(report) {
+  const rows = [];
+  let r = 1;
+  const pushRow = (a, b, styleA, styleB) => {
+    let cells = "";
+    const bIsText = typeof b === "string";
+    if (a != null) cells += xlsxCell(`A${r}`, a, styleA != null ? styleA : XLSX_STYLE.normal, "text");
+    if (b != null) cells += xlsxCell(`B${r}`, b, styleB != null ? styleB : bIsText ? XLSX_STYLE.normal : XLSX_STYLE.money, bIsText ? "text" : "number");
+    rows.push(`<row r="${r}">${cells}</row>`);
+    r++;
+  };
+  pushRow("BadQ — รายงานการเงิน", null, XLSX_STYLE.boldText);
+  pushRow("ช่วงเวลา", report.period.label);
+  pushRow("วันที่สร้างรายงาน", fmtGeneratedAt(report.generatedAt));
+  r++;
+  pushRow("สรุป", null, XLSX_STYLE.boldText);
+  pushRow("รายได้", report.summary.revenue);
+  pushRow("รับแล้ว", report.summary.collected);
+  pushRow("ค้างรับ", report.summary.receivable);
+  pushRow("ค่าใช้จ่าย", report.summary.expense);
+  pushRow(report.summary.profit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.summary.profit), XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  r++;
+  pushRow("สรุปกำไรขาดทุน", null, XLSX_STYLE.boldText);
+  pushRow("รายได้ค่าก๊วน", report.pnl.groupRevenue);
+  pushRow("รายได้อื่น", report.pnl.otherIncome);
+  pushRow("รายได้รวม", report.pnl.totalRevenue, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => pushRow(cat, amt));
+  pushRow("ค่าใช้จ่ายรวม", report.pnl.totalExpense, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  pushRow(report.pnl.netProfit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.pnl.netProfit), XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  const lastRow = r - 1;
+  const dim = `A1:B${lastRow}`;
+  const cols = `<cols><col min="1" max="1" width="26" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/></cols>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="${dim}"/>${cols}<sheetData>${rows.join("")}</sheetData></worksheet>`;
+}
+function buildFinancialXlsxStylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;฿&quot;#,##0"/><numFmt numFmtId="165" formatCode="yyyy-mm-dd"/></numFmts><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEEF2F0"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+}
+function buildFinancialReportXlsxBytes(report) {
+  const sheets = [
+    { name: "สรุป", xml: buildFinancialXlsxSummarySheet(report) },
+    { name: "รายก๊วน", xml: buildFinancialXlsxTableSheet(["วันที่", "ชื่อก๊วน", "จำนวนผู้เล่น", "จำนวนแมตช์", "จำนวนสนาม", "รายได้", "รับแล้ว", "ค้างรับ", "ค่าใช้จ่าย", "กำไร/ขาดทุน"], ["date", "text", "int", "int", "int", "money", "money", "money", "money", "money"], report.sessions.map((s) => [s.date, s.name, s.playerCount, s.matchCount, s.courtCount, s.revenue, s.collected, s.receivable, s.expense, s.profit]), { widths: [12, 20, 10, 8, 8, 12, 12, 12, 12, 12], emptyMessage: "ไม่มีก๊วนในช่วงเวลานี้" }) },
+    { name: "รายรับรายจ่าย", xml: buildFinancialXlsxTableSheet(["วันที่", "ประเภท", "หมวด", "รายละเอียด", "ก๊วน", "จำนวนเงิน"], ["date", "text", "text", "text", "text", "money"], report.transactions.map((t) => [t.date, t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย", t.category, t.description, t.session, t.amount]), { widths: [12, 10, 14, 28, 18, 12], emptyMessage: "ไม่มีรายการ" }) },
+    { name: "ค้างชำระ", xml: buildFinancialXlsxTableSheet(["วันที่", "ก๊วน", "ผู้เล่น", "ยอดที่ต้องชำระ", "รับแล้ว", "ค้างชำระ"], ["date", "text", "text", "money", "money", "money"], report.outstandingPayments.map((o) => [o.date, o.sessionName, o.playerName, o.due, o.collected, o.outstanding]), { widths: [12, 18, 16, 14, 12, 12], emptyMessage: "ไม่มีรายการค้างชำระ" }) },
+    { name: "ส่วนลดคงเหลือ", xml: buildFinancialXlsxTableSheet(["ผู้เล่น", "จำนวนเงิน", "ก๊วนต้นทาง", "วันที่ได้รับ", "สถานะ"], ["text", "money", "text", "date", "text"], report.discountCredits.map((c) => [c.playerName, c.amount, c.sourceSession, c.createdAt ? new Date(c.createdAt).toISOString().slice(0, 10) : "", c.status === "available" ? "พร้อมใช้" : c.status]), { widths: [18, 12, 22, 14, 12], emptyMessage: "ไม่มีส่วนลดคงเหลือ" }) },
+  ];
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${sheets.map((s, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+  const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((s, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${xmlEscape(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("")}</sheets></workbook>`;
+  const files = [
+    { name: "[Content_Types].xml", data: strToBytes(contentTypes) },
+    { name: "_rels/.rels", data: strToBytes(rootRels) },
+    { name: "xl/workbook.xml", data: strToBytes(workbookXml) },
+    { name: "xl/_rels/workbook.xml.rels", data: strToBytes(workbookRels) },
+    { name: "xl/styles.xml", data: strToBytes(buildFinancialXlsxStylesXml()) },
+    ...sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: strToBytes(s.xml) })),
+  ];
+  return buildZipArchive(files);
+}
+function downloadFinancialReportXlsx(report) {
+  const bytes = buildFinancialReportXlsxBytes(report);
+  const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  return shareOrDownloadBlob(blob, financeExportFilename(report.period, "xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+}
+
 // build the plain-text summary used by the Web Share API (with clipboard/alert fallback)
 function buildShareText({ name, date, playerCount, totalMatches, maxGames, totalExpense }) {
   return `BadQ — ${name || "ก๊วนแบดมินตัน"}\n${date || ""}\nผู้เล่น ${playerCount} คน\n${totalMatches} แมตช์\nเกมมากสุด ${maxGames} เกม\nค่าใช้จ่ายรวม ${formatCurrency(totalExpense)}`;
@@ -608,7 +1106,7 @@ async function readImageFull(file) {
   } catch (e) { return dataUrl; }
 }
 function fmtMode(settings, mode) {
-  return `🏸 ${mode === "doubles" ? "ตีคู่" : "ตีเดี่ยว"} · ${settings.winScore || 21} แต้ม · ${settings.deuce ? "มีดิว" : "ไม่มีดิว"} · ${settings.rounds || 1} เซต`;
+  return `🏸 ${mode === "doubles" ? "ตีคู่" : "ตีเดี่ยว"} · ${settings.winScore || 21} แต้ม · ${settings.deuce ? "มีดิว" : "ไม่มีดิว"} · ${roundsLabel(settings.rounds)}`;
 }
 // one-line summary shown on the Today tab's "⚙️ ตั้งค่าก๊วน" entry point — reflects the real current
 // session config so organizers don't have to open the sheet just to check it.
@@ -674,6 +1172,116 @@ async function resizePhoto(file) {
   } catch (e) { return dataUrl; }
 }
 
+// v1.9.13: interactive "move & scale" crop step, shared by every photo-upload flow (player profile photo,
+// ก๊วน photo, QR code) — lets the organizer drag to pan and pinch/slide to zoom a fixed square frame over
+// the picked image before it's saved, instead of always auto-centering. Always exports a SQUARE image (the
+// existing Avatar component already applies its own border-radius for circular display, so no shape-specific
+// output is needed) — circleGuide only changes the on-screen preview mask, not the underlying crop math or
+// the exported result. Pure presentation/input step: does not touch how/where the result is ultimately saved
+// (each caller's onConfirm decides that, exactly as before this existed).
+function ImageCropper({ src, circleGuide, title, onCancel, onConfirm }) {
+  const FRAME = 300;
+  const MAX_ZOOM = 4;
+  const [natSize, setNatSize] = useState(null); // { w, h } once the picked image has loaded
+  const [baseScale, setBaseScale] = useState(1); // scale at which the image just covers the frame (zoom=1)
+  const [zoom, setZoom] = useState(1); // multiplier on top of baseScale, 1..MAX_ZOOM
+  const [offset, setOffset] = useState({ x: 0, y: 0 }); // top-left of the displayed image, relative to the frame
+  const imgElRef = useRef(null); // the actual loaded Image object, used for the final canvas draw
+  const dragRef = useRef(null); // { sx, sy, ox, oy } while a mouse/single-touch drag is active
+  const pinchRef = useRef(null); // { startDist, startZoom } while a two-finger pinch is active
+
+  useEffect(() => {
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      const w = img.naturalWidth || 1, h = img.naturalHeight || 1;
+      const bs = FRAME / Math.min(w, h);
+      setNatSize({ w, h });
+      setBaseScale(bs);
+      setZoom(1);
+      setOffset({ x: (FRAME - w * bs) / 2, y: (FRAME - h * bs) / 2 });
+    };
+    img.src = src;
+    imgElRef.current = img;
+    return () => { cancelled = true; };
+  }, [src]);
+
+  const scale = baseScale * zoom;
+  const dispW = natSize ? natSize.w * scale : 0;
+  const dispH = natSize ? natSize.h * scale : 0;
+  const clampOffset = (off, dw, dh) => {
+    const minX = Math.min(0, FRAME - dw), minY = Math.min(0, FRAME - dh);
+    return { x: Math.min(0, Math.max(minX, off.x)), y: Math.min(0, Math.max(minY, off.y)) };
+  };
+  const setZoomClamped = (z) => {
+    if (!natSize) return;
+    const nz = Math.min(MAX_ZOOM, Math.max(1, z));
+    const ndw = natSize.w * baseScale * nz, ndh = natSize.h * baseScale * nz;
+    setZoom(nz);
+    setOffset((o) => clampOffset(o, ndw, ndh));
+  };
+
+  const onMouseDown = (e) => { dragRef.current = { sx: e.clientX, sy: e.clientY, ox: offset.x, oy: offset.y }; };
+  const onMouseMove = (e) => {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.sx, dy = e.clientY - dragRef.current.sy;
+    setOffset(clampOffset({ x: dragRef.current.ox + dx, y: dragRef.current.oy + dy }, dispW, dispH));
+  };
+  const onMouseUp = () => { dragRef.current = null; };
+
+  const touchDist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const onTouchStart = (e) => {
+    if (e.touches.length === 1) { dragRef.current = { sx: e.touches[0].clientX, sy: e.touches[0].clientY, ox: offset.x, oy: offset.y }; pinchRef.current = null; }
+    else if (e.touches.length === 2) { pinchRef.current = { startDist: touchDist(e.touches), startZoom: zoom }; dragRef.current = null; }
+  };
+  const onTouchMove = (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1 && dragRef.current) {
+      const dx = e.touches[0].clientX - dragRef.current.sx, dy = e.touches[0].clientY - dragRef.current.sy;
+      setOffset(clampOffset({ x: dragRef.current.ox + dx, y: dragRef.current.oy + dy }, dispW, dispH));
+    } else if (e.touches.length === 2 && pinchRef.current) {
+      setZoomClamped(pinchRef.current.startZoom * (touchDist(e.touches) / pinchRef.current.startDist));
+    }
+  };
+  const onTouchEnd = (e) => { if (e.touches.length === 0) { dragRef.current = null; pinchRef.current = null; } };
+
+  const confirm = () => {
+    if (!natSize || !imgElRef.current) return;
+    const OUT = 640;
+    const sx = -offset.x / scale, sy = -offset.y / scale, sw = FRAME / scale, sh = FRAME / scale;
+    const cv = document.createElement("canvas"); cv.width = OUT; cv.height = OUT;
+    cv.getContext("2d").drawImage(imgElRef.current, sx, sy, sw, sh, 0, 0, OUT, OUT);
+    onConfirm(cv.toDataURL("image/jpeg", 0.88));
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "#000", zIndex: 90, display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 16px", paddingTop: "calc(14px + env(safe-area-inset-top))" }}>
+        <button onClick={onCancel} style={{ width: 34, height: 34, borderRadius: 17, background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}><X size={18} /></button>
+        <span style={{ color: "#fff", fontSize: 14, fontWeight: 700 }}>{title || "จัดตำแหน่งรูป"}</span>
+        <button onClick={confirm} style={{ width: 34, height: 34, borderRadius: 17, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center", justifyContent: "center" }}><Check size={18} /></button>
+      </div>
+      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", minHeight: 0 }}>
+        <div
+          onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} onMouseLeave={onMouseUp}
+          onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
+          style={{ position: "relative", width: FRAME, height: FRAME, overflow: "hidden", borderRadius: circleGuide ? "50%" : 14, touchAction: "none", background: "#151515", cursor: "grab", boxShadow: "0 0 0 2000px rgba(0,0,0,0.55)" }}
+        >
+          {natSize && (
+            <img src={src} draggable={false} alt="" style={{ position: "absolute", left: offset.x, top: offset.y, width: dispW, height: dispH, maxWidth: "none", userSelect: "none", pointerEvents: "none" }} />
+          )}
+        </div>
+      </div>
+      <div style={{ padding: "10px 24px calc(20px + env(safe-area-inset-bottom))", display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 13 }}>🔍</span>
+        <input type="range" min={1} max={MAX_ZOOM} step={0.01} value={zoom} onChange={(e) => setZoomClamped(Number(e.target.value))} style={{ flex: 1 }} disabled={!natSize} />
+      </div>
+      <div style={{ textAlign: "center", color: "rgba(255,255,255,0.55)", fontSize: 11, paddingBottom: 10 }}>ลากเพื่อเลื่อน · บีบนิ้ว/เลื่อนแถบเพื่อซูม</div>
+    </div>
+  );
+}
+
 // fresh defaults for `settings` — pulled out into a function (instead of an inline useState() object
 // literal) so the exact same shape can be reused both on first load AND as the fallback base when
 // migrating an old/partial backup file on import. Called fresh each time so nobody accidentally shares
@@ -695,10 +1303,14 @@ function getDefaultSettings() {
     customCostRows: [], // model E: กำหนดเอง — [{ id, category, description, amount }, ...], reuses ExpenseListEditor
     wheelEnabled: true,
     wheelEnabled: true,
+    // v1.9.19: when true, prizes that have run out (qty 0) still appear on the wheel — grayed out, purely
+    // visual, never actually landable — instead of disappearing. Default false = unchanged prior behavior
+    // (sold-out prizes simply vanish from the wheel).
+    wheelShowSoldOut: false,
     wheelPrizes: [
-      { id: uid(), label: "ส่วนลด 20฿ (ใช้ทันที)", type: "now", amount: 20, qty: 5 },
-      { id: uid(), label: "ส่วนลด 10฿ (ครั้งหน้า)", type: "next", amount: 10, qty: 5 },
-      { id: uid(), label: "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)", type: "now", amount: 65, qty: 2 },
+      { id: uid(), label: "ส่วนลด 20฿ (ใช้ทันที)", type: "now", amount: 20, qty: 5, totalQty: 5 },
+      { id: uid(), label: "ส่วนลด 10฿ (ครั้งหน้า)", type: "next", amount: 10, qty: 5, totalQty: 5 },
+      { id: uid(), label: "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)", type: "now", amount: 65, qty: 2, totalQty: 2 },
       { id: uid(), label: "เสียใจด้วย ไม่ได้รางวัล", type: "none", amount: 0, qty: 40 },
     ],
     lastBackupAt: null,
@@ -715,6 +1327,19 @@ const BACKUP_VERSION = 1; // outer envelope format — bump only if this wrapper
 const SCHEMA_VERSION = 1; // inner `data` shape — bump whenever the persisted state shape changes, and
                            // add a migration step in migrateBackupData() so OLD backups keep importing
                            // into NEWER app versions (import is tied to schemaVersion, never APP_VERSION)
+// Auto-backup checkpoints (v1.9.16) — a silent, in-app safety net for organizers who never remember to
+// tap "สำรองข้อมูล" themselves. Every time a ก๊วน or Tournament finishes, a full snapshot (same envelope
+// shape as a manual backup file) is stashed into localStorage under this key — no dialog, no download,
+// nothing that could interrupt the "จบก๊วน" flow. Kept as a short rotating list so it can't grow without
+// bound; each entry restores through the exact same preview/confirm UI as importing a backup FILE.
+const AUTO_BACKUP_KEY = "bg-v11-autobackups";
+const AUTO_BACKUP_MAX = 8; // last 8 checkpoints — a few weeks of ก๊วนs for most groups, negligible storage cost
+// v1.9.18: a tiny forensic ring buffer for diagnosing the "data reverted after updating" class of bug —
+// records every boot (loaded savedAt + player/session counts) and every time the safety guard actually
+// pulls in newer data from storage ("heal"), so a reported regression can be traced after the fact
+// instead of guessed at. Read-only from the UI (ตั้งค่า → ข้อมูลและการสำรอง); never affects app behavior.
+const BOOT_LOG_KEY = "bg-v11-bootlog";
+const BOOT_LOG_MAX = 20;
 
 function pad2(n) { return String(n).padStart(2, "0"); }
 function fmtBackupStamp(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`; }
@@ -1349,42 +1974,204 @@ export default function App() {
   const photoTarget = useRef(null);
   const sessionPhotoFileRef = useRef(); // dedicated file input for the current ก๊วน's own photo (separate from per-player photos)
   const histPhotoTarget = useRef(null); // sessionHistory id currently being (re)photographed via HistoricalDetail
+  // v1.9.13: interactive crop/position step before ANY photo (player profile, ก๊วน photo, QR) is actually
+  // saved — { src (raw picked image), circleGuide, title, onDone(croppedDataUrl) } | null. The file input's
+  // onChange now only reads the raw file and opens this; the actual state write happens in onDone once the
+  // user confirms the crop, so no existing save logic/shape changes — only WHEN the save happens moves later.
+  const [cropJob, setCropJob] = useState(null);
+  // Financial Report Export (v1.9.14) — PDF path is a full-screen print-optimized view that REPLACES the
+  // entire app render (see the early return right after this component's other hooks) so bottom nav / tabs /
+  // edit buttons are simply never mounted while printing, instead of being CSS-hidden. `null` = not open.
+  const [financePrintReport, setFinancePrintReport] = useState(null);
+
+  // ===== PERSISTENCE SAFETY GUARD (v1.9.15) =====
+  // Bug this fixes: the app saves its ENTIRE state as one localStorage blob on every change. If two
+  // instances are open at once (e.g. the Home Screen icon + a separate Safari tab — iOS keeps these as
+  // two completely separate in-memory contexts even though they share the same localStorage), and one
+  // instance finishes a ก๊วน/Tournament while the other still has an older, history-less state sitting in
+  // memory, then merely touching that stale instance used to silently overwrite the newer data with the
+  // old data (unrelated fields like `players` looked unaffected, but `sessionHistory`/`tournamentHistory`
+  // vanished — exactly the symptom reported).
+  //
+  // Fix: every save now carries a `savedAt` timestamp, and `lastKnownSavedAtRef` tracks the `savedAt` of
+  // whatever THIS instance's in-memory state currently reflects. Before every write we re-check storage;
+  // if someone else has saved something newer than what we last loaded/saved, we pull THEIR data in
+  // instead of clobbering it, and skip our own write. We also proactively re-check the moment the app
+  // becomes active again (tab focus/visibility, iOS bfcache restore) so a stale instance heals itself
+  // before the user can even touch anything.
+  const lastKnownSavedAtRef = useRef(0);
+  const [staleSyncNotice, setStaleSyncNotice] = useState(null); // brief banner text, or null when hidden
+  // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
+  // below so the two can never silently drift apart on which fields they read/default.
+  const applyPersistedState = (s) => {
+    if (!s) return;
+    s.players && setPlayers(s.players.map(normPlayer));
+    s.history && setHistory(s.history);
+    s.current && setCurrent(s.current);
+    s.future && setFuture(s.future);
+    typeof s.roundNo === "number" && setRoundNo(s.roundNo);
+    s.courtCount && setCourtCount(s.courtCount);
+    setCourtLabelsRaw(syncCourtLabels(s.courtLabels, s.courtCount || 2)); // absent on old saves -> sequential default, backward-compatible
+    s.mode && setMode(s.mode);
+    s.settings && setSettings((d) => ({ ...d, ...s.settings }));
+    s.session && setSession({ ...s.session, mode: s.session.mode || "casual", id: s.session.id || uid() }); // old saves have no `mode`/`id` — default them, backward-compatible
+    s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
+    setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
+    setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
+    setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
+    setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
+    setActiveTournament(ensureTournamentCourtLabels(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
+    setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(ensureTournamentCourtLabels));
+    // old saves (pre-v1.9.15) have no `savedAt` — treat them as "current as of right now" rather than 0,
+    // so upgrading doesn't itself trigger a false "newer data elsewhere" flag on the very next save.
+    lastKnownSavedAtRef.current = typeof s.savedAt === "number" ? s.savedAt : Date.now();
+    // keep the auto-backup growth-watcher's baseline in sync with whatever we just loaded — otherwise a
+    // load/heal that brings in existing history would look like "history just grew" and fire a spurious
+    // extra checkpoint (see the sessionHistory/tournamentHistory effect below).
+    prevHistLenRef.current = {
+      session: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0,
+      tournament: Array.isArray(s.tournamentHistory) ? s.tournamentHistory.length : 0
+    };
+  };
+  // ===== AUTO-BACKUP CHECKPOINTS (v1.9.16) =====
+  // A silent, in-app safety net layered on top of the guard above — for the organizer who never
+  // remembers to tap "สำรองข้อมูล" manually. Every time sessionHistory/tournamentHistory GROWS (i.e. a
+  // ก๊วน or Tournament just got archived), a full snapshot is stashed into localStorage — no dialog, no
+  // download, nothing that interrupts "จบก๊วน". Restoring one reuses the exact same preview/confirm flow
+  // as importing a backup file (see BackupSettingsEditor) — see "สำรองข้อมูลอัตโนมัติ" in ตั้งค่า.
+  const [autoBackups, setAutoBackups] = useState([]); // newest first, capped at AUTO_BACKUP_MAX
+  const prevHistLenRef = useRef({ session: 0, tournament: 0 }); // baseline to detect "history grew" vs. any other edit
+  // v1.9.18: forensic boot/heal log — see BOOT_LOG_KEY above. Pure diagnostics: read-only in the UI,
+  // never influences load/save behavior.
+  const [bootLog, setBootLog] = useState([]); // newest first, capped at BOOT_LOG_MAX
+  const pushBootLog = (entry) => {
+    try {
+      setBootLog((prev) => {
+        const next = [{ t: Date.now(), ...entry }, ...prev].slice(0, BOOT_LOG_MAX);
+        window.storage.set(BOOT_LOG_KEY, JSON.stringify(next)).catch(() => {});
+        return next;
+      });
+    } catch (e) {}
+  };
+  const saveAutoBackup = async (reason) => {
+    try {
+      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits });
+      const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
+      const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
+      setAutoBackups(next);
+      await window.storage.set(AUTO_BACKUP_KEY, JSON.stringify(next));
+    } catch (e) {}
+  };
+  // Re-reads "bg-v11"; if its `savedAt` is newer than what THIS instance's memory reflects, pulls it in
+  // (instead of letting this instance later write stale data over it) and, optionally, tells the user.
+  // Returns true iff a newer save was found and applied.
+  const refreshFromStorageIfNewer = async (announce) => {
+    try {
+      const r = await window.storage.get("bg-v11");
+      if (!r?.value) return false;
+      const s = JSON.parse(r.value);
+      const storedSavedAt = typeof s.savedAt === "number" ? s.savedAt : 0;
+      if (storedSavedAt > lastKnownSavedAtRef.current) {
+        const prevKnownSavedAt = lastKnownSavedAtRef.current;
+        applyPersistedState(s);
+        pushBootLog({ event: "heal", fromSavedAt: prevKnownSavedAt, toSavedAt: storedSavedAt, playerCount: Array.isArray(s.players) ? s.players.length : 0, sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0 });
+        if (announce) {
+          setStaleSyncNotice("มีข้อมูลใหม่กว่าจากอุปกรณ์/แท็บอื่น — รีเฟรชให้แล้ว");
+          setTimeout(() => setStaleSyncNotice(null), 4000);
+        }
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  };
 
   useEffect(() => {
     (async () => {
+      let loadedSavedAt = null, playerCount = 0, sessionHistoryCount = 0;
       try {
         const r = await window.storage.get("bg-v11");
         if (r?.value) {
           const s = JSON.parse(r.value);
-          s.players && setPlayers(s.players.map(normPlayer));
-          s.history && setHistory(s.history);
-          s.current && setCurrent(s.current);
-          s.future && setFuture(s.future);
-          typeof s.roundNo === "number" && setRoundNo(s.roundNo);
-          s.courtCount && setCourtCount(s.courtCount);
-          setCourtLabelsRaw(syncCourtLabels(s.courtLabels, s.courtCount || 2)); // absent on old saves -> sequential default, backward-compatible
-          s.mode && setMode(s.mode);
-          s.settings && setSettings((d) => ({ ...d, ...s.settings }));
-          s.session && setSession({ ...s.session, mode: s.session.mode || "casual", id: s.session.id || uid() }); // old saves have no `mode`/`id` — default them, backward-compatible
-          s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
-          setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
-          setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
-          setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
-          setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
-          setActiveTournament(ensureTournamentCourtLabels(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
-          setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(ensureTournamentCourtLabels));
+          applyPersistedState(s);
+          loadedSavedAt = typeof s.savedAt === "number" ? s.savedAt : null;
+          playerCount = Array.isArray(s.players) ? s.players.length : 0;
+          sessionHistoryCount = Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0;
         }
       } catch (e) {}
       try {
         const pr = await window.storage.get("bg-v11-prerestore");
         setHasPreRestoreBackup(!!pr?.value);
       } catch (e) {}
+      try {
+        const ab = await window.storage.get(AUTO_BACKUP_KEY);
+        const list = ab?.value ? JSON.parse(ab.value) : [];
+        setAutoBackups(Array.isArray(list) ? list : []);
+      } catch (e) {}
+      try {
+        const bl = await window.storage.get(BOOT_LOG_KEY);
+        const list = bl?.value ? JSON.parse(bl.value) : [];
+        setBootLog(Array.isArray(list) ? list : []);
+      } catch (e) {}
+      // v1.9.18: record this boot — was it a version-update-triggered reload (?_v=…)? what savedAt/counts
+      // did we actually load? — BEFORE flipping the storage-ready flag below, so the log always has an
+      // entry even if something after this point throws.
+      pushBootLog({ event: "boot", appVersion: APP_VERSION, loadedSavedAt, playerCount, sessionHistoryCount, viaUpdateReload: !!new URLSearchParams(location.search).get("_v") });
       setLoaded(true);
+      // v1.9.18: signal the pre-React auto-update script (see the top of <head>) that THIS tab's own
+      // load-from-storage + safety-guard pass has completed, so it never force-reloads (for a newer
+      // deployed version) before this tab has had a chance to load/heal its own state first — closes a
+      // theoretical race on a long-backgrounded tab where a version-triggered navigation could otherwise
+      // preempt that initial reconciliation.
+      try {
+        window.__badqStorageReady = true;
+        window.dispatchEvent(new Event("badq:storage-ready"));
+      } catch (e) {}
     })();
   }, []);
+  // Proactively re-check freshness the moment this instance becomes active again — catches a stale
+  // instance BEFORE the user touches anything, not just reactively at the next save.
   useEffect(() => {
     if (!loaded) return;
-    (async () => { try { await window.storage.set("bg-v11", JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory })); } catch (e) {} })();
+    const onVisible = () => {
+      if (document.visibilityState === "visible") refreshFromStorageIfNewer(true);
+    };
+    const onPageShow = (e) => {
+      if (e.persisted) refreshFromStorageIfNewer(true); // bfcache restore (common on iOS Safari)
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("focus", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("focus", onVisible);
+    };
+  }, [loaded]);
+  // Fire an auto-backup checkpoint whenever sessionHistory or tournamentHistory GROWS — i.e. a ก๊วน or
+  // Tournament was just archived (via endSession()/tCompleteTournament(), or history merged in from a
+  // restore). Watching the array lengths (rather than calling saveAutoBackup() from inside each of those
+  // functions individually) means every present AND future "something just got archived" path is covered
+  // automatically, and a delete (length going DOWN) never triggers a checkpoint.
+  useEffect(() => {
+    if (!loaded) return;
+    const grew = sessionHistory.length > prevHistLenRef.current.session || tournamentHistory.length > prevHistLenRef.current.tournament;
+    const reason = tournamentHistory.length > prevHistLenRef.current.tournament ? "tournament" : "session";
+    prevHistLenRef.current = { session: sessionHistory.length, tournament: tournamentHistory.length };
+    if (grew) saveAutoBackup(reason);
+  }, [sessionHistory, tournamentHistory, loaded]);
+  useEffect(() => {
+    if (!loaded) return;
+    (async () => {
+      try {
+        // Guard: never write this instance's in-memory state over a newer save made elsewhere — pull
+        // that newer data in instead (see refreshFromStorageIfNewer above) and skip this write. The
+        // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
+        if (await refreshFromStorageIfNewer(true)) return;
+        const savedAt = Date.now();
+        await window.storage.set("bg-v11", JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, savedAt }));
+        lastKnownSavedAtRef.current = savedAt;
+      } catch (e) {}
+    })();
   }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, loaded]);
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(t); }, []);
 
@@ -1405,7 +2192,7 @@ export default function App() {
   const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim(); if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
-    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null }]);
+    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null }]);
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
@@ -1466,6 +2253,18 @@ export default function App() {
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
     setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, skillIndex: si, level: displayLevelFor(si, settings) } : p)));
   };
+  // v1.9.17: backs the new "แก้ไขสมาชิก" modal — patch is { name?, skillIndex?, handedness? }. Recomputes
+  // the cached `level` label whenever skillIndex is part of the patch, same as setPLevel above, so the two
+  // never drift out of sync. Deliberately does NOT touch status/photo (status has its own quick-dropdown;
+  // photo keeps using the existing openPhoto()+crop flow) — those interactions stay exactly as they were.
+  const updatePlayer = (id, patch) => {
+    setPlayers((prev) => prev.map((p) => {
+      if (p.id !== id) return p;
+      const next = { ...p, ...patch };
+      if (patch.skillIndex != null) next.level = displayLevelFor(next.skillIndex, settings);
+      return next;
+    }));
+  };
   // switch the active level-preset: skillIndex (matchmaking) never changes, only the cached display label
   // is recomputed for every player so their level badge reflects the new preset immediately.
   const changeLevelPreset = (newPresetId) => {
@@ -1501,20 +2300,25 @@ export default function App() {
       : m)));
   };
   const openPhoto = (id) => { photoTarget.current = id; fileRef.current.click(); };
-  const onPhotoFile = async (e) => { const f = e.target.files?.[0]; if (!f) return; const data = await resizePhoto(f); const id = photoTarget.current; if (data) setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photo: data } : p))); e.target.value = ""; };
+  const onPhotoFile = async (e) => {
+    const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
+    const id = photoTarget.current;
+    setCropJob({ src: raw, circleGuide: true, title: "จัดตำแหน่งรูปโปรไฟล์", onDone: (data) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photo: data } : p))) });
+  };
   // ก๊วน (session) photo — shown on the History list/detail instead of the default 🏸 icon when set.
   // Shared file input: histPhotoTarget=null -> photo goes on the CURRENT live session; a sessionHistory
   // id -> photo is added/changed retroactively on that archived entry (never touches other fields).
   const openSessionPhoto = () => { histPhotoTarget.current = null; sessionPhotoFileRef.current.click(); };
   const openHistPhoto = (sessId) => { histPhotoTarget.current = sessId; sessionPhotoFileRef.current.click(); };
   const onSessionPhotoFile = async (e) => {
-    const f = e.target.files?.[0]; if (!f) return;
-    const data = await resizePhoto(f);
-    e.target.value = "";
-    if (!data) return;
+    const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
     const target = histPhotoTarget.current;
-    if (target) setSessionHistory((prev) => prev.map((s) => (s.id === target ? { ...s, photo: data } : s)));
-    else setSession((s) => ({ ...s, photo: data }));
+    setCropJob({ src: raw, circleGuide: true, title: "จัดตำแหน่งรูปก๊วน", onDone: (data) => {
+      if (target) setSessionHistory((prev) => prev.map((s) => (s.id === target ? { ...s, photo: data } : s)));
+      else setSession((s) => ({ ...s, photo: data }));
+    } });
   };
   const clearSessionPhoto = () => setSession((s) => ({ ...s, photo: null }));
   const clearHistPhoto = (sessId) => setSessionHistory((prev) => prev.map((s) => (s.id === sessId ? { ...s, photo: null } : s)));
@@ -1695,9 +2499,9 @@ export default function App() {
   const setScore = (mid, ri, side, val) => {
     const upd = (arr) => arr.map((m) => {
       if (m.id !== mid) return m;
-      const rounds = settings.rounds || 1;
-      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: rounds }, () => ({ a: null, b: null, win: null }));
-      while (scores.length < rounds) scores.push({ a: null, b: null, win: null });
+      const maxSets = maxSetsFor(settings.rounds || 1);
+      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: maxSets }, () => ({ a: null, b: null, win: null }));
+      while (scores.length < maxSets) scores.push({ a: null, b: null, win: null });
       scores[ri] = { ...scores[ri], [side]: val === "" ? null : Number(val) };
       return { ...m, scores };
     });
@@ -1709,9 +2513,9 @@ export default function App() {
   const setWin = (mid, ri, side) => {
     const upd = (arr) => arr.map((m) => {
       if (m.id !== mid) return m;
-      const rounds = settings.rounds || 1;
-      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: rounds }, () => ({ a: null, b: null, win: null }));
-      while (scores.length < rounds) scores.push({ a: null, b: null, win: null });
+      const maxSets = maxSetsFor(settings.rounds || 1);
+      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: maxSets }, () => ({ a: null, b: null, win: null }));
+      while (scores.length < maxSets) scores.push({ a: null, b: null, win: null });
       scores[ri] = { ...scores[ri], win: side };
       return { ...m, scores };
     });
@@ -1731,7 +2535,11 @@ export default function App() {
   };
 
   const toggleCurrentLock = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, locked: !m.locked } : m)));
-  const onQRFile = async (e) => { const f = e.target.files?.[0]; if (!f) return; const data = await readImageFull(f); if (data) setSettings((s) => ({ ...s, qr: data })); e.target.value = ""; };
+  const onQRFile = async (e) => {
+    const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
+    setCropJob({ src: raw, circleGuide: false, title: "จัดตำแหน่งคิวอาร์โค้ด", onDone: (data) => setSettings((s) => ({ ...s, qr: data })) });
+  };
 
   const tapSlot = (mid, team, idx, pid) => {
     if (!sel) { if (pid) setSel({ playerId: pid, mid, team, idx }); return; }
@@ -1851,6 +2659,11 @@ export default function App() {
     });
   };
   const removeLockPair = (id) => setLockPairs((prev) => prev.filter((r) => r.id !== id));
+  // v1.9.17: "อยากคู่/ไม่อยากคู่กับมือซ้าย" — a single-player attribute (not an A-B pair relation like
+  // lockPairs above), so it lives directly on the player as `handPref` instead of in the lockPairs array.
+  // Surfaced through the SAME lock-pair editor UI (see LockPairEditor's type dropdown) per spec — set
+  // `pref` to null to clear. Soft constraint only: see handPrefNudge inside buildMatch.
+  const setHandPref = (id, pref) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, handPref: pref === "preferLeft" || pref === "avoidLeft" ? pref : null } : p)));
   const resetGames = () => setPlayers((prev) => prev.map((p) => ({ ...p, games: 0 })));
   const isSel = (pid, mid, team, idx) => sel && sel.playerId === pid && sel.mid === mid && sel.team === team && sel.idx === idx;
 
@@ -1963,9 +2776,9 @@ export default function App() {
   };
   const tSetScore = (matchId, ri, side, val) => {
     setActiveTournament((t) => updateTournamentMatch(t, matchId, (m) => {
-      const rounds = settings.rounds || 1;
-      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: rounds }, () => ({ a: null, b: null, win: null }));
-      while (scores.length < rounds) scores.push({ a: null, b: null, win: null });
+      const maxSets = maxSetsFor(settings.rounds || 1);
+      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: maxSets }, () => ({ a: null, b: null, win: null }));
+      while (scores.length < maxSets) scores.push({ a: null, b: null, win: null });
       scores[ri] = { ...scores[ri], [side]: val === "" ? null : Number(val) };
       return { ...m, scores };
     }));
@@ -1973,9 +2786,9 @@ export default function App() {
   // manual win/lose pick for a round with no numeric score — see casual setWin() for the same behavior.
   const tSetWin = (matchId, ri, side) => {
     setActiveTournament((t) => updateTournamentMatch(t, matchId, (m) => {
-      const rounds = settings.rounds || 1;
-      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: rounds }, () => ({ a: null, b: null, win: null }));
-      while (scores.length < rounds) scores.push({ a: null, b: null, win: null });
+      const maxSets = maxSetsFor(settings.rounds || 1);
+      const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: maxSets }, () => ({ a: null, b: null, win: null }));
+      while (scores.length < maxSets) scores.push({ a: null, b: null, win: null });
       scores[ri] = { ...scores[ri], win: side };
       return { ...m, scores };
     }));
@@ -2137,7 +2950,11 @@ export default function App() {
   const exportBackup = async () => {
     const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits });
     const json = JSON.stringify(payload);
-    const filename = `BadQ_Backup_${fmtBackupStamp(new Date())}.json`;
+    // v1.9.19: "BadQ Back-up <date> <time>.json" per explicit naming request — colon-free time (HH-mm)
+    // so the filename stays valid on every OS (Windows rejects ":" in filenames).
+    const now = new Date();
+    const stamp = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ${pad2(now.getHours())}-${pad2(now.getMinutes())}`;
+    const filename = `BadQ Back-up ${stamp}.json`;
     const blob = new Blob([json], { type: "application/json" });
     let completed = false;
     if (navigator.share && navigator.canShare) {
@@ -2256,23 +3073,44 @@ export default function App() {
     } catch (e) { return false; }
   };
 
+  // Financial Report Export PDF path (Requirement #16): replace the ENTIRE app render with just the print
+  // view while open — guarantees bottom nav / tabs / edit buttons / every other interactive control is
+  // completely absent from both the on-screen preview and the printed/saved PDF, with zero extra CSS-hiding
+  // logic that could accidentally leak through print's default UA stylesheet handling.
+  if (financePrintReport) {
+    return <FinancePrintView report={financePrintReport} onClose={() => setFinancePrintReport(null)} />;
+  }
+
   return (
     <div style={{ background: T.bg, color: T.text, minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui, sans-serif", paddingTop: "env(safe-area-inset-top)" }}>
+      {staleSyncNotice && (
+        <div style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 8px)", left: "50%", transform: "translateX(-50%)", zIndex: 9999, background: T.green, color: "#fff", padding: "8px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 14px rgba(0,0,0,.18)", maxWidth: "90vw", textAlign: "center" }}>
+          {staleSyncNotice}
+        </div>
+      )}
       <input ref={fileRef} type="file" accept="image/*" onChange={onPhotoFile} style={{ display: "none" }} />
       <input ref={sessionPhotoFileRef} type="file" accept="image/*" onChange={onSessionPhotoFile} style={{ display: "none" }} />
       <input ref={qrRef} type="file" accept="image/*" onChange={onQRFile} style={{ display: "none" }} />
+      {cropJob && (
+        <ImageCropper
+          src={cropJob.src}
+          circleGuide={cropJob.circleGuide}
+          title={cropJob.title}
+          onCancel={() => setCropJob(null)}
+          onConfirm={(data) => { cropJob.onDone(data); setCropJob(null); }}
+        />
+      )}
       <div style={{ maxWidth: isWide ? 860 : 520, margin: "0 auto", padding: "16px 14px calc(92px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
           <img src="data:image/png;base64,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" alt="BadQ" style={{ width: 32, height: 32, borderRadius: 9, objectFit: "cover", flexShrink: 0 }} />
           <div><div style={{ fontWeight: 800, fontSize: 18, letterSpacing: -0.3 }}>BadQ</div><div style={{ fontSize: 11, color: T.muted }}>v{APP_VERSION}</div></div>
         </div>
 
-        {tab === "members" && <MembersTab {...{ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }} />}
-        {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, openSessionPhoto, clearSessionPhoto }} />}
-        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }} />}
+        {tab === "members" && <MembersTab {...{ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }} />}
+        {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, openSessionPhoto, clearSessionPhoto }} />}
+        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
-        {tab === "payment" && <PaymentTab {...{ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit }} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport }} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -2280,9 +3118,8 @@ export default function App() {
           <TabBtn active={tab === "members"} onClick={() => setTab("members")} label="ผู้เล่น"><User size={20} strokeWidth={tab === "members" ? 2.4 : 1.8} /></TabBtn>
           <TabBtn active={tab === "session"} onClick={() => setTab("session")} label="วันนี้"><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
           <TabBtn active={tab === "summary"} onClick={() => setTab("summary")} label="สรุป"><ClipboardList size={20} strokeWidth={tab === "summary" ? 2.4 : 1.8} /></TabBtn>
-          <TabBtn active={tab === "payment"} onClick={() => setTab("payment")} label="ชำระเงิน"><Wallet size={20} strokeWidth={tab === "payment" ? 2.4 : 1.8} /></TabBtn>
-          <TabBtn active={tab === "history"} onClick={() => setTab("history")} label="ประวัติ"><History size={20} strokeWidth={tab === "history" ? 2.4 : 1.8} /></TabBtn>
           <TabBtn active={tab === "finance"} onClick={() => setTab("finance")} label="การเงิน"><span style={{ fontSize: 19, lineHeight: "20px" }}>💰</span></TabBtn>
+          <TabBtn active={tab === "history"} onClick={() => setTab("history")} label="ประวัติ"><History size={20} strokeWidth={tab === "history" ? 2.4 : 1.8} /></TabBtn>
         </div>
       </div>
     </div>
@@ -2298,24 +3135,36 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }) {
+function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }) {
   const [q, setQ] = useState(""); const [sort, setSort] = useState("levelDesc"); const [onlyPresent, setOnlyPresent] = useState(false);
+  const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
   const levelOptions = activeLevelOptions(settings);
   const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
-  const [name, setName] = useState(""); const [skillIndex, setSkillIndex] = useState(defaultSkillIndex); const [showLevelInfo, setShowLevelInfo] = useState(false);
-  const [openPresetPicker, setOpenPresetPicker] = useState(false);
-  const [draftPhoto, setDraftPhoto] = useState(null);
-  const newPlayerFileRef = useRef();
+  const [name, setName] = useState(""); const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
+  const [levelSheetOpen, setLevelSheetOpen] = useState(false); // v1.9.9 IA cleanup (Phase 2): preset picker + skill-index descriptions moved out of the always-visible flow into one collapsed "ตั้งค่าระดับฝีมือ" sheet
   const [confirmResetAll, setConfirmResetAll] = useState(false);
   const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
   const list = useMemo(() => {
     let l = players.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
-    if (onlyPresent) l = l.filter((p) => p.status !== "absent");
+    // v1.9.17: "registered" hasn't actually arrived yet, so it doesn't count as "ที่มา" here either —
+    // same treatment as "absent" for this filter (everything else about "absent" logic is unchanged).
+    if (onlyPresent) l = l.filter((p) => p.status !== "absent" && p.status !== "registered");
     return [...l].sort((a, b) => sort === "levelDesc" ? (b.skillIndex || 0) - (a.skillIndex || 0) || a.name.localeCompare(b.name) : sort === "levelAsc" ? (a.skillIndex || 0) - (b.skillIndex || 0) || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
   }, [players, q, sort, onlyPresent]);
   const readyCount = players.filter((p) => p.status === "ready").length;
+  // v1.9.17: "registeredCount" = registered OR ready (anyone who said they're coming, per spec — this is
+  // the count a future court-count recommendation feature will build on; readyCount above stays the
+  // narrower "actually here right now" number, unchanged).
+  const registeredCount = players.filter((p) => p.status === "registered" || p.status === "ready").length;
+  // v1.9.11: brought the photo-at-creation control back into Quick Add (per explicit request) — lets the
+  // organizer snap/attach a photo right when adding a new member, instead of only after via tap-to-edit.
+  // v1.9.13: picking a file now opens the same crop/position step used everywhere else, instead of an
+  // auto-centered crop — see cropJob below.
+  const [draftPhoto, setDraftPhoto] = useState(null);
+  const newPlayerFileRef = useRef();
+  const [cropJob, setCropJob] = useState(null); // raw picked-image src awaiting crop, or null
+  const onDraftPhotoFile = async (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; const raw = await fileToDataURL(f).catch(() => null); if (raw) setCropJob(raw); };
   const submit = () => { addPlayer(name, skillIndex, draftPhoto); setName(""); setDraftPhoto(null); };
-  const onDraftPhotoFile = async (e) => { const f = e.target.files?.[0]; if (!f) return; const data = await resizePhoto(f); if (data) setDraftPhoto(data); e.target.value = ""; };
   return (
     <div>
       <div style={{ position: "relative", marginBottom: 10 }}>
@@ -2323,21 +3172,14 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อสมาชิก" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
       </div>
 
-      {/* LEVEL PRESET SELECTOR — which naming system is used for skill labels shown in this Player tab */}
-      <button onClick={() => setOpenPresetPicker((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: openPresetPicker ? "11px 11px 0 0" : 11, background: T.surface, border: `1px solid ${T.border}`, borderBottom: openPresetPicker ? "none" : undefined, marginBottom: openPresetPicker ? 0 : 10, cursor: "pointer" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>ระบบระดับฝีมือ:</span>
-          <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{currentPreset.name}</span>
-          <ChevronDown size={15} color={T.muted} style={{ marginLeft: "auto", transform: openPresetPicker ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
-        </div>
-        <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{levelOptions.map((o) => o.label).join(" → ")}</div>
+      {/* v1.9.9: compact entry point into the "ตั้งค่าระดับฝีมือ" sheet — preset switch + skill descriptions moved there */}
+      <button onClick={() => setLevelSheetOpen(true)} style={{ width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+        <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>ระบบระดับฝีมือ:</span>
+        <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{currentPreset.name}</span>
+        <span style={{ marginLeft: "auto", fontSize: 11.5, fontWeight: 700, color: T.accent, display: "flex", alignItems: "center", gap: 3 }}>⚙️ ตั้งค่า</span>
       </button>
-      {openPresetPicker && (
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 11px 11px", padding: 12, marginBottom: 10 }}>
-          <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>เลือกระบบระดับที่ใช้ในพื้นที่/ก๊วนของคุณ</div>
-          <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} />
-        </div>
-      )}
+      {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} onClose={() => setLevelSheetOpen(false)} />}
+      {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
 
       <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
         <div style={{ position: "relative", flex: 1 }}>
@@ -2348,6 +3190,7 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
         </div>
         <button onClick={() => setOnlyPresent((v) => !v)} style={{ padding: "9px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${onlyPresent ? T.green : T.border}`, background: onlyPresent ? "#e2f5ec" : T.surface, color: onlyPresent ? T.green : T.muted }}>เฉพาะที่มา</button>
       </div>
+      {/* v1.9.11: Quick Add — photo button restored (snap/attach at creation time) + [ชื่อผู้เล่น][ระดับ][+]. Skill-index explanations still live in the ตั้งค่าระดับฝีมือ sheet above (unaffected). */}
       <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
         <input ref={newPlayerFileRef} type="file" accept="image/*" onChange={onDraftPhotoFile} style={{ display: "none" }} />
         <button onClick={() => newPlayerFileRef.current.click()} title="เพิ่ม/ถ่ายรูปสมาชิกใหม่" style={{ position: "relative", border: `1px solid ${T.border}`, background: T.surface, borderRadius: 11, padding: 0, width: 42, height: 42, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
@@ -2355,23 +3198,17 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
         </button>
         <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="เพิ่มสมาชิกใหม่" style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
         <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ padding: "0 8px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700 }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}</select>
-        <button onClick={() => setShowLevelInfo((v) => !v)} title="อธิบายระดับฝีมือ" style={{ padding: "0 10px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: showLevelInfo ? T.green : T.muted, display: "flex", alignItems: "center" }}><Info size={17} /></button>
         <button onClick={submit} style={{ padding: "0 15px", borderRadius: 11, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={19} /></button>
       </div>
-      {showLevelInfo && (
-        <div style={{ fontSize: 12, color: T.muted, lineHeight: 1.6, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px", marginBottom: 12 }}>
-          <div style={{ fontWeight: 800, color: T.text, marginBottom: 2 }}>ระบบที่ใช้อยู่: {currentPreset.name}</div>
-          <div style={{ marginBottom: 10 }}>ลำดับระดับ: {levelOptions.map((o) => o.label).join(" → ")}</div>
-          <div style={{ fontWeight: 800, color: T.text, marginBottom: 4 }}>คำอธิบายแต่ละระดับ (Skill Index 1–11 ใช้ตัดสินการจับคู่ภายใน แสดงชื่อตามระบบที่เลือก)</div>
-          {Array.from({ length: 11 }, (_, i) => i + 1).map((si) => (
-            <div key={si} style={{ marginBottom: 2 }}><span style={{ fontWeight: 800, color: levelColor(si) }}>{levelOptions.find((o) => o.skillIndex === si)?.label || `Skill ${si}`}</span> — {SKILL_DESC[si]}</div>
-          ))}
-        </div>
-      )}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.muted, marginBottom: 8 }}>
         <span>สมาชิก {players.length} คน</span>
         <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <span style={{ color: T.green, fontWeight: 700 }}>พร้อมเล่น {readyCount} คน</span>
+          {/* v1.9.17: compact "ลงทะเบียน N · พร้อมเล่น N" — same row, no extra vertical space */}
+          <span>
+            <span style={{ color: PSTATUS.registered.color, fontWeight: 700 }}>ลงทะเบียน {registeredCount}</span>
+            <span style={{ color: T.muted }}> · </span>
+            <span style={{ color: T.green, fontWeight: 700 }}>พร้อมเล่น {readyCount}</span>
+          </span>
           {players.length > 0 && <button onClick={() => setConfirmResetAll(true)} title="รีเซ็ตทุกคนเป็นไม่ได้มา (เริ่มวันใหม่)" style={{ padding: "5px 9px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><RotateCcw size={12} /> ไม่มาทั้งหมด</button>}
         </span>
       </div>
@@ -2396,8 +3233,15 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
               <span style={{ position: "absolute", right: -2, bottom: -2, width: 18, height: 18, borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={10} color={T.muted} /></span>
             </button>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 14.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
-              <select value={p.skillIndex} onChange={(e) => setPLevel(p.id, Number(e.target.value))} style={{ marginTop: 4, background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, border: "none", borderRadius: 7, padding: "3px 6px" }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex} style={{ background: "#fff", color: "#000" }}>{o.label}</option>)}</select>
+              {/* v1.9.17: tapping the name opens "แก้ไขสมาชิก" — Quick Edit ระดับฝีมือ (the select below),
+                  Status dropdown, Delete, and photo (the Avatar button above) are all untouched/unchanged. */}
+              <button onClick={() => setEditPlayerId(p.id)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", background: "none", padding: 0, cursor: "pointer" }}>
+                <div style={{ fontSize: 14.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.text }}>{p.name}</div>
+              </button>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+                <select value={p.skillIndex} onChange={(e) => setPLevel(p.id, Number(e.target.value))} style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, border: "none", borderRadius: 7, padding: "3px 6px" }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex} style={{ background: "#fff", color: "#000" }}>{o.label}</option>)}</select>
+                <span style={{ background: HAND_BADGE.bg, color: HAND_BADGE.color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span>
+              </div>
             </div>
             {playingIds && playingIds.has(p.id)
               ? <span style={{ padding: "7px 12px", borderRadius: 20, fontSize: 12, fontWeight: 800, minWidth: 76, textAlign: "center", background: PSTATUS.playing.bg, color: PSTATUS.playing.color }}>กำลังเล่น</span>
@@ -2408,7 +3252,87 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
           </div>
         ))}
       </div>
+      {editPlayerId && players.find((p) => p.id === editPlayerId) && (
+        <EditPlayerModal
+          player={players.find((p) => p.id === editPlayerId)}
+          levelOptions={levelOptions}
+          onOpenPhoto={openPhoto}
+          onSave={(patch) => updatePlayer(editPlayerId, patch)}
+          onClose={() => setEditPlayerId(null)}
+        />
+      )}
     </div>
+  );
+}
+
+// v1.9.17: "แก้ไขสมาชิก" — opened by tapping a player's NAME on the Player Card (Quick Edit ระดับฝีมือ,
+// Status dropdown, Delete, and the photo button are all untouched — this is an ADDITIONAL entry point,
+// not a replacement for any of them). Edits name/skill/handedness, plus a shortcut into the exact same
+// photo crop flow used everywhere else (onOpenPhoto = the existing openPhoto(id)). Pairing preference
+// ("อยากคู่/ไม่อยากคู่กับมือซ้าย") deliberately has NO control here — per spec it stays exclusively on
+// the existing ล็อคคู่/ข้อจำกัดคู่ editor (ตั้งค่าก๊วน sheet) rather than a new/duplicate one.
+function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onClose }) {
+  const [name, setName] = useState(player.name);
+  const [skillIndex, setSkillIndex] = useState(player.skillIndex);
+  const [handedness, setHandedness] = useState(player.handedness === "left" ? "left" : "right");
+  const save = () => {
+    const n = name.trim();
+    if (!n) return;
+    onSave({ name: n, skillIndex, handedness });
+    onClose();
+  };
+  const handBtn = (v, label) => (
+    <button
+      onClick={() => setHandedness(v)}
+      style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${handedness === v ? HAND_BADGE.color : T.border}`, background: handedness === v ? HAND_BADGE.bg : T.surface, color: handedness === v ? HAND_BADGE.color : T.text, fontWeight: 800, fontSize: 13.5 }}
+    >{label}</button>
+  );
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>แก้ไขสมาชิก</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
+        <button onClick={() => onOpenPhoto(player.id)} style={{ position: "relative", border: "none", background: "none", padding: 0, flexShrink: 0 }}>
+          <Avatar p={{ ...player, name: name || player.name }} size={60} />
+          <span style={{ position: "absolute", right: -2, bottom: -2, width: 20, height: 20, borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={11} color={T.muted} /></span>
+        </button>
+        <div style={{ fontSize: 12, color: T.muted }}>แตะรูปเพื่อเปลี่ยน</div>
+      </div>
+      <Label>ชื่อ</Label>
+      <input value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 14 }} />
+      <Label>ระดับฝีมือ</Label>
+      <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, fontWeight: 700, marginBottom: 14, boxSizing: "border-box" }}>
+        {levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}
+      </select>
+      <Label>มือถนัด</Label>
+      <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+        {handBtn("left", "ซ้าย")}
+        {handBtn("right", "ขวา")}
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 16, lineHeight: 1.5 }}>
+        ความต้องการจับคู่กับมือซ้าย (อยาก/ไม่อยาก) ตั้งค่าได้ที่ ตั้งค่าก๊วน → ล็อคคู่/ข้อจำกัดคู่
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
+        <button onClick={save} style={btnPrimary}>บันทึก</button>
+      </div>
+    </Overlay>
+  );
+}
+
+// v1.9.9 IA cleanup (Phase 2): consolidates the level-preset switch (LevelPresetEditor, unchanged) and the
+// per-skill-index (1-11) description text — previously always-visible / a separate inline toggle in
+// MembersTab — into one collapsed sheet, opened from the compact "ตั้งค่าระดับฝีมือ" button.
+function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onClose }) {
+  // v1.9.12 fix: LevelPresetEditor already renders its own "ดู/ซ่อนคำอธิบายแต่ละระดับ" toggle + the same
+  // per-skill-index (1-11) list — the sheet used to ALSO render that list again unconditionally below it,
+  // showing the exact same descriptions twice. Removed the duplicate block; LevelPresetEditor's own toggle
+  // is the single source for it now.
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>⚙️ ตั้งค่าระดับฝีมือ</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>เลือกระบบระดับที่ใช้ในพื้นที่/ก๊วนของคุณ และดูคำอธิบายแต่ละระดับ</div>
+      <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} />
+    </Overlay>
   );
 }
 
@@ -2442,7 +3366,7 @@ function Fairness({ sA, sB }) {
 
 /* ============ SESSION ============ */
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, openSessionPhoto, clearSessionPhoto } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
@@ -2454,6 +3378,8 @@ function SessionTab(props) {
     return out;
   }, [sessionHistory]);
   const [showHistory, setShowHistory] = useState(false);
+  const [historyShowAll, setHistoryShowAll] = useState(false); // v1.9.9: cap the expanded match-history list so it never outweighs active courts/queue (Phase 2)
+  const HISTORY_PAGE = 8;
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
   // inline "สนาม N" label editor — tap the label right on the court card (no need to open ตั้งค่าก๊วน).
   // `editingCourt` holds the court NUMBER (1-based) currently being edited, or null. The draft lives in
@@ -2520,8 +3446,11 @@ function SessionTab(props) {
         </div>
         <MatchTeams m={m} getP={getP} editable={editable} tapSlot={tapSlot} isSel={isSel} replaceSlot={replaceSlot} bench={bench} big={m.status === "playing"} now={now} />
         {/* Balance is a pre-game decision aid only (Requirement 2/4): once a court is actually playing,
-            the CURRENT match never shows Balance/%/bar. "next" (not-yet-started) and "done" keep it. */}
-        {m.status !== "playing" && <Fairness sA={sA} sB={sB} />}
+            the CURRENT match never shows Balance/%/bar. "next" (not-yet-started) and "done" keep it —
+            but ONLY once every slot is filled (FIX: an incomplete "next" court used to show a bogus
+            0%/ห่างกัน/team-score reading computed from partial teams — now it shows a plain hint instead,
+            with no % / status label / team score / bar at all until the match is fully selected). */}
+        {m.status !== "playing" && (startReady(m) ? <Fairness sA={sA} sB={sB} /> : <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 7, textAlign: "center" }}>เลือกผู้เล่นให้ครบก่อนเริ่มเกม</div>)}
         {m.status === "playing" && (
           <NextMatchBlock
             m={m}
@@ -2549,7 +3478,6 @@ function SessionTab(props) {
             <button onClick={() => { setScoreOpen(null); nextCourt(m.id); }} style={btnPrimary}><ChevronRight size={16} /> เริ่มเกมถัดไป</button>
           </>}
         </div>
-        {m.status === "next" && !startReady(m) && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 6, textAlign: "center" }}>เลือกผู้เล่นให้ครบก่อนเริ่มเกม</div>}
         {m.status === "done" && scoreOpen === m.id && <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} />}
       </div>
     );
@@ -2642,7 +3570,7 @@ function SessionTab(props) {
         <QuanSettingsSheet
           mode={mode} setMode={setMode} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} setCourtLabel={setCourtLabel}
           settings={settings} setSettings={setSettings}
-          players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} getP={getP}
+          players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
           resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
           onClose={() => setOpenQuanSettings(false)}
         />
@@ -2691,16 +3619,27 @@ function SessionTab(props) {
             <History size={15} /> ประวัติแมตช์ ({history.length})
             <ChevronDown size={16} style={{ marginLeft: "auto", transform: showHistory ? "rotate(180deg)" : "none" }} />
           </button>
-          {showHistory && (
-            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
-              {history.map((m) => (
-                <div key={m.id}>
-                  <CompactMatch m={m} getP={getP} onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} />
-                  {scoreOpen === m.id && <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} />}
-                </div>
-              ))}
-            </div>
-          )}
+          {showHistory && (() => {
+            // recent-first (history is stored oldest -> newest); capped to HISTORY_PAGE unless expanded,
+            // so a long match log never competes visually with active courts/queue (Phase 2 cleanup).
+            const recent = [...history].reverse();
+            const shown = historyShowAll ? recent : recent.slice(0, HISTORY_PAGE);
+            return (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                {shown.map((m) => (
+                  <div key={m.id}>
+                    <CompactMatch m={m} getP={getP} onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} />
+                    {scoreOpen === m.id && <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} />}
+                  </div>
+                ))}
+                {!historyShowAll && recent.length > HISTORY_PAGE && (
+                  <button onClick={() => setHistoryShowAll(true)} style={{ width: "100%", padding: "8px 0", borderRadius: 10, background: "none", border: `1px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}>
+                    ดูทั้งหมด ({recent.length})
+                  </button>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -3368,7 +4307,7 @@ function TournamentDashboard(props) {
   );
 }
 
-function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, players, lockPairs, addLockPair, removeLockPair, getP, resetGames, changeLevelPreset, setCustomLevels, onClose }) {
+function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, onClose }) {
   // v1.8.4: ค่าใช้จ่าย (💳) and รางวัล (🏆) moved out of this sheet into FinanceSettingsSheet, opened from the
   // ชำระเงิน tab instead — Today/ตั้งค่าก๊วน is now Game Operations only, money settings live with money UI.
   const [open, setOpen] = useState("play"); // "play" | "level" | null — one section open at a time
@@ -3392,7 +4331,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           </div>
           <div style={{ marginBottom: 8 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนเซต</div>
-            <Seg options={[[1, "1 เซต"], [2, "2 เซต"], [3, "3 เซต"]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
+            <Seg options={[[1, "1 เซต"], [2, "2 ใน 3 เซต"], [3, "3 ใน 5 เซต"]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
           </div>
           <div style={{ marginBottom: 8 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เล่นถึง</div>
@@ -3427,7 +4366,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
             </div>
           )}
           <Label>ล็อคคู่ / เลี่ยงคู่ (เฉพาะโหมดตีคู่ ยกเว้น "ไม่อยากสู้/ไม่อยากเจอเลย" ใช้ได้ทั้งเดี่ยว-คู่)</Label>
-          <LockPairEditor {...{ players, lockPairs, addLockPair, removeLockPair, getP }} />
+          <LockPairEditor {...{ players, lockPairs, addLockPair, removeLockPair, setHandPref, getP }} />
           <button onClick={resetGames} style={{ marginTop: 14, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><RotateCcw size={14} /> รีเซ็ตจำนวนเกม</button>
         </div>
       )}
@@ -3569,6 +4508,17 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
             <Seg options={[[true, "เปิด"], [false, "ปิด"]]} value={settings.wheelEnabled !== false} onChange={(v) => setSettings((s) => ({ ...s, wheelEnabled: v }))} />
           </div>
           {settings.wheelEnabled !== false && (<>
+            {/* v1.9.19: sold-out prizes are excluded from the wheel by default (unchanged behavior) —
+                this lets the organizer opt into showing them anyway, purely so players still see the
+                wheel as fully stocked for the suspense. v1.9.21: when shown, they're drawn IDENTICAL to
+                a live slice (no gray, no "(หมด)" marker) — a spinning player can't tell they're gone.
+                Never affects actual odds: see SpinWheel — sold-out slices are excluded from the
+                random-selection pool regardless of how they're drawn. */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+              <div style={{ fontSize: 13, fontWeight: 700 }}>รางวัลที่หมดแล้วในวงล้อ</div>
+              <Seg options={[[false, "แค่ที่เหลือ"], [true, "แสดงทั้งหมด"]]} value={!!settings.wheelShowSoldOut} onChange={(v) => setSettings((s) => ({ ...s, wheelShowSoldOut: v }))} />
+            </div>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14 }}>"แสดงทั้งหมด" = วงล้อยังโชว์ครบเหมือนของเดิม (ผู้เล่นไม่รู้ว่าหมดแล้ว) แต่หมุนไม่มีทางออกจริง</div>
             <Label>🎡 วงล้อรางวัล — กำหนดรางวัลและโอกาสออก</Label>
             <WheelPrizeEditor prizes={settings.wheelPrizes || []} setPrizes={(updater) => setSettings((s) => ({ ...s, wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater }))} />
           </>)}
@@ -3628,9 +4578,13 @@ function WinLoseSelect({ state, onPick, locked }) {
   );
 }
 function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
+  // `rounds` here is "sets needed to win" (see maxSetsFor/visibleSetCount) — best-of-3 for 2, best-of-5
+  // for 3. Only reveal as many set rows as are actually needed right now: stop early once a side has
+  // clinched it in straight sets, but add the decider row the moment the score is split.
+  const visible = visibleSetCount(m, rounds || 1);
   return (
     <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginTop: 6 }}>
-      {Array.from({ length: rounds }).map((_, ri) => {
+      {Array.from({ length: visible }).map((_, ri) => {
         const r = (m.scores && m.scores[ri]) || { a: null, b: null, win: null };
         const auto = r.a != null && r.b != null ? (Number(r.a) === Number(r.b) ? null : (Number(r.a) > Number(r.b) ? "A" : "B")) : null;
         const eff = auto || r.win || null; // "A" | "B" | null — effective round winner (auto beats manual pick)
@@ -3642,8 +4596,8 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
           else setWin(m.id, ri, null);
         };
         return (
-          <div key={ri} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: ri < rounds - 1 ? 8 : 0 }}>
-            {rounds > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
+          <div key={ri} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: ri < visible - 1 ? 8 : 0 }}>
+            {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
             {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} />}
             <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
             <input type="number" value={r.a ?? ""} onChange={(e) => setScore(m.id, ri, "a", e.target.value)} style={scoreInput} />
@@ -3740,7 +4694,7 @@ function fmtThaiMonthLabel(ym) {
   if (!y || !m) return ym;
   return `${MO[m - 1]} ${y + 543}`;
 }
-function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
+function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
   const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
@@ -3774,7 +4728,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHist
       </button>
       {openBackupSettings && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
-          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} />
+          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} />
         </div>
       )}
 
@@ -4032,11 +4986,18 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit }) {
+function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint }) {
+  // v1.9.9 IA cleanup (Phase 1): "ชำระเงิน" is no longer a standalone bottom-nav tab — it now lives here as
+  // a sub-tab, reusing PaymentTab UNCHANGED (same payment logic/state/fee calc — no duplicated payment
+  // system). Defaults to ชำระเงิน while a group session is actively running so the organizer lands where
+  // they need to be during play; otherwise defaults to the finance dashboard. This only reads `current`
+  // once on mount (by design) — manually switching away doesn't get overridden mid-session.
+  const [payTab, setPayTab] = useState((current && current.length > 0) ? "payment" : "overview");
   const [mode, setMode] = useState("day"); // "day" | "month" | "overview"
   const [openId, setOpenId] = useState(null); // sessionHistory id opened in SessionFinancialDetail
   const [discountSheetOpen, setDiscountSheetOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(null); // "day-month" | "month-month" | "year" | null
+  const [exportSheetOpen, setExportSheetOpen] = useState(false); // ส่งออกรายงานการเงิน (Financial Report Export)
 
   const allMonths = useMemo(() => getActiveMonths(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
   const allYears = useMemo(() => getActiveYears(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
@@ -4049,6 +5010,9 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
 
   const datesInDayYm = useMemo(() => getActiveDates(dayYm, sessionHistory, generalExpenses, otherIncome), [dayYm, sessionHistory, generalExpenses, otherIncome]);
   const effectiveDate = datesInDayYm.includes(selectedDate) ? selectedDate : (datesInDayYm[0] || null);
+  // ส่งออกรายงานการเงิน (Financial Report Export) — always follows whatever period is CURRENTLY selected on
+  // this page (Requirement #2); the sheet itself may additionally offer a custom-range override.
+  const exportDefaultPeriod = financePeriodMeta(mode, effectiveDate, monthYm, year, null);
 
   // drill-down: รายเดือน's daily-performance row -> รายวัน with that exact date selected (Requirement 8/11)
   const goDay = (dateStr) => { setMode("day"); setDayYm(dateStr.slice(0, 7)); setSelectedDate(dateStr); };
@@ -4076,7 +5040,18 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
 
   return (
     <div>
-      <SectionHead icon={<span style={{ fontSize: 16 }}>💰</span>} title="การเงิน" sub="รายรับ-รายจ่ายของก๊วน" />
+      <div style={{ marginBottom: 16 }}>
+        <Seg options={[["payment", "ชำระเงิน"], ["overview", "ภาพรวมการเงิน"]]} value={payTab} onChange={setPayTab} />
+      </div>
+
+      {payTab === "payment" ? (
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} />
+      ) : (
+      <>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <SectionHead icon={<span style={{ fontSize: 16 }}>💰</span>} title="การเงิน" sub="รายรับ-รายจ่ายของก๊วน" />
+        <button onClick={() => setExportSheetOpen(true)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 11px", borderRadius: 20, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 800, color: T.text, flexShrink: 0, marginBottom: 10 }}>📤 ส่งออก</button>
+      </div>
 
       <div style={{ marginBottom: 16 }}>
         <Seg options={[["day", "รายวัน"], ["month", "รายเดือน"], ["overview", "ภาพรวม"]]} value={mode} onChange={setMode} />
@@ -4169,6 +5144,234 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
       {pickerOpen === "day-month" && <MonthPickerSheet months={allMonths} onPick={(ym) => { setDayYm(ym); setSelectedDate(null); }} onClose={() => setPickerOpen(null)} />}
       {pickerOpen === "month-month" && <MonthPickerSheet months={allMonths} onPick={setMonthYm} onClose={() => setPickerOpen(null)} />}
       {pickerOpen === "year" && <YearPickerSheet years={allYears} onPick={setYear} onClose={() => setPickerOpen(null)} />}
+      {exportSheetOpen && (
+        <FinanceExportSheet
+          defaultPeriod={exportDefaultPeriod}
+          sessionHistory={sessionHistory}
+          generalExpenses={generalExpenses}
+          otherIncome={otherIncome}
+          discountCredits={discountCredits}
+          onOpenPrint={onOpenFinancePrint}
+          onClose={() => setExportSheetOpen(false)}
+        />
+      )}
+      </>
+      )}
+    </div>
+  );
+}
+
+// ===================== FINANCIAL REPORT EXPORT — BOTTOM SHEET (Requirement #1) =====================
+// Compact entry point's sheet: shows the period currently being exported (always follows what's selected on
+// the Finance page — Requirement #2 — with an optional custom-range override scoped to export only, so it
+// never touches the Finance page's own period selection), a live preview, then TXT / Excel / PDF.
+function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, otherIncome, discountCredits, onOpenPrint, onClose }) {
+  const [customOn, setCustomOn] = useState(false);
+  const [customFrom, setCustomFrom] = useState(defaultPeriod ? defaultPeriod.range.from.slice(0, 10) : "");
+  const [customTo, setCustomTo] = useState(defaultPeriod ? defaultPeriod.range.to.slice(0, 10) : "");
+  const [busy, setBusy] = useState(null); // "txt" | "xlsx" | null
+  const [status, setStatus] = useState(null); // { kind: "ok"|"error", msg } | null
+
+  const period = useMemo(() => {
+    if (customOn && customFrom && customTo) return financePeriodMeta(null, null, null, null, { from: customFrom, to: customTo });
+    return defaultPeriod;
+  }, [customOn, customFrom, customTo, defaultPeriod]);
+
+  const ctx = { sessionHistory, generalExpenses, otherIncome, discountCredits };
+  const report = useMemo(() => (period ? buildFinancialReport(period, ctx) : null), [period, sessionHistory, generalExpenses, otherIncome, discountCredits]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const isEmpty = report && report.sessions.length === 0 && report.transactions.length === 0 && report.outstandingPayments.length === 0 && report.discountCredits.length === 0;
+
+  const doExport = async (fmt) => {
+    if (!report) return;
+    setBusy(fmt);
+    setStatus(null);
+    try {
+      const outcome = fmt === "txt" ? await downloadFinancialReportTxt(report) : await downloadFinancialReportXlsx(report);
+      if (outcome === "done") setStatus({ kind: "ok", msg: "บันทึก/แชร์ไฟล์แล้ว" });
+      else if (outcome === "cancelled") setStatus(null);
+      else setStatus({ kind: "error", msg: "ส่งออกไม่สำเร็จ ลองอีกครั้ง" });
+    } catch (e) {
+      setStatus({ kind: "error", msg: "ส่งออกไม่สำเร็จ ลองอีกครั้ง" });
+    }
+    setBusy(null);
+  };
+  const openPdf = () => {
+    if (!report || !onOpenPrint) return;
+    onOpenPrint(report);
+    onClose();
+  };
+  const rowStyle = { display: "flex", justifyContent: "space-between", fontSize: 13.5, padding: "3px 0" };
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>ส่งออกรายงานการเงิน</div>
+
+      <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, marginBottom: 4 }}>ช่วงเวลา</div>
+      <div style={{ fontSize: 14.5, fontWeight: 800, marginBottom: 10 }}>{period ? period.label : "-"}</div>
+      <button onClick={() => setCustomOn((v) => !v)} style={{ fontSize: 12, fontWeight: 700, color: T.accent, background: "none", border: "none", padding: 0, marginBottom: customOn ? 8 : 14 }}>
+        {customOn ? "✕ ยกเลิกกำหนดช่วงเอง" : "กำหนดช่วงวันที่เอง"}
+      </button>
+      {customOn && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={{ flex: 1, padding: "8px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13 }} />
+          <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} style={{ flex: 1, padding: "8px 10px", borderRadius: 10, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13 }} />
+        </div>
+      )}
+
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
+        {isEmpty && <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "6px 0" }}>ไม่พบข้อมูลการเงินในช่วงเวลานี้</div>}
+        <div style={rowStyle}><span style={{ color: T.muted }}>{report ? `${report.sessions.length} ก๊วน` : "-"}</span><span /></div>
+        <div style={rowStyle}><span>รายได้</span><span style={{ fontWeight: 800 }}>{report ? formatCurrency(report.summary.revenue) : "-"}</span></div>
+        <div style={rowStyle}><span>ค่าใช้จ่าย</span><span style={{ fontWeight: 800 }}>{report ? formatCurrency(report.summary.expense) : "-"}</span></div>
+        <div style={rowStyle}>
+          <span>{report && report.summary.profit < 0 ? "ขาดทุน" : "กำไร"}</span>
+          <span style={{ fontWeight: 800, color: report && report.summary.profit < 0 ? T.accent : T.green }}>{report ? formatCurrency(Math.abs(report.summary.profit)) : "-"}</span>
+        </div>
+      </div>
+
+      {status && <div style={{ fontSize: 12.5, fontWeight: 700, color: status.kind === "ok" ? T.green : T.accent, textAlign: "center", marginBottom: 10 }}>{status.msg}</div>}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {[["txt", "📄 TXT"], ["xlsx", "📊 Excel"]].map(([fmt, label]) => (
+          <button
+            key={fmt}
+            disabled={!report || busy !== null}
+            onClick={() => doExport(fmt)}
+            style={{ width: "100%", padding: "12px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 800, color: T.text, opacity: !report || busy !== null ? 0.6 : 1 }}
+          >
+            {busy === fmt ? "กำลังสร้างไฟล์…" : label}
+          </button>
+        ))}
+        <button disabled={!report} onClick={openPdf} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 800, color: T.text, opacity: !report ? 0.6 : 1 }}>
+          🖨️ PDF
+        </button>
+      </div>
+    </Overlay>
+  );
+}
+
+// ===================== FINANCIAL REPORT EXPORT — PDF PRINT VIEW (Requirements #15/#16) =====================
+// Small reusable table for the print report's detail sections — plain <table>, browsers paginate long ones
+// across pages on their own (Requirement #16 "long tables may continue on the next page").
+function PrintTable({ headers, rows, rightCols }) {
+  const isRight = (i) => !!(rightCols && rightCols.includes(i));
+  const th = { border: "1px solid #ccc", padding: "4px 6px", fontSize: 10.5, fontWeight: 800, background: "#f3f6f4" };
+  const td = { border: "1px solid #ddd", padding: "4px 6px", fontSize: 10.5 };
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: 4 }}>
+      <thead>
+        <tr>{headers.map((h, i) => <th key={i} style={{ ...th, textAlign: isRight(i) ? "right" : "left" }}>{h}</th>)}</tr>
+      </thead>
+      <tbody>
+        {rows.length === 0 ? (
+          <tr><td colSpan={headers.length} style={{ ...td, textAlign: "center", color: "#6b7d74" }}>ไม่มีรายการ</td></tr>
+        ) : rows.map((r, ri) => (
+          <tr key={ri}>{r.map((c, ci) => <td key={ci} style={{ ...td, textAlign: isRight(ci) ? "right" : "left" }}>{c}</td>)}</tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+function PrintSectionTitle({ children }) {
+  return <div style={{ fontSize: 13, fontWeight: 800, margin: "18px 0 6px", color: "#16241d" }}>{children}</div>;
+}
+function FinancePrintView({ report, onClose }) {
+  const negative = report.summary.profit < 0;
+  const negativePnl = report.pnl.netProfit < 0;
+  const expenseRows = Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0);
+  return (
+    <div style={{ background: "#fff", color: "#16241d", minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      <style>{`
+        @media print {
+          @page { size: A4 portrait; margin: 14mm; }
+          .fpv-noprint { display: none !important; }
+          .fpv-page { padding: 0 !important; }
+          .fpv-avoidbreak { break-inside: avoid; }
+        }
+      `}</style>
+      <div className="fpv-noprint" style={{ position: "sticky", top: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#16241d", color: "#fff", zIndex: 5 }}>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 14, fontWeight: 700 }}>‹ ปิด</button>
+        <button onClick={() => window.print()} style={{ background: "#fff", color: "#16241d", border: "none", borderRadius: 20, padding: "8px 16px", fontSize: 13.5, fontWeight: 800 }}>🖨️ พิมพ์ / บันทึกเป็น PDF</button>
+      </div>
+      <div className="fpv-page" style={{ maxWidth: 780, margin: "0 auto", padding: "20px 18px 60px", boxSizing: "border-box" }}>
+        <div className="fpv-avoidbreak" style={{ textAlign: "center", marginBottom: 18 }}>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>BadQ</div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>รายงานการเงิน</div>
+          <div style={{ fontSize: 12.5, color: "#6b7d74" }}>ช่วงเวลา: {report.period.label}</div>
+          <div style={{ fontSize: 11, color: "#6b7d74" }}>วันที่สร้างรายงาน: {fmtGeneratedAt(report.generatedAt)}</div>
+        </div>
+
+        <div className="fpv-avoidbreak" style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+          {[["รายได้", report.summary.revenue, "#16241d"], ["ค่าใช้จ่าย", report.summary.expense, "#16241d"], [negative ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.summary.profit), negative ? "#ef5a44" : "#12986a"]].map(([label, amt, color], i) => (
+            <div key={i} style={{ flex: 1, border: "1px solid #dde5e1", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
+              <div style={{ fontSize: 10.5, color: "#6b7d74", marginBottom: 2 }}>{label}</div>
+              <div style={{ fontSize: 13.5, fontWeight: 800, color }}>{formatCurrency(amt)}</div>
+            </div>
+          ))}
+        </div>
+
+        <PrintSectionTitle>สรุป</PrintSectionTitle>
+        <PrintTable
+          headers={["รายการ", "จำนวนเงิน"]}
+          rightCols={[1]}
+          rows={[
+            ["รายได้", formatCurrency(report.summary.revenue)],
+            ["รับแล้ว", formatCurrency(report.summary.collected)],
+            ["ค้างรับ", formatCurrency(report.summary.receivable)],
+            ["ค่าใช้จ่าย", formatCurrency(report.summary.expense)],
+            [negative ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.summary.profit))],
+          ]}
+        />
+
+        <PrintSectionTitle>สรุปกำไรขาดทุน</PrintSectionTitle>
+        <PrintTable
+          headers={["รายการ", "จำนวนเงิน"]}
+          rightCols={[1]}
+          rows={[
+            ["รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)],
+            ["รายได้อื่น", formatCurrency(report.pnl.otherIncome)],
+            ["รายได้รวม", formatCurrency(report.pnl.totalRevenue)],
+            ...expenseRows.map(([cat, amt]) => [cat, formatCurrency(amt)]),
+            ["ค่าใช้จ่ายรวม", formatCurrency(report.pnl.totalExpense)],
+            [negativePnl ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.pnl.netProfit))],
+          ]}
+        />
+
+        <PrintSectionTitle>รายก๊วน</PrintSectionTitle>
+        <PrintTable
+          headers={["วันที่", "ชื่อก๊วน", "ผู้เล่น", "แมตช์", "สนาม", "รายได้", "ค่าใช้จ่าย", "กำไร/ขาดทุน"]}
+          rightCols={[2, 3, 4, 5, 6, 7]}
+          rows={report.sessions.map((s) => [fmtThaiDateFull(s.date), s.name, s.playerCount, s.matchCount, s.courtCount, formatCurrency(s.revenue), formatCurrency(s.expense), formatCurrency(s.profit)])}
+        />
+
+        <PrintSectionTitle>รายรับรายจ่าย</PrintSectionTitle>
+        <PrintTable
+          headers={["วันที่", "ประเภท", "หมวด", "รายละเอียด", "ก๊วน", "จำนวนเงิน"]}
+          rightCols={[5]}
+          rows={report.transactions.map((t) => [fmtThaiDateFull(t.date), t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย", t.category, t.description, t.session, formatCurrency(t.amount)])}
+        />
+
+        <PrintSectionTitle>ค้างชำระ</PrintSectionTitle>
+        <PrintTable
+          headers={["วันที่", "ก๊วน", "ผู้เล่น", "ยอดที่ต้องชำระ", "รับแล้ว", "ค้างชำระ"]}
+          rightCols={[3, 4, 5]}
+          rows={report.outstandingPayments.length === 0 ? [] : report.outstandingPayments.map((o) => [fmtThaiDateFull(o.date), o.sessionName, o.playerName, formatCurrency(o.due), formatCurrency(o.collected), formatCurrency(o.outstanding)])}
+        />
+        {report.outstandingPayments.length === 0 && <div style={{ fontSize: 11.5, color: "#6b7d74", marginTop: -6, marginBottom: 8 }}>ไม่มีรายการค้างชำระ</div>}
+
+        <PrintSectionTitle>ส่วนลดคงเหลือ</PrintSectionTitle>
+        <PrintTable
+          headers={["ผู้เล่น", "จำนวนเงิน", "ก๊วนต้นทาง", "สถานะ"]}
+          rightCols={[1]}
+          rows={report.discountCredits.length === 0 ? [] : report.discountCredits.map((c) => [c.playerName, formatCurrency(c.amount), c.sourceSession, c.status])}
+        />
+        {report.discountCredits.length === 0 && <div style={{ fontSize: 11.5, color: "#6b7d74", marginTop: -6, marginBottom: 8 }}>ไม่มีส่วนลดคงเหลือ</div>}
+
+        <div style={{ textAlign: "center", fontSize: 10.5, color: "#6b7d74", marginTop: 24, borderTop: "1px solid #dde5e1", paddingTop: 10 }}>
+          สร้างจาก BadQ · {fmtGeneratedAt(report.generatedAt)}
+        </div>
+      </div>
     </div>
   );
 }
@@ -4526,7 +5729,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
   const [detail, setDetail] = useState(null); // player id for detail
   const doneCurrent = current.filter((m) => m.status === "done");
   const totalMatches = history.length + doneCurrent.length;
-  const played = players.filter((p) => (p.games || 0) > 0 || p.status !== "absent");
+  const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered"));
   const gamesArr = played.map((p) => p.games || 0);
   const minGames = gamesArr.length ? Math.min(...gamesArr) : 0;
   const maxGames = gamesArr.length ? Math.max(...gamesArr) : 0;
@@ -4647,7 +5850,7 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [openFinanceSettings, setOpenFinanceSettings] = useState(false);
   const doneCurrent = current.filter((m) => m.status === "done");
-  const played = players.filter((p) => (p.games || 0) > 0 || p.status !== "absent");
+  const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered"));
   const bill = computeBill(players, settings);
   const billBy = (id) => bill.find((b) => b.id === id);
   const grandTotal = bill.reduce((s, b) => s + b.total, 0);
@@ -4821,6 +6024,7 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
         <SpinWheel
           prizes={settings.wheelPrizes || []}
           remainingPlayers={played.filter((p) => !p.spun).length}
+          showSoldOut={!!settings.wheelShowSoldOut}
           onFinish={(prize) => applyWheelPrize(wheelFor, prize)}
           onClose={() => setWheelFor(null)}
         />
@@ -5019,6 +6223,13 @@ function NextMatchBlock({ m, getP, pool, autoQueueNext, setQueuedSlot, swapQueue
         )}
       </div>
 
+      {/* v1.9.9: while actively picking players, show Balance ABOVE the team row (not below) so the per-slot
+          picker dropdown — which expands downward over this block — never covers it, and so the organizer can
+          see the resulting balance as a decision aid while still choosing players. Reuses the exact same
+          full-gated Fairness render as the view-mode block below; disappears automatically once เสร็จสิ้น is
+          pressed (editing becomes false), leaving only the unchanged view-mode Balance below. */}
+      {editing && full && <div style={{ marginBottom: 2 }}><Fairness sA={sA} sB={sB} /></div>}
+
       <MatchTeams m={synthM} getP={getP} editable={editing} bench={pool} replaceSlot={replaceSlotQueued} big={false} now={now} />
 
       {editing && (
@@ -5055,12 +6266,27 @@ const PAIR_RULE_META = {
   avoidOpponent: { label: "ไม่อยากสู้ (ห้ามอยู่คนละฝั่ง)", short: "ไม่อยากสู้", bg: "#eef1fd", border: "#c9d3f5", color: "#3d4fb0" },
   avoidBoth: { label: "ไม่อยากเจอเลย (ทั้งคู่และสู้)", short: "ไม่อยากเจอเลย", bg: "#f3effb", border: "#ddcff0", color: "#6d3fa8" },
 };
-function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, getP }) {
+// v1.9.17: the two handedness-preference values, shown as two MORE options in the exact same type
+// dropdown below — per spec these must NOT get a new section/control, only ride along on the existing
+// lock-pair editor. Unlike PAIR_RULE_META above these describe a single PLAYER, not an A-B pair, so they
+// key onto player.handPref (via setHandPref) instead of into the lockPairs array.
+const HAND_PREF_META = {
+  preferLeft: { label: "อยากคู่กับมือซ้าย", short: "อยากคู่มือซ้าย", bg: HAND_BADGE.bg, border: "#ddc8fb", color: HAND_BADGE.color },
+  avoidLeft: { label: "ไม่อยากคู่กับมือซ้าย", short: "ไม่อยากคู่มือซ้าย", bg: "#fdecec", border: "#f5c9c9", color: "#c0392b" },
+};
+function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, setHandPref, getP }) {
   const [a, setA] = useState(""); const [b, setB] = useState(""); const [type, setType] = useState("lock");
   const sty = { flex: 1, padding: "9px 8px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, minWidth: 0 };
+  const isHandPrefType = type === "preferLeft" || type === "avoidLeft";
+  const handPrefPlayers = players.filter((p) => p.handPref === "preferLeft" || p.handPref === "avoidLeft");
+  const add = () => {
+    if (isHandPrefType) { if (a) setHandPref(a, type); }
+    else addLockPair(a, b, type);
+    setA(""); setB("");
+  };
   return (
     <div>
-      {lockPairs.length > 0 && (
+      {(lockPairs.length > 0 || handPrefPlayers.length > 0) && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
           {lockPairs.map((r) => {
             const meta = PAIR_RULE_META[r.type] || PAIR_RULE_META.lock;
@@ -5073,18 +6299,32 @@ function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, getP 
               </div>
             );
           })}
+          {handPrefPlayers.map((p) => {
+            const meta = HAND_PREF_META[p.handPref];
+            return (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 10, background: meta.bg, border: `1px solid ${meta.border}` }}>
+                <Unlock size={13} color={meta.color} />
+                <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{p.name}</span>
+                <span style={{ fontSize: 10.5, fontWeight: 800, color: meta.color }}>{meta.short}</span>
+                <button onClick={() => setHandPref(p.id, null)} style={{ background: "none", border: "none", color: T.muted, display: "flex" }}><X size={15} /></button>
+              </div>
+            );
+          })}
         </div>
       )}
       <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
         <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">เลือกคน</option>{players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-        <span style={{ color: T.muted, fontWeight: 800 }}>+</span>
-        <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+        {!isHandPrefType && <>
+          <span style={{ color: T.muted, fontWeight: 800 }}>+</span>
+          <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+        </>}
       </div>
       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
         <select value={type} onChange={(e) => setType(e.target.value)} style={{ ...sty, flex: 1.6, fontWeight: 700 }}>
           {Object.entries(PAIR_RULE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
+          {Object.entries(HAND_PREF_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
         </select>
-        <button onClick={() => { addLockPair(a, b, type); setA(""); setB(""); }} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={17} /></button>
+        <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={17} /></button>
       </div>
     </div>
   );
@@ -5099,6 +6339,12 @@ function prizeQty(p) {
   if (p.weight != null) return Math.max(0, Number(p.weight) || 0);
   return 5;
 }
+// how many of this prize the organizer last stocked (set whenever they create or restock a prize —
+// see add()/editQty() below), separate from `qty` (the live remaining count, decremented by one on every
+// win — see applyWheelPrize). SpinWheel uses totalQty - qty to know how many units of a prize have already
+// been claimed, so it can render that many individual "sold out" cosmetic slices. Missing on prizes saved
+// before this existed (or never restocked since) — callers should fall back to treating it as == qty
+// (i.e. nothing claimed yet) rather than crash, exactly like prizeQty() does for the older `weight` field.
 function WheelPrizeEditor({ prizes, setPrizes }) {
   const [label, setLabel] = useState("");
   const [qty, setQty] = useState(5);
@@ -5108,11 +6354,14 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
   const add = () => {
     const n = label.trim();
     if (!n) return;
-    setPrizes((prev) => [...(prev || []), { id: uid(), label: n, type, amount: needsAmount ? Number(amount) || 0 : 0, qty: Math.max(0, Number(qty) || 0) }]);
+    const q = Math.max(0, Number(qty) || 0);
+    setPrizes((prev) => [...(prev || []), { id: uid(), label: n, type, amount: needsAmount ? Number(amount) || 0 : 0, qty: q, totalQty: q }]);
     setLabel(""); setQty(5); setAmount(10); setType("now");
   };
   const remove = (id) => setPrizes((prev) => (prev || []).filter((p) => p.id !== id));
-  const editQty = (id, v) => setPrizes((prev) => (prev || []).map((p) => (p.id === id ? { ...p, qty: Math.max(0, Number(v) || 0) } : p)));
+  // editing the "remaining" number is how organizers restock — treat it as resetting the baseline too,
+  // so a fresh top-up doesn't retroactively show a pile of "sold out" slices from before the restock.
+  const editQty = (id, v) => setPrizes((prev) => (prev || []).map((p) => (p.id === id ? { ...p, qty: Math.max(0, Number(v) || 0), totalQty: Math.max(0, Number(v) || 0) } : p)));
   const sty = { padding: "9px 8px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5 };
   return (
     <div>
@@ -5269,8 +6518,9 @@ function CustomLevelEditor({ customLevels, setCustomLevels }) {
 // local-file backup / restore UI: export the whole app state as a JSON file, or import one back with
 // a validate -> preview -> confirm flow. A "replace all" restore always takes a safety snapshot first
 // (see App().applyRestore) so it can be undone with the button below the two main actions.
-function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup }) {
+function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog }) {
   const [busy, setBusy] = useState(false);
+  const [showBootLog, setShowBootLog] = useState(false); // v1.9.18: collapsed by default — diagnostic only
   const [successMsg, setSuccessMsg] = useState(null); // { kind: "export"|"import"|"undo", stats?, sizeLabel? }
   const [importError, setImportError] = useState(null);
   const [preview, setPreview] = useState(null); // validated backup object awaiting mode choice / confirm
@@ -5346,6 +6596,51 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.5 }}>
         ไฟล์สำรองอาจมีชื่อ รูปผู้เล่น ประวัติการเล่น และข้อมูลการชำระเงิน กรุณาเก็บไฟล์ไว้ในที่ปลอดภัย
       </div>
+
+      {autoBackups && autoBackups.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <Label>จุดสำรองอัตโนมัติ (ในเครื่องนี้)</Label>
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 8, lineHeight: 1.5 }}>
+            ระบบบันทึกจุดกู้คืนให้อัตโนมัติทุกครั้งที่จบก๊วนหรือ Tournament — เก็บไว้ {autoBackups.length} จุดล่าสุดในเครื่องนี้เท่านั้น (ไม่ใช่ไฟล์แยกต่างหาก จึงยังควรกด "สำรองข้อมูล" ด้านบนเป็นระยะ เพื่อเก็บไฟล์ไว้นอกเครื่องด้วย)
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {autoBackups.map((entry) => (
+              <div key={entry.savedAt} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
+                <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 0 }}>
+                  <div style={{ fontWeight: 700, color: T.text }}>{fmtThaiDateTime(entry.savedAt)}</div>
+                  <div style={{ color: T.muted }}>
+                    ผู้เล่น {entry.stats.playerCount} คน · ประวัติก๊วน {entry.stats.sessionHistoryCount} ครั้ง
+                    {entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน"}
+                  </div>
+                </div>
+                <button disabled={busy} onClick={() => { setSuccessMsg(null); setImportError(null); setRestoreMode("replace"); setPreview(entry.payload); }} style={{ ...btnSecondary, padding: "7px 10px", fontSize: 12, flexShrink: 0, opacity: busy ? 0.6 : 1 }}>กู้คืน</button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* v1.9.18: forensic boot/heal log — diagnoses reports of "data reverted after updating".
+          Collapsed by default, read-only, never affects any of the logic above. */}
+      {bootLog && bootLog.length > 0 && (
+        <div style={{ marginTop: 16 }}>
+          <button onClick={() => setShowBootLog((v) => !v)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>บันทึกการซิงค์ข้อมูล (debug)</span>
+            <ChevronDown size={13} color={T.muted} style={{ transform: showBootLog ? "rotate(180deg)" : "none" }} />
+          </button>
+          {showBootLog && (
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
+              {bootLog.map((e, i) => (
+                <div key={e.t + "-" + i} style={{ fontSize: 10.5, fontFamily: "monospace", color: T.muted, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 8, padding: "6px 8px", lineHeight: 1.5, wordBreak: "break-all" }}>
+                  {fmtThaiDateTime(e.t)} · {e.event}
+                  {e.event === "boot" && ` · v${e.appVersion} · โหลด savedAt=${e.loadedSavedAt ? fmtThaiDateTime(e.loadedSavedAt) : "ไม่มี"} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount} · reload=${e.viaUpdateReload ? "yes" : "no"}`}
+                  {e.event === "heal" && ` · ${e.fromSavedAt ? fmtThaiDateTime(e.fromSavedAt) : "-"} → ${fmtThaiDateTime(e.toSavedAt)} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount}`}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {preview && (
         <div onClick={() => setPreview(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
@@ -5434,46 +6729,87 @@ function describeSlicePath(cx, cy, r, startDeg, endDeg) {
 }
 function truncateLabel(s, n) { return !s ? "" : (s.length > n ? s.slice(0, n) : s); } // hard cap only as a defensive backstop against a pathologically long label — no "…" appended
 
-// custom spin wheel — the real-prize slices together take up exactly (total remaining prize stock ÷
-// remainingPlayers) of the wheel, so the odds always reflect reality: e.g. 5 prizes left among 10
-// players still due to spin = a 50% chance to win THIS spin, and — because remainingPlayers/prize stock
-// both shrink by exactly one each time someone spins (win or miss) — the prizes are guaranteed to be
-// fully handed out across that group of players, never over- or under-allocated. The "no prize" portion
-// is split into several same-colored, unlabeled slices interleaved between the (labeled) prize slices
-// instead of one big block, so a miss doesn't look concentrated in one place on the wheel.
-function SpinWheel({ prizes, remainingPlayers, onFinish, onClose }) {
+// custom spin wheel — v1.9.21: every remaining UNIT of every real prize gets its own equal-size slice
+// (a prize with qty 3 draws 3 separate slices, not one slice 3x the size) — shuffled together ("คละกัน")
+// so same-prize slices never cluster, then a "miss" slice is inserted after each one so the wheel
+// alternates prize/miss all the way around, same red every time so a miss always reads the same at a
+// glance. Sold-out units (already won — materialized only when the organizer turns settings.wheelShowSoldOut
+// on) are individual unwinnable slices mixed in right alongside the still-live ones, deliberately drawn to
+// look IDENTICAL to a live slice of the same prize (same color, same label — no "(หมด)" marker, no gray):
+// the point of "แสดงทั้งหมด" is to keep the wheel looking fully stocked so a spinning player can't tell some
+// slices are already gone, keeping the suspense up, even though those slices can structurally never win
+// (see `selectable` in spin()). How many of each prize are "used" comes from totalQty (the stocked amount,
+// set once per restock in WheelPrizeEditor and never decremented) minus qty (the live remaining count,
+// decremented on every win — see prizeQty()).
+function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose }) {
   const [rotation, setRotation] = useState(0);
   const [spinning, setSpinning] = useState(false);
   const [resultPrize, setResultPrize] = useState(null);
   // bright/light tones for prize slices, cycling yellow → green → orange → blue → ...; red is deliberately
   // never used here — it's reserved for the "no prize" slices (NONE_SLICE_COLOR below) so a glance at the
-  // wheel tells red = miss, every other color = a real prize.
+  // wheel tells red = miss, every other color = a real prize (all units of the same prize share one color
+  // even after shuffling, so it's still easy to spot "how many slices of THIS prize are left").
   const colors = ["#fbbf24", "#4ade80", "#fb923c", "#38bdf8", "#c084fc", "#2dd4bf", "#f9a8d4", "#a3e635", "#fcd34d", "#7dd3fc"];
-  const realPrizes = (prizes || []).filter((p) => p.type !== "none" && prizeQty(p) > 0);
-  const totalPrizeQty = realPrizes.reduce((s, p) => s + prizeQty(p), 0);
+  const noneProto = (prizes || []).find((p) => p.type === "none") || { id: "__none__", label: "ไม่ได้รางวัล", type: "none", amount: 0 };
+  const totalPrizeQty = (prizes || []).filter((p) => p.type !== "none").reduce((s, p) => s + prizeQty(p), 0);
   // never let the math imply >100% win odds — total players due to spin is always at least the prize count
   const totalPlayers = Math.max(totalPrizeQty, Number(remainingPlayers) || 0);
-  const noneTotal = Math.max(0, totalPlayers - totalPrizeQty);
-  const noneProto = (prizes || []).find((p) => p.type === "none") || { id: "__none__", label: "ไม่ได้รางวัล", type: "none", amount: 0 };
 
-  let segs = [];
-  if (realPrizes.length === 0) {
-    if (noneTotal > 0 || totalPlayers > 0) segs = [{ ...noneProto, span: 360, isNone: true, color: NONE_SLICE_COLOR }];
-  } else {
-    const missPerGap = noneTotal / realPrizes.length; // spread evenly — one gap after each prize, same color throughout
-    realPrizes.forEach((p, i) => {
-      segs.push({ ...p, span: (prizeQty(p) / totalPlayers) * 360, color: colors[i % colors.length], isNone: false });
-      if (missPerGap > 0) segs.push({ ...noneProto, span: (missPerGap / totalPlayers) * 360, isNone: true, color: NONE_SLICE_COLOR });
+  // Built once via useState's lazy initializer so the shuffled layout stays put for as long as this wheel
+  // instance is open (the parent unmounts/remounts SpinWheel — see wheelFor in PaymentTab — between spins,
+  // so each new spin naturally gets a fresh shuffle).
+  const [segs] = useState(() => {
+    const realPrizes = (prizes || []).filter((p) => p.type !== "none");
+    const colorById = {};
+    realPrizes.forEach((p, i) => { colorById[p.id] = colors[i % colors.length]; });
+    let units = [];
+    realPrizes.forEach((p) => {
+      const remaining = prizeQty(p);
+      for (let i = 0; i < remaining; i++) units.push({ ...p, isSoldOut: false, isNone: false, color: colorById[p.id] });
+      if (showSoldOut) {
+        // totalQty missing (prize saved before v1.9.21, or never restocked since): if it still has stock
+        // left, assume nothing's been claimed (we simply don't know, and nothing looked "sold out" about
+        // it before). If it's already at 0 though, show it as exactly ONE sold-out slice rather than
+        // vanishing it entirely — matches how v1.9.19/1.9.20 always rendered one cosmetic slice per
+        // depleted prize TYPE, so upgrading never silently drops a prize the organizer could already see.
+        const total = p.totalQty != null ? Math.max(Number(p.totalQty) || 0, remaining) : (remaining > 0 ? remaining : 1);
+        const used = Math.max(0, total - remaining);
+        // deliberately made to look IDENTICAL to a live slice of the same prize (same color, same label,
+        // no "(หมด)" marker) — the whole point is that a spinning player can't tell it's already gone, so
+        // the wheel still looks fully stocked and keeps the suspense up. isSoldOut is what actually keeps
+        // it unwinnable (see the `selectable` filter in spin() below); nothing about how it LOOKS gives it away.
+        for (let i = 0; i < used; i++) units.push({ ...p, isSoldOut: true, isNone: false, color: colorById[p.id] });
+      }
     });
-  }
-  let acc = 0;
-  segs = segs.map((s) => { const seg = { ...s, start: acc }; acc += s.span; return seg; });
+    for (let i = units.length - 1; i > 0; i--) { // Fisher–Yates shuffle ("คละกัน")
+      const j = Math.floor(Math.random() * (i + 1));
+      [units[i], units[j]] = [units[j], units[i]];
+    }
+    let built;
+    if (units.length === 0) {
+      built = totalPlayers > 0 ? [{ ...noneProto, span: 360, isNone: true, isSoldOut: false, color: NONE_SLICE_COLOR }] : [];
+    } else {
+      const span = 360 / (units.length * 2); // one prize slice + one miss slice per unit, all equal size
+      built = [];
+      units.forEach((u) => {
+        built.push({ ...u, span });
+        built.push({ ...noneProto, span, isNone: true, isSoldOut: false, color: NONE_SLICE_COLOR });
+      });
+    }
+    let acc = 0;
+    return built.map((s) => { const seg = { ...s, start: acc }; acc += s.span; return seg; });
+  });
 
   const spin = () => {
     if (spinning || resultPrize || segs.length === 0) return;
-    const r = Math.random() * 360;
-    let cum = 0, chosen = segs[segs.length - 1];
-    for (const s of segs) { cum += s.span; if (r <= cum) { chosen = s; break; } }
+    // cosmetic sold-out slices are excluded here — they occupy real visual space on the wheel above but
+    // can NEVER be the one actually chosen, whatever `showSoldOut` is set to.
+    const selectable = segs.filter((s) => !s.isSoldOut);
+    if (selectable.length === 0) return;
+    const totalSelectable = selectable.reduce((s, x) => s + x.span, 0);
+    const r = Math.random() * totalSelectable;
+    let cum = 0, chosen = selectable[selectable.length - 1];
+    for (const s of selectable) { cum += s.span; if (r <= cum) { chosen = s; break; } }
     const center = chosen.start + chosen.span / 2;
     const target = 5 * 360 + (360 - center);
     setSpinning(true);

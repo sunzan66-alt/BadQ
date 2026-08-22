@@ -45,7 +45,7 @@
   // can never be permanently stuck.
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.20";
+      var CURRENT_VERSION = "1.9.22";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -429,7 +429,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.20";
+const APP_VERSION = "1.9.22";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -2489,19 +2489,22 @@ function getDefaultSettings() {
       label: "ส่วนลด 20฿ (ใช้ทันที)",
       type: "now",
       amount: 20,
-      qty: 5
+      qty: 5,
+      totalQty: 5
     }, {
       id: uid(),
       label: "ส่วนลด 10฿ (ครั้งหน้า)",
       type: "next",
       amount: 10,
-      qty: 5
+      qty: 5,
+      totalQty: 5
     }, {
       id: uid(),
       label: "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)",
       type: "now",
       amount: 65,
-      qty: 2
+      qty: 2,
+      totalQty: 2
     }, {
       id: uid(),
       label: "เสียใจด้วย ไม่ได้รางวัล",
@@ -10304,7 +10307,7 @@ function FinanceSettingsSheet({
       display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
-      marginBottom: 14
+      marginBottom: 6
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -10318,7 +10321,13 @@ function FinanceSettingsSheet({
       ...s,
       wheelShowSoldOut: v
     }))
-  })), /*#__PURE__*/React.createElement(Label, null, "🎡 วงล้อรางวัล — กำหนดรางวัลและโอกาสออก"), /*#__PURE__*/React.createElement(WheelPrizeEditor, {
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginBottom: 14
+    }
+  }, "\"แสดงทั้งหมด\" = วงล้อยังโชว์ครบเหมือนของเดิม (ผู้เล่นไม่รู้ว่าหมดแล้ว) แต่หมุนไม่มีทางออกจริง"), /*#__PURE__*/React.createElement(Label, null, "🎡 วงล้อรางวัล — กำหนดรางวัลและโอกาสออก"), /*#__PURE__*/React.createElement(WheelPrizeEditor, {
     prizes: settings.wheelPrizes || [],
     setPrizes: updater => setSettings(s => ({
       ...s,
@@ -15585,6 +15594,12 @@ function prizeQty(p) {
   if (p.weight != null) return Math.max(0, Number(p.weight) || 0);
   return 5;
 }
+// how many of this prize the organizer last stocked (set whenever they create or restock a prize —
+// see add()/editQty() below), separate from `qty` (the live remaining count, decremented by one on every
+// win — see applyWheelPrize). SpinWheel uses totalQty - qty to know how many units of a prize have already
+// been claimed, so it can render that many individual "sold out" cosmetic slices. Missing on prizes saved
+// before this existed (or never restocked since) — callers should fall back to treating it as == qty
+// (i.e. nothing claimed yet) rather than crash, exactly like prizeQty() does for the older `weight` field.
 function WheelPrizeEditor({
   prizes,
   setPrizes
@@ -15597,12 +15612,14 @@ function WheelPrizeEditor({
   const add = () => {
     const n = label.trim();
     if (!n) return;
+    const q = Math.max(0, Number(qty) || 0);
     setPrizes(prev => [...(prev || []), {
       id: uid(),
       label: n,
       type,
       amount: needsAmount ? Number(amount) || 0 : 0,
-      qty: Math.max(0, Number(qty) || 0)
+      qty: q,
+      totalQty: q
     }]);
     setLabel("");
     setQty(5);
@@ -15610,9 +15627,12 @@ function WheelPrizeEditor({
     setType("now");
   };
   const remove = id => setPrizes(prev => (prev || []).filter(p => p.id !== id));
+  // editing the "remaining" number is how organizers restock — treat it as resetting the baseline too,
+  // so a fresh top-up doesn't retroactively show a pile of "sold out" slices from before the restock.
   const editQty = (id, v) => setPrizes(prev => (prev || []).map(p => p.id === id ? {
     ...p,
-    qty: Math.max(0, Number(v) || 0)
+    qty: Math.max(0, Number(v) || 0),
+    totalQty: Math.max(0, Number(v) || 0)
   } : p));
   const sty = {
     padding: "9px 8px",
@@ -16600,13 +16620,18 @@ function truncateLabel(s, n) {
   return !s ? "" : s.length > n ? s.slice(0, n) : s;
 } // hard cap only as a defensive backstop against a pathologically long label — no "…" appended
 
-// custom spin wheel — the real-prize slices together take up exactly (total remaining prize stock ÷
-// remainingPlayers) of the wheel, so the odds always reflect reality: e.g. 5 prizes left among 10
-// players still due to spin = a 50% chance to win THIS spin, and — because remainingPlayers/prize stock
-// both shrink by exactly one each time someone spins (win or miss) — the prizes are guaranteed to be
-// fully handed out across that group of players, never over- or under-allocated. The "no prize" portion
-// is split into several same-colored, unlabeled slices interleaved between the (labeled) prize slices
-// instead of one big block, so a miss doesn't look concentrated in one place on the wheel.
+// custom spin wheel — v1.9.21: every remaining UNIT of every real prize gets its own equal-size slice
+// (a prize with qty 3 draws 3 separate slices, not one slice 3x the size) — shuffled together ("คละกัน")
+// so same-prize slices never cluster, then a "miss" slice is inserted after each one so the wheel
+// alternates prize/miss all the way around, same red every time so a miss always reads the same at a
+// glance. Sold-out units (already won — materialized only when the organizer turns settings.wheelShowSoldOut
+// on) are individual unwinnable slices mixed in right alongside the still-live ones, deliberately drawn to
+// look IDENTICAL to a live slice of the same prize (same color, same label — no "(หมด)" marker, no gray):
+// the point of "แสดงทั้งหมด" is to keep the wheel looking fully stocked so a spinning player can't tell some
+// slices are already gone, keeping the suspense up, even though those slices can structurally never win
+// (see `selectable` in spin()). How many of each prize are "used" comes from totalQty (the stocked amount,
+// set once per restock in WheelPrizeEditor and never decremented) minus qty (the live remaining count,
+// decremented on every win — see prizeQty()).
 function SpinWheel({
   prizes,
   remainingPlayers,
@@ -16619,77 +16644,103 @@ function SpinWheel({
   const [resultPrize, setResultPrize] = useState(null);
   // bright/light tones for prize slices, cycling yellow → green → orange → blue → ...; red is deliberately
   // never used here — it's reserved for the "no prize" slices (NONE_SLICE_COLOR below) so a glance at the
-  // wheel tells red = miss, every other color = a real prize.
+  // wheel tells red = miss, every other color = a real prize (all units of the same prize share one color
+  // even after shuffling, so it's still easy to spot "how many slices of THIS prize are left").
   const colors = ["#fbbf24", "#4ade80", "#fb923c", "#38bdf8", "#c084fc", "#2dd4bf", "#f9a8d4", "#a3e635", "#fcd34d", "#7dd3fc"];
-  const realPrizes = (prizes || []).filter(p => p.type !== "none" && prizeQty(p) > 0);
-  const totalPrizeQty = realPrizes.reduce((s, p) => s + prizeQty(p), 0);
-  // never let the math imply >100% win odds — total players due to spin is always at least the prize count
-  const totalPlayers = Math.max(totalPrizeQty, Number(remainingPlayers) || 0);
-  const noneTotal = Math.max(0, totalPlayers - totalPrizeQty);
   const noneProto = (prizes || []).find(p => p.type === "none") || {
     id: "__none__",
     label: "ไม่ได้รางวัล",
     type: "none",
     amount: 0
   };
-  // v1.9.19: sold-out prizes (qty 0), shown ONLY when the organizer opts in via settings.wheelShowSoldOut —
-  // purely cosmetic ("what could have been"), grayed out, reserved a modest capped slice of the circle so
-  // real prize odds stay visually dominant. Never enters the actual selection math below (see `selectable`
-  // in spin()) — showing them can never change anyone's real chance of winning.
-  const soldOutPrizes = showSoldOut ? (prizes || []).filter(p => p.type !== "none" && prizeQty(p) === 0) : [];
-  const RESERVE_PER_SOLDOUT = 18; // degrees
-  const reserveDeg = soldOutPrizes.length > 0 ? Math.min(140, soldOutPrizes.length * RESERVE_PER_SOLDOUT) : 0;
-  const usableDeg = 360 - reserveDeg;
-  let segs = [];
-  if (realPrizes.length === 0) {
-    if (noneTotal > 0 || totalPlayers > 0) segs = [{
-      ...noneProto,
-      span: usableDeg,
-      isNone: true,
-      color: NONE_SLICE_COLOR
-    }];
-  } else {
-    const missPerGap = noneTotal / realPrizes.length; // spread evenly — one gap after each prize, same color throughout
+  const totalPrizeQty = (prizes || []).filter(p => p.type !== "none").reduce((s, p) => s + prizeQty(p), 0);
+  // never let the math imply >100% win odds — total players due to spin is always at least the prize count
+  const totalPlayers = Math.max(totalPrizeQty, Number(remainingPlayers) || 0);
+
+  // Built once via useState's lazy initializer so the shuffled layout stays put for as long as this wheel
+  // instance is open (the parent unmounts/remounts SpinWheel — see wheelFor in PaymentTab — between spins,
+  // so each new spin naturally gets a fresh shuffle).
+  const [segs] = useState(() => {
+    const realPrizes = (prizes || []).filter(p => p.type !== "none");
+    const colorById = {};
     realPrizes.forEach((p, i) => {
-      segs.push({
+      colorById[p.id] = colors[i % colors.length];
+    });
+    let units = [];
+    realPrizes.forEach(p => {
+      const remaining = prizeQty(p);
+      for (let i = 0; i < remaining; i++) units.push({
         ...p,
-        span: prizeQty(p) / totalPlayers * usableDeg,
-        color: colors[i % colors.length],
-        isNone: false
+        isSoldOut: false,
+        isNone: false,
+        color: colorById[p.id]
       });
-      if (missPerGap > 0) segs.push({
+      if (showSoldOut) {
+        // totalQty missing (prize saved before v1.9.21, or never restocked since): if it still has stock
+        // left, assume nothing's been claimed (we simply don't know, and nothing looked "sold out" about
+        // it before). If it's already at 0 though, show it as exactly ONE sold-out slice rather than
+        // vanishing it entirely — matches how v1.9.19/1.9.20 always rendered one cosmetic slice per
+        // depleted prize TYPE, so upgrading never silently drops a prize the organizer could already see.
+        const total = p.totalQty != null ? Math.max(Number(p.totalQty) || 0, remaining) : (remaining > 0 ? remaining : 1);
+        const used = Math.max(0, total - remaining);
+        // deliberately made to look IDENTICAL to a live slice of the same prize (same color, same label,
+        // no "(หมด)" marker) — the whole point is that a spinning player can't tell it's already gone, so
+        // the wheel still looks fully stocked and keeps the suspense up. isSoldOut is what actually keeps
+        // it unwinnable (see the `selectable` filter in spin() below); nothing about how it LOOKS gives it away.
+        for (let i = 0; i < used; i++) units.push({
+          ...p,
+          isSoldOut: true,
+          isNone: false,
+          color: colorById[p.id]
+        });
+      }
+    });
+    for (let i = units.length - 1; i > 0; i--) {
+      // Fisher–Yates shuffle ("คละกัน")
+      const j = Math.floor(Math.random() * (i + 1));
+      [units[i], units[j]] = [units[j], units[i]];
+    }
+    let built;
+    if (units.length === 0) {
+      built = totalPlayers > 0 ? [{
         ...noneProto,
-        span: missPerGap / totalPlayers * usableDeg,
+        span: 360,
         isNone: true,
+        isSoldOut: false,
         color: NONE_SLICE_COLOR
+      }] : [];
+    } else {
+      const span = 360 / (units.length * 2); // one prize slice + one miss slice per unit, all equal size
+      built = [];
+      units.forEach(u => {
+        built.push({
+          ...u,
+          span
+        });
+        built.push({
+          ...noneProto,
+          span,
+          isNone: true,
+          isSoldOut: false,
+          color: NONE_SLICE_COLOR
+        });
       });
+    }
+    let acc = 0;
+    return built.map(s => {
+      const seg = {
+        ...s,
+        start: acc
+      };
+      acc += s.span;
+      return seg;
     });
-  }
-  if (soldOutPrizes.length > 0) {
-    const perSlice = reserveDeg / soldOutPrizes.length;
-    soldOutPrizes.forEach(p => {
-      segs.push({
-        ...p,
-        label: `${p.label} (หมด)`,
-        span: perSlice,
-        isSoldOut: true,
-        color: "#9ca3af"
-      }); // neutral gray — distinct from every live prize color and from the "miss" red
-    });
-  }
-  let acc = 0;
-  segs = segs.map(s => {
-    const seg = {
-      ...s,
-      start: acc
-    };
-    acc += s.span;
-    return seg;
   });
   const spin = () => {
     if (spinning || resultPrize || segs.length === 0) return;
     // cosmetic sold-out slices are excluded here — they occupy real visual space on the wheel above but
-    // can NEVER be the one actually chosen, whatever `showSoldOut` is set to.
+    // can NEVER be the one actually chosen, whatever `showSoldOut` is set to. Miss slices remain a real
+    // possible outcome, same as before.
     const selectable = segs.filter(s => !s.isSoldOut);
     if (selectable.length === 0) return;
     const totalSelectable = selectable.reduce((s, x) => s + x.span, 0);
@@ -16888,6 +16939,7 @@ function SpinWheel({
     }
   }, "ปิด")));
 }
+
 function Label({
   children
 }) {
