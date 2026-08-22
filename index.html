@@ -26,6 +26,13 @@
     async set(k,v){ try{ localStorage.setItem("bg:"+k, v); }catch(e){ /* quota */ } return { value:v }; },
     async delete(k){ try{ localStorage.removeItem("bg:"+k); }catch(e){} return { deleted:true }; },
   };
+  // v1.9.23: best-effort request that the browser NOT evict this site's storage under pressure/inactivity
+  // — reported symptom this targets: "swiped the app away in the switcher, reopened it, all data gone".
+  // This is a real (if imperfect) browser API for exactly that failure mode; iOS Safari does not currently
+  // implement it (calling it there is a silent no-op, not an error), so it helps on Chrome/Android and
+  // costs nothing where it's unsupported. It can never fail loudly — wrapped defensively since some
+  // browsers don't have `navigator.storage` at all.
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}
 </script>
 <script>
   // Auto-update check: on every launch, fetch the live index.html (bypassing any
@@ -45,7 +52,7 @@
   // can never be permanently stuck.
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.22";
+      var CURRENT_VERSION = "1.9.23";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -429,7 +436,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.22";
+const APP_VERSION = "1.9.23";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3710,6 +3717,14 @@ function App() {
   // before the user can even touch anything.
   const lastKnownSavedAtRef = useRef(0);
   const [staleSyncNotice, setStaleSyncNotice] = useState(null); // brief banner text, or null when hidden
+  // v1.9.23: mobile browsers (iOS Safari standalone "Add to Home Screen" apps especially) can and do
+  // clear a site's localStorage under storage pressure or after enough time unvisited — there is no way
+  // for the app itself to prevent this (see navigator.storage.persist() attempt in index.html's <head>,
+  // which is a best-effort mitigation, not a guarantee). The ONLY real protection is an export the user
+  // holds outside the browser's storage — so nudge them to take one periodically. Dismissal is
+  // session-only (not persisted) so a still-overdue reminder resurfaces on the next full app open instead
+  // of being silenced forever by one tap.
+  const [backupNoticeDismissed, setBackupNoticeDismissed] = useState(false);
   // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
   // below so the two can never silently drift apart on which fields they read/default.
   const applyPersistedState = s => {
@@ -5694,6 +5709,9 @@ function App() {
       onClose: () => setFinancePrintReport(null)
     });
   }
+  const BACKUP_REMINDER_DAYS = 7;
+  const daysSinceBackup = settings.lastBackupAt ? Math.floor((Date.now() - new Date(settings.lastBackupAt).getTime()) / 86400000) : null;
+  const showBackupReminder = !backupNoticeDismissed && (daysSinceBackup == null || daysSinceBackup >= BACKUP_REMINDER_DAYS);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.bg,
@@ -5787,7 +5805,66 @@ function App() {
       fontSize: 11,
       color: T.muted
     }
-  }, "v", APP_VERSION))), tab === "members" && /*#__PURE__*/React.createElement(MembersTab, {
+  }, "v", APP_VERSION))), showBackupReminder && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#fff7e6",
+      border: "1px solid #f0c96b",
+      borderRadius: 12,
+      padding: "10px 11px",
+      marginBottom: 14,
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 9
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 17,
+      flexShrink: 0,
+      lineHeight: "20px"
+    }
+  }, "💾"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 800
+    }
+  }, daysSinceBackup == null ? "ยังไม่เคยสำรองข้อมูลเลย" : `ยังไม่ได้สำรองข้อมูลมา ${daysSinceBackup} วันแล้ว`), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginTop: 2
+    }
+  }, "มือถือ (โดยเฉพาะ iPhone) อาจล้างข้อมูลแอปเองได้ถ้าปิด/ไม่ได้เปิดนาน ๆ — สำรองเก็บไว้กันพลาด"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      exportBackup();
+      setBackupNoticeDismissed(true);
+    },
+    style: {
+      marginTop: 7,
+      padding: "7px 13px",
+      borderRadius: 9,
+      background: T.green,
+      border: "none",
+      color: "#fff",
+      fontSize: 12,
+      fontWeight: 800
+    }
+  }, "สำรองเลย")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setBackupNoticeDismissed(true),
+    style: {
+      flexShrink: 0,
+      background: "none",
+      border: "none",
+      color: T.muted,
+      padding: 4
+    }
+  }, /*#__PURE__*/React.createElement(X, {
+    size: 16
+  }))), tab === "members" && /*#__PURE__*/React.createElement(MembersTab, {
     players,
     playingIds,
     addPlayer,
