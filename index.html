@@ -45,7 +45,7 @@
   // can never be permanently stuck.
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.19";
+      var CURRENT_VERSION = "1.9.20";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -429,7 +429,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.19";
+const APP_VERSION = "1.9.20";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -929,6 +929,30 @@ function matchWinner(m) {
   if (ca > cb) return "A";
   if (cb > ca) return "B";
   return null; // draw / undecided
+}
+// "rounds" (the จำนวนเซต setting) means "sets needed to win", matching real badminton scoring:
+// 1 = single set decides it, 2 = best-of-3 (win 2 of 3), 3 = best-of-5 (win 3 of 5). maxSetsFor() is
+// the hard cap on sets a match could ever need; visibleSetCount() is how many set rows ScoreEditor
+// should show right now — a new set is revealed only once the previous one is decided, and revealing
+// stops the moment either side has already clinched the needed wins (so a 2-0 match never shows a
+// pointless 3rd set, but a 1-1 match does).
+function maxSetsFor(neededWins) { return Math.max(1, (neededWins || 1) * 2 - 1); }
+function visibleSetCount(m, neededWins) {
+  const need = neededWins || 1;
+  const maxSets = maxSetsFor(need);
+  let wa = 0, wb = 0, visible = 1;
+  for (let i = 0; i < maxSets; i++) {
+    visible = i + 1;
+    const w = roundWinner(m && m.scores && m.scores[i]);
+    if (w === "A") wa++; else if (w === "B") wb++;
+    if (wa >= need || wb >= need) break;
+    if (!w) break; // this set isn't decided yet — don't reveal the next one early
+  }
+  return visible;
+}
+function roundsLabel(rounds) {
+  const r = rounds || 1;
+  return r <= 1 ? "1 เซต" : `${r} ใน ${maxSetsFor(r)} เซต`;
 }
 function playerStats(pid, matches) {
   let win = 0,
@@ -2069,7 +2093,7 @@ async function readImageFull(file) {
   }
 }
 function fmtMode(settings, mode) {
-  return `🏸 ${mode === "doubles" ? "ตีคู่" : "ตีเดี่ยว"} · ${settings.winScore || 21} แต้ม · ${settings.deuce ? "มีดิว" : "ไม่มีดิว"} · ${settings.rounds || 1} เซต`;
+  return `🏸 ${mode === "doubles" ? "ตีคู่" : "ตีเดี่ยว"} · ${settings.winScore || 21} แต้ม · ${settings.deuce ? "มีดิว" : "ไม่มีดิว"} · ${roundsLabel(settings.rounds)}`;
 }
 // one-line summary shown on the Today tab's "⚙️ ตั้งค่าก๊วน" entry point — reflects the real current
 // session config so organizers don't have to open the sheet just to check it.
@@ -4608,17 +4632,17 @@ function App() {
   const setScore = (mid, ri, side, val) => {
     const upd = arr => arr.map(m => {
       if (m.id !== mid) return m;
-      const rounds = settings.rounds || 1;
+      const maxSets = maxSetsFor(settings.rounds || 1);
       const scores = m.scores ? m.scores.map(r => ({
         ...r
       })) : Array.from({
-        length: rounds
+        length: maxSets
       }, () => ({
         a: null,
         b: null,
         win: null
       }));
-      while (scores.length < rounds) scores.push({
+      while (scores.length < maxSets) scores.push({
         a: null,
         b: null,
         win: null
@@ -4641,17 +4665,17 @@ function App() {
   const setWin = (mid, ri, side) => {
     const upd = arr => arr.map(m => {
       if (m.id !== mid) return m;
-      const rounds = settings.rounds || 1;
+      const maxSets = maxSetsFor(settings.rounds || 1);
       const scores = m.scores ? m.scores.map(r => ({
         ...r
       })) : Array.from({
-        length: rounds
+        length: maxSets
       }, () => ({
         a: null,
         b: null,
         win: null
       }));
-      while (scores.length < rounds) scores.push({
+      while (scores.length < maxSets) scores.push({
         a: null,
         b: null,
         win: null
@@ -5119,17 +5143,17 @@ function App() {
   };
   const tSetScore = (matchId, ri, side, val) => {
     setActiveTournament(t => updateTournamentMatch(t, matchId, m => {
-      const rounds = settings.rounds || 1;
+      const maxSets = maxSetsFor(settings.rounds || 1);
       const scores = m.scores ? m.scores.map(r => ({
         ...r
       })) : Array.from({
-        length: rounds
+        length: maxSets
       }, () => ({
         a: null,
         b: null,
         win: null
       }));
-      while (scores.length < rounds) scores.push({
+      while (scores.length < maxSets) scores.push({
         a: null,
         b: null,
         win: null
@@ -5147,17 +5171,17 @@ function App() {
   // manual win/lose pick for a round with no numeric score — see casual setWin() for the same behavior.
   const tSetWin = (matchId, ri, side) => {
     setActiveTournament(t => updateTournamentMatch(t, matchId, m => {
-      const rounds = settings.rounds || 1;
+      const maxSets = maxSetsFor(settings.rounds || 1);
       const scores = m.scores ? m.scores.map(r => ({
         ...r
       })) : Array.from({
-        length: rounds
+        length: maxSets
       }, () => ({
         a: null,
         b: null,
         win: null
       }));
-      while (scores.length < rounds) scores.push({
+      while (scores.length < maxSets) scores.push({
         a: null,
         b: null,
         win: null
@@ -9617,7 +9641,7 @@ function QuanSettingsSheet({
       marginBottom: 5
     }
   }, "จำนวนเซต"), /*#__PURE__*/React.createElement(Seg, {
-    options: [[1, "1 เซต"], [2, "2 เซต"], [3, "3 เซต"]],
+    options: [[1, "1 เซต"], [2, "2 ใน 3 เซต"], [3, "3 ใน 5 เซต"]],
     value: settings.rounds || 1,
     onChange: v => setSettings(s => ({
       ...s,
@@ -10444,6 +10468,10 @@ function ScoreEditor({
   setWin,
   clearScore
 }) {
+  // `rounds` here is "sets needed to win" (see maxSetsFor/visibleSetCount) — best-of-3 for 2, best-of-5
+  // for 3. Only reveal as many set rows as are actually needed right now: stop early once a side has
+  // clinched it in straight sets, but add the decider row the moment the score is split.
+  const visible = visibleSetCount(m, rounds || 1);
   return /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.surface2,
@@ -10453,7 +10481,7 @@ function ScoreEditor({
       marginTop: 6
     }
   }, Array.from({
-    length: rounds
+    length: visible
   }).map((_, ri) => {
     const r = m.scores && m.scores[ri] || {
       a: null,
@@ -10473,9 +10501,9 @@ function ScoreEditor({
         display: "flex",
         alignItems: "center",
         gap: 6,
-        marginBottom: ri < rounds - 1 ? 8 : 0
+        marginBottom: ri < visible - 1 ? 8 : 0
       }
-    }, rounds > 1 && /*#__PURE__*/React.createElement("span", {
+    }, visible > 1 && /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 11,
         fontWeight: 800,
