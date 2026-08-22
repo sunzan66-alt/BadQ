@@ -33,9 +33,19 @@
   // currently running. If a newer version has been deployed, force a cache-busted
   // reload so the app updates itself — without ever touching localStorage (data
   // lives in a separate storage area and is never affected by this).
+  //
+  // v1.9.18: the actual reload is now gated behind window.__badqStorageReady — a flag the React app
+  // sets (and "badq:storage-ready" event it fires) only once it has finished its OWN initial load from
+  // localStorage and safety-guard self-heal pass (see the persistence effects further down). This closes
+  // a theoretical race: on a long-backgrounded ("zombie") tab that still has old in-memory data, this
+  // version-triggered navigation used to fire the instant the network check resolved — potentially before
+  // React had even mounted — with no guarantee the tab's own state had been reconciled with the freshest
+  // localStorage first. Reported symptom this targets: "data looks reverted right after I update the app".
+  // A hard 8s fallback timeout still fires the reload even if React never finishes loading, so an update
+  // can never be permanently stuck.
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.17";
+      var CURRENT_VERSION = "1.9.18";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -43,7 +53,17 @@
         .then(function(html){
           var m = html.match(/APP_VERSION\s*=\s*"([^"]+)"/);
           if (m && m[1] && m[1] !== CURRENT_VERSION) {
-            location.replace(location.pathname + "?_v=" + Date.now());
+            var fired = false;
+            var doReload = function(){
+              if (fired) return;
+              fired = true;
+              location.replace(location.pathname + "?_v=" + Date.now());
+            };
+            if (window.__badqStorageReady) doReload();
+            else {
+              window.addEventListener("badq:storage-ready", doReload, { once: true });
+              setTimeout(doReload, 8000); // safety net: never wait forever
+            }
           }
         })
         .catch(function(){ /* offline: keep running current cached version */ });
@@ -409,7 +429,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.17";
+const APP_VERSION = "1.9.18";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -2482,6 +2502,12 @@ const SCHEMA_VERSION = 1; // inner `data` shape — bump whenever the persisted 
 // bound; each entry restores through the exact same preview/confirm UI as importing a backup FILE.
 const AUTO_BACKUP_KEY = "bg-v11-autobackups";
 const AUTO_BACKUP_MAX = 8; // last 8 checkpoints — a few weeks of ก๊วนs for most groups, negligible storage cost
+// v1.9.18: a tiny forensic ring buffer for diagnosing the "data reverted after updating" class of bug —
+// records every boot (loaded savedAt + player/session counts) and every time the safety guard actually
+// pulls in newer data from storage ("heal"), so a reported regression can be traced after the fact
+// instead of guessed at. Read-only from the UI (ตั้งค่า → ข้อมูลและการสำรอง); never affects app behavior.
+const BOOT_LOG_KEY = "bg-v11-bootlog";
+const BOOT_LOG_MAX = 20;
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -3703,6 +3729,21 @@ function App() {
     session: 0,
     tournament: 0
   }); // baseline to detect "history grew" vs. any other edit
+  // v1.9.18: forensic boot/heal log — see BOOT_LOG_KEY above. Pure diagnostics: read-only in the UI,
+  // never influences load/save behavior.
+  const [bootLog, setBootLog] = useState([]); // newest first, capped at BOOT_LOG_MAX
+  const pushBootLog = entry => {
+    try {
+      setBootLog(prev => {
+        const next = [{
+          t: Date.now(),
+          ...entry
+        }, ...prev].slice(0, BOOT_LOG_MAX);
+        window.storage.set(BOOT_LOG_KEY, JSON.stringify(next)).catch(() => {});
+        return next;
+      });
+    } catch (e) {}
+  };
   const saveAutoBackup = async reason => {
     try {
       const payload = buildBackupPayload({
@@ -3745,7 +3786,15 @@ function App() {
       const s = JSON.parse(r.value);
       const storedSavedAt = typeof s.savedAt === "number" ? s.savedAt : 0;
       if (storedSavedAt > lastKnownSavedAtRef.current) {
+        const prevKnownSavedAt = lastKnownSavedAtRef.current;
         applyPersistedState(s);
+        pushBootLog({
+          event: "heal",
+          fromSavedAt: prevKnownSavedAt,
+          toSavedAt: storedSavedAt,
+          playerCount: Array.isArray(s.players) ? s.players.length : 0,
+          sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0
+        });
         if (announce) {
           setStaleSyncNotice("มีข้อมูลใหม่กว่าจากอุปกรณ์/แท็บอื่น — รีเฟรชให้แล้ว");
           setTimeout(() => setStaleSyncNotice(null), 4000);
@@ -3757,9 +3806,18 @@ function App() {
   };
   useEffect(() => {
     (async () => {
+      let loadedSavedAt = null,
+        playerCount = 0,
+        sessionHistoryCount = 0;
       try {
         const r = await window.storage.get("bg-v11");
-        if (r?.value) applyPersistedState(JSON.parse(r.value));
+        if (r?.value) {
+          const s = JSON.parse(r.value);
+          applyPersistedState(s);
+          loadedSavedAt = typeof s.savedAt === "number" ? s.savedAt : null;
+          playerCount = Array.isArray(s.players) ? s.players.length : 0;
+          sessionHistoryCount = Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0;
+        }
       } catch (e) {}
       try {
         const pr = await window.storage.get("bg-v11-prerestore");
@@ -3770,7 +3828,32 @@ function App() {
         const list = ab?.value ? JSON.parse(ab.value) : [];
         setAutoBackups(Array.isArray(list) ? list : []);
       } catch (e) {}
+      try {
+        const bl = await window.storage.get(BOOT_LOG_KEY);
+        const list = bl?.value ? JSON.parse(bl.value) : [];
+        setBootLog(Array.isArray(list) ? list : []);
+      } catch (e) {}
+      // v1.9.18: record this boot — was it a version-update-triggered reload (?_v=…)? what savedAt/counts
+      // did we actually load? — BEFORE flipping the storage-ready flag below, so the log always has an
+      // entry even if something after this point throws.
+      pushBootLog({
+        event: "boot",
+        appVersion: APP_VERSION,
+        loadedSavedAt,
+        playerCount,
+        sessionHistoryCount,
+        viaUpdateReload: !!new URLSearchParams(location.search).get("_v")
+      });
       setLoaded(true);
+      // v1.9.18: signal the pre-React auto-update script (see the top of <head>) that THIS tab's own
+      // load-from-storage + safety-guard pass has completed, so it never force-reloads (for a newer
+      // deployed version) before this tab has had a chance to load/heal its own state first — closes a
+      // theoretical race on a long-backgrounded tab where a version-triggered navigation could otherwise
+      // preempt that initial reconciliation.
+      try {
+        window.__badqStorageReady = true;
+        window.dispatchEvent(new Event("badq:storage-ready"));
+      } catch (e) {}
     })();
   }, []);
   // Proactively re-check freshness the moment this instance becomes active again — catches a stale
@@ -5767,6 +5850,7 @@ function App() {
     lastBackupAt: settings.lastBackupAt,
     hasPreRestoreBackup,
     autoBackups,
+    bootLog,
     openHistPhoto,
     clearHistPhoto,
     addHistExpense,
@@ -10745,6 +10829,7 @@ function HistoryTab({
   lastBackupAt,
   hasPreRestoreBackup,
   autoBackups,
+  bootLog,
   openHistPhoto,
   clearHistPhoto,
   addHistExpense,
@@ -10819,7 +10904,8 @@ function HistoryTab({
     undoRestore: undoRestore,
     lastBackupAt: lastBackupAt,
     hasPreRestoreBackup: hasPreRestoreBackup,
-    autoBackups: autoBackups
+    autoBackups: autoBackups,
+    bootLog: bootLog
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "relative",
@@ -15976,9 +16062,11 @@ function BackupSettingsEditor({
   undoRestore,
   lastBackupAt,
   hasPreRestoreBackup,
-  autoBackups
+  autoBackups,
+  bootLog
 }) {
   const [busy, setBusy] = useState(false);
+  const [showBootLog, setShowBootLog] = useState(false); // v1.9.18: collapsed by default — diagnostic only
   const [successMsg, setSuccessMsg] = useState(null); // { kind: "export"|"import"|"undo", stats?, sizeLabel? }
   const [importError, setImportError] = useState(null);
   const [preview, setPreview] = useState(null); // validated backup object awaiting mode choice / confirm
@@ -16141,7 +16229,7 @@ function BackupSettingsEditor({
       marginBottom: 8,
       lineHeight: 1.5
     }
-  }, `ระบบบันทึกจุดกู้คืนให้อัตโนมัติทุกครั้งที่จบก๊วนหรือ Tournament — เก็บไว้ ${autoBackups.length} จุดล่าสุดในเครื่องนี้เท่านั้น (ไม่ใช่ไฟล์แยกต่างหาก จึงยังควรกด "สำรองข้อมูล" ด้านบนเป็นระยะ เพื่อเก็บไฟล์ไว้นอกเครื่องด้วย)`), /*#__PURE__*/React.createElement("div", {
+  }, "ระบบบันทึกจุดกู้คืนให้อัตโนมัติทุกครั้งที่จบก๊วนหรือ Tournament — เก็บไว้ ", autoBackups.length, " จุดล่าสุดในเครื่องนี้เท่านั้น (ไม่ใช่ไฟล์แยกต่างหาก จึงยังควรกด \"สำรองข้อมูล\" ด้านบนเป็นระยะ เพื่อเก็บไฟล์ไว้นอกเครื่องด้วย)"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -16174,7 +16262,7 @@ function BackupSettingsEditor({
     style: {
       color: T.muted
     }
-  }, `ผู้เล่น ${entry.stats.playerCount} คน · ประวัติก๊วน ${entry.stats.sessionHistoryCount} ครั้ง${entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน"}`)), /*#__PURE__*/React.createElement("button", {
+  }, "ผู้เล่น ", entry.stats.playerCount, " คน · ประวัติก๊วน ", entry.stats.sessionHistoryCount, " ครั้ง", entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน")), /*#__PURE__*/React.createElement("button", {
     disabled: busy,
     onClick: () => {
       setSuccessMsg(null);
@@ -16189,7 +16277,56 @@ function BackupSettingsEditor({
       flexShrink: 0,
       opacity: busy ? 0.6 : 1
     }
-  }, "กู้คืน"))))), preview && /*#__PURE__*/React.createElement("div", {
+  }, "กู้คืน"))))), bootLog && bootLog.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 16
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowBootLog(v => !v),
+    style: {
+      width: "100%",
+      textAlign: "left",
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      background: "none",
+      border: "none",
+      padding: 0,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: T.muted
+    }
+  }, "บันทึกการซิงค์ข้อมูล (debug)"), /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 13,
+    color: T.muted,
+    style: {
+      transform: showBootLog ? "rotate(180deg)" : "none"
+    }
+  })), showBootLog && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      display: "flex",
+      flexDirection: "column",
+      gap: 5
+    }
+  }, bootLog.map((e, i) => /*#__PURE__*/React.createElement("div", {
+    key: e.t + "-" + i,
+    style: {
+      fontSize: 10.5,
+      fontFamily: "monospace",
+      color: T.muted,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      borderRadius: 8,
+      padding: "6px 8px",
+      lineHeight: 1.5,
+      wordBreak: "break-all"
+    }
+  }, fmtThaiDateTime(e.t), " · ", e.event, e.event === "boot" && ` · v${e.appVersion} · โหลด savedAt=${e.loadedSavedAt ? fmtThaiDateTime(e.loadedSavedAt) : "ไม่มี"} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount} · reload=${e.viaUpdateReload ? "yes" : "no"}`, e.event === "heal" && ` · ${e.fromSavedAt ? fmtThaiDateTime(e.fromSavedAt) : "-"} → ${fmtThaiDateTime(e.toSavedAt)} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount}`)))), preview && /*#__PURE__*/React.createElement("div", {
     onClick: () => setPreview(null),
     style: {
       position: "fixed",
