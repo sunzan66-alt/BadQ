@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.9.26";
+const APP_VERSION = "1.11.0";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -146,9 +146,25 @@ function courtLabelFor(labels, idx) {
   return v != null && String(v).trim() !== "" ? String(v) : String(idx);
 }
 // backward-compat for Tournament objects saved before per-court labels existed (or missing/short arrays)
-function ensureTournamentCourtLabels(t) {
+// v1.10.0: renamed from ensureTournamentCourtLabels (kept doing exactly what it did, court-label sync,
+// plus now also backfills every field added by the Tournament Profile/Finance upgrade) so old saved
+// tournaments — from before logo/venue/description/registration/finance existed — load with safe
+// defaults instead of `undefined`, without ever touching any of their existing data.
+function normTournament(t) {
   if (!t || typeof t !== "object") return t;
-  return { ...t, courtLabels: syncCourtLabels(t.courtLabels, t.courtCount || 2) };
+  return {
+    ...t,
+    courtLabels: syncCourtLabels(t.courtLabels, t.courtCount || 2),
+    logo: t.logo || null,
+    venue: t.venue || "",
+    description: t.description || "",
+    registration: t.registration && typeof t.registration === "object"
+      ? { feeMode: "none", feeAmount: 0, paidTeamIds: [], ...t.registration }
+      : { feeMode: "none", feeAmount: 0, paidTeamIds: [] },
+    finance: t.finance && typeof t.finance === "object"
+      ? { income: Array.isArray(t.finance.income) ? t.finance.income : [], expense: Array.isArray(t.finance.expense) ? t.finance.expense : [] }
+      : { income: [], expense: [] },
+  };
 }
 const kcomb = (arr, k) => {
   const res = [];
@@ -1340,6 +1356,14 @@ const AUTO_BACKUP_MAX = 8; // last 8 checkpoints — a few weeks of ก๊วน
 // instead of guessed at. Read-only from the UI (ตั้งค่า → ข้อมูลและการสำรอง); never affects app behavior.
 const BOOT_LOG_KEY = "bg-v11-bootlog";
 const BOOT_LOG_MAX = 20;
+// v1.11.0 PERSISTENCE REWRITE — Last Known Good snapshot: a copy of the most recent state that
+// successfully passed boot (or was just saved during a normal, non-recovering session). Sits between
+// the live primary/mirror pair and the Auto-Backup list in the recovery hierarchy: cheaper/fresher than
+// digging through Auto-Backup (which only updates when a ก๊วน/Tournament archives), but still a
+// completely separate key from "bg-v11" so a corrupted primary can never take this down with it. Goes
+// through the exact same window.storage (IndexedDB-primary + localStorage-mirror) plumbing as every
+// other key here — see BOOT SEQUENCE below for how/when it's read and (re)written.
+const LKG_KEY = "bg-v11-lkg";
 
 function pad2(n) { return String(n).padStart(2, "0"); }
 function fmtBackupStamp(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`; }
@@ -1486,8 +1510,8 @@ function migrateBackupData(parsed) {
   data.sessionHistory = (Array.isArray(data.sessionHistory) ? data.sessionHistory : []).map(ensureSessionId).map(ensureSessionExpenses); // e.g. no sessionHistory -> []
   data.generalExpenses = Array.isArray(data.generalExpenses) ? data.generalExpenses : []; // no field at all (old backup) -> []
   data.otherIncome = Array.isArray(data.otherIncome) ? data.otherIncome : [];
-  data.activeTournament = ensureTournamentCourtLabels(data.activeTournament && typeof data.activeTournament === "object" ? data.activeTournament : null); // no field at all (old backup) -> no active Tournament
-  data.tournamentHistory = (Array.isArray(data.tournamentHistory) ? data.tournamentHistory : []).map(ensureTournamentCourtLabels);
+  data.activeTournament = normTournament(data.activeTournament && typeof data.activeTournament === "object" ? data.activeTournament : null); // no field at all (old backup) -> no active Tournament
+  data.tournamentHistory = (Array.isArray(data.tournamentHistory) ? data.tournamentHistory : []).map(normTournament);
   data.discountCredits = (Array.isArray(data.discountCredits) ? data.discountCredits : []).map(normDiscountCredit); // no field at all (old backup) -> []
   return { ...parsed, schemaVersion: SCHEMA_VERSION, data };
 }
@@ -1537,6 +1561,43 @@ function validateBackupIntegrity(data) {
   }
   return { ok: true, data };
 }
+// v1.11.0 PERSISTENCE REWRITE — recovery helpers shared by the boot-sequence waterfall (primary /
+// mirror / Last-Known-Good / Auto-Backup). Both funnel through the EXACT SAME migrate+validate pipeline
+// already used for manual backup-file restores above (migrateBackupData/validateBackupIntegrity),
+// rather than inventing new ad hoc validity rules — a structural check (well-formed ids, no dupes),
+// never an "is this empty?" check, so a legitimately empty new install still validates as ok (see
+// validateBackupIntegrity: an empty `players` array is a valid array, not a validation failure).
+//
+// tryRecoverFlatState: for "bg-v11" / mirror / Last-Known-Good, which are all stored as a FLAT state
+// object (the exact shape applyPersistedState expects), not the {app,backupVersion,...,data} envelope
+// used by backup FILES and Auto-Backup entries. Returns the recovered+normalized flat state object, or
+// null if the raw string is missing/unparseable/structurally invalid.
+function tryRecoverFlatState(rawJsonString) {
+  if (!rawJsonString) return null;
+  try {
+    const parsed = JSON.parse(rawJsonString);
+    if (!parsed || typeof parsed !== "object") return null;
+    const migrated = migrateBackupData({ schemaVersion: SCHEMA_VERSION, data: parsed });
+    const check = validateBackupIntegrity(migrated.data);
+    if (!check.ok) return null;
+    return { ...check.data, savedAt: typeof parsed.savedAt === "number" ? parsed.savedAt : null };
+  } catch (e) {
+    return null;
+  }
+}
+// tryRecoverFromAutoBackupEntry: for one entry off the AUTO_BACKUP_KEY list, which — unlike the flat
+// keys above — DOES carry the full backup envelope in `entry.payload` (see saveAutoBackup/buildBackupPayload).
+function tryRecoverFromAutoBackupEntry(entry) {
+  if (!entry || !entry.payload || typeof entry.payload !== "object") return null;
+  try {
+    const migrated = migrateBackupData(entry.payload);
+    const check = validateBackupIntegrity(migrated.data);
+    if (!check.ok) return null;
+    return { ...check.data, savedAt: typeof entry.savedAt === "number" ? entry.savedAt : null };
+  } catch (e) {
+    return null;
+  }
+}
 
 /* ============ TOURNAMENT ENGINE ============
    Tournament state lives in `activeTournament` (the Tournament currently being run, one at a time) and
@@ -1571,6 +1632,13 @@ function makeTournament(overrides) {
     handicap: { mode: "off" }, // "off" | "manual" | "skill" — skill mode is only ever a Recommendation the organizer must confirm per match
     doubleRound: false, // League: single vs double round robin
     createdAt: null, startedAt: null, completedAt: null, // stamped by the caller (Date.now()), never inside this factory
+    // v1.10.0 Tournament Profile + Finance additions — see normTournament() for the load-time migration
+    // that backfills these same defaults onto tournaments saved before this version existed.
+    logo: null, // data URL string, or null — same pattern as player photos (see openPhoto/photo)
+    venue: "", // free-text venue name
+    description: "", // optional short description
+    registration: { feeMode: "none", feeAmount: 0, paidTeamIds: [] }, // feeMode: "none" | "perPlayer" | "perTeam"
+    finance: { income: [], expense: [] }, // { id, category, label, amount }[] each — see TOURNAMENT_FINANCE_CATEGORIES
     ...overrides,
   };
 }
@@ -1889,6 +1957,42 @@ function totalTournamentMatchCount(tournament) {
   const all = tournamentAllMatches(tournament).filter((m) => m.status !== "bye");
   return { done: all.filter((m) => m.status === "completed").length, total: all.length };
 }
+// v1.10.0: registration-fee progress. Fee income from PAID teams is what feeds tournamentFinanceTotals()
+// below as "entry fee" revenue — unpaid teams contribute nothing until toggled paid (tToggleTeamPaid).
+const TOURNAMENT_EXPENSE_CATEGORIES = [["court", "สนาม/สถานที่"], ["shuttle", "ลูกขนไก่"], ["prize", "รางวัล/ถ้วย"], ["other", "อื่นๆ"]];
+// "entry" (ค่าสมัคร) is deliberately NOT a selectable manual category here — it's shown as a read-only
+// auto-computed row in TournamentFinancePanel (tournamentEntryFeeTotal) instead, so there is exactly one
+// way entry-fee income can enter the totals and no way for an organizer to accidentally double-log it.
+const TOURNAMENT_INCOME_CATEGORIES = [["sponsor", "สปอนเซอร์"], ["other", "รายได้อื่นๆ"]];
+function registrationProgress(t) {
+  if (!t) return { paid: 0, total: 0 };
+  const total = (t.teams || []).length;
+  const paid = (t.registration?.paidTeamIds || []).filter((id) => (t.teams || []).some((tm) => tm.id === id)).length;
+  return { paid, total };
+}
+function registrationFeeAmountFor(t, team) {
+  const reg = t.registration || { feeMode: "none", feeAmount: 0 };
+  if (reg.feeMode === "perTeam") return Number(reg.feeAmount) || 0;
+  if (reg.feeMode === "perPlayer") return (Number(reg.feeAmount) || 0) * ((team.playerIds || []).length || 1);
+  return 0;
+}
+// Entry-fee income is DERIVED from registration (paid teams × their fee) rather than requiring the
+// organizer to also manually log it as a finance "income" row — this is what section 16 means by
+// "must not double-count": the manual finance.income list is for sponsor/other income ONLY, entry fees
+// are computed once here and never also re-enterable as a manual income row (see TOURNAMENT_INCOME_CATEGORIES
+// excludes "entry" from the manual-add form in TournamentFinancePanel).
+function tournamentEntryFeeTotal(t) {
+  if (!t || !t.registration || t.registration.feeMode === "none") return 0;
+  return (t.teams || []).filter((tm) => (t.registration.paidTeamIds || []).includes(tm.id)).reduce((s, tm) => s + registrationFeeAmountFor(t, tm), 0);
+}
+function tournamentFinanceTotals(t) {
+  if (!t) return { income: 0, expense: 0, profit: 0, entryFee: 0, otherIncome: 0 };
+  const entryFee = tournamentEntryFeeTotal(t);
+  const otherIncome = (t.finance?.income || []).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const expense = (t.finance?.expense || []).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const income = entryFee + otherIncome;
+  return { income, expense, profit: income - expense, entryFee, otherIncome };
+}
 // locates a match anywhere inside the nested division/group/bracket/swiss structure
 function findTMatch(t, matchId) {
   for (const d of t?.divisions || []) {
@@ -1974,6 +2078,7 @@ export default function App() {
   const photoTarget = useRef(null);
   const sessionPhotoFileRef = useRef(); // dedicated file input for the current ก๊วน's own photo (separate from per-player photos)
   const histPhotoTarget = useRef(null); // sessionHistory id currently being (re)photographed via HistoricalDetail
+  const tLogoFileRef = useRef(); // v1.10.0: dedicated file input for the Tournament Profile logo (section 1)
   // v1.9.13: interactive crop/position step before ANY photo (player profile, ก๊วน photo, QR) is actually
   // saved — { src (raw picked image), circleGuide, title, onDone(croppedDataUrl) } | null. The file input's
   // onChange now only reads the raw file and opens this; the actual state write happens in onDone once the
@@ -2000,6 +2105,7 @@ export default function App() {
   // becomes active again (tab focus/visibility, iOS bfcache restore) so a stale instance heals itself
   // before the user can even touch anything.
   const lastKnownSavedAtRef = useRef(0);
+  const latestStateJsonRef = useRef(null); // most recently computed save payload — read synchronously by the pagehide/visibility flush below (section 14)
   const [staleSyncNotice, setStaleSyncNotice] = useState(null); // brief banner text, or null when hidden
   // v1.9.23: mobile browsers (iOS Safari standalone "Add to Home Screen" apps especially) can and do
   // clear a site's localStorage under storage pressure or after enough time unvisited — there is no way
@@ -2015,6 +2121,20 @@ export default function App() {
   // present data with a fresh empty save. Cleared once the user restores from a checkpoint/backup, or
   // explicitly acknowledges starting fresh (see the recovery banner near the top of the render).
   const [loadCorrupted, setLoadCorrupted] = useState(false);
+  // v1.11.0 PERSISTENCE REWRITE — explicit boot state machine (replaces relying on `loaded` alone,
+  // since "storage returned nothing" is NOT equivalent to "a valid empty database loaded"). One of:
+  // "loading" (boot sequence still running), "restored" (a valid state was found/recovered from some
+  // layer), "new-install" (genuinely no evidence of prior data anywhere), "recovery-required" (evidence
+  // of prior data exists but nothing recoverable could be validated — kept in sync with the legacy
+  // `loadCorrupted` flag above so the existing recovery banner/tests keep working unchanged), "error"
+  // (the boot sequence itself hit an unexpected exception). The save effect below refuses to write
+  // ANYTHING except while bootStatus is "restored" or "new-install" — this is the boot barrier that
+  // makes "primary missing -> defaults to [] -> saves [] over recoverable data" structurally impossible.
+  const [bootStatus, setBootStatus] = useState("loading");
+  // Small non-blocking toast shown after an automatic recovery from Last-Known-Good or Auto-Backup (an
+  // actual "your data was restored for you" event, distinct from the ordinary same-tab boot case) — per
+  // spec, this must never force the user into the manual restore screen. Auto-dismisses; purely informational.
+  const [autoRecoveryToast, setAutoRecoveryToast] = useState(null);
   // v1.9.25: the head script's update-check no longer force-reloads on its own (see index.html's <head>
   // comment) — it just records a newer version exists. This picks that up (either via the event, if
   // React was already mounted when the check resolved, or via the window.__badqNewVersion flag directly,
@@ -2054,8 +2174,8 @@ export default function App() {
     setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
     setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
     setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
-    setActiveTournament(ensureTournamentCourtLabels(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
-    setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(ensureTournamentCourtLabels));
+    setActiveTournament(normTournament(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
+    setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(normTournament));
     // old saves (pre-v1.9.15) have no `savedAt` — treat them as "current as of right now" rather than 0,
     // so upgrading doesn't itself trigger a false "newer data elsewhere" flag on the very next save.
     lastKnownSavedAtRef.current = typeof s.savedAt === "number" ? s.savedAt : Date.now();
@@ -2120,33 +2240,117 @@ export default function App() {
   };
 
   useEffect(() => {
+    // v1.11.0 PERSISTENCE REWRITE — startup recovery waterfall (replaces the v1.9.26 "read bg-v11,
+    // parse-or-flag-corrupted" boot effect). Order: primary (IndexedDB) -> mirror (localStorage) ->
+    // Last-Known-Good -> newest valid Auto-Backup entry -> only THEN "new install", and only after
+    // checking the boot log for evidence this device previously had real data. See tryRecoverFlatState/
+    // tryRecoverFromAutoBackupEntry above for the shared validate-don't-guess recovery logic, and the
+    // save effect below for the matching boot barrier that makes this waterfall actually matter (a
+    // recovered/created state here is worthless if something can still save an empty one over it).
     (async () => {
-      let loadedSavedAt = null, playerCount = 0, sessionHistoryCount = 0, corrupted = false;
+      const storageErrors = [];
+      let primaryFound = false, primaryValid = false, mirrorFound = false, lastKnownGoodFound = false, autoBackupFound = false;
+      let finalState = null, recoverySource = "new-install", recoveryAction = "none";
+      let corrupted = false; // legacy flag — kept in sync so the existing recovery banner/tests (which key off `loadCorrupted`) keep working unchanged; true exactly when bootStatus lands on "recovery-required"
+
       try {
-        const r = await window.storage.get("bg-v11");
-        if (r?.value) {
-          // v1.9.26: a value being PRESENT but failing to parse is a fundamentally different situation
-          // from there being no value at all — it means real data exists but got corrupted (most likely
-          // an interrupted/partial write from the OS killing the app mid-save, which — given BadQ saves
-          // on nearly every state change — is disproportionately likely to be "bg-v11" specifically,
-          // vs. the far-less-frequently-written bg-v11-autobackups/bootlog keys, which is exactly the
-          // asymmetric pattern Sun's repro showed: the main save gone, the auto-backup checkpoint intact).
-          // Treating a parse failure the same as "nothing saved yet" would boot the app on empty defaults
-          // and then — the moment `loaded` flips true below — the save effect would silently WRITE that
-          // empty state back over the corrupted-but-till-then-recoverable string, permanently destroying
-          // it. So a parse failure gets its own path: block the save effect entirely (see `loadCorrupted`)
-          // until the user resolves it, instead of ever silently overwriting.
+        // Steps 1-2: primary then mirror. getBothRaw (unlike the self-healing get()) reports each
+        // backend independently, so a corrupted PRIMARY doesn't stop us from checking whether the
+        // MIRROR independently still holds something valid (and vice versa) — see TEST F.
+        let bothRaw = { primary: null, mirror: null };
+        try { bothRaw = await window.storage.getBothRaw("bg-v11"); } catch (e) { storageErrors.push("bg-v11 read: " + (e?.message || e)); }
+        primaryFound = !!bothRaw.primary;
+        mirrorFound = !!bothRaw.mirror;
+        for (const candidate of [bothRaw.primary, bothRaw.mirror]) {
+          if (!candidate) continue;
+          const recovered = tryRecoverFlatState(candidate);
+          if (recovered) {
+            finalState = recovered;
+            recoverySource = candidate === bothRaw.primary ? "primary" : "mirror";
+            primaryValid = recoverySource === "primary";
+            break;
+          }
+          storageErrors.push((candidate === bothRaw.primary ? "primary" : "mirror") + " present but failed validation/parse");
+        }
+
+        // Step 3: Last Known Good
+        if (!finalState) {
           try {
-            const s = JSON.parse(r.value);
-            applyPersistedState(s);
-            loadedSavedAt = typeof s.savedAt === "number" ? s.savedAt : null;
-            playerCount = Array.isArray(s.players) ? s.players.length : 0;
-            sessionHistoryCount = Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0;
-          } catch (parseErr) {
-            corrupted = true;
+            const lkgR = await window.storage.get(LKG_KEY);
+            if (lkgR?.value) {
+              lastKnownGoodFound = true;
+              const recovered = tryRecoverFlatState(lkgR.value);
+              if (recovered) { finalState = recovered; recoverySource = "last-known-good"; recoveryAction = "restored-from-last-known-good"; }
+              else storageErrors.push("last-known-good present but failed validation/parse");
+            }
+          } catch (e) { storageErrors.push("last-known-good read: " + (e?.message || e)); }
+        }
+
+        // Step 4: newest valid Auto-Backup entry (list is already newest-first)
+        if (!finalState) {
+          try {
+            const abR = await window.storage.get(AUTO_BACKUP_KEY);
+            const list = abR?.value ? JSON.parse(abR.value) : [];
+            if (Array.isArray(list) && list.length) {
+              autoBackupFound = true;
+              for (const entry of list) {
+                const recovered = tryRecoverFromAutoBackupEntry(entry);
+                if (recovered) { finalState = recovered; recoverySource = "auto-backup"; recoveryAction = "restored-from-auto-backup"; break; }
+              }
+              if (!finalState) storageErrors.push("auto-backup list present but no entry validated");
+            }
+          } catch (e) { storageErrors.push("auto-backup read: " + (e?.message || e)); }
+        }
+      } catch (e) { storageErrors.push("waterfall: " + (e?.message || e)); }
+
+      let bootStatusResult, recoveredPlayerCount = 0, recoveredHistoryCount = 0, loadedSavedAt = null;
+
+      if (finalState) {
+        applyPersistedState(finalState);
+        recoveredPlayerCount = Array.isArray(finalState.players) ? finalState.players.length : 0;
+        recoveredHistoryCount = Array.isArray(finalState.sessionHistory) ? finalState.sessionHistory.length : 0;
+        loadedSavedAt = typeof finalState.savedAt === "number" ? finalState.savedAt : null;
+        bootStatusResult = "restored";
+        if (recoverySource !== "primary") {
+          // Close the gap immediately: rebuild primary + mirror + Last-Known-Good from whatever layer
+          // actually had the good data, so the NEXT boot reads a clean primary instead of limping along.
+          recoveryAction = recoveryAction === "none" ? ("rebuilt-from-" + recoverySource) : recoveryAction;
+          try {
+            const rebuiltAt = Date.now();
+            const rebuiltJson = JSON.stringify({ ...finalState, savedAt: rebuiltAt });
+            await window.storage.set("bg-v11", rebuiltJson);
+            await window.storage.set(LKG_KEY, rebuiltJson);
+            lastKnownSavedAtRef.current = rebuiltAt;
+          } catch (e) { storageErrors.push("rebuild-after-recovery: " + (e?.message || e)); }
+          if (recoverySource === "last-known-good" || recoverySource === "auto-backup") {
+            // A genuine "this would have been gone" automatic recovery — a small non-blocking heads-up,
+            // never a forced trip to the manual restore screen (spec: automatic recovery, no modal spam).
+            setAutoRecoveryToast("♻️ กู้คืนข้อมูลล่าสุดให้อัตโนมัติแล้ว");
+            setTimeout(() => setAutoRecoveryToast(null), 5000);
           }
         }
-      } catch (e) {}
+      } else {
+        // Nothing recoverable anywhere. Do NOT assume "new install" just because bg-v11 is missing —
+        // check for evidence this device previously had real data first (section 8): a present-but-
+        // unreadable primary/mirror/LKG/auto-backup IS such evidence on its own, and so is a boot log
+        // showing this device previously booted with actual players/history.
+        let priorBootEvidence = false;
+        try {
+          const bl = await window.storage.get(BOOT_LOG_KEY);
+          const list = bl?.value ? JSON.parse(bl.value) : [];
+          priorBootEvidence = Array.isArray(list) && list.some((e) => (e.recoveredPlayerCount || e.playerCount || 0) > 0 || (e.recoveredHistoryCount || e.sessionHistoryCount || 0) > 0);
+        } catch (e) {}
+        const hadUnreadableEvidence = primaryFound || mirrorFound || lastKnownGoodFound || autoBackupFound;
+        if (hadUnreadableEvidence || priorBootEvidence) {
+          bootStatusResult = "recovery-required";
+          corrupted = true;
+        } else {
+          bootStatusResult = "new-install";
+        }
+      }
+
+      setBootStatus(bootStatusResult);
+      setLoadCorrupted(corrupted);
       try {
         const pr = await window.storage.get("bg-v11-prerestore");
         setHasPreRestoreBackup(!!pr?.value);
@@ -2161,12 +2365,24 @@ export default function App() {
         const list = bl?.value ? JSON.parse(bl.value) : [];
         setBootLog(Array.isArray(list) ? list : []);
       } catch (e) {}
-      // record this boot — was it a manual update-tap reload (?_v=…)? what savedAt/counts did we
-      // actually load? corrupted=true means a "bg-v11" value existed but failed to parse (see above).
-      pushBootLog({ event: "boot", appVersion: APP_VERSION, loadedSavedAt, playerCount, sessionHistoryCount, corrupted, viaUpdateReload: !!new URLSearchParams(location.search).get("_v") });
-      setLoadCorrupted(corrupted);
+      pushBootLog({
+        event: "boot", appVersion: APP_VERSION, bootStatus: bootStatusResult, recoverySource, recoveryAction,
+        primaryFound, primaryValid, mirrorFound, lastKnownGoodFound, autoBackupFound,
+        recoveredPlayerCount, recoveredHistoryCount, loadedSavedAt,
+        playerCount: recoveredPlayerCount, sessionHistoryCount: recoveredHistoryCount, corrupted, // legacy field names, kept so older boot-log entries/consumers read consistently
+        saveBlockedDuringBoot: bootStatusResult === "recovery-required",
+        storageErrors: storageErrors.length ? storageErrors : undefined,
+        viaUpdateReload: !!new URLSearchParams(location.search).get("_v"),
+      });
       setLoaded(true);
-    })();
+    })().catch(() => {
+      // The boot sequence itself threw somewhere unexpected (outside an inner try/catch) — land in a
+      // safe, save-blocked state rather than getting stuck on "loading" forever, or falling through to
+      // an unguarded default-empty state that something downstream could then save.
+      setBootStatus("error");
+      setLoadCorrupted(true);
+      setLoaded(true);
+    });
   }, []);
   // Proactively re-check freshness the moment this instance becomes active again — catches a stale
   // instance BEFORE the user touches anything, not just reactively at the next save.
@@ -2200,10 +2416,14 @@ export default function App() {
     if (grew) saveAutoBackup(reason);
   }, [sessionHistory, tournamentHistory, loaded]);
   useEffect(() => {
-    // v1.9.26: also refuse to save while loadCorrupted is true — see its declaration above. Without this,
-    // the very first fire of this effect (triggered by `loaded` flipping true) would write the still-
-    // default-empty React state over the corrupted-but-recoverable raw string, permanently losing it.
-    if (!loaded || loadCorrupted) return;
+    // v1.11.0 BOOT BARRIER (CRITICAL): saves are blocked for any bootStatus other than "restored" or
+    // "new-install" — i.e. while the recovery waterfall is still running ("loading") or concluded that
+    // nothing safe to save exists yet ("recovery-required"/"error"). This is what makes "primary missing
+    // -> defaults to [] -> save [] over recoverable data" structurally impossible: there is no path from
+    // boot to a save without bootStatus first resolving to one of the two states that mean "this
+    // in-memory state is trustworthy, however it got here." (loadCorrupted is kept as a legacy alias of
+    // "recovery-required" for the existing banner/tests — both are checked as belt-and-suspenders.)
+    if (!loaded || loadCorrupted || (bootStatus !== "restored" && bootStatus !== "new-install")) return;
     (async () => {
       try {
         // Guard: never write this instance's in-memory state over a newer save made elsewhere — pull
@@ -2211,11 +2431,57 @@ export default function App() {
         // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
         if (await refreshFromStorageIfNewer(true)) return;
         const savedAt = Date.now();
-        await window.storage.set("bg-v11", JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, savedAt }));
+        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, savedAt });
+        latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
+        const result = await window.storage.set("bg-v11", json);
         lastKnownSavedAtRef.current = savedAt;
+        // Last Known Good: only ever updated from HERE, i.e. only once bootStatus has already resolved
+        // to a trustworthy state — so a failed/interrupted boot can never overwrite a good LKG with an
+        // empty or corrupted one (section 9's explicit warning). A normal save landing safely on the
+        // primary is exactly the "existing valid current state" this snapshot is meant to capture.
+        if (result?.primaryOk !== false) {
+          try { await window.storage.set(LKG_KEY, json); } catch (e) {}
+        }
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, loaded, loadCorrupted]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, loaded, loadCorrupted, bootStatus]);
+  // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
+  // most recently computed save payload when the app backgrounds — insurance for the narrow window
+  // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
+  // the process. This is NOT the primary durability guarantee (that's the save effect firing on every
+  // state change, above) — it's a secondary net, since pagehide/visibilitychange handlers get no
+  // reliable time for further async work on iOS. Plain synchronous localStorage.setItem is used
+  // directly here (bypassing window.storage's async IndexedDB-first path) specifically because it's the
+  // one storage write iOS is most likely to let finish before teardown.
+  useEffect(() => {
+    if (!loaded) return;
+    const flush = () => {
+      if (bootStatus !== "restored" && bootStatus !== "new-install") return; // never flush during/after a blocked boot
+      if (!latestStateJsonRef.current) return;
+      try {
+        // Defensive guard: never let this instance's own (possibly stale) in-memory snapshot
+        // clobber something newer that already landed in the mirror by some other path (e.g. the
+        // async save effect's own mirror write completing a moment earlier, or — in principle — a
+        // separate write reaching the same origin). Compare savedAt and skip if what's already
+        // there is not older than what we're about to write.
+        let mineSavedAt = 0;
+        try { mineSavedAt = JSON.parse(latestStateJsonRef.current)?.savedAt || 0; } catch (e) {}
+        let existingSavedAt = -1;
+        try {
+          const existingRaw = localStorage.getItem("bg:bg-v11");
+          if (existingRaw) existingSavedAt = JSON.parse(existingRaw)?.savedAt ?? -1;
+        } catch (e) {}
+        if (mineSavedAt < existingSavedAt) return;
+        localStorage.setItem("bg:bg-v11", latestStateJsonRef.current);
+      } catch (e) {}
+    };
+    document.addEventListener("visibilitychange", flush);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      document.removeEventListener("visibilitychange", flush);
+      window.removeEventListener("pagehide", flush);
+    };
+  }, [loaded, bootStatus]);
   useEffect(() => { const t = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(t); }, []);
 
   const getP = (id) => players.find((p) => p.id === id);
@@ -2582,6 +2848,17 @@ export default function App() {
     const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
     const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
     setCropJob({ src: raw, circleGuide: false, title: "จัดตำแหน่งคิวอาร์โค้ด", onDone: (data) => setSettings((s) => ({ ...s, qr: data })) });
+  };
+  // v1.10.0 (Tournament Profile, section 1): logo upload reuses the exact same crop/position flow as
+  // every other photo in the app (openPhoto/openSessionPhoto/QR above) — square, non-circle guide, same
+  // as the QR code. onDone patches the active tournament via tUpdateProfile (passed in from where App()
+  // builds the Tournament handlers), not a direct setActiveTournament call, to stay consistent with every
+  // other profile-field edit path.
+  const openTournamentLogo = () => tLogoFileRef.current.click();
+  const onTournamentLogoFile = async (e) => {
+    const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
+    setCropJob({ src: raw, circleGuide: false, title: "จัดตำแหน่งโลโก้ทัวร์นาเมนต์", onDone: (data) => tUpdateProfile({ logo: data }) });
   };
 
   const tapSlot = (mid, team, idx, pid) => {
@@ -2985,6 +3262,35 @@ export default function App() {
   };
   const tArchiveOnly = () => setActiveTournament(null); // organizer dismisses a completed Tournament from the dashboard without re-running tCompleteTournament
   const tDeleteTournament = () => setActiveTournament((t) => (t && t.status === "draft" ? null : t)); // active Tournaments must be paused/completed first, never silently deleted
+  // v1.10.0: Tournament Profile — lets the organizer edit name/venue/description/logo AFTER creation
+  // (spec section 1 explicitly requires this), without touching any format/team/bracket state. Merges
+  // only the given keys so callers never need to spread the whole tournament object themselves.
+  const tUpdateProfile = (patch) => setActiveTournament((t) => (t ? { ...t, ...patch } : t));
+  // v1.10.0: Registration fee + payment — organizer sets feeMode/feeAmount once; paidTeamIds tracks which
+  // teams have paid. Kept as a small toggle (not a full ledger) per spec section 14's "do not clutter".
+  const tSetRegistrationConfig = (patch) => setActiveTournament((t) => (t ? { ...t, registration: { ...t.registration, ...patch } } : t));
+  const tToggleTeamPaid = (teamId) => setActiveTournament((t) => {
+    if (!t) return t;
+    const paid = new Set(t.registration.paidTeamIds || []);
+    paid.has(teamId) ? paid.delete(teamId) : paid.add(teamId);
+    return { ...t, registration: { ...t.registration, paidTeamIds: [...paid] } };
+  });
+  // v1.10.0: Tournament Finance — a small income/expense ledger scoped to this Tournament (spec sections
+  // 15-17). Deliberately its own array pair rather than reusing generalExpenses/otherIncome (which are
+  // Casual-session-scoped) so a Tournament's P&L is always computable in isolation without any risk of
+  // double-counting when it's also rolled into the overall Finance view (see tournamentFinanceTotals()
+  // and its call site in FinanceTab for how the rollup avoids double-counting).
+  const tAddFinanceEntry = (kind, entry) => setActiveTournament((t) => {
+    if (!t) return t;
+    const list = kind === "income" ? t.finance.income : t.finance.expense;
+    const next = [...list, { id: uid(), ...entry }];
+    return { ...t, finance: { ...t.finance, [kind]: next } };
+  });
+  const tRemoveFinanceEntry = (kind, id) => setActiveTournament((t) => {
+    if (!t) return t;
+    const list = (kind === "income" ? t.finance.income : t.finance.expense).filter((e) => e.id !== id);
+    return { ...t, finance: { ...t.finance, [kind]: list } };
+  });
 
   // ---- Backup / Restore ----
   // Export the entire persisted state (same shape as "bg-v11") as a downloadable/shareable JSON file.
@@ -3105,8 +3411,8 @@ export default function App() {
       setSession(data.session ? { ...data.session, mode: data.session.mode || "casual", id: data.session.id || uid() } : { id: uid(), name: "", date: new Date().toISOString().slice(0, 10), mode: "casual" });
       setLockPairs(migrateLockPairs(data.lockPairs));
       setSessionHistory(data.sessionHistory || []);
-      setActiveTournament(ensureTournamentCourtLabels(data.activeTournament) || null);
-      setTournamentHistory((data.tournamentHistory || []).map(ensureTournamentCourtLabels));
+      setActiveTournament(normTournament(data.activeTournament) || null);
+      setTournamentHistory((data.tournamentHistory || []).map(normTournament));
       setGeneralExpenses(data.generalExpenses || []);
       setOtherIncome(data.otherIncome || []);
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
@@ -3135,9 +3441,15 @@ export default function App() {
           {staleSyncNotice}
         </div>
       )}
+      {autoRecoveryToast && (
+        <div style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 8px)", left: "50%", transform: "translateX(-50%)", zIndex: 9999, background: T.green, color: "#fff", padding: "8px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 14px rgba(0,0,0,.18)", maxWidth: "90vw", textAlign: "center" }}>
+          {autoRecoveryToast}
+        </div>
+      )}
       <input ref={fileRef} type="file" accept="image/*" onChange={onPhotoFile} style={{ display: "none" }} />
       <input ref={sessionPhotoFileRef} type="file" accept="image/*" onChange={onSessionPhotoFile} style={{ display: "none" }} />
       <input ref={qrRef} type="file" accept="image/*" onChange={onQRFile} style={{ display: "none" }} />
+      <input ref={tLogoFileRef} type="file" accept="image/*" onChange={onTournamentLogoFile} style={{ display: "none" }} />
       {cropJob && (
         <ImageCropper
           src={cropJob.src}
@@ -3161,7 +3473,7 @@ export default function App() {
               <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>น่าจะเกิดจากแอปถูกปิดกลางคันตอนกำลังบันทึก — ไปที่ "ประวัติ" แล้วเปิด "ข้อมูลและการสำรอง" เพื่อกู้คืนจากจุดสำรองอัตโนมัติ หรือไฟล์สำรองที่เคยเก็บไว้</div>
               <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
                 <button onClick={() => setTab("history")} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>ไปกู้คืนข้อมูล</button>
-                <button onClick={() => setLoadCorrupted(false)} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>เริ่มต้นใหม่ (ไม่กู้คืน)</button>
+                <button onClick={() => { setLoadCorrupted(false); setBootStatus("new-install"); }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>เริ่มต้นใหม่ (ไม่กู้คืน)</button>
               </div>
             </div>
           </div>
@@ -3188,10 +3500,10 @@ export default function App() {
         )}
 
         {tab === "members" && <MembersTab {...{ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }} />}
-        {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, openSessionPhoto, clearSessionPhoto }} />}
+        {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport }} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory }} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -3448,7 +3760,7 @@ function Fairness({ sA, sB }) {
 /* ============ SESSION ============ */
 function SessionTab(props) {
   const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
-    activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, openSessionPhoto, clearSessionPhoto } = props;
+    activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
   // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
@@ -3576,7 +3888,7 @@ function SessionTab(props) {
     return (
       <div>
         {ModeSelector}
-        <TournamentPanel {...{ players, playersById, settings, activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament }} />
+        <TournamentPanel {...{ players, playersById, settings, activeTournament, tournamentHistory, startTournament, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo }} />
       </div>
     );
   }
@@ -4181,12 +4493,14 @@ function StandingsTable({ teams, matches, pointsConfig, peopleById }) {
 }
 
 function TournamentDashboard(props) {
-  const { activeTournament: t, playersById, settings, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament } = props;
+  const { activeTournament: t, playersById, settings, tStartMatch, tSetCourtLabel, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo } = props;
   const [view, setView] = useState("courts");
   const [confirmComplete, setConfirmComplete] = useState(false);
   const [editingMatch, setEditingMatch] = useState(null);
   const [pendingCascade, setPendingCascade] = useState(null);
   const [editCourtLabels, setEditCourtLabels] = useState(false); // "แก้ไขเลขสนาม" — start sequential 1..N, renumber later to match the venue's actual court numbers
+  const [showProfileEditor, setShowProfileEditor] = useState(false); // section 1: edit name/venue/description/logo after creation
+  const [showFinance, setShowFinance] = useState(false); // sections 14-17: registration fee/payment + tournament finance — one drill-down overlay, kept off the main dashboard
 
   const teamsById = Object.fromEntries(t.teams.map((tm) => [tm.id, tm]));
   const peopleById = { ...playersById, ...Object.fromEntries((t.guestPlayers || []).map((g) => [g.id, g])) };
@@ -4197,17 +4511,36 @@ function TournamentDashboard(props) {
   const busyCourts = new Set(playing.map((m) => m.court));
   const emptyCourts = []; for (let c = 1; c <= t.courtCount; c++) if (!busyCourts.has(c)) emptyCourts.push(c);
   const suggested = suggestNextTMatch(t);
+  const regProgress = registrationProgress(t);
+  const finTotals = tournamentFinanceTotals(t);
 
   return (
     <div>
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 14, marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {t.logo && <img src={t.logo} alt="" style={{ width: 32, height: 32, borderRadius: 9, objectFit: "cover", flexShrink: 0 }} />}
           <div style={{ fontWeight: 800, fontSize: 15.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🏆 {t.name}</div>
           <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11, fontWeight: 800, color: t.status === "paused" ? T.accent : T.green, background: t.status === "paused" ? "#fdecea" : "#e2f5ec", padding: "3px 9px", borderRadius: 20 }}>{t.status === "paused" ? "พักการแข่งขัน" : "กำลังแข่งขัน"}</span>
+          <button onClick={() => setShowProfileEditor(true)} title="แก้ไขข้อมูลรายการ" style={{ flexShrink: 0, background: "none", border: "none", color: T.muted, padding: 2 }}>✎</button>
         </div>
+        {(t.venue || t.description) && (
+          <div style={{ fontSize: 11.5, color: T.muted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {t.venue}{t.venue && t.description ? " · " : ""}{t.description}
+          </div>
+        )}
         <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{t.format} · {t.courtCount} สนาม · {done} / {total} แมตช์</div>
         <div style={{ height: 6, background: T.surface2, borderRadius: 4, marginTop: 8, overflow: "hidden" }}><div style={{ height: "100%", width: `${total ? (done / total) * 100 : 0}%`, background: T.green }} /></div>
+        <button onClick={() => setShowFinance(true)} style={{ width: "100%", marginTop: 10, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>
+          <span>💰 ค่าสมัครและการเงิน</span>
+          <span style={{ color: T.muted, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
+            {t.registration.feeMode !== "none" && <span>ชำระแล้ว {regProgress.paid}/{regProgress.total}</span>}
+            <span style={{ color: finTotals.profit >= 0 ? T.green : T.accent }}>{finTotals.profit >= 0 ? "กำไร" : "ขาดทุน"} ฿{Math.abs(finTotals.profit).toLocaleString()}</span>
+            <ChevronRight size={15} />
+          </span>
+        </button>
       </div>
+      {showProfileEditor && <TournamentProfileEditor t={t} onSave={(patch) => { tUpdateProfile(patch); setShowProfileEditor(false); }} onOpenLogoPicker={openTournamentLogo} onClose={() => setShowProfileEditor(false)} />}
+      {showFinance && <TournamentFinancePanel t={t} teamsById={teamsById} peopleById={peopleById} tSetRegistrationConfig={tSetRegistrationConfig} tToggleTeamPaid={tToggleTeamPaid} tAddFinanceEntry={tAddFinanceEntry} tRemoveFinanceEntry={tRemoveFinanceEntry} onClose={() => setShowFinance(false)} />}
 
       <div style={{ display: "flex", gap: 6, marginBottom: 12, overflowX: "auto" }}>
         {[["courts", "สนาม"], ["bracket", "Bracket/Standings"], ["teams", "ทีม"], ["results", "ผล"]].map(([v, l]) => (
@@ -4384,6 +4717,176 @@ function TournamentDashboard(props) {
           </Overlay>
         );
       })()}
+    </div>
+  );
+}
+
+// v1.10.0 (Tournament Profile, section 1): edit name/venue/description/logo AFTER creation. Logo tap
+// reuses the app-wide crop/position flow (see openTournamentLogo in App()) — the logo itself saves
+// immediately on crop-confirm, independent of this sheet's own "บันทึก" button, exactly like every
+// other photo field in the app (player photo, ก๊วน photo, QR). Only the text fields batch into onSave.
+function TournamentProfileEditor({ t, onSave, onOpenLogoPicker, onClose }) {
+  const [name, setName] = useState(t.name || "");
+  const [venue, setVenue] = useState(t.venue || "");
+  const [description, setDescription] = useState(t.description || "");
+  const canSave = name.trim().length > 0;
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontWeight: 800, fontSize: 15.5, marginBottom: 14 }}>แก้ไขข้อมูลรายการ</div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
+        <button onClick={onOpenLogoPicker} style={{ flexShrink: 0, width: 62, height: 62, borderRadius: 14, background: T.surface2, border: `1px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", padding: 0 }}>
+          {t.logo ? <img src={t.logo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 20 }}>🏆</span>}
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <button onClick={onOpenLogoPicker} style={{ padding: "7px 12px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{t.logo ? "เปลี่ยนโลโก้" : "เพิ่มโลโก้"}</button>
+          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 5 }}>ไม่บังคับ — จะแสดงในหน้าภาพรวม, หัวข้อ และสายแข่ง</div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>ชื่อรายการ</div>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="เช่น BadQ Open 2026" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
+      </div>
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>สถานที่จัด</div>
+        <input value={venue} onChange={(e) => setVenue(e.target.value)} placeholder="เช่น สนามแบดมินตัน ABC" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
+      </div>
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>รายละเอียด (ไม่บังคับ)</div>
+        <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="เช่น รุ่นคู่ผสม, จำกัด 16 ทีม" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }} />
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
+        <button onClick={() => canSave && onSave({ name: name.trim(), venue: venue.trim(), description: description.trim() })} disabled={!canSave} style={{ ...btnPrimary, opacity: canSave ? 1 : 0.5 }}>บันทึก</button>
+      </div>
+    </Overlay>
+  );
+}
+
+// v1.10.0 (sections 14-17): one drill-down overlay covering registration fee config, per-team paid
+// status, and tournament finance (income/expense + P&L) — kept off the main dashboard per the spec's
+// "don't clutter main screen" instruction. Entry-fee income is NEVER entered here directly — it's
+// derived (registrationFeeAmountFor / tournamentEntryFeeTotal) from feeMode+feeAmount+paidTeamIds, so
+// there is exactly one source of truth and no way to double-count it against manual finance entries.
+function TournamentFinancePanel({ t, teamsById, peopleById, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, onClose }) {
+  const [showPaidList, setShowPaidList] = useState(false);
+  const [addingIncome, setAddingIncome] = useState(false);
+  const [addingExpense, setAddingExpense] = useState(false);
+  const reg = t.registration || { feeMode: "none", feeAmount: 0, paidTeamIds: [] };
+  const progress = registrationProgress(t);
+  const totals = tournamentFinanceTotals(t);
+  const feeModeLabel = { none: "ไม่เก็บค่าสมัคร", perTeam: "เก็บต่อทีม", perPlayer: "เก็บต่อคน" };
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontWeight: 800, fontSize: 15.5, marginBottom: 14 }}>ค่าสมัครและการเงิน</div>
+
+      <SectionHead icon={<span style={{ fontSize: 14 }}>🎫</span>} title="ค่าสมัคร" sub={feeModeLabel[reg.feeMode] || ""} />
+      <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+        {[["none", "ไม่เก็บ"], ["perTeam", "ต่อทีม"], ["perPlayer", "ต่อคน"]].map(([v, l]) => (
+          <button key={v} onClick={() => tSetRegistrationConfig({ feeMode: v })} style={{ flex: 1, padding: "8px 6px", borderRadius: 9, fontSize: 12, fontWeight: 800, border: `1.5px solid ${reg.feeMode === v ? T.green : T.border}`, background: reg.feeMode === v ? "#e2f5ec" : T.surface2, color: reg.feeMode === v ? T.green : T.muted }}>{l}</button>
+        ))}
+      </div>
+      {reg.feeMode !== "none" && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>ค่าสมัคร ({reg.feeMode === "perTeam" ? "บาท/ทีม" : "บาท/คน"})</div>
+          <input type="number" inputMode="numeric" value={reg.feeAmount || ""} onChange={(e) => tSetRegistrationConfig({ feeAmount: Math.max(0, Number(e.target.value) || 0) })} placeholder="0" style={{ width: "100%", padding: "9px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
+        </div>
+      )}
+      {reg.feeMode !== "none" && (
+        <button onClick={() => setShowPaidList((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 700, marginBottom: showPaidList ? 6 : 16, display: "flex", alignItems: "center", gap: 6 }}>
+          <span>ชำระแล้ว {progress.paid}/{progress.total} ทีม</span><ChevronDown size={14} style={{ marginLeft: "auto", transform: showPaidList ? "rotate(180deg)" : "none" }} />
+        </button>
+      )}
+      {reg.feeMode !== "none" && showPaidList && (
+        <div style={{ marginBottom: 16 }}>
+          {t.teams.map((team) => {
+            const paid = (reg.paidTeamIds || []).includes(team.id);
+            return (
+              <div key={team.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, marginBottom: 6 }}>
+                <span style={{ fontSize: 12.5, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tTeamName(team, peopleById)}</span>
+                <span style={{ fontSize: 11, color: T.muted, marginRight: 8 }}>฿{registrationFeeAmountFor(t, team).toLocaleString()}</span>
+                <button onClick={() => tToggleTeamPaid(team.id)} style={{ flexShrink: 0, padding: "5px 11px", borderRadius: 8, fontSize: 11.5, fontWeight: 800, border: "none", background: paid ? "#e2f5ec" : T.surface2, color: paid ? T.green : T.muted }}>{paid ? "ชำระแล้ว ✓" : "ยังไม่จ่าย"}</button>
+              </div>
+            );
+          })}
+          {t.teams.length === 0 && <div style={{ fontSize: 12, color: T.muted, textAlign: "center", padding: 10 }}>ยังไม่มีทีม</div>}
+        </div>
+      )}
+
+      <SectionHead icon={<span style={{ fontSize: 14 }}>💵</span>} title="รายรับ-รายจ่าย" />
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 11, marginBottom: 10 }}>
+        <Row label="ค่าสมัคร (อัตโนมัติ)" value={`฿${totals.entryFee.toLocaleString()}`} />
+        <Row label="รายรับอื่นๆ" value={`฿${totals.otherIncome.toLocaleString()}`} />
+        <Row label="รายจ่ายรวม" value={`฿${totals.expense.toLocaleString()}`} />
+        <div style={{ height: 1, background: T.border, margin: "7px 0" }} />
+        <Row label={totals.profit >= 0 ? "กำไร" : "ขาดทุน"} value={`฿${Math.abs(totals.profit).toLocaleString()}`} bold color={totals.profit >= 0 ? T.green : T.accent} />
+      </div>
+
+      <FinanceEntryList title="รายรับอื่นๆ" categories={TOURNAMENT_INCOME_CATEGORIES} entries={t.finance.income} adding={addingIncome} setAdding={setAddingIncome} onAdd={(entry) => tAddFinanceEntry("income", entry)} onRemove={(id) => tRemoveFinanceEntry("income", id)} />
+      <FinanceEntryList title="รายจ่าย" categories={TOURNAMENT_EXPENSE_CATEGORIES} entries={t.finance.expense} adding={addingExpense} setAdding={setAddingExpense} onAdd={(entry) => tAddFinanceEntry("expense", entry)} onRemove={(id) => tRemoveFinanceEntry("expense", id)} />
+
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 4 }}>ปิด</button>
+    </Overlay>
+  );
+}
+
+function Row({ label, value, bold, color }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", padding: "3px 0", fontSize: bold ? 13.5 : 12.5, fontWeight: bold ? 800 : 500, color: color || T.text }}>
+      <span style={{ color: bold ? color || T.text : T.muted }}>{label}</span><span>{value}</span>
+    </div>
+  );
+}
+
+// simple line-item entry list shared by tournament finance's income/expense sections (spec section 15:
+// "simple line-item entry, not full accounting") — collapsed add-form, tap-to-remove existing entries.
+function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd, onRemove }) {
+  const [category, setCategory] = useState(categories[0][0]);
+  const [label, setLabel] = useState("");
+  const [amount, setAmount] = useState("");
+  const canAdd = Number(amount) > 0;
+  const submit = () => {
+    if (!canAdd) return;
+    onAdd({ category, label: label.trim(), amount: Number(amount) });
+    setLabel(""); setAmount(""); setAdding(false);
+  };
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 800, color: T.muted }}>{title}</span>
+        <button onClick={() => setAdding((v) => !v)} style={{ marginLeft: "auto", fontSize: 11.5, fontWeight: 800, color: T.green, background: "none", border: "none", padding: "2px 4px" }}>{adding ? "ยกเลิก" : "+ เพิ่มรายการ"}</button>
+      </div>
+      {entries.length === 0 && !adding && <div style={{ fontSize: 11.5, color: T.muted, padding: "4px 2px" }}>ยังไม่มีรายการ</div>}
+      {entries.map((e) => {
+        const catLabel = (categories.find((c) => c[0] === e.category) || [, e.category])[1];
+        return (
+          <div key={e.id} style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, marginBottom: 6 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.label || catLabel}</div>
+              <div style={{ fontSize: 10.5, color: T.muted }}>{catLabel}</div>
+            </div>
+            <span style={{ fontSize: 12.5, fontWeight: 800, marginRight: 8 }}>฿{e.amount.toLocaleString()}</span>
+            <button onClick={() => onRemove(e.id)} style={{ flexShrink: 0, background: "none", border: "none", color: T.muted, padding: 3 }}><X size={14} /></button>
+          </div>
+        );
+      })}
+      {adding && (
+        <div style={{ padding: 10, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 10, marginTop: 4 }}>
+          <div style={{ display: "flex", gap: 6, marginBottom: 8, overflowX: "auto" }}>
+            {categories.map(([v, l]) => (
+              <button key={v} onClick={() => setCategory(v)} style={{ flex: "none", padding: "6px 10px", borderRadius: 8, fontSize: 11.5, fontWeight: 800, border: `1.5px solid ${category === v ? T.green : T.border}`, background: category === v ? "#e2f5ec" : T.surface, color: category === v ? T.green : T.muted }}>{l}</button>
+            ))}
+          </div>
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="รายละเอียด (ไม่บังคับ)" style={{ width: "100%", padding: "8px 10px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, boxSizing: "border-box", marginBottom: 8 }} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="จำนวนเงิน (บาท)" style={{ flex: 1, padding: "8px 10px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, boxSizing: "border-box" }} />
+            <button onClick={submit} disabled={!canAdd} style={{ padding: "8px 16px", borderRadius: 8, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: canAdd ? 1 : 0.5 }}>เพิ่ม</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -6714,7 +7217,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
               {bootLog.map((e, i) => (
                 <div key={e.t + "-" + i} style={{ fontSize: 10.5, fontFamily: "monospace", color: T.muted, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 8, padding: "6px 8px", lineHeight: 1.5, wordBreak: "break-all" }}>
                   {fmtThaiDateTime(e.t)} · {e.event}
-                  {e.event === "boot" && ` · v${e.appVersion} · โหลด savedAt=${e.loadedSavedAt ? fmtThaiDateTime(e.loadedSavedAt) : "ไม่มี"} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount} · reload=${e.viaUpdateReload ? "yes" : "no"}`}
+                  {e.event === "boot" && ` · v${e.appVersion} · ${e.bootStatus || "-"}${e.recoverySource ? " (" + e.recoverySource + ")" : ""} · โหลด savedAt=${e.loadedSavedAt ? fmtThaiDateTime(e.loadedSavedAt) : "ไม่มี"} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount} · reload=${e.viaUpdateReload ? "yes" : "no"}`}
                   {e.event === "heal" && ` · ${e.fromSavedAt ? fmtThaiDateTime(e.fromSavedAt) : "-"} → ${fmtThaiDateTime(e.toSavedAt)} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount}`}
                 </div>
               ))}
