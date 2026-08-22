@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.3";
+const APP_VERSION = "1.11.4";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1133,6 +1133,29 @@ function downloadFinancialReportXlsx(report) {
 function buildShareText({ name, date, playerCount, totalMatches, maxGames, totalExpense }) {
   return `BadQ — ${name || "ก๊วนแบดมินตัน"}\n${date || ""}\nผู้เล่น ${playerCount} คน\n${totalMatches} แมตช์\nเกมมากสุด ${maxGames} เกม\nค่าใช้จ่ายรวม ${formatCurrency(totalExpense)}`;
 }
+// v1.11.4: single Tournament share-text generator — built from the SAME buildTournamentResultReport
+// object that feeds the Podium/Bracket/PDF, so the shared text can never separately calculate or drift
+// from what's actually on screen. Includes medals + the final score line; ends with a small BadQ credit.
+function buildTournamentShareText(report, teamsById, peopleById) {
+  const { t, totals, podium, finalMatch, isCompleted } = report;
+  const lines = [`🏆 BadQ Tournament — ${t.name || "Tournament ไม่มีชื่อ"}`, `${fmtThaiDate(t.date)} · ${totals.teamCount} ทีม · ${totals.completedMatches} แมตช์`];
+  if (podium && podium.champion) {
+    lines.push("");
+    lines.push(`🥇 แชมป์: ${tTeamName(teamsById[podium.champion], peopleById)}`);
+    if (podium.runnerUp) lines.push(`🥈 รองแชมป์: ${tTeamName(teamsById[podium.runnerUp], peopleById)}`);
+    if (podium.thirdIds && podium.thirdIds.length) lines.push(`🥉 อันดับ 3: ${podium.thirdIds.map((id) => tTeamName(teamsById[id], peopleById)).join(" / ")}`);
+    if (finalMatch && matchScoreText(finalMatch)) {
+      const lbl = tMatchLabel(finalMatch, teamsById, peopleById);
+      lines.push(`ชิงชนะเลิศ: ${lbl.a} ${matchScoreText(finalMatch)} ${lbl.b}`);
+    }
+  } else if (!isCompleted) {
+    lines.push("");
+    lines.push("สถานะ: กำลังแข่งขัน — ยังไม่ทราบผู้ชนะ");
+  }
+  lines.push("");
+  lines.push("สร้างโดย BadQ 🏸");
+  return lines.join("\n");
+}
 async function shareSummary(text) {
   try {
     if (navigator.share) { await navigator.share({ text }); return; }
@@ -1805,7 +1828,10 @@ function standardBracketOrder(size) {
   while (order.length < size) { const sum = order.length * 2 + 1; const next = []; order.forEach((s) => { next.push(s); next.push(sum - s); }); order = next; }
   return order;
 }
-function roundLabelFor(teamsInRound) { return teamsInRound === 2 ? "รอบชิงชนะเลิศ" : teamsInRound === 4 ? "รอบรองชนะเลิศ" : teamsInRound === 8 ? "รอบก่อนรองชนะเลิศ" : `รอบ ${Math.log2(teamsInRound)}`; }
+// v1.11.4 fix: any round size other than 2/4/8 (16, 32, ...) used to fall through to `รอบ ${Math.log2(n)}`
+// (e.g. "รอบ 4" for a 16-team round, "รอบ 5" for a 32-team round) — nonsensical and confusing. Now every
+// larger round is labeled by its actual team count, matching how Thai badminton brackets are normally read.
+function roundLabelFor(teamsInRound) { return teamsInRound === 2 ? "รอบชิงชนะเลิศ" : teamsInRound === 4 ? "รอบรองชนะเลิศ" : teamsInRound === 8 ? "รอบก่อนรองชนะเลิศ" : `รอบ ${teamsInRound} ทีม`; }
 // teams: seeded (seed 1..n, 1 = strongest). Builds every round's matches up front, wiring
 // nextMatchId/nextSlot so a finished match auto-feeds its winner forward. A first-round match with only
 // one real team (uneven team count) is resolved immediately as status:"bye" (never counted as played)
@@ -2070,6 +2096,86 @@ function tournamentBusyPlayers(t) {
   return set;
 }
 function tournamentBusyCourts(t) { return new Set(tournamentAllMatches(t).filter((m) => m.status === "playing").map((m) => m.court)); }
+
+/* ---- v1.11.4: normalized Tournament result/report model ----
+   Single source of truth for champion/runnerUp/third + player win-loss stats, shared by:
+   tCompleteTournament (freezes these into the archived snapshot), the live in-progress dashboard,
+   the completed-tournament Summary page, the Share text, and the PDF export. Never compute these
+   independently in a UI component — always go through buildTournamentResultReport so an edited
+   result (before or after archiving) is reflected everywhere at once. */
+
+// champion/runnerUp/third for one division, from its CURRENT bracket or standings — works identically
+// whether the tournament is still active or already archived. Returns nulls (not guesses) when the
+// division hasn't produced a result yet, and supports a shared/joint third place (thirdIds: []).
+function computeDivisionPodium(d, teamsById, pointsConfig) {
+  if (!d) return { champion: null, runnerUp: null, thirdIds: [] };
+  if (d.bracket) {
+    const finalMatch = d.bracket.matches.find((m) => !m.nextMatchId && m.status === "completed");
+    if (!finalMatch) return { champion: null, runnerUp: null, thirdIds: [] };
+    const champion = finalMatch.winnerTeamId;
+    const runnerUp = finalMatch.teamAId === champion ? finalMatch.teamBId : finalMatch.teamAId;
+    // both semifinal losers share 3rd place — the bracket structure doesn't play a 3rd-place match,
+    // so we surface both losers rather than arbitrarily picking one (matches current Tournament rules).
+    const semis = d.bracket.matches.filter((m) => m.nextMatchId === finalMatch.id && m.status === "completed");
+    const thirdIds = semis.flatMap((m) => [m.teamAId, m.teamBId]).filter((id) => id && id !== champion && id !== runnerUp);
+    return { champion, runnerUp, thirdIds };
+  }
+  const divTeams = (d.teamIds || []).map((id) => teamsById[id]).filter(Boolean);
+  const matches = d.matches && d.matches.length ? d.matches : (d.swissMatches || []);
+  if (!matches.length) return { champion: null, runnerUp: null, thirdIds: [] };
+  const standings = computeStandings(divTeams, matches, pointsConfig);
+  if (!standings.some((r) => r.played > 0)) return { champion: null, runnerUp: null, thirdIds: [] };
+  return { champion: standings[0]?.teamId || null, runnerUp: standings[1]?.teamId || null, thirdIds: standings[2] ? [standings[2].teamId] : [] };
+}
+// per-player wins/losses across the WHOLE tournament (all divisions/groups/bracket/swiss combined),
+// derived purely from t.teams + completed matches — safe to call for an in-progress tournament too.
+function computeTournamentPlayerStats(t) {
+  const teamsById = Object.fromEntries((t.teams || []).map((tm) => [tm.id, tm]));
+  const allMatches = tournamentAllMatches(t).filter((m) => m.status === "completed");
+  const byPlayer = {};
+  (t.teams || []).forEach((tm) => (tm.playerIds || []).forEach((pid) => { byPlayer[pid] = byPlayer[pid] || { playerId: pid, wins: 0, losses: 0 }; }));
+  allMatches.forEach((m) => {
+    [m.teamAId, m.teamBId].forEach((tid) => {
+      if (!tid) return;
+      const tm = teamsById[tid]; if (!tm) return;
+      (tm.playerIds || []).forEach((pid) => {
+        const s = byPlayer[pid]; if (!s) return;
+        if (m.winnerTeamId === tid) s.wins++; else if (m.winnerTeamId) s.losses++;
+      });
+    });
+  });
+  return Object.values(byPlayer).filter((s) => s.wins + s.losses > 0).sort((a, b) => b.wins - a.wins || a.losses - b.losses);
+}
+// headline counts used by the Summary header — teams/players/matches + which stage path this
+// tournament actually ran (so the report never assumes a bracket or groups that don't exist).
+function tournamentResultTotals(t) {
+  const allMatches = tournamentAllMatches(t).filter((m) => m.status !== "bye");
+  const teamCount = (t.teams || []).length;
+  const playerCount = new Set((t.teams || []).flatMap((tm) => tm.playerIds || [])).size;
+  const hasGroups = (t.divisions || []).some((d) => d.groups && d.groups.length > 0);
+  const hasBracket = (t.divisions || []).some((d) => d.bracket);
+  const stagePath = hasGroups && hasBracket ? "Group Stage → Knockout" : (TOURNAMENT_FORMAT_LABELS[t.format] || t.format);
+  return { totalMatches: allMatches.length, completedMatches: allMatches.filter((m) => m.status === "completed").length, teamCount, playerCount, hasGroups, hasBracket, stagePath };
+}
+// THE single entry point every result-facing view (live dashboard, historical Summary, share text,
+// PDF export) should call. Never trust a division's frozen d.champion/runnerUp/third as primary —
+// those are only a snapshot taken once at archive time and go stale the moment a result is edited.
+function buildTournamentResultReport(t, peopleById) {
+  if (!t) return null;
+  const teamsById = Object.fromEntries((t.teams || []).map((tm) => [tm.id, tm]));
+  const totals = tournamentResultTotals(t);
+  const divisions = (t.divisions || []).map((d) => ({ ...d, podium: computeDivisionPodium(d, teamsById, t.pointsConfig) }));
+  const mainDivision = divisions.length === 1 ? divisions[0] : null;
+  const playerStats = (t.status === "completed" || t.status === "archived") && t.playerStats ? t.playerStats : computeTournamentPlayerStats(t);
+  const finalMatch = mainDivision?.bracket ? mainDivision.bracket.matches.find((m) => !m.nextMatchId) || null : null;
+  return {
+    t, teamsById, peopleById, divisions, mainDivision, totals, playerStats,
+    podium: mainDivision ? mainDivision.podium : null,
+    finalMatch,
+    isCompleted: t.status === "completed" || t.status === "archived",
+  };
+}
+
 // suggests the best next match to fill an empty court: dependency-ready first, then no player already
 // busy elsewhere, then longest-waiting (oldest ready match), then earlier round/group before later ones
 function suggestNextTMatch(t) {
@@ -2132,6 +2238,10 @@ export default function App() {
   // entire app render (see the early return right after this component's other hooks) so bottom nav / tabs /
   // edit buttons are simply never mounted while printing, instead of being CSS-hidden. `null` = not open.
   const [financePrintReport, setFinancePrintReport] = useState(null);
+  // v1.11.4: same early-return print-view pattern as financePrintReport, for the dedicated Tournament
+  // PDF export — holds the buildTournamentResultReport object to render (not raw tournament data), so
+  // the print view is always fed the exact same source of truth as the on-screen Summary/Podium/Bracket.
+  const [tournamentPrintReport, setTournamentPrintReport] = useState(null);
 
   // ===== PERSISTENCE SAFETY GUARD (v1.9.15) =====
   // Bug this fixes: the app saves its ENTIRE state as one localStorage blob on every change. If two
@@ -3299,33 +3409,16 @@ export default function App() {
     setActiveTournament((t) => {
       if (!t) return t;
       const teamsById = Object.fromEntries(t.teams.map((tm) => [tm.id, tm]));
+      // v1.11.4: champion/runnerUp/third + playerStats now come from the same shared
+      // computeDivisionPodium/computeTournamentPlayerStats used by the live dashboard, the Summary
+      // page, Share, and PDF export — no more separately-computed duplicate logic here.
       const divisions = t.divisions.map((d) => {
-        let champion = null, runnerUp = null, third = null;
-        if (d.bracket) {
-          const finalMatch = d.bracket.matches.find((m) => !m.nextMatchId && m.status === "completed");
-          if (finalMatch) {
-            champion = finalMatch.winnerTeamId;
-            runnerUp = finalMatch.teamAId === champion ? finalMatch.teamBId : finalMatch.teamAId;
-            const semis = d.bracket.matches.filter((m) => m.nextMatchId === finalMatch.id);
-            const thirdCandidates = semis.flatMap((m) => [m.teamAId, m.teamBId]).filter((id) => id && id !== champion && id !== runnerUp);
-            third = thirdCandidates[0] || null;
-          }
-        } else {
-          const divTeams = d.teamIds.map((id) => teamsById[id]);
-          const matches = d.matches.length ? d.matches : d.swissMatches;
-          const standings = computeStandings(divTeams, matches, t.pointsConfig);
-          champion = standings[0]?.teamId || null; runnerUp = standings[1]?.teamId || null; third = standings[2]?.teamId || null;
-        }
-        return { ...d, champion, runnerUp, third };
+        const podium = computeDivisionPodium(d, teamsById, t.pointsConfig);
+        return { ...d, champion: podium.champion, runnerUp: podium.runnerUp, third: podium.thirdIds[0] || null, thirdIds: podium.thirdIds };
       });
       const finished = { ...t, divisions, status: "completed", completedAt: Date.now() };
       const allMatches = tournamentAllMatches(finished).filter((m) => m.status !== "bye");
-      const playerStats = players.map((p) => {
-        const teamIds = new Set(t.teams.filter((tm) => (tm.playerIds || []).includes(p.id)).map((tm) => tm.id));
-        let wins = 0, losses = 0;
-        allMatches.filter((m) => m.status === "completed").forEach((m) => { if (teamIds.has(m.teamAId) || teamIds.has(m.teamBId)) { if (m.winnerTeamId && teamIds.has(m.winnerTeamId)) wins++; else if (m.winnerTeamId) losses++; } });
-        return { playerId: p.id, wins, losses };
-      }).filter((s) => s.wins + s.losses > 0);
+      const playerStats = computeTournamentPlayerStats(finished);
       const snapshot = {
         ...finished,
         playerSnapshots: players.map((p) => ({ id: p.id, name: p.name, level: p.level, skillIndex: p.skillIndex })), // level/skill frozen at archive time
@@ -3507,6 +3600,9 @@ export default function App() {
   if (financePrintReport) {
     return <FinancePrintView report={financePrintReport} onClose={() => setFinancePrintReport(null)} />;
   }
+  if (tournamentPrintReport) {
+    return <TournamentPrintView report={tournamentPrintReport} onClose={() => setTournamentPrintReport(null)} />;
+  }
 
   const BACKUP_REMINDER_DAYS = 7;
   const daysSinceBackup = settings.lastBackupAt ? Math.floor((Date.now() - new Date(settings.lastBackupAt).getTime()) / 86400000) : null;
@@ -3578,8 +3674,8 @@ export default function App() {
         )}
 
         {tab === "members" && <MembersTab {...{ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }} />}
-        {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto }} />}
-        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }} />}
+        {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory }} />}
       </div>
@@ -3838,7 +3934,7 @@ function Fairness({ sA, sB }) {
 /* ============ SESSION ============ */
 function SessionTab(props) {
   const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
-    activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto } = props;
+    activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
   // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
@@ -3966,7 +4062,7 @@ function SessionTab(props) {
     return (
       <div>
         {ModeSelector}
-        <TournamentPanel {...{ players, playersById, settings, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo }} />
+        <TournamentPanel {...{ players, playersById, settings, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, onOpenTournamentPrint }} />
       </div>
     );
   }
@@ -4690,8 +4786,112 @@ function groupOriginTag(team, groupNameById) {
   const medal = GROUP_RANK_MEDAL[team.groupRank] || `#${team.groupRank}`;
   return `${medal} Group ${groupNameById[team.groupId]}`;
 }
+/* ============ v1.11.4: redesigned Knockout Bracket ============
+   Two view modes over the SAME bracket data (never a separate/duplicated data source):
+   - "round" (default, mobile-first): a round selector + one round's match cards at a time.
+   - "full": a horizontally-scrollable, visually-connected bracket (all rounds side by side).
+   Both recompute each round's label fresh from its actual team count (roundLabelFor) instead of
+   trusting the round's stored `label` string, so brackets generated before the v1.11.4 label fix
+   (which mislabeled 16/32-team rounds) display correctly too, with zero data migration needed.
+   Per spec: no trophy beside every match winner — the trophy is reserved for the champion banner. */
+function bracketRoundsWithFixedLabels(bracket) {
+  return (bracket.rounds || []).map((r) => ({ ...r, label: roundLabelFor(r.matchIds.length * 2) }));
+}
+function BracketMatchCard({ m, teamsById, peopleById, tagA, tagB, compact }) {
+  const lbl = tMatchLabel(m, teamsById, peopleById);
+  return (
+    <div style={{ background: m.status === "playing" ? "#e2f5ec" : T.surface, border: `1px solid ${m.status === "playing" ? T.green : T.border}`, borderRadius: 10, padding: compact ? "7px 9px" : "8px 10px", fontSize: compact ? 11.5 : 12.5, height: "100%", boxSizing: "border-box", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+      <div style={{ fontWeight: m.winnerTeamId === m.teamAId ? 800 : 500, color: m.winnerTeamId === m.teamAId ? T.green : T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tagA && <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700 }}>{tagA} · </span>}{lbl.a}</div>
+      <div style={{ fontWeight: m.winnerTeamId === m.teamBId ? 800 : 500, color: m.winnerTeamId === m.teamBId ? T.green : T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tagB && <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700 }}>{tagB} · </span>}{lbl.b}</div>
+      {!compact && matchScoreText(m) && <div style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{matchScoreText(m)}</div>}
+      {m.status === "bye" && <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>BYE — ไม่นับเป็นแมตช์</div>}
+    </div>
+  );
+}
+// mobile default: round-selector chips + one round's match cards, stacked vertically.
+function BracketRoundByRound({ rounds, bracket, teamsById, peopleById, groupNameById, defaultIdx }) {
+  const [idx, setIdx] = useState(Math.min(defaultIdx, rounds.length - 1));
+  const r = rounds[idx];
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, marginBottom: 8, WebkitOverflowScrolling: "touch" }}>
+        {rounds.map((rr, i) => (
+          <button key={rr.index} onClick={() => setIdx(i)} style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 9, fontSize: 12, fontWeight: 800, whiteSpace: "nowrap", border: `1.5px solid ${idx === i ? T.green : T.border}`, background: idx === i ? "#e2f5ec" : T.surface, color: idx === i ? T.green : T.muted }}>{rr.label}</button>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {r.matchIds.map((mid) => {
+          const m = bracket.matches.find((x) => x.id === mid);
+          if (!m) return null;
+          const tagA = r.index === 0 ? groupOriginTag(teamsById[m.teamAId], groupNameById) : null;
+          const tagB = r.index === 0 ? groupOriginTag(teamsById[m.teamBId], groupNameById) : null;
+          return <BracketMatchCard key={mid} m={m} teamsById={teamsById} peopleById={peopleById} tagA={tagA} tagB={tagB} />;
+        })}
+      </div>
+    </div>
+  );
+}
+// "เต็มสาย" — full connected bracket, horizontal scroll, one column per round. Uses the classic
+// flexbox `space-around` bracket technique: every column stretches to the same height and evenly
+// distributes its matches within it, which places each match's vertical center at exactly the
+// average of its two children's centers in the previous round — so simple CSS connector lines
+// (drawn via the scoped .bqbk-* rules below) line up correctly with no manual pixel math.
+function BracketFull({ rounds, bracket, teamsById, peopleById, groupNameById }) {
+  const CARD_H = 52;
+  return (
+    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch", marginBottom: 4 }}>
+      <style>{`
+        .bqbk-row { display:flex; align-items:stretch; gap:26px; min-width:max-content; padding:4px 2px 10px; }
+        .bqbk-col { display:flex; flex-direction:column; justify-content:space-around; gap:10px; width:132px; flex-shrink:0; }
+        .bqbk-match { position:relative; }
+        .bqbk-col:not(:last-child) .bqbk-match::after { content:''; position:absolute; right:-14px; width:14px; border-right:2px solid #cbd5c9; }
+        .bqbk-col:not(:last-child) .bqbk-match:nth-child(odd)::after { top:50%; height:calc(50% + 5px); border-top:2px solid #cbd5c9; border-top-right-radius:6px; }
+        .bqbk-col:not(:last-child) .bqbk-match:nth-child(even)::after { bottom:50%; height:calc(50% + 5px); border-bottom:2px solid #cbd5c9; border-bottom-right-radius:6px; }
+        .bqbk-col:not(:first-child) .bqbk-match::before { content:''; position:absolute; left:-14px; top:50%; width:14px; height:2px; background:#cbd5c9; }
+      `}</style>
+      <div className="bqbk-row">
+        {rounds.map((r) => (
+          <div key={r.index} className="bqbk-col">
+            <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, textAlign: "center", marginBottom: 2 }}>{r.label}</div>
+            {r.matchIds.map((mid) => {
+              const m = bracket.matches.find((x) => x.id === mid);
+              if (!m) return null;
+              const tagA = r.index === 0 ? groupOriginTag(teamsById[m.teamAId], groupNameById) : null;
+              const tagB = r.index === 0 ? groupOriginTag(teamsById[m.teamBId], groupNameById) : null;
+              return (
+                <div key={mid} className="bqbk-match" style={{ minHeight: CARD_H }}>
+                  <BracketMatchCard m={m} teamsById={teamsById} peopleById={peopleById} tagA={tagA} tagB={tagB} compact />
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+// entry point: toggle between the two views above, plus the champion banner (only when decided).
+function TournamentBracket({ bracket, teamsById, peopleById, champion, groupNameById }) {
+  const [mode, setMode] = useState("round");
+  const rounds = bracketRoundsWithFixedLabels(bracket);
+  // default round shown = the earliest one that isn't fully decided yet (the "current" round for an
+  // in-progress tournament); once everything is decided (completed tournament) that's simply the final.
+  const firstIncompleteIdx = rounds.findIndex((r) => r.matchIds.some((mid) => { const m = bracket.matches.find((x) => x.id === mid); return m && m.status !== "completed" && m.status !== "bye"; }));
+  const defaultIdx = firstIncompleteIdx === -1 ? rounds.length - 1 : firstIncompleteIdx;
+  return (
+    <div>
+      {rounds.length > 1 && <div style={{ marginBottom: 10 }}><Seg options={[["round", "ทีละรอบ"], ["full", "เต็มสาย"]]} value={mode} onChange={setMode} /></div>}
+      {mode === "round" || rounds.length <= 1
+        ? <BracketRoundByRound rounds={rounds} bracket={bracket} teamsById={teamsById} peopleById={peopleById} groupNameById={groupNameById} defaultIdx={defaultIdx} />
+        : <BracketFull rounds={rounds} bracket={bracket} teamsById={teamsById} peopleById={peopleById} groupNameById={groupNameById} />}
+      {champion && <div style={{ textAlign: "center", padding: 14, background: "#fff7e6", borderRadius: 12, marginTop: 10 }}><div style={{ fontSize: 22 }}>🏆</div><div style={{ fontWeight: 800, fontSize: 13.5 }}>{tTeamName(teamsById[champion], peopleById)}</div></div>}
+    </div>
+  );
+}
 // vertical, round-by-round bracket — deliberately NOT a traditional wide horizontal bracket (canvas-style
 // brackets are hard to use on iPhone); each round just stacks as its own labeled group of match cards.
+// v1.11.4: superseded by TournamentBracket (above) on the redesigned Summary page — kept here as-is
+// since the LIVE in-progress Tournament dashboard's own Bracket/Standings tab still renders through it.
 function BracketView({ bracket, teamsById, peopleById, champion, groupNameById }) {
   return (
     <div>
@@ -4716,6 +4916,66 @@ function BracketView({ bracket, teamsById, peopleById, champion, groupNameById }
         </div>
       ))}
       {champion && <div style={{ textAlign: "center", padding: 14, background: "#fff7e6", borderRadius: 12, marginTop: 6 }}><div style={{ fontSize: 22 }}>🏆</div><div style={{ fontWeight: 800, fontSize: 13.5 }}>{tTeamName(teamsById[champion], peopleById)}</div></div>}
+    </div>
+  );
+}
+// v1.11.4: same standings math as StandingsTable, but (a) drops the D column — draws are structurally
+// impossible in this app's completed-match flow (a match can't be finished without a definite winner,
+// see matchWinner()/the "จบแมตช์" button's disabled guard), so a D column would only ever show zeros —
+// and (b) optionally highlights the qualification cutoff (top `qualifyCount` rows) when this group's
+// teams actually carry a stamped groupRank from a real group->knockout promotion (tGenerateGroupKnockout).
+// Kept as a separate component from StandingsTable (which stays untouched — still used during live play).
+function StandingsTableNoD({ teams, matches, pointsConfig, peopleById, qualifyCount = 0 }) {
+  const standings = computeStandings(teams.filter(Boolean), matches, pointsConfig);
+  return (
+    <div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+          <thead><tr style={{ color: T.muted, textAlign: "left" }}>
+            <th style={{ padding: "5px 6px" }}>ทีม</th><th style={{ padding: "5px 4px", textAlign: "center" }}>P</th><th style={{ padding: "5px 4px", textAlign: "center" }}>W</th><th style={{ padding: "5px 4px", textAlign: "center" }}>L</th><th style={{ padding: "5px 4px", textAlign: "center" }}>Pts</th><th style={{ padding: "5px 4px", textAlign: "center" }}>+/-</th>
+          </tr></thead>
+          <tbody>
+            {standings.map((row, i) => {
+              const team = teams.find((tm) => tm && tm.id === row.teamId);
+              const qualifies = qualifyCount > 0 && i < qualifyCount;
+              const isCutoff = qualifyCount > 0 && i === qualifyCount - 1 && i < standings.length - 1;
+              return (
+                <tr key={row.teamId} style={{ borderTop: `1px solid ${T.border}`, borderBottom: isCutoff ? `2px dashed ${T.green}` : undefined, background: qualifies ? "#eafbf3" : "transparent" }}>
+                  <td style={{ padding: "6px" }}>{i + 1}. {team ? tTeamName(team, peopleById) : "-"}</td>
+                  <td style={{ textAlign: "center" }}>{row.played}</td><td style={{ textAlign: "center" }}>{row.win}</td><td style={{ textAlign: "center" }}>{row.loss}</td>
+                  <td style={{ textAlign: "center", fontWeight: 800 }}>{row.points}</td><td style={{ textAlign: "center" }}>{row.diff > 0 ? "+" : ""}{row.diff}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {qualifyCount > 0 && <div style={{ fontSize: 10.5, color: T.green, fontWeight: 700, marginTop: 6 }}>อันดับ 1-{qualifyCount} ผ่านเข้ารอบ Knockout</div>}
+    </div>
+  );
+}
+// v1.11.4: tab-per-group Standings — shows one group at a time instead of every group fully expanded
+// (previously the biggest source of a long Summary page for group-stage tournaments). A single-group
+// tournament skips the chip row entirely and just shows that one group's table directly.
+function GroupStandingsTabs({ groups, teamsById, peopleById, pointsConfig }) {
+  const [gi, setGi] = useState(0);
+  if (!groups || !groups.length) return null;
+  const g = groups[Math.min(gi, groups.length - 1)];
+  const groupTeams = g.teamIds.map((id) => teamsById[id]).filter(Boolean);
+  const qualifyCount = groupTeams.filter((tm) => tm && tm.groupRank != null).length;
+  return (
+    <div style={{ marginBottom: 14 }}>
+      {groups.length > 1 && (
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 6, marginBottom: 8, WebkitOverflowScrolling: "touch" }}>
+          {groups.map((gg, i) => (
+            <button key={gg.id} onClick={() => setGi(i)} style={{ flexShrink: 0, padding: "7px 14px", borderRadius: 9, fontSize: 12, fontWeight: 800, whiteSpace: "nowrap", border: `1.5px solid ${gi === i ? T.green : T.border}`, background: gi === i ? "#e2f5ec" : T.surface, color: gi === i ? T.green : T.muted }}>Group {gg.name}</button>
+          ))}
+        </div>
+      )}
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 10 }}>
+        {groups.length === 1 && <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Group {g.name}</div>}
+        <StandingsTableNoD teams={groupTeams} matches={g.matches} pointsConfig={pointsConfig} peopleById={peopleById} qualifyCount={qualifyCount} />
+      </div>
     </div>
   );
 }
@@ -4747,7 +5007,7 @@ function StandingsTable({ teams, matches, pointsConfig, peopleById }) {
 }
 
 function TournamentDashboard(props) {
-  const { activeTournament: t, playersById, settings, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo } = props;
+  const { activeTournament: t, playersById, settings, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, onOpenTournamentPrint } = props;
   const [view, setView] = useState("courts");
   const [confirmComplete, setConfirmComplete] = useState(false);
   const [editingMatch, setEditingMatch] = useState(null);
@@ -4772,6 +5032,11 @@ function TournamentDashboard(props) {
   const suggested = suggestNextTMatch(t);
   const regProgress = registrationProgress(t);
   const finTotals = tournamentFinanceTotals(t);
+  // v1.11.4: same report builder used by History/Share/PDF — reused here (not reimplemented) so a
+  // live, in-progress tournament's Podium/Bracket/Share/PDF always match the completed-tournament view
+  // exactly. computeDivisionPodium never fabricates a champion before the final is decided, so this is
+  // safe to render even while matches are still in progress.
+  const report = buildTournamentResultReport(t, peopleById);
 
   return (
     <div>
@@ -4884,22 +5149,20 @@ function TournamentDashboard(props) {
 
       {view === "bracket" && (
         <div>
-          {t.divisions.map((d) => (
+          {t.divisions.map((d) => {
+            const rd = report.divisions.find((x) => x.id === d.id) || { podium: { champion: null, runnerUp: null, thirdIds: [] } };
+            return (
             <div key={d.id} style={{ marginBottom: 20 }}>
               {t.divisions.length > 1 && <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>{d.name}</div>}
-              {d.bracket && <BracketView bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={d.champion} groupNameById={groupNameById} />}
+              {/* v1.11.4: Podium/Bracket redesign wired into the LIVE dashboard too (not just the
+                  completed-tournament History view) — same components, same computeDivisionPodium, so
+                  an in-progress tournament shows the "เส้นทางสู่แชมป์" placeholder (never a fake
+                  champion) and a decided final flips it to the real podium automatically. */}
+              {d.bracket && <TournamentPodium podium={rd.podium} teamsById={teamsById} peopleById={peopleById} />}
+              {d.bracket && <TournamentBracket bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={rd.podium.champion} groupNameById={groupNameById} />}
               {d.groups && d.groups.length > 0 && (
                 <div>
-                  {/* v1.11.2: each group gets its own bordered card with a fixed 14px gap after it —
-                      previously a bare heading + table per group could read as uneven spacing once
-                      table heights differed; a card boundary makes the gap between groups unambiguous
-                      regardless of how many rows each group has. */}
-                  {d.groups.map((g) => (
-                    <div key={g.id} style={{ marginBottom: 14, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 10 }}>
-                      <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Group {g.name}</div>
-                      <StandingsTable teams={g.teamIds.map((id) => teamsById[id])} matches={g.matches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
-                    </div>
-                  ))}
+                  <GroupStandingsTabs groups={d.groups} teamsById={teamsById} peopleById={peopleById} pointsConfig={t.pointsConfig} />
                   {!d.bracket && d.groups.every((g) => g.matches.every((m) => m.status === "completed" || m.status === "bye")) && (
                     <button onClick={() => tGenerateGroupKnockout(d.id, t.qualifyTopN || 2)} style={{ ...btnPrimary, marginTop: 6 }}>สร้าง Knockout รอบต่อไป</button>
                   )}
@@ -4908,17 +5171,17 @@ function TournamentDashboard(props) {
               {!d.bracket && (!d.groups || !d.groups.length) && d.swissMatches && d.swissMatches.length > 0 && (
                 <div>
                   <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>Swiss รอบ {d.swissRound + 1} / {d.swissRounds}</div>
-                  <StandingsTable teams={d.teamIds.map((id) => teamsById[id])} matches={d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
+                  <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
                   {d.swissMatches.filter((m) => m.roundIndex === d.swissRound).every((m) => m.status === "completed" || m.status === "bye") && d.swissRound + 1 < (d.swissRounds || 1) && (
                     <button onClick={() => tGenerateSwissNextRound(d.id)} style={{ ...btnPrimary, marginTop: 8 }}>จับคู่รอบถัดไป</button>
                   )}
                 </div>
               )}
               {!d.bracket && (!d.groups || !d.groups.length) && (!d.swissMatches || !d.swissMatches.length) && d.matches && d.matches.length > 0 && (
-                <StandingsTable teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
+                <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
               )}
             </div>
-          ))}
+          );})}
         </div>
       )}
 
@@ -4959,14 +5222,19 @@ function TournamentDashboard(props) {
             </div>
           ))}
           {allMatches.filter((m) => m.status === "completed").length === 0 && <div style={{ textAlign: "center", color: T.muted, fontSize: 13, padding: 30 }}>ยังไม่มีผลการแข่งขัน</div>}
+          {report.playerStats.length > 0 && <div style={{ marginTop: 16 }}><PlayerPerformanceList playerStats={report.playerStats} peopleById={peopleById} /></div>}
         </div>
       )}
 
       <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
         <button onClick={() => (t.status === "paused" ? tResumeTournament() : tPauseTournament())} style={btnSecondary}>{t.status === "paused" ? "เล่นต่อ" : "พักการแข่งขัน"}</button>
-        <button onClick={() => shareSummary(`🏆 BadQ Tournament\n${t.name}\n${t.teams.length} ทีม\n${t.format}\n${done}/${total} แมตช์`)} style={btnSecondary}><Share2 size={15} /> แชร์</button>
+        <button onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById))} style={btnSecondary}><Share2 size={15} /> แชร์</button>
         <button onClick={() => setConfirmComplete(true)} style={{ ...btnPrimary, background: T.accent }}><LogOut size={15} /> จบ Tournament</button>
       </div>
+      {/* v1.11.4: Export PDF available on the live dashboard too — same buildTournamentResultReport +
+          TournamentPrintView as the completed-tournament History page, so an in-progress event can
+          already be exported/printed mid-tournament (partial bracket, no fake podium). */}
+      <button onClick={() => onOpenTournamentPrint && onOpenTournamentPrint(report)} style={{ ...btnPrimary, width: "100%", marginTop: 8, background: T.green }}><Download size={15} /> Export PDF</button>
       <button onClick={() => exportTournamentJSON(t, playersById)} style={{ ...btnSecondary, width: "100%", marginTop: 8 }}><Download size={15} /> ส่งออกข้อมูล Tournament (JSON)</button>
 
       {pendingCascade && (
@@ -5559,7 +5827,7 @@ function fmtThaiMonthLabel(ym) {
   if (!y || !m) return ym;
   return `${MO[m - 1]} ${y + 543}`;
 }
-function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
+function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
   const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
@@ -5676,7 +5944,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHist
 
       {openT && (
         <Overlay onClose={() => setOpenTId(null)}>
-          <TournamentHistoricalDetail t={openT} playersById={playersById} />
+          <TournamentHistoricalDetail t={openT} playersById={playersById} onOpenTournamentPrint={onOpenTournamentPrint} />
         </Overlay>
       )}
 
@@ -6256,6 +6524,214 @@ function FinancePrintView({ report, onClose }) {
   );
 }
 
+/* ============ v1.11.4: dedicated Tournament PDF export ============
+   Same print-to-PDF mechanism as FinancePrintView (proven, already used in this app): a full-screen
+   print-only view mounted via an early return in App() so the bottom nav/tabs/edit controls are
+   guaranteed absent from both the on-screen preview and the saved PDF — never a screenshot of the
+   mobile UI, and built entirely from the SAME buildTournamentResultReport used by the Summary page/
+   Podium/Bracket/Share text (never a separate calculation of champion/scores for the PDF).
+   Design note: every page stays A4-portrait, including the bracket page, rather than switching to
+   landscape mid-document — mixing page orientations inside one print job is unreliable across
+   browsers/OS print pipelines (notably iOS Safari's Share-Sheet print path, which cannot be verified
+   from this headless environment) — so the bracket instead uses a compact multi-column layout sized
+   to fit A4-portrait width for up to 4 rounds (16 teams), falling back to a stacked round-by-round
+   layout for bigger brackets where a forced side-by-side layout would otherwise turn illegible. */
+function tournamentPdfFilename(t) {
+  const clean = (t.name || "Tournament").replace(/[^\p{L}\p{N}\- ]/gu, "").trim().replace(/\s+/g, "-");
+  return `BadQ_${clean || "Tournament"}_${t.date || "report"}`;
+}
+function PrintPodiumBlock({ podium, teamsById, peopleById }) {
+  if (!podium || !podium.champion) {
+    return <div style={{ textAlign: "center", padding: "16px 0", color: "#6b7d74", fontSize: 12.5 }}>ยังไม่ทราบผู้ชนะ — Tournament กำลังดำเนินอยู่</div>;
+  }
+  const champTeam = teamsById[podium.champion];
+  const champName = tTeamName(champTeam, peopleById);
+  const runnerTeam = podium.runnerUp ? teamsById[podium.runnerUp] : null;
+  const runnerName = runnerTeam ? tTeamName(runnerTeam, peopleById) : null;
+  const thirdIds = podium.thirdIds || [];
+  const thirdNames = thirdIds.map((id) => tTeamName(teamsById[id], peopleById));
+  return (
+    <div className="tpv-avoidbreak" style={{ textAlign: "center", marginBottom: 12 }}>
+      <div style={{ border: "1.5px solid #d97706", background: "#fff8ec", borderRadius: 10, padding: "14px 10px", marginBottom: 8 }}>
+        <div style={{ fontSize: 32 }}>🏆</div>
+        <div style={{ fontSize: 11, color: "#d97706", fontWeight: 800, letterSpacing: 0.5, marginBottom: 5 }}>แชมป์เปี้ยน</div>
+        <PodiumTeamPeople team={champTeam} peopleById={peopleById} photoSize={36} fontSize={12.5} gap={16} />
+      </div>
+      {(runnerName || thirdNames.length > 0) && (
+        <div style={{ display: "flex", gap: 8 }}>
+          {runnerName && (
+            <div style={{ flex: 1, border: "1px solid #dde5e1", borderRadius: 8, padding: "8px 6px" }}>
+              <div style={{ fontSize: 20 }}>🥈</div>
+              <div style={{ fontSize: 10, color: "#6b7d74", fontWeight: 700, marginBottom: 4 }}>รองแชมป์</div>
+              <PodiumTeamPeople team={runnerTeam} peopleById={peopleById} photoSize={26} fontSize={11} gap={8} maxWidth={54} />
+            </div>
+          )}
+          {thirdNames.length > 0 && (
+            <div style={{ flex: 1, border: "1px solid #dde5e1", borderRadius: 8, padding: "8px 6px" }}>
+              <div style={{ fontSize: 20 }}>🥉</div>
+              <div style={{ fontSize: 10, color: "#6b7d74", fontWeight: 700, marginBottom: 4 }}>{thirdNames.length > 1 ? "ร่วมอันดับ 3" : "อันดับ 3"}</div>
+              {thirdIds.length > 1 ? (
+                <div style={{ display: "flex", gap: 5 }}>
+                  {thirdIds.map((id) => <div key={id} style={{ flex: 1, minWidth: 0 }}><PodiumTeamPeople team={teamsById[id]} peopleById={peopleById} photoSize={16} fontSize={8} gap={3} maxWidth={30} /></div>)}
+                </div>
+              ) : (
+                <PodiumTeamPeople team={teamsById[thirdIds[0]]} peopleById={peopleById} photoSize={26} fontSize={11} gap={8} maxWidth={54} />
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+function PrintBracket({ divisions, teamsById, peopleById }) {
+  const th = { fontSize: 9.5, fontWeight: 800, color: "#6b7d74", textAlign: "center", marginBottom: 4 };
+  const renderMatch = (m) => {
+    const lbl = tMatchLabel(m, teamsById, peopleById);
+    const sc = matchScoreText(m);
+    return (
+      <div key={m.id} style={{ border: "1px solid #dde5e1", borderRadius: 6, padding: "5px 6px", marginBottom: 5, fontSize: 9.5 }}>
+        <div style={{ fontWeight: m.winnerTeamId === m.teamAId ? 800 : 500, color: m.winnerTeamId === m.teamAId ? "#12986a" : "#16241d" }}>{lbl.a}</div>
+        <div style={{ fontWeight: m.winnerTeamId === m.teamBId ? 800 : 500, color: m.winnerTeamId === m.teamBId ? "#12986a" : "#16241d" }}>{lbl.b}</div>
+        {sc && <div style={{ color: "#6b7d74", fontSize: 8.5, marginTop: 1 }}>{sc}</div>}
+      </div>
+    );
+  };
+  return (
+    <div>
+      {divisions.map((d) => {
+        if (!d.bracket) return null;
+        const rounds = bracketRoundsWithFixedLabels(d.bracket);
+        const wide = rounds.length <= 4;
+        // no break-avoidance wrapper on the div below on purpose: a bracket can span many rows/pages,
+        // and an unbreakable box taller than one page forces the WHOLE thing onto the next page instead
+        // of flowing naturally — leaving a near-blank page behind it (found via a real 32-team-bracket
+        // PDF render during testing). Each match card/round-title chunk is small enough to paginate
+        // cleanly on its own without needing the wrapper.
+        return (
+          <div key={d.id} style={{ marginBottom: 16 }}>
+            {divisions.length > 1 && <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>{d.name}</div>}
+            {wide ? (
+              <div style={{ display: "flex", gap: 8 }}>
+                {rounds.map((r) => (
+                  <div key={r.index} style={{ flex: 1, minWidth: 0 }}>
+                    <div style={th}>{r.label}</div>
+                    {r.matchIds.map((mid) => { const m = d.bracket.matches.find((x) => x.id === mid); return m ? renderMatch(m) : null; })}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              // CSS grid, not flexbox, for the match cards: Chromium's print pagination treats a
+              // flex container as one atomic unbreakable block, so a flex-wrap grid of many matches
+              // either fits entirely on the current page or jumps whole to the next one — leaving a
+              // near-blank page behind it for a big bracket. A grid's cells paginate individually.
+              rounds.map((r) => (
+                <div key={r.index} style={{ marginBottom: 10 }}>
+                  <div style={{ ...th, textAlign: "left" }}>{r.label}</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    {r.matchIds.map((mid) => { const m = d.bracket.matches.find((x) => x.id === mid); return m ? <div key={mid}>{renderMatch(m)}</div> : null; })}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+function TournamentPrintView({ report, onClose }) {
+  const { t, teamsById, peopleById, divisions, totals, playerStats, podium, isCompleted } = report;
+  // best-effort filename hint for "Save as PDF" — most browsers title the suggested PDF file after
+  // document.title at the moment window.print() is invoked; restored on unmount so it never leaks
+  // into the rest of the app (tab title, etc).
+  useEffect(() => {
+    const original = document.title;
+    document.title = tournamentPdfFilename(t);
+    return () => { document.title = original; };
+  }, []);
+  const groupsFlat = divisions.flatMap((d) => (d.groups || []).map((g) => ({ ...g, divisionName: d.name })));
+  const hasQualifyMarks = groupsFlat.some((g) => (g.teamIds || []).some((id) => teamsById[id]?.groupRank != null));
+  return (
+    <div style={{ background: "#fff", color: "#16241d", minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      <style>{`
+        @media print {
+          @page { size: A4 portrait; margin: 14mm; }
+          html, body { background: #fff !important; } /* app's own body bg (#f3f6f4) would otherwise
+            show through any leftover space past the last printed page's content */
+          .tpv-noprint { display: none !important; }
+          .tpv-page { padding: 0 !important; }
+          .tpv-avoidbreak { break-inside: avoid; }
+          .tpv-pagebreak { page-break-before: always; }
+          * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+      `}</style>
+      <div className="tpv-noprint" style={{ position: "sticky", top: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#16241d", color: "#fff", zIndex: 5 }}>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 14, fontWeight: 700 }}>‹ ปิด</button>
+        <button onClick={() => window.print()} style={{ background: "#fff", color: "#16241d", border: "none", borderRadius: 20, padding: "8px 16px", fontSize: 13.5, fontWeight: 800 }}>🖨️ พิมพ์ / บันทึกเป็น PDF</button>
+      </div>
+      <div className="tpv-page" style={{ maxWidth: 780, margin: "0 auto", padding: "20px 18px 60px", boxSizing: "border-box" }}>
+        <div className="tpv-avoidbreak" style={{ textAlign: "center", marginBottom: 18 }}>
+          <div style={{ fontSize: 20, fontWeight: 800, color: "#12986a" }}>BadQ</div>
+          <div style={{ fontSize: 16, fontWeight: 800, marginTop: 4 }}>{t.name || "Tournament ไม่มีชื่อ"}</div>
+          <div style={{ fontSize: 12, color: "#6b7d74", marginTop: 3 }}>{fmtThaiDateFull(t.date)} · {totals.teamCount} ทีม · {totals.playerCount} คน · {totals.stagePath}</div>
+          {!isCompleted && <div style={{ display: "inline-block", marginTop: 6, padding: "3px 10px", borderRadius: 20, background: "#fef3c7", color: "#92400e", fontSize: 11, fontWeight: 800 }}>สถานะ: กำลังแข่งขัน</div>}
+        </div>
+        <PrintPodiumBlock podium={podium} teamsById={teamsById} peopleById={peopleById} />
+
+        {totals.hasBracket && (
+          <div className="tpv-pagebreak">
+            <PrintSectionTitle>Knockout Bracket</PrintSectionTitle>
+            <PrintBracket divisions={divisions} teamsById={teamsById} peopleById={peopleById} />
+          </div>
+        )}
+
+        {totals.hasGroups && (
+          <div className="tpv-pagebreak">
+            <PrintSectionTitle>ผลรอบแบ่งกลุ่ม (Group Stage)</PrintSectionTitle>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              {groupsFlat.map((g) => {
+                const gTeams = (g.teamIds || []).map((id) => teamsById[id]).filter(Boolean);
+                const qualifyCount = gTeams.filter((tm) => tm && tm.groupRank != null).length;
+                const standings = computeStandings(gTeams, g.matches || [], t.pointsConfig);
+                return (
+                  <div key={g.id} className="tpv-avoidbreak">
+                    <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 4 }}>Group {g.name}</div>
+                    <PrintTable
+                      headers={["ทีม", "P", "W", "L", "Pts", "+/-"]}
+                      rightCols={[1, 2, 3, 4, 5]}
+                      rows={standings.map((row, i) => {
+                        const team = gTeams.find((tm) => tm.id === row.teamId);
+                        return [`${i + 1}. ${team ? tTeamName(team, peopleById) : "-"}${qualifyCount > 0 && i < qualifyCount ? " ✓" : ""}`, row.played, row.win, row.loss, row.points, (row.diff > 0 ? "+" : "") + row.diff];
+                      })}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            {hasQualifyMarks && <div style={{ fontSize: 9.5, color: "#12986a", marginTop: 6 }}>✓ ผ่านเข้ารอบ Knockout</div>}
+          </div>
+        )}
+
+        {playerStats.length > 0 && (
+          <div className="tpv-pagebreak">
+            <PrintSectionTitle>สถิติผู้เล่น</PrintSectionTitle>
+            <PrintTable
+              headers={["ผู้เล่น", "ชนะ", "แพ้"]}
+              rightCols={[1, 2]}
+              rows={[...playerStats].sort((a, b) => b.wins - a.wins).map((ps) => [peopleById[ps.playerId]?.name || "?", ps.wins, ps.losses])}
+            />
+          </div>
+        )}
+
+        <div style={{ textAlign: "center", fontSize: 10.5, color: "#6b7d74", marginTop: 24, borderTop: "1px solid #dde5e1", paddingTop: 10 }}>
+          สร้างจาก BadQ · {fmtGeneratedAt(Date.now())}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ‹ month › nav shared by รายวัน and รายเดือน — arrows jump to the nearest ACTIVE month (can skip empty
 // months/years entirely, Requirement 3); tapping the label opens the compact picker sheet instead of a
 // full calendar (Requirement 3/19).
@@ -6592,57 +7068,185 @@ function ApplyCreditsConfirm({ player, credits, applyDiscountCredits, onClose })
 // Read-only snapshot view of an archived Tournament from tournamentHistory. Player display level /
 // skillIndex shown here come from t.playerSnapshots — frozen at the moment the Tournament was
 // completed — never the player's current (possibly later-edited) level, per the archive rule.
-function TournamentHistoricalDetail({ t, playersById }) {
+// v1.11.4: shared header used by the completed Summary page (and, later, the live in-progress
+// dashboard + PDF export) — shows the tournament's own logo exactly like the History list rows do.
+function TournamentResultHeader({ t, totals, statusLabel }) {
+  return (
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 14 }}>
+      {t.logo ? (
+        <img src={t.logo} alt="" style={{ width: 42, height: 42, borderRadius: 12, objectFit: "cover", flexShrink: 0 }} />
+      ) : (
+        <div style={{ width: 42, height: 42, borderRadius: 12, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>🏆</div>
+      )}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 17, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name || "Tournament ไม่มีชื่อ"}</div>
+        <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2 }}>{fmtThaiDate(t.date)} · {totals.playerCount} คน · {totals.teamCount} ทีม · {totals.stagePath}</div>
+        {statusLabel && <div style={{ fontSize: 11.5, color: T.amber, fontWeight: 800, marginTop: 3 }}>สถานะ: {statusLabel}</div>}
+      </div>
+    </div>
+  );
+}
+// v1.11.4: replaces the old flat champion/runnerUp/third MiniStat row with a real podium. Shows
+// "เส้นทางสู่แชมป์" (never a fabricated result) until a division actually has a decided champion —
+// used identically for an in-progress division (podium.champion === null) and a completed one.
+// Supports a shared/joint 3rd place (podium.thirdIds may hold 2 ids from both semifinal losers).
+// v1.11.4: shows a team's player photo(s) inside a Podium box. Singles -> one centered photo.
+// Doubles -> one photo on the left, one on the right (per explicit request), so a pair's two faces
+// bookend the box instead of just showing a name.
+// v1.11.4 (podium photo alignment fix): each player gets their own photo-above-name column instead
+// of stretching photos to the box's outer edges (space-between) with a separate combined name line
+// below — that made photos hug the left/right edges while the "Alice + Bob" text sat centered in the
+// middle, misaligned with either photo. Columns are centered as a group so a single name always sits
+// directly beneath its own photo, for both singles and doubles teams.
+function PodiumPersonCol({ p, photoSize, fontSize, maxWidth }) {
+  if (!p) return null;
+  // Avatar is a fixed-width block box; text-align:center on the wrapper only centers inline content
+  // (the name), not a block child, so without this explicit flex+justifyContent the photo can sit
+  // off-center relative to the name whenever maxWidth is wider than the photo itself. Wrapping it in
+  // its own centered flex row guarantees the photo's center-X always matches the name's center-X.
+  return (
+    <div style={{ textAlign: "center", minWidth: 0, maxWidth: maxWidth || photoSize + 26 }}>
+      <div style={{ display: "flex", justifyContent: "center" }}><Avatar p={p} size={photoSize} /></div>
+      <div style={{ fontSize, fontWeight: 700, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name || "?"}</div>
+    </div>
+  );
+}
+function PodiumTeamPeople({ team, peopleById, photoSize, fontSize, gap = 14, maxWidth }) {
+  const pids = (team?.playerIds || []).slice(0, 2);
+  if (pids.length === 0) return null;
+  return (
+    <div style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", gap, flexWrap: "nowrap" }}>
+      {pids.map((pid) => <PodiumPersonCol key={pid} p={peopleById[pid]} photoSize={photoSize} fontSize={fontSize} maxWidth={maxWidth} />)}
+    </div>
+  );
+}
+function TournamentPodium({ podium, teamsById, peopleById }) {
+  if (!podium || !podium.champion) {
+    return (
+      <div style={{ textAlign: "center", padding: "20px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, marginBottom: 14 }}>
+        <div style={{ fontSize: 28 }}>🏆</div>
+        <div style={{ fontSize: 14.5, fontWeight: 800, marginTop: 2 }}>เส้นทางสู่แชมป์</div>
+        <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>ยังไม่ทราบผู้ชนะ — ติดตามผลแต่ละคู่ได้ด้านล่าง</div>
+      </div>
+    );
+  }
+  const champTeam = teamsById[podium.champion];
+  const champName = tTeamName(champTeam, peopleById);
+  const runnerTeam = podium.runnerUp ? teamsById[podium.runnerUp] : null;
+  const runnerName = runnerTeam ? tTeamName(runnerTeam, peopleById) : null;
+  const thirdIds = podium.thirdIds || [];
+  const thirdNames = thirdIds.map((id) => tTeamName(teamsById[id], peopleById));
+  const GOLD = "#d97706", BRONZE = "#c2703d";
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ textAlign: "center", padding: "18px 14px", background: "#fff8ec", border: `1.5px solid ${GOLD}`, borderRadius: 14, marginBottom: 8 }}>
+        <div style={{ fontSize: 42 }}>🏆</div>
+        <div style={{ fontSize: 11.5, color: GOLD, fontWeight: 800, letterSpacing: 0.5, marginTop: 2, marginBottom: 6 }}>แชมป์เปี้ยน</div>
+        <PodiumTeamPeople team={champTeam} peopleById={peopleById} photoSize={42} fontSize={13} gap={18} />
+      </div>
+      {(runnerName || thirdNames.length > 0) && (
+        <div style={{ display: "flex", gap: 8 }}>
+          {runnerName && (
+            <div style={{ flex: 1, textAlign: "center", padding: "10px 8px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, minWidth: 0 }}>
+              <div style={{ fontSize: 26 }}>🥈</div>
+              <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, marginTop: 1, marginBottom: 5 }}>รองแชมป์</div>
+              <PodiumTeamPeople team={runnerTeam} peopleById={peopleById} photoSize={30} fontSize={11.5} gap={10} maxWidth={62} />
+            </div>
+          )}
+          {thirdNames.length > 0 && (
+            <div style={{ flex: 1, textAlign: "center", padding: "10px 8px", background: T.surface, border: `1px solid ${BRONZE}55`, borderRadius: 12, minWidth: 0 }}>
+              <div style={{ fontSize: 26 }}>🥉</div>
+              <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, marginTop: 1, marginBottom: 5 }}>{thirdNames.length > 1 ? "ร่วมอันดับ 3" : "อันดับ 3"}</div>
+              {thirdIds.length > 1 ? (
+                // joint 3rd: the box splits into a left half (first team's own photo+name column(s))
+                // and a right half (the other team's), per explicit request — not one merged row.
+                // Text/photos shrink further here (per user's "บีบให้เล็กลง" request) so names fit on
+                // one line without wrapping in the cramped half-width space.
+                <div style={{ display: "flex", gap: 6 }}>
+                  {thirdIds.map((id) => <div key={id} style={{ flex: 1, minWidth: 0 }}><PodiumTeamPeople team={teamsById[id]} peopleById={peopleById} photoSize={18} fontSize={8.5} gap={4} maxWidth={34} /></div>)}
+                </div>
+              ) : (
+                <PodiumTeamPeople team={teamsById[thirdIds[0]]} peopleById={peopleById} photoSize={30} fontSize={11.5} gap={10} maxWidth={62} />
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+function TournamentHistoricalDetail({ t, playersById, onOpenTournamentPrint }) {
   const snapById = Object.fromEntries((t.playerSnapshots || []).map((p) => [p.id, p]));
   const peopleById = { ...playersById, ...snapById, ...Object.fromEntries((t.guestPlayers || []).map((g) => [g.id, g])) };
   const teamsById = Object.fromEntries((t.teams || []).map((tm) => [tm.id, tm]));
+  // v1.11.4: podium/totals are recomputed fresh from the live bracket/match data every render (never
+  // trusted from the frozen d.champion/d.third fields) so an edited result always reflects correctly —
+  // this is the same buildTournamentResultReport used by the live dashboard, Share, and PDF export.
+  const report = buildTournamentResultReport(t, peopleById);
   return (
     <div>
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 17, fontWeight: 800 }}>🏆 {t.name || "Tournament ไม่มีชื่อ"}</div>
-        <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2 }}>{fmtThaiDate(t.date)} · {(t.playerSnapshots || []).length} คน · {(t.teams || []).length} ทีม · {t.courtCount || 1} สนาม · {TOURNAMENT_FORMAT_LABELS[t.format] || t.format}</div>
-      </div>
+      <TournamentResultHeader t={t} totals={report.totals} />
+      {report.mainDivision && <TournamentPodium podium={report.mainDivision.podium} teamsById={teamsById} peopleById={peopleById} />}
 
-      <button
-        onClick={() => shareSummary(`🏆 BadQ Tournament\n${t.name}\n${(t.teams || []).length} ทีม\n${TOURNAMENT_FORMAT_LABELS[t.format] || t.format}\n${t.matchCount || 0} แมตช์`)}
-        style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 10 }}
-      ><Share2 size={15} /> แชร์สรุป Tournament</button>
-      <button onClick={() => exportTournamentJSON(t, playersById)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 18 }}><Download size={15} /> ส่งออกข้อมูล Tournament (JSON)</button>
-
-      {t.divisions.map((d) => (
+      {report.divisions.map((d) => (
         <div key={d.id} style={{ marginBottom: 18 }}>
-          {t.divisions.length > 1 && <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>{d.name}</div>}
-          <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-            {d.champion && <MiniStat label="🏆 แชมป์" value={tTeamName(teamsById[d.champion], peopleById)} />}
-            {d.runnerUp && <MiniStat label="🥈 รองแชมป์" value={tTeamName(teamsById[d.runnerUp], peopleById)} />}
-            {d.third && <MiniStat label="🥉 อันดับ 3" value={tTeamName(teamsById[d.third], peopleById)} />}
-          </div>
-          {d.bracket && <BracketView bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={d.champion} groupNameById={Object.fromEntries((d.groups || []).map((g) => [g.id, g.name]))} />}
-          {d.groups && d.groups.length > 0 && d.groups.map((g) => (
-            <div key={g.id} style={{ marginBottom: 14, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 10 }}>
-              <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Group {g.name}</div>
-              <StandingsTable teams={g.teamIds.map((id) => teamsById[id])} matches={g.matches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
-            </div>
-          ))}
+          {report.divisions.length > 1 && <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>{d.name}</div>}
+          {report.divisions.length > 1 && <TournamentPodium podium={d.podium} teamsById={teamsById} peopleById={peopleById} />}
+          {d.bracket && <TournamentBracket bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={d.podium.champion} groupNameById={Object.fromEntries((d.groups || []).map((g) => [g.id, g.name]))} />}
+          {d.groups && d.groups.length > 0 && <GroupStandingsTabs groups={d.groups} teamsById={teamsById} peopleById={peopleById} pointsConfig={t.pointsConfig} />}
           {!d.bracket && (!d.groups || !d.groups.length) && (d.matches?.length > 0 || d.swissMatches?.length > 0) && (
-            <StandingsTable teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches?.length ? d.matches : d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
+            <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches?.length ? d.matches : d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
           )}
         </div>
       ))}
 
+      <PlayerPerformanceList playerStats={report.playerStats} peopleById={peopleById} />
+
+      {/* v1.11.4: compact share/export bar at the very bottom, per spec — PDF is the polished
+          user-facing report and sits at the same visual tier as Share; the old JSON export is kept
+          (still needed as a data backup/import path) but demoted to a small text-link below, not
+          given equal visual weight with the new PDF button. */}
+      <SectionHead icon={<Share2 size={16} color={T.green} />} title="แชร์และส่งออก" />
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <button
+          onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById))}
+          style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}
+        ><Share2 size={15} /> แชร์สรุป</button>
+        <button
+          onClick={() => onOpenTournamentPrint && onOpenTournamentPrint(report)}
+          style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}
+        ><Download size={15} /> Export PDF</button>
+      </div>
+      <button onClick={() => exportTournamentJSON(t, playersById)} style={{ width: "100%", textAlign: "center", padding: "8px 0", marginBottom: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700, textDecoration: "underline" }}>ข้อมูล/สำรอง/เพิ่มเติม — ส่งออก JSON</button>
+    </div>
+  );
+}
+// v1.11.4: top-5 by wins + a "ดูทั้งหมด" drill-down for the rest, instead of the full list always
+// fully expanded — one of the biggest single contributors to a long Summary page for big tournaments.
+function PlayerPerformanceList({ playerStats, peopleById }) {
+  const [showAll, setShowAll] = useState(false);
+  const sorted = [...(playerStats || [])].sort((a, b) => b.wins - a.wins || a.losses - b.losses);
+  const shown = showAll ? sorted : sorted.slice(0, 5);
+  const Row = (ps) => {
+    const p = peopleById[ps.playerId];
+    return (
+      <div key={ps.playerId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+        <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p?.name || "?"}</span>
+        <span style={{ fontSize: 11.5, color: T.muted }}>{ps.wins}W - {ps.losses}L</span>
+      </div>
+    );
+  };
+  return (
+    <div>
       <SectionHead icon={<User size={16} color={T.green} />} title="สถิติผู้เล่น" sub="ชนะ-แพ้ ใน Tournament นี้" />
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {(t.playerStats || []).length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีข้อมูล</div> :
-          [...(t.playerStats || [])].sort((a, b) => b.wins - a.wins).map((ps) => {
-            const p = peopleById[ps.playerId];
-            return (
-              <div key={ps.playerId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
-                <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p?.name || "?"}</span>
-                <span style={{ fontSize: 11.5, color: T.muted }}>{ps.wins}W - {ps.losses}L</span>
-              </div>
-            );
-          })}
+        {sorted.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีข้อมูล</div> : shown.map(Row)}
       </div>
+      {sorted.length > 5 && (
+        <button onClick={() => setShowAll((v) => !v)} style={{ width: "100%", textAlign: "center", padding: "9px 0", marginTop: 8, borderRadius: 10, background: "none", border: "none", color: T.green, fontSize: 12.5, fontWeight: 800 }}>
+          {showAll ? "▲ ย่อกลับ" : `▼ ดูทั้งหมด (${sorted.length} คน)`}
+        </button>
+      )}
     </div>
   );
 }
