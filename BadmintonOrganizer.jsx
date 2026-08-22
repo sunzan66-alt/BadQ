@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.0";
+const APP_VERSION = "1.11.1";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -84,7 +84,13 @@ const PSTATUS = {
 const PSTATUS_OPTS = ["absent", "registered", "ready", "resting", "left"];
 // v1.9.17: handedness badge on the Player Card — a violet distinct from every skill-level color
 // (LEVEL_COLORS_BY_INDEX has no purple), every PSTATUS color, T.blue, and T.accent, as specified.
-const HAND_BADGE = { color: "#7c3aed", bg: "#efe7fc" };
+// v1.11.1: ขวา (right) and ซ้าย (left) now get their own distinct colors (previously both purple,
+// making them indistinguishable at a glance in the player list) — right keeps the original violet,
+// left gets a magenta/pink that isn't used anywhere else in the badge system.
+const HAND_BADGE = {
+  right: { color: "#7c3aed", bg: "#efe7fc" },
+  left: { color: "#db2777", bg: "#fce7f3" },
+};
 const HAND_LABEL = { left: "ซ้าย", right: "ขวา" };
 const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
 // backward-compatible: old data used `present` boolean; old data also has no skillIndex yet — derive it
@@ -518,59 +524,81 @@ function todayYm() { const d = new Date(); return `${d.getFullYear()}-${String(d
 // Single financial calculation source for the whole Finance page — รายวัน/รายเดือน/ภาพรวม all read through
 // these instead of each computing its own totals, per the redesign's IMPLEMENTATION PRINCIPLE. Every function
 // here reuses the EXISTING sessionRevenue/sessionExpenseTotal/etc — no parallel accounting, no duplicated data.
-function computeFinanceForRange(range, sessionHistory, generalExpenses, otherIncome) {
+// v1.11.1: added `tournamentHistory` as a trailing optional param throughout this whole aggregation
+// chain (defaults to [] everywhere so any not-yet-updated caller can't crash) — completed Tournaments
+// now feed into the SAME overall financial reports as ก๊วน sessions, per organizer request. Only
+// ARCHIVED tournaments (tournamentHistory) count, keyed by the Tournament's own `.date` — mirrors how
+// the live `session` isn't counted until it's ended into sessionHistory; an in-progress Tournament's
+// finances aren't final (registration/expenses can still change) so it stays out of these totals until
+// completed, exactly like an ongoing ก๊วน session's revenue doesn't count until it's archived.
+function computeFinanceForRange(range, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
   const sessionsInRange = (sessionHistory || []).filter((s) => inPeriod(s.date, range)).sort((a, b) => (b.endedAt || 0) - (a.endedAt || 0));
   const genExpInRange = (generalExpenses || []).filter((e) => inPeriod(e.date, range));
   const otherIncInRange = (otherIncome || []).filter((e) => inPeriod(e.date, range));
+  const tournamentsInRange = (tournamentHistory || []).filter((t) => inPeriod(t.date, range));
   const sessionRevenueTotal = sessionsInRange.reduce((sum, s) => sum + sessionRevenue(s), 0);
   const sessionCollectedTotal = sessionsInRange.reduce((sum, s) => sum + sessionCollected(s), 0);
   const sessionExpenseSum = sessionsInRange.reduce((sum, s) => sum + sessionExpenseTotal(s), 0);
   const otherIncomeTotal = otherIncInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   const genExpenseTotal = genExpInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
-  const revenue = sessionRevenueTotal + otherIncomeTotal; // รายได้ = ยอดเรียกเก็บ + รายได้อื่น
-  const collected = sessionCollectedTotal + otherIncomeTotal;
-  const expense = sessionExpenseSum + genExpenseTotal;
+  // entryFee only ever counts PAID teams and manual finance.income is logged when actually received (no
+  // separate paid/unpaid tracking like session bills have) — so, unlike session revenue, ALL Tournament
+  // income here is already "collected", not merely billed.
+  const tournamentFinances = tournamentsInRange.map((t) => tournamentFinanceTotals(t));
+  const tournamentIncomeTotal = tournamentFinances.reduce((s, f) => s + f.income, 0);
+  const tournamentExpenseTotal = tournamentFinances.reduce((s, f) => s + f.expense, 0);
+  const revenue = sessionRevenueTotal + otherIncomeTotal + tournamentIncomeTotal; // รายได้ = ยอดเรียกเก็บ + รายได้อื่น + รายได้ Tournament
+  const collected = sessionCollectedTotal + otherIncomeTotal + tournamentIncomeTotal;
+  const expense = sessionExpenseSum + genExpenseTotal + tournamentExpenseTotal;
   const profit = revenue - expense; // กำไร/ขาดทุน = รายได้ - ค่าใช้จ่าย เสมอ (ไม่ใช่ รับแล้ว - ค่าใช้จ่าย)
   const catTotals = {};
   sessionsInRange.forEach((s) => sessionExpenseList(s).forEach((e) => { catTotals[e.category] = (catTotals[e.category] || 0) + (Number(e.amount) || 0); }));
   genExpInRange.forEach((e) => { catTotals[e.category] = (catTotals[e.category] || 0) + (Number(e.amount) || 0); });
-  return { range, sessionsInRange, genExpInRange, otherIncInRange, sessionRevenueTotal, sessionCollectedTotal, otherIncomeTotal, genExpenseTotal, revenue, collected, expense, profit, catTotals };
+  // Tournament expense categories use their own key namespace (see TOURNAMENT_EXPENSE_CATEGORIES) —
+  // translated to Thai and prefixed with 🏆 so they read clearly alongside ก๊วน expense categories
+  // without colliding with (or being confused for) them in the breakdown.
+  tournamentsInRange.forEach((t) => (t.finance?.expense || []).forEach((e) => {
+    const key = `🏆 ${TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category}`;
+    catTotals[key] = (catTotals[key] || 0) + (Number(e.amount) || 0);
+  }));
+  return { range, sessionsInRange, genExpInRange, otherIncInRange, tournamentsInRange, sessionRevenueTotal, sessionCollectedTotal, otherIncomeTotal, genExpenseTotal, tournamentIncomeTotal, tournamentExpenseTotal, revenue, collected, expense, profit, catTotals };
 }
-function getFinanceForDate(dateStr, sessionHistory, generalExpenses, otherIncome) {
-  return computeFinanceForRange({ from: dateStr, to: dateStr }, sessionHistory, generalExpenses, otherIncome);
+function getFinanceForDate(dateStr, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  return computeFinanceForRange({ from: dateStr, to: dateStr }, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
 }
-function getFinanceForMonth(ym, sessionHistory, generalExpenses, otherIncome) {
-  return computeFinanceForRange({ from: `${ym}-01`, to: `${ym}-${String(lastDayOfMonth(ym)).padStart(2, "0")}` }, sessionHistory, generalExpenses, otherIncome);
+function getFinanceForMonth(ym, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  return computeFinanceForRange({ from: `${ym}-01`, to: `${ym}-${String(lastDayOfMonth(ym)).padStart(2, "0")}` }, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
 }
-function getFinanceForYear(year, sessionHistory, generalExpenses, otherIncome) {
-  return computeFinanceForRange({ from: `${year}-01-01`, to: `${year}-12-31` }, sessionHistory, generalExpenses, otherIncome);
+function getFinanceForYear(year, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  return computeFinanceForRange({ from: `${year}-01-01`, to: `${year}-12-31` }, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
 }
-function getFinanceAllTime(sessionHistory, generalExpenses, otherIncome) {
-  return computeFinanceForRange({ from: "0000-01-01", to: "9999-12-31" }, sessionHistory, generalExpenses, otherIncome);
+function getFinanceAllTime(sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  return computeFinanceForRange({ from: "0000-01-01", to: "9999-12-31" }, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
 }
 // every "YYYY-MM-DD" with ANY financial activity — a ก๊วน session OR a standalone general-expense/other-income
-// entry. A standalone expense with no group still needs to be reachable in รายวัน (Requirement 16), so this is
-// NOT just sessionHistory's dates.
-function activeDateSet(sessionHistory, generalExpenses, otherIncome) {
+// entry, OR a completed Tournament's date. A standalone expense with no group still needs to be reachable in
+// รายวัน (Requirement 16), so this is NOT just sessionHistory's dates.
+function activeDateSet(sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
   const set = new Set();
   (sessionHistory || []).forEach((s) => { if (s.date) set.add(s.date); });
   (generalExpenses || []).forEach((e) => { if (e.date) set.add(e.date); });
   (otherIncome || []).forEach((e) => { if (e.date) set.add(e.date); });
+  (tournamentHistory || []).forEach((t) => { if (t.date) set.add(t.date); });
   return set;
 }
-function getActiveDates(ym, sessionHistory, generalExpenses, otherIncome) {
-  const set = activeDateSet(sessionHistory, generalExpenses, otherIncome);
+function getActiveDates(ym, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  const set = activeDateSet(sessionHistory, generalExpenses, otherIncome, tournamentHistory);
   return [...set].filter((d) => d.slice(0, 7) === ym).sort().reverse(); // newest -> oldest
 }
 // every "YYYY-MM" with activity, across ALL years, newest first — the single list that powers both รายวัน's
 // and รายเดือน's month-nav arrows, so "previous" can skip straight over an empty month (or empty year).
-function getActiveMonths(sessionHistory, generalExpenses, otherIncome) {
-  const set = activeDateSet(sessionHistory, generalExpenses, otherIncome);
+function getActiveMonths(sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  const set = activeDateSet(sessionHistory, generalExpenses, otherIncome, tournamentHistory);
   const months = new Set([...set].map((d) => d.slice(0, 7)));
   return [...months].sort().reverse();
 }
-function getActiveYears(sessionHistory, generalExpenses, otherIncome) {
-  const months = getActiveMonths(sessionHistory, generalExpenses, otherIncome);
+function getActiveYears(sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  const months = getActiveMonths(sessionHistory, generalExpenses, otherIncome, tournamentHistory);
   const years = new Set(months.map((m) => m.slice(0, 4)));
   return [...years].sort().reverse();
 }
@@ -582,17 +610,17 @@ function adjacentActiveMonth(ym, dir, months) {
   return greater.length ? greater[greater.length - 1] : null;
 }
 // per-day breakdown for one month — powers รายเดือน's "ผลประกอบการรายวัน" drill-down list
-function financeByDay(ym, sessionHistory, generalExpenses, otherIncome) {
-  return getActiveDates(ym, sessionHistory, generalExpenses, otherIncome).map((d) => {
-    const f = getFinanceForDate(d, sessionHistory, generalExpenses, otherIncome);
+function financeByDay(ym, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  return getActiveDates(ym, sessionHistory, generalExpenses, otherIncome, tournamentHistory).map((d) => {
+    const f = getFinanceForDate(d, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
     return { date: d, sessionCount: f.sessionsInRange.length, revenue: f.revenue, expense: f.expense, profit: f.profit };
   });
 }
 // per-month breakdown for one year (or "all" for lifetime) — powers ภาพรวม's "ผลประกอบการรายเดือน" list
-function financeByMonthForYear(year, sessionHistory, generalExpenses, otherIncome) {
-  const months = getActiveMonths(sessionHistory, generalExpenses, otherIncome).filter((m) => year === "all" || m.slice(0, 4) === String(year));
+function financeByMonthForYear(year, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
+  const months = getActiveMonths(sessionHistory, generalExpenses, otherIncome, tournamentHistory).filter((m) => year === "all" || m.slice(0, 4) === String(year));
   return months.map((ym) => {
-    const f = getFinanceForMonth(ym, sessionHistory, generalExpenses, otherIncome);
+    const f = getFinanceForMonth(ym, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
     return { ym, sessionCount: f.sessionsInRange.length, revenue: f.revenue, expense: f.expense, profit: f.profit };
   });
 }
@@ -704,13 +732,22 @@ function buildTransactionDetail(f) {
   });
   f.otherIncInRange.forEach((e) => rows.push({ date: e.date, type: "revenue", category: "รายได้อื่น", description: e.description || "รายได้อื่น", session: "-", amount: Number(e.amount) || 0 }));
   f.genExpInRange.forEach((e) => rows.push({ date: e.date, type: "expense", category: e.category || "อื่น ๆ", description: e.description || e.category || "รายการ", session: "-", amount: Number(e.amount) || 0 }));
+  // v1.11.1: completed Tournaments' own transactions (entry-fee income, sponsor/other income, expenses)
+  // shown at line-item level too, same as ก๊วน sessions above — keeps the export/print detail table
+  // consistent with the totals in computeFinanceForRange, which already fold these in.
+  (f.tournamentsInRange || []).forEach((t) => {
+    const entryFee = tournamentEntryFeeTotal(t);
+    if (entryFee > 0) rows.push({ date: t.date, type: "revenue", category: "🏆 ค่าสมัคร", description: t.name || "Tournament", session: t.name || "-", amount: entryFee });
+    (t.finance?.income || []).forEach((e) => rows.push({ date: t.date, type: "revenue", category: `🏆 ${TOURNAMENT_INCOME_CAT_LABEL[e.category] || e.category}`, description: e.label || t.name || "Tournament", session: t.name || "-", amount: Number(e.amount) || 0 }));
+    (t.finance?.expense || []).forEach((e) => rows.push({ date: t.date, type: "expense", category: `🏆 ${TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category}`, description: e.label || e.category || "รายการ", session: t.name || "-", amount: Number(e.amount) || 0 }));
+  });
   rows.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
   return rows;
 }
 // THE single normalized report object — TXT/PDF/XLSX all render straight from this, never recompute totals themselves.
 function buildFinancialReport(period, ctx) {
-  const { sessionHistory, generalExpenses, otherIncome, discountCredits } = ctx;
-  const f = computeFinanceForRange(period.range, sessionHistory, generalExpenses, otherIncome);
+  const { sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory = [] } = ctx;
+  const f = computeFinanceForRange(period.range, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
   const sessions = f.sessionsInRange.map((s) => ({
     date: s.date,
     name: s.name || "ก๊วนไม่มีชื่อ",
@@ -736,7 +773,7 @@ function buildFinancialReport(period, ctx) {
     period,
     generatedAt: Date.now(),
     summary: { revenue: f.revenue, collected: f.collected, receivable: f.revenue - f.collected, expense: f.expense, profit: f.profit },
-    pnl: { groupRevenue: f.sessionRevenueTotal, otherIncome: f.otherIncomeTotal, totalRevenue: f.revenue, expenseByCategory: f.catTotals, totalExpense: f.expense, netProfit: f.profit },
+    pnl: { groupRevenue: f.sessionRevenueTotal, otherIncome: f.otherIncomeTotal, tournamentIncome: f.tournamentIncomeTotal, tournamentExpense: f.tournamentExpenseTotal, totalRevenue: f.revenue, expenseByCategory: f.catTotals, totalExpense: f.expense, netProfit: f.profit },
     sessions,
     transactions: buildTransactionDetail(f),
     outstandingPayments: outstandingPaymentsForSessions(f.sessionsInRange),
@@ -807,6 +844,7 @@ function buildFinancialReportTxt(report) {
   L.push("กำไรขาดทุน"); L.push("");
   L.push(padTxtRow("รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)));
   L.push(padTxtRow("รายได้อื่น", formatCurrency(report.pnl.otherIncome)));
+  if (report.pnl.tournamentIncome > 0) L.push(padTxtRow("รายได้ Tournament", formatCurrency(report.pnl.tournamentIncome)));
   L.push(padTxtRow("รายได้รวม", formatCurrency(report.pnl.totalRevenue)));
   L.push(""); L.push("ค่าใช้จ่าย");
   Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => { L.push(padTxtRow(cat, formatCurrency(amt))); });
@@ -1050,6 +1088,7 @@ function buildFinancialXlsxSummarySheet(report) {
   pushRow("สรุปกำไรขาดทุน", null, XLSX_STYLE.boldText);
   pushRow("รายได้ค่าก๊วน", report.pnl.groupRevenue);
   pushRow("รายได้อื่น", report.pnl.otherIncome);
+  if (report.pnl.tournamentIncome > 0) pushRow("รายได้ Tournament", report.pnl.tournamentIncome);
   pushRow("รายได้รวม", report.pnl.totalRevenue, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
   Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => pushRow(cat, amt));
   pushRow("ค่าใช้จ่ายรวม", report.pnl.totalExpense, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
@@ -1960,10 +1999,15 @@ function totalTournamentMatchCount(tournament) {
 // v1.10.0: registration-fee progress. Fee income from PAID teams is what feeds tournamentFinanceTotals()
 // below as "entry fee" revenue — unpaid teams contribute nothing until toggled paid (tToggleTeamPaid).
 const TOURNAMENT_EXPENSE_CATEGORIES = [["court", "สนาม/สถานที่"], ["shuttle", "ลูกขนไก่"], ["prize", "รางวัล/ถ้วย"], ["other", "อื่นๆ"]];
+// v1.11.1: Thai label lookup for the keys above — used when a completed Tournament's expense entries
+// get merged into the overall financial report's catTotals breakdown (see computeFinanceForRange), so
+// they render as readable Thai text ("🏆 สนาม/สถานที่") instead of the raw storage key ("court").
+const TOURNAMENT_EXPENSE_CAT_LABEL = Object.fromEntries(TOURNAMENT_EXPENSE_CATEGORIES);
 // "entry" (ค่าสมัคร) is deliberately NOT a selectable manual category here — it's shown as a read-only
 // auto-computed row in TournamentFinancePanel (tournamentEntryFeeTotal) instead, so there is exactly one
 // way entry-fee income can enter the totals and no way for an organizer to accidentally double-log it.
 const TOURNAMENT_INCOME_CATEGORIES = [["sponsor", "สปอนเซอร์"], ["other", "รายได้อื่นๆ"]];
+const TOURNAMENT_INCOME_CAT_LABEL = Object.fromEntries(TOURNAMENT_INCOME_CATEGORIES);
 function registrationProgress(t) {
   if (!t) return { paid: 0, total: 0 };
   const total = (t.teams || []).length;
@@ -3633,7 +3677,7 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
                 <select value={p.skillIndex} onChange={(e) => setPLevel(p.id, Number(e.target.value))} style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, border: "none", borderRadius: 7, padding: "3px 6px" }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex} style={{ background: "#fff", color: "#000" }}>{o.label}</option>)}</select>
-                <span style={{ background: HAND_BADGE.bg, color: HAND_BADGE.color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span>
+                <span style={{ background: HAND_BADGE[p.handedness === "left" ? "left" : "right"].bg, color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span>
               </div>
             </div>
             {playingIds && playingIds.has(p.id)
@@ -3677,7 +3721,7 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onClose })
   const handBtn = (v, label) => (
     <button
       onClick={() => setHandedness(v)}
-      style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${handedness === v ? HAND_BADGE.color : T.border}`, background: handedness === v ? HAND_BADGE.bg : T.surface, color: handedness === v ? HAND_BADGE.color : T.text, fontWeight: 800, fontSize: 13.5 }}
+      style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${handedness === v ? HAND_BADGE[v].color : T.border}`, background: handedness === v ? HAND_BADGE[v].bg : T.surface, color: handedness === v ? HAND_BADGE[v].color : T.text, fontWeight: 800, fontSize: 13.5 }}
     >{label}</button>
   );
   return (
@@ -4094,6 +4138,17 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, o
   const [courtCount, setCourtCount] = useState(2);
   const [format, setFormat] = useState("knockout");
   const [matchMode, setMatchMode] = useState("doubles"); // doubles | singles — Tournament's own, independent of Casual's `mode`
+  // v1.11.1: let the organizer attach a logo right at creation (step 1), same as adding a photo when
+  // quick-adding a new member (see draftPhoto/cropJob in the Members list) or the ก๊วน header's own photo
+  // button — previously a Tournament logo could only be added AFTER creation via the ✎ profile editor.
+  const [draftLogo, setDraftLogo] = useState(null);
+  const wizardLogoFileRef = useRef();
+  const [wizardCropJob, setWizardCropJob] = useState(null); // raw picked-image src awaiting crop, or null
+  const onWizardLogoFile = async (e) => {
+    const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
+    const raw = await fileToDataURL(f).catch(() => null);
+    if (raw) setWizardCropJob(raw);
+  };
   // step 2
   const [teamEntryMode, setTeamEntryMode] = useState("individual");
   const [selectedIds, setSelectedIds] = useState([]);
@@ -4205,6 +4260,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, o
       guestPlayers, teams: allTeams, divisions: divisionsClean,
       pointsConfig: { win: 3, draw: 1, loss: 0 }, handicap: { mode: handicapMode }, doubleRound,
       qualifyTopN, groupCount, matchMode,
+      logo: draftLogo,
     });
     onCreate(tournament);
   };
@@ -4223,6 +4279,25 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, o
 
       {step === 1 && (
         <div>
+          <input ref={wizardLogoFileRef} type="file" accept="image/*" onChange={onWizardLogoFile} style={{ display: "none" }} />
+          {wizardCropJob && (
+            <ImageCropper
+              src={wizardCropJob}
+              circleGuide={false}
+              title="จัดตำแหน่งโลโก้ทัวร์นาเมนต์"
+              onCancel={() => setWizardCropJob(null)}
+              onConfirm={(data) => { setDraftLogo(data); setWizardCropJob(null); }}
+            />
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+            <button onClick={() => wizardLogoFileRef.current.click()} style={{ flexShrink: 0, width: 56, height: 56, borderRadius: 14, background: T.surface2, border: `1px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", padding: 0 }}>
+              {draftLogo ? <img src={draftLogo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={20} color={T.muted} />}
+            </button>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <button onClick={() => wizardLogoFileRef.current.click()} style={{ padding: "7px 12px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{draftLogo ? "เปลี่ยนโลโก้" : "เพิ่มโลโก้ (ไม่บังคับ)"}</button>
+              {draftLogo && <button onClick={() => setDraftLogo(null)} style={{ marginLeft: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบ</button>}
+            </div>
+          </div>
           <Label>ชื่อ Tournament</Label>
           <input value={name} onChange={(e) => setName(e.target.value)} placeholder="เช่น BadQ Championship" style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
           <Label>วันที่</Label>
@@ -5570,7 +5645,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint }) {
+function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint, tournamentHistory }) {
   // v1.9.9 IA cleanup (Phase 1): "ชำระเงิน" is no longer a standalone bottom-nav tab — it now lives here as
   // a sub-tab, reusing PaymentTab UNCHANGED (same payment logic/state/fee calc — no duplicated payment
   // system). Defaults to ชำระเงิน while a group session is actively running so the organizer lands where
@@ -5583,8 +5658,8 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
   const [pickerOpen, setPickerOpen] = useState(null); // "day-month" | "month-month" | "year" | null
   const [exportSheetOpen, setExportSheetOpen] = useState(false); // ส่งออกรายงานการเงิน (Financial Report Export)
 
-  const allMonths = useMemo(() => getActiveMonths(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
-  const allYears = useMemo(() => getActiveYears(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
+  const allMonths = useMemo(() => getActiveMonths(sessionHistory, generalExpenses, otherIncome, tournamentHistory), [sessionHistory, generalExpenses, otherIncome, tournamentHistory]);
+  const allYears = useMemo(() => getActiveYears(sessionHistory, generalExpenses, otherIncome, tournamentHistory), [sessionHistory, generalExpenses, otherIncome, tournamentHistory]);
   const defaultYm = allMonths[0] || todayYm();
 
   const [dayYm, setDayYm] = useState(defaultYm); // month currently shown by รายวัน's date-chip row
@@ -5592,7 +5667,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
   const [monthYm, setMonthYm] = useState(defaultYm); // month currently shown by รายเดือน
   const [year, setYear] = useState(allYears[0] || "all"); // "YYYY" or "all" — ภาพรวม's selected period
 
-  const datesInDayYm = useMemo(() => getActiveDates(dayYm, sessionHistory, generalExpenses, otherIncome), [dayYm, sessionHistory, generalExpenses, otherIncome]);
+  const datesInDayYm = useMemo(() => getActiveDates(dayYm, sessionHistory, generalExpenses, otherIncome, tournamentHistory), [dayYm, sessionHistory, generalExpenses, otherIncome, tournamentHistory]);
   const effectiveDate = datesInDayYm.includes(selectedDate) ? selectedDate : (datesInDayYm[0] || null);
   // ส่งออกรายงานการเงิน (Financial Report Export) — always follows whatever period is CURRENTLY selected on
   // this page (Requirement #2); the sheet itself may additionally offer a custom-range override.
@@ -5645,13 +5720,13 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
         <>
           <MonthNav ym={dayYm} months={allMonths} onChange={(ym) => { setDayYm(ym); setSelectedDate(null); }} onOpenPicker={() => setPickerOpen("day-month")} />
           {datesInDayYm.length === 0 ? emptyBlock("ไม่มีรายการในเดือนนี้") : (() => {
-            const f = getFinanceForDate(effectiveDate, sessionHistory, generalExpenses, otherIncome);
+            const f = getFinanceForDate(effectiveDate, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
             return (
               <>
                 <DayChipRow dates={datesInDayYm} selected={effectiveDate} onSelect={setSelectedDate} />
                 <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>{fmtThaiDateFull(effectiveDate)}</div>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinanceGroupsList title="ก๊วนในวันนี้" sessions={f.sessionsInRange} onOpen={setOpenId} />
                 <SectionHead title="ค่าใช้จ่ายทั่วไป" sub="ไม่ผูกกับก๊วน" />
@@ -5668,14 +5743,14 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
         <>
           <MonthNav ym={monthYm} months={allMonths} onChange={setMonthYm} onOpenPicker={() => setPickerOpen("month-month")} />
           {(() => {
-            const f = getFinanceForMonth(monthYm, sessionHistory, generalExpenses, otherIncome);
-            const empty = f.sessionsInRange.length === 0 && f.genExpInRange.length === 0 && f.otherIncInRange.length === 0;
+            const f = getFinanceForMonth(monthYm, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
+            const empty = f.sessionsInRange.length === 0 && f.genExpInRange.length === 0 && f.otherIncInRange.length === 0 && f.tournamentsInRange.length === 0;
             if (empty) return emptyBlock("ไม่มีรายการในเดือนนี้");
-            const days = financeByDay(monthYm, sessionHistory, generalExpenses, otherIncome);
+            const days = financeByDay(monthYm, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
             return (
               <>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinancePerformanceList title="ผลประกอบการรายวัน" rows={days.map((d) => ({ key: d.date, label: fmtThaiMonthDay(d.date), count: d.sessionCount, profit: d.profit }))} onPick={goDay} />
                 <SectionHead title="ค่าใช้จ่ายทั่วไป" sub="ไม่ผูกกับก๊วน" />
@@ -5696,12 +5771,12 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
             </button>
           </div>
           {(() => {
-            const f = year === "all" ? getFinanceAllTime(sessionHistory, generalExpenses, otherIncome) : getFinanceForYear(year, sessionHistory, generalExpenses, otherIncome);
-            const months = financeByMonthForYear(year, sessionHistory, generalExpenses, otherIncome);
+            const f = year === "all" ? getFinanceAllTime(sessionHistory, generalExpenses, otherIncome, tournamentHistory) : getFinanceForYear(year, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
+            const months = financeByMonthForYear(year, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
             return (
               <>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinancePerformanceList title="ผลประกอบการรายเดือน" rows={months.map((m) => ({ key: m.ym, label: fmtThaiMonthLabel(m.ym), count: null, profit: m.profit }))} onPick={goMonth} />
                 <SectionHead title="ค่าใช้จ่ายทั่วไป" sub="ไม่ผูกกับก๊วน" />
@@ -5735,6 +5810,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
           generalExpenses={generalExpenses}
           otherIncome={otherIncome}
           discountCredits={discountCredits}
+          tournamentHistory={tournamentHistory}
           onOpenPrint={onOpenFinancePrint}
           onClose={() => setExportSheetOpen(false)}
         />
@@ -5749,7 +5825,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
 // Compact entry point's sheet: shows the period currently being exported (always follows what's selected on
 // the Finance page — Requirement #2 — with an optional custom-range override scoped to export only, so it
 // never touches the Finance page's own period selection), a live preview, then TXT / Excel / PDF.
-function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, otherIncome, discountCredits, onOpenPrint, onClose }) {
+function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory, onOpenPrint, onClose }) {
   const [customOn, setCustomOn] = useState(false);
   const [customFrom, setCustomFrom] = useState(defaultPeriod ? defaultPeriod.range.from.slice(0, 10) : "");
   const [customTo, setCustomTo] = useState(defaultPeriod ? defaultPeriod.range.to.slice(0, 10) : "");
@@ -5761,8 +5837,8 @@ function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, ot
     return defaultPeriod;
   }, [customOn, customFrom, customTo, defaultPeriod]);
 
-  const ctx = { sessionHistory, generalExpenses, otherIncome, discountCredits };
-  const report = useMemo(() => (period ? buildFinancialReport(period, ctx) : null), [period, sessionHistory, generalExpenses, otherIncome, discountCredits]); // eslint-disable-line react-hooks/exhaustive-deps
+  const ctx = { sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory };
+  const report = useMemo(() => (period ? buildFinancialReport(period, ctx) : null), [period, sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isEmpty = report && report.sessions.length === 0 && report.transactions.length === 0 && report.outstandingPayments.length === 0 && report.discountCredits.length === 0;
 
@@ -5915,6 +5991,7 @@ function FinancePrintView({ report, onClose }) {
           rows={[
             ["รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)],
             ["รายได้อื่น", formatCurrency(report.pnl.otherIncome)],
+            ...(report.pnl.tournamentIncome > 0 ? [["รายได้ Tournament", formatCurrency(report.pnl.tournamentIncome)]] : []),
             ["รายได้รวม", formatCurrency(report.pnl.totalRevenue)],
             ...expenseRows.map(([cat, amt]) => [cat, formatCurrency(amt)]),
             ["ค่าใช้จ่ายรวม", formatCurrency(report.pnl.totalExpense)],
@@ -6014,13 +6091,14 @@ function FinanceSummaryCard({ revenue, expense, profit }) {
 }
 
 // สรุปกำไรขาดทุน — same P&L shape at every period level (Requirement 5/7/10), one shared renderer
-function FinancePL({ sessionRevenueTotal, otherIncomeTotal, catTotals, expense, profit }) {
+function FinancePL({ sessionRevenueTotal, otherIncomeTotal, tournamentIncomeTotal, catTotals, expense, profit }) {
   return (
     <>
       <SectionHead title="สรุปกำไรขาดทุน" />
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 18 }}>
         <BillRow label="รายได้ (ค่าก๊วน)" v={sessionRevenueTotal} />
         <BillRow label="รายได้อื่น" v={otherIncomeTotal} />
+        {tournamentIncomeTotal > 0 && <BillRow label="รายได้ 🏆 Tournament" v={tournamentIncomeTotal} />}
         <div style={{ height: 4 }} />
         {Object.keys(catTotals).length === 0
           ? <div style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>ไม่มีค่าใช้จ่ายในช่วงนี้</div>
@@ -6855,7 +6933,7 @@ const PAIR_RULE_META = {
 // lock-pair editor. Unlike PAIR_RULE_META above these describe a single PLAYER, not an A-B pair, so they
 // key onto player.handPref (via setHandPref) instead of into the lockPairs array.
 const HAND_PREF_META = {
-  preferLeft: { label: "อยากคู่กับมือซ้าย", short: "อยากคู่มือซ้าย", bg: HAND_BADGE.bg, border: "#ddc8fb", color: HAND_BADGE.color },
+  preferLeft: { label: "อยากคู่กับมือซ้าย", short: "อยากคู่มือซ้าย", bg: HAND_BADGE.left.bg, border: "#ddc8fb", color: HAND_BADGE.left.color },
   avoidLeft: { label: "ไม่อยากคู่กับมือซ้าย", short: "ไม่อยากคู่มือซ้าย", bg: "#fdecec", border: "#f5c9c9", color: "#c0392b" },
 };
 function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, setHandPref, getP }) {
