@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.16";
+      var CURRENT_VERSION = "1.9.17";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.16";
+const APP_VERSION = "1.9.17";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -545,6 +545,11 @@ const PSTATUS = {
     color: "#6b7d74",
     bg: "#eef2f0"
   },
+  registered: {
+    label: "ลงทะเบียน",
+    color: "#4f46e5",
+    bg: "#eef0fd"
+  },
   ready: {
     label: "พร้อมเล่น",
     color: "#12986a",
@@ -566,7 +571,7 @@ const PSTATUS = {
     bg: "#f1eafd"
   }
 };
-const PSTATUS_OPTS = ["absent", "ready", "resting", "left"];
+const PSTATUS_OPTS = ["absent", "registered", "ready", "resting", "left"];
 const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
 // backward-compatible: old data used `present` boolean; old data also has no skillIndex yet — derive it
 // from the (isan-based) label so matchmaking strength is 100% preserved across the upgrade.
@@ -583,8 +588,13 @@ const normPlayer = p => ({
   carriedInDiscount: p.carriedInDiscount || 0,
   spun: p.spun || false,
   wheelResult: p.wheelResult || null,
-  skillIndex: p.skillIndex || WEIGHT[p.level] || 1
+  skillIndex: p.skillIndex || WEIGHT[p.level] || 1,
+  handedness: p.handedness === "left" ? "left" : "right",
+  handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null
 });
+const HAND_BADGE = { color: "#7c3aed", bg: "#efe7fc" };
+const HAND_LABEL = { left: "ซ้าย", right: "ขวา" };
+const HAND_PREF_WEIGHT = 1;
 
 // true once the viewport is wide enough to benefit from a landscape/tablet layout (multi-column court
 // cards, wider content column) — re-evaluated live on rotate/resize, no page reload needed.
@@ -740,6 +750,16 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
     }
     return true;
   };
+  // v1.9.17: "อยากคู่/ไม่อยากคู่กับมือถนัดซ้าย" — a SOFT preference, never a hard filter (unlike lockOk
+  // above). Nudges the score for a candidate partnership x+y up/down; if NO split satisfies anyone's
+  // preference the match still forms normally, just picking whichever split scores lowest overall.
+  const handPrefNudge = (x, y) => {
+    const px = players.find(pp => pp.id === x),
+      py = players.find(pp => pp.id === y);
+    if (!px || !py) return 0;
+    const of = (pref, partner) => pref === "preferLeft" ? partner.handedness === "left" ? -HAND_PREF_WEIGHT : 0 : pref === "avoidLeft" ? partner.handedness === "left" ? HAND_PREF_WEIGHT : 0 : 0;
+    return of(px.handPref, py) + of(py.handPref, px);
+  };
   let best = null;
   for (const trio of kcomb(others, 3)) {
     const four = [anchor, ...trio];
@@ -752,7 +772,8 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
       const pRep = pc(A[0], A[1]) + pc(B[0], B[1]);
       const oRep = oc(A[0], B[0]) + oc(A[0], B[1]) + oc(A[1], B[0]) + oc(A[1], B[1]);
       const waitPen = idxOf(trio[0]) + idxOf(trio[1]) + idxOf(trio[2]);
-      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4;
+      const handPen = handPrefNudge(A[0], A[1]) + handPrefNudge(B[0], B[1]);
+      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4 + handPen;
       if (!best || score < best.score) best = {
         score,
         teamA: A,
@@ -972,7 +993,7 @@ function formatCurrency(amount, opts) {
 }
 // expense: reuse existing court+shuttle logic; split "other" equally among attendees
 function computeBill(players, settings) {
-  const payers = players.filter(p => p.status && p.status !== "absent");
+  const payers = players.filter(p => p.status && p.status !== "absent" && p.status !== "registered");
   const n = payers.length || 1;
   const otherShare = (settings.other || 0) / n;
   // model D (รายคน) is the ONLY cost model that changes REVENUE — it overrides the flat per-person court
@@ -3858,7 +3879,9 @@ function App() {
       pendingDiscount: 0,
       carriedInDiscount: 0,
       spun: false,
-      wheelResult: null
+      wheelResult: null,
+      handedness: "right",
+      handPref: null
     }]);
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
@@ -3962,6 +3985,21 @@ function App() {
       skillIndex: si,
       level: displayLevelFor(si, settings)
     } : p));
+  };
+  // v1.9.17: backs the new "แก้ไขสมาชิก" modal — patch is { name?, skillIndex?, handedness? }. Recomputes
+  // the cached `level` label whenever skillIndex is part of the patch, same as setPLevel above, so the two
+  // never drift out of sync. Deliberately does NOT touch status/photo (status has its own quick-dropdown;
+  // photo keeps using the existing openPhoto()+crop flow) — those interactions stay exactly as they were.
+  const updatePlayer = (id, patch) => {
+    setPlayers(prev => prev.map(p => {
+      if (p.id !== id) return p;
+      const next = {
+        ...p,
+        ...patch
+      };
+      if (patch.skillIndex != null) next.level = displayLevelFor(next.skillIndex, settings);
+      return next;
+    }));
   };
   // switch the active level-preset: skillIndex (matchmaking) never changes, only the cached display label
   // is recomputed for every player so their level badge reflects the new preset immediately.
@@ -4759,6 +4797,13 @@ function App() {
     });
   };
   const removeLockPair = id => setLockPairs(prev => prev.filter(r => r.id !== id));
+  // v1.9.17: "อยากคู่/ไม่อยากคู่กับมือถนัดซ้าย" — surfaced through the existing lock-pair dropdown
+  // (see LockPairEditor) but stored as a soft per-player preference, not a lockPairs A-B entry: set the
+  // `pref` ("preferLeft" | "avoidLeft") key onto player.handPref instead. Pass null to clear.
+  const setHandPref = (id, pref) => setPlayers(prev => prev.map(p => p.id === id ? {
+    ...p,
+    handPref: pref === "preferLeft" || pref === "avoidLeft" ? pref : null
+  } : p));
   const resetGames = () => setPlayers(prev => prev.map(p => ({
     ...p,
     games: 0
@@ -5631,6 +5676,7 @@ function App() {
     resetAllToAbsent,
     setStatus,
     setPLevel,
+    updatePlayer,
     delPlayer,
     openPhoto,
     settings,
@@ -5657,6 +5703,7 @@ function App() {
     lockPairs,
     addLockPair,
     removeLockPair,
+    setHandPref,
     genStart,
     startGame,
     endGame,
@@ -5857,6 +5904,7 @@ function MembersTab({
   resetAllToAbsent,
   setStatus,
   setPLevel,
+  updatePlayer,
   delPlayer,
   openPhoto,
   settings,
@@ -5866,6 +5914,7 @@ function MembersTab({
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("levelDesc");
   const [onlyPresent, setOnlyPresent] = useState(false);
+  const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
   const levelOptions = activeLevelOptions(settings);
   const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
   const [name, setName] = useState("");
@@ -5875,10 +5924,16 @@ function MembersTab({
   const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
   const list = useMemo(() => {
     let l = players.filter(p => p.name.toLowerCase().includes(q.trim().toLowerCase()));
-    if (onlyPresent) l = l.filter(p => p.status !== "absent");
+    // v1.9.17: "registered" hasn't actually arrived yet, so it doesn't count as "ที่มา" here either —
+    // same treatment as "absent" for this filter (everything else about "absent" logic is unchanged).
+    if (onlyPresent) l = l.filter(p => p.status !== "absent" && p.status !== "registered");
     return [...l].sort((a, b) => sort === "levelDesc" ? (b.skillIndex || 0) - (a.skillIndex || 0) || a.name.localeCompare(b.name) : sort === "levelAsc" ? (a.skillIndex || 0) - (b.skillIndex || 0) || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
   }, [players, q, sort, onlyPresent]);
   const readyCount = players.filter(p => p.status === "ready").length;
+  // v1.9.17: "registeredCount" = registered OR ready (anyone who said they're coming, per spec — this is
+  // the count a future court-count recommendation feature will build on; readyCount above stays the
+  // narrower "actually here right now" number, unchanged).
+  const registeredCount = players.filter(p => p.status === "registered" || p.status === "ready").length;
   // v1.9.11: brought the photo-at-creation control back into Quick Add (per explicit request) — lets the
   // organizer snap/attach a photo right when adding a new member, instead of only after via tap-to-edit.
   // v1.9.13: picking a file now opens the same crop/position step used everywhere else, instead of an
@@ -6129,12 +6184,21 @@ function MembersTab({
       alignItems: "center",
       gap: 10
     }
-  }, /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement("span", null, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: PSTATUS.registered.color,
+      fontWeight: 700
+    }
+  }, "ลงทะเบียน ", registeredCount), /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: T.muted
+    }
+  }, " · "), /*#__PURE__*/React.createElement("span", {
     style: {
       color: T.green,
       fontWeight: 700
     }
-  }, "พร้อมเล่น ", readyCount, " คน"), players.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }, "พร้อมเล่น ", readyCount)), players.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => setConfirmResetAll(true),
     title: "รีเซ็ตทุกคนเป็นไม่ได้มา (เริ่มวันใหม่)",
     style: {
@@ -6256,19 +6320,37 @@ function MembersTab({
       flex: 1,
       minWidth: 0
     }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditPlayerId(p.id),
+    style: {
+      display: "block",
+      width: "100%",
+      textAlign: "left",
+      border: "none",
+      background: "none",
+      padding: 0,
+      cursor: "pointer"
+    }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 14.5,
       fontWeight: 700,
       overflow: "hidden",
       textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
+      whiteSpace: "nowrap",
+      color: T.text
     }
-  }, p.name), /*#__PURE__*/React.createElement("select", {
+  }, p.name)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4,
+      marginTop: 4
+    }
+  }, /*#__PURE__*/React.createElement("select", {
     value: p.skillIndex,
     onChange: e => setPLevel(p.id, Number(e.target.value)),
     style: {
-      marginTop: 4,
       background: levelColor(p.skillIndex),
       color: "#fff",
       fontWeight: 800,
@@ -6284,7 +6366,16 @@ function MembersTab({
       background: "#fff",
       color: "#000"
     }
-  }, o.label)))), playingIds && playingIds.has(p.id) ? /*#__PURE__*/React.createElement("span", {
+  }, o.label))), /*#__PURE__*/React.createElement("span", {
+    style: {
+      background: HAND_BADGE.bg,
+      color: HAND_BADGE.color,
+      fontWeight: 800,
+      fontSize: 11,
+      borderRadius: 7,
+      padding: "3px 6px"
+    }
+  }, HAND_LABEL[p.handedness === "left" ? "left" : "right"]))), playingIds && playingIds.has(p.id) ? /*#__PURE__*/React.createElement("span", {
     style: {
       padding: "7px 12px",
       borderRadius: 20,
@@ -6327,7 +6418,164 @@ function MembersTab({
     }
   }, /*#__PURE__*/React.createElement(Trash2, {
     size: 15
-  }))))));
+  }))))), editPlayerId && players.find(p => p.id === editPlayerId) && /*#__PURE__*/React.createElement(EditPlayerModal, {
+    player: players.find(p => p.id === editPlayerId),
+    levelOptions: levelOptions,
+    onOpenPhoto: openPhoto,
+    onSave: patch => updatePlayer(editPlayerId, patch),
+    onClose: () => setEditPlayerId(null)
+  }));
+}
+
+// v1.9.17: "แก้ไขสมาชิก" — opened by tapping a player's NAME on the Player Card (Quick Edit ระดับฝีมือ,
+// Status dropdown, Delete, and the photo button are all untouched — this is an ADDITIONAL entry point,
+// not a replacement for any of them). Edits name/skill/handedness, plus a shortcut into the exact same
+// photo crop flow used everywhere else (onOpenPhoto = the existing openPhoto(id)). Pairing preference
+// ("อยากคู่/ไม่อยากคู่กับมือซ้าย") deliberately has NO control here — per spec it stays exclusively on
+// the existing ล็อคคู่/ข้อจำกัดคู่ editor (ตั้งค่าก๊วน sheet) rather than a new/duplicate one.
+function EditPlayerModal({
+  player,
+  levelOptions,
+  onOpenPhoto,
+  onSave,
+  onClose
+}) {
+  const [name, setName] = useState(player.name);
+  const [skillIndex, setSkillIndex] = useState(player.skillIndex);
+  const [handedness, setHandedness] = useState(player.handedness === "left" ? "left" : "right");
+  const save = () => {
+    const n = name.trim();
+    if (!n) return;
+    onSave({
+      name: n,
+      skillIndex,
+      handedness
+    });
+    onClose();
+  };
+  const handBtn = (v, label) => /*#__PURE__*/React.createElement("button", {
+    onClick: () => setHandedness(v),
+    style: {
+      flex: 1,
+      padding: "10px 0",
+      borderRadius: 11,
+      border: `1.5px solid ${handedness === v ? HAND_BADGE.color : T.border}`,
+      background: handedness === v ? HAND_BADGE.bg : T.surface,
+      color: handedness === v ? HAND_BADGE.color : T.text,
+      fontWeight: 800,
+      fontSize: 13.5
+    }
+  }, label);
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 14
+    }
+  }, "แก้ไขสมาชิก"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => onOpenPhoto(player.id),
+    style: {
+      position: "relative",
+      border: "none",
+      background: "none",
+      padding: 0,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement(Avatar, {
+    p: {
+      ...player,
+      name: name || player.name
+    },
+    size: 60
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      position: "absolute",
+      right: -2,
+      bottom: -2,
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, /*#__PURE__*/React.createElement(Camera, {
+    size: 11,
+    color: T.muted
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: T.muted
+    }
+  }, "แตะรูปเพื่อเปลี่ยน")), /*#__PURE__*/React.createElement(Label, null, "ชื่อ"), /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => setName(e.target.value),
+    style: {
+      width: "100%",
+      padding: "11px 12px",
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 14.5,
+      outline: "none",
+      boxSizing: "border-box",
+      marginBottom: 14
+    }
+  }), /*#__PURE__*/React.createElement(Label, null, "ระดับฝีมือ"), /*#__PURE__*/React.createElement("select", {
+    value: skillIndex,
+    onChange: e => setSkillIndex(Number(e.target.value)),
+    style: {
+      width: "100%",
+      padding: "11px 12px",
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 14.5,
+      fontWeight: 700,
+      marginBottom: 14,
+      boxSizing: "border-box"
+    }
+  }, levelOptions.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o.skillIndex + o.label,
+    value: o.skillIndex
+  }, o.label))), /*#__PURE__*/React.createElement(Label, null, "มือถนัด"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 6
+    }
+  }, handBtn("left", "ซ้าย"), handBtn("right", "ขวา")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginBottom: 16,
+      lineHeight: 1.5
+    }
+  }, "ความต้องการจับคู่กับมือซ้าย (อยาก/ไม่อยาก) ตั้งค่าได้ที่ ตั้งค่าก๊วน → ล็อคคู่/ข้อจำกัดคู่"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: btnSecondary
+  }, "ยกเลิก"), /*#__PURE__*/React.createElement("button", {
+    onClick: save,
+    style: btnPrimary
+  }, "บันทึก")));
 }
 
 // v1.9.9 IA cleanup (Phase 2): consolidates the level-preset switch (LevelPresetEditor, unchanged) and the
@@ -6498,6 +6746,7 @@ function SessionTab(props) {
     lockPairs,
     addLockPair,
     removeLockPair,
+    setHandPref,
     genStart,
     startGame,
     endGame,
@@ -7161,6 +7410,7 @@ function SessionTab(props) {
     lockPairs: lockPairs,
     addLockPair: addLockPair,
     removeLockPair: removeLockPair,
+    setHandPref: setHandPref,
     getP: getP,
     resetGames: resetGames,
     changeLevelPreset: changeLevelPreset,
@@ -9200,6 +9450,7 @@ function QuanSettingsSheet({
   lockPairs,
   addLockPair,
   removeLockPair,
+  setHandPref,
   getP,
   resetGames,
   changeLevelPreset,
@@ -9415,6 +9666,7 @@ function QuanSettingsSheet({
     lockPairs,
     addLockPair,
     removeLockPair,
+    setHandPref,
     getP
   }), /*#__PURE__*/React.createElement("button", {
     onClick: resetGames,
@@ -13289,7 +13541,7 @@ function SummaryTab({
   const [detail, setDetail] = useState(null); // player id for detail
   const doneCurrent = current.filter(m => m.status === "done");
   const totalMatches = history.length + doneCurrent.length;
-  const played = players.filter(p => (p.games || 0) > 0 || p.status !== "absent");
+  const played = players.filter(p => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered"));
   const gamesArr = played.map(p => p.games || 0);
   const minGames = gamesArr.length ? Math.min(...gamesArr) : 0;
   const maxGames = gamesArr.length ? Math.max(...gamesArr) : 0;
@@ -13631,7 +13883,7 @@ function PaymentTab({
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [openFinanceSettings, setOpenFinanceSettings] = useState(false);
   const doneCurrent = current.filter(m => m.status === "done");
-  const played = players.filter(p => (p.games || 0) > 0 || p.status !== "absent");
+  const played = players.filter(p => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered"));
   const bill = computeBill(players, settings);
   const billBy = id => bill.find(b => b.id === id);
   const grandTotal = bill.reduce((s, b) => s + b.total, 0);
@@ -14977,11 +15229,28 @@ const PAIR_RULE_META = {
     color: "#6d3fa8"
   }
 };
+const HAND_PREF_META = {
+  preferLeft: {
+    label: "อยากคู่กับมือซ้าย",
+    short: "อยากคู่มือซ้าย",
+    bg: HAND_BADGE.bg,
+    border: "#ddc8fb",
+    color: HAND_BADGE.color
+  },
+  avoidLeft: {
+    label: "ไม่อยากคู่กับมือซ้าย",
+    short: "ไม่อยากคู่มือซ้าย",
+    bg: "#fdecec",
+    border: "#f5c9c9",
+    color: "#c0392b"
+  }
+};
 function LockPairEditor({
   players,
   lockPairs,
   addLockPair,
   removeLockPair,
+  setHandPref,
   getP
 }) {
   const [a, setA] = useState("");
@@ -14997,7 +15266,16 @@ function LockPairEditor({
     fontSize: 13,
     minWidth: 0
   };
-  return /*#__PURE__*/React.createElement("div", null, lockPairs.length > 0 && /*#__PURE__*/React.createElement("div", {
+  const isHandPrefType = type === "preferLeft" || type === "avoidLeft";
+  const handPrefPlayers = players.filter(p => p.handPref === "preferLeft" || p.handPref === "avoidLeft");
+  const add = () => {
+    if (isHandPrefType) {
+      if (a) setHandPref(a, type);
+    } else addLockPair(a, b, type);
+    setA("");
+    setB("");
+  };
+  return /*#__PURE__*/React.createElement("div", null, (lockPairs.length > 0 || handPrefPlayers.length > 0) && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -15046,6 +15324,45 @@ function LockPairEditor({
     }, /*#__PURE__*/React.createElement(X, {
       size: 15
     })));
+  }), handPrefPlayers.map(p => {
+    const meta = HAND_PREF_META[p.handPref];
+    return /*#__PURE__*/React.createElement("div", {
+      key: p.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 11px",
+        borderRadius: 10,
+        background: meta.bg,
+        border: `1px solid ${meta.border}`
+      }
+    }, /*#__PURE__*/React.createElement(Unlock, {
+      size: 13,
+      color: meta.color
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        fontSize: 13,
+        fontWeight: 600
+      }
+    }, p.name), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 10.5,
+        fontWeight: 800,
+        color: meta.color
+      }
+    }, meta.short), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setHandPref(p.id, null),
+      style: {
+        background: "none",
+        border: "none",
+        color: T.muted,
+        display: "flex"
+      }
+    }, /*#__PURE__*/React.createElement(X, {
+      size: 15
+    })));
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -15062,7 +15379,7 @@ function LockPairEditor({
   }, "เลือกคน"), players.map(p => /*#__PURE__*/React.createElement("option", {
     key: p.id,
     value: p.id
-  }, p.name))), /*#__PURE__*/React.createElement("span", {
+  }, p.name))), !isHandPrefType && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("span", {
     style: {
       color: T.muted,
       fontWeight: 800
@@ -15076,7 +15393,7 @@ function LockPairEditor({
   }, "เลือกคน"), players.map(p => /*#__PURE__*/React.createElement("option", {
     key: p.id,
     value: p.id
-  }, p.name)))), /*#__PURE__*/React.createElement("div", {
+  }, p.name))))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
@@ -15093,12 +15410,11 @@ function LockPairEditor({
   }, Object.entries(PAIR_RULE_META).map(([k, m]) => /*#__PURE__*/React.createElement("option", {
     key: k,
     value: k
+  }, m.label)), Object.entries(HAND_PREF_META).map(([k, m]) => /*#__PURE__*/React.createElement("option", {
+    key: k,
+    value: k
   }, m.label))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      addLockPair(a, b, type);
-      setA("");
-      setB("");
-    },
+    onClick: add,
     style: {
       padding: "0 13px",
       height: 36,
