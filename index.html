@@ -35,7 +35,7 @@
   // lives in a separate storage area and is never affected by this).
   (function(){
     try{
-      var CURRENT_VERSION = "1.9.13";
+      var CURRENT_VERSION = "1.9.14";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just force-reloaded once, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -409,7 +409,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 // ===================== APP =====================
-const APP_VERSION = "1.9.13";
+const APP_VERSION = "1.9.14";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1336,6 +1336,626 @@ function resolveSessionLabel(sessId, session, sessionHistory) {
   if (hist) return `${hist.name || "ก๊วนไม่มีชื่อ"} · ${fmtThaiDate(hist.date)}`;
   if (session && session.id === sessId) return `${session.name || "ก๊วนไม่มีชื่อ"} · ${fmtThaiDate(session.date)}`;
   return "ก๊วนที่ผ่านมา";
+}
+
+// ===================== FINANCIAL REPORT EXPORT (v1.9.14) =====================
+// Single normalized report builder — reused byTXT/PDF-print/XLSX exporters so every export format shows
+// EXACTLY the same numbers as the Finance page (no parallel accounting, per the task's #3/#4 requirements).
+// `period` describes what range is being exported (see financePeriodMeta below); `ctx` bundles the raw
+// state the report is built from. This function only READS state — never mutates anything (Requirement #19).
+function fmtGeneratedAt(ts) {
+  const d = new Date(ts);
+  const MO = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+  const pad = n => String(n).padStart(2, "0");
+  return `${d.getDate()} ${MO[d.getMonth()]} ${d.getFullYear() + 543} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+// describes which period is currently selected on the Finance page (or a custom override chosen inside the
+// export sheet itself) — one shared shape consumed by buildFinancialReport() AND the filename builder, so
+// the exported data and the exported filename can never disagree about what range they cover.
+function financePeriodMeta(mode, effectiveDate, monthYm, year, custom) {
+  if (custom && custom.from && custom.to) {
+    const from = custom.from <= custom.to ? custom.from : custom.to;
+    const to = custom.from <= custom.to ? custom.to : custom.from;
+    return {
+      kind: "custom",
+      range: {
+        from,
+        to
+      },
+      label: `${fmtThaiDateFull(from)} – ${fmtThaiDateFull(to)}`,
+      filenameStub: `${from}_to_${to}`
+    };
+  }
+  if (mode === "day") {
+    if (!effectiveDate) return null;
+    return {
+      kind: "day",
+      range: {
+        from: effectiveDate,
+        to: effectiveDate
+      },
+      label: fmtThaiDateFull(effectiveDate),
+      filenameStub: effectiveDate
+    };
+  }
+  if (mode === "month") {
+    if (!monthYm) return null;
+    return {
+      kind: "month",
+      range: {
+        from: `${monthYm}-01`,
+        to: `${monthYm}-${String(lastDayOfMonth(monthYm)).padStart(2, "0")}`
+      },
+      label: fmtThaiMonthFull(monthYm),
+      filenameStub: monthYm
+    };
+  }
+  // mode === "overview" -> follows the ภาพรวม tab's year selector ("YYYY" | "all")
+  if (year === "all") return {
+    kind: "all",
+    range: {
+      from: "0000-01-01",
+      to: "9999-12-31"
+    },
+    label: "ทั้งหมด",
+    filenameStub: "All"
+  };
+  return {
+    kind: "year",
+    range: {
+      from: `${year}-01-01`,
+      to: `${year}-12-31`
+    },
+    label: `ปี ${Number(year) + 543}`,
+    filenameStub: String(year)
+  };
+}
+// every outstanding (not fully paid) player row across the sessions in range — Requirement #10
+function outstandingPaymentsForSessions(sessionsInRange) {
+  const rows = [];
+  sessionsInRange.forEach(s => {
+    (s.bill || []).forEach(b => {
+      const due = Number(b.total) || 0;
+      const collected = b.paid ? due : 0;
+      const outstanding = due - collected;
+      if (outstanding > 0) rows.push({
+        date: s.date,
+        sessionName: s.name || "ก๊วนไม่มีชื่อ",
+        playerName: b.name || "ผู้เล่น",
+        due,
+        collected,
+        outstanding
+      });
+    });
+  });
+  return rows;
+}
+// per-session + per-line-item transaction detail — DISPLAY ONLY (Requirement #9): totals in `summary`/`pnl`
+// always come from computeFinanceForRange, never re-summed from this list, so detail and totals can't drift.
+function buildTransactionDetail(f) {
+  const rows = [];
+  f.sessionsInRange.forEach(s => {
+    const rev = sessionRevenue(s);
+    if (rev > 0) rows.push({
+      date: s.date,
+      type: "revenue",
+      category: "ค่าก๊วน",
+      description: s.name || "ก๊วนไม่มีชื่อ",
+      session: s.name || "-",
+      amount: rev
+    });
+    sessionExpenseList(s).forEach(e => rows.push({
+      date: e.date || s.date,
+      type: "expense",
+      category: e.category || "อื่น ๆ",
+      description: e.description || e.category || "รายการ",
+      session: s.name || "-",
+      amount: Number(e.amount) || 0
+    }));
+  });
+  f.otherIncInRange.forEach(e => rows.push({
+    date: e.date,
+    type: "revenue",
+    category: "รายได้อื่น",
+    description: e.description || "รายได้อื่น",
+    session: "-",
+    amount: Number(e.amount) || 0
+  }));
+  f.genExpInRange.forEach(e => rows.push({
+    date: e.date,
+    type: "expense",
+    category: e.category || "อื่น ๆ",
+    description: e.description || e.category || "รายการ",
+    session: "-",
+    amount: Number(e.amount) || 0
+  }));
+  rows.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  return rows;
+}
+// THE single normalized report object — TXT/PDF/XLSX all render straight from this, never recompute totals themselves.
+function buildFinancialReport(period, ctx) {
+  const {
+    sessionHistory,
+    generalExpenses,
+    otherIncome,
+    discountCredits
+  } = ctx;
+  const f = computeFinanceForRange(period.range, sessionHistory, generalExpenses, otherIncome);
+  const sessions = f.sessionsInRange.map(s => ({
+    date: s.date,
+    name: s.name || "ก๊วนไม่มีชื่อ",
+    playerCount: (s.players || []).length,
+    matchCount: s.stats && typeof s.stats.totalMatches === "number" ? s.stats.totalMatches : (s.matches || []).length,
+    courtCount: s.courtCount || 0,
+    revenue: sessionRevenue(s),
+    collected: sessionCollected(s),
+    receivable: sessionReceivable(s),
+    expense: sessionExpenseTotal(s),
+    profit: sessionProfit(s)
+  }));
+  // ส่วนลดคงเหลือ (Requirement #11) — only "available" credits by default; a player who no longer exists
+  // in the live roster still shows via the frozen playerNameSnapshot, never dropped/crashed on.
+  const discountCreditRows = (discountCredits || []).filter(c => c.status === "available").map(c => ({
+    playerName: c.playerNameSnapshot || "ผู้เล่น",
+    amount: Number(c.amount) || 0,
+    sourceSession: resolveSessionLabel(c.sourceSessionId, null, sessionHistory) || "-",
+    createdAt: c.createdAt || null,
+    status: c.status
+  }));
+  return {
+    period,
+    generatedAt: Date.now(),
+    summary: {
+      revenue: f.revenue,
+      collected: f.collected,
+      receivable: f.revenue - f.collected,
+      expense: f.expense,
+      profit: f.profit
+    },
+    pnl: {
+      groupRevenue: f.sessionRevenueTotal,
+      otherIncome: f.otherIncomeTotal,
+      totalRevenue: f.revenue,
+      expenseByCategory: f.catTotals,
+      totalExpense: f.expense,
+      netProfit: f.profit
+    },
+    sessions,
+    transactions: buildTransactionDetail(f),
+    outstandingPayments: outstandingPaymentsForSessions(f.sessionsInRange),
+    discountCredits: discountCreditRows
+  };
+}
+// filename per Requirement #17 — always the Gregorian year, even though the UI displays พ.ศ. everywhere else
+function financeExportFilename(periodMeta, ext) {
+  return `BadQ_Finance_${periodMeta.filenameStub}.${ext}`;
+}
+// shared save/share path for every export format (Requirement #18) — same Web Share API (files) + direct-
+// download fallback already proven by the JSON backup export; never throws, always resolves with an outcome.
+async function shareOrDownloadBlob(blob, filename, mimeType) {
+  if (navigator.share && navigator.canShare) {
+    try {
+      const file = new File([blob], filename, {
+        type: mimeType
+      });
+      if (navigator.canShare({
+        files: [file]
+      })) {
+        await navigator.share({
+          files: [file],
+          title: filename
+        });
+        return "done";
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return "cancelled";
+      // any other share failure: fall through to the direct-download fallback below
+    }
+  }
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return "done";
+  } catch (e) {
+    try {
+      window.open(URL.createObjectURL(blob), "_blank");
+      return "done";
+    } catch (e2) {
+      return "failed";
+    }
+  }
+}
+
+// ===================== TXT EXPORT (Requirement #12) =====================
+// Plain readable text, UTF-8. Deliberately NOT fixed-width-column aligned (Thai glyph widths vary by font/
+// app, so exact alignment breaks) — just consistent left-label/right-value spacing, good enough to scan.
+function padTxtRow(label, value) {
+  const width = 22;
+  const gap = Math.max(1, width - label.length);
+  return label + " ".repeat(gap) + value;
+}
+function buildFinancialReportTxt(report) {
+  const L = [];
+  const sep = "==============================";
+  L.push("BadQ — รายงานการเงิน");
+  L.push(report.period.label);
+  L.push(`สร้างเมื่อ ${fmtGeneratedAt(report.generatedAt)}`);
+  L.push("");
+  L.push(sep);
+  L.push("");
+  L.push("สรุป");
+  L.push("");
+  L.push(padTxtRow("รายได้", formatCurrency(report.summary.revenue)));
+  L.push(padTxtRow("รับแล้ว", formatCurrency(report.summary.collected)));
+  L.push(padTxtRow("ค้างรับ", formatCurrency(report.summary.receivable)));
+  L.push(padTxtRow("ค่าใช้จ่าย", formatCurrency(report.summary.expense)));
+  L.push(padTxtRow(report.summary.profit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.summary.profit))));
+  L.push("");
+  L.push(sep);
+  L.push("");
+  L.push("กำไรขาดทุน");
+  L.push("");
+  L.push(padTxtRow("รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)));
+  L.push(padTxtRow("รายได้อื่น", formatCurrency(report.pnl.otherIncome)));
+  L.push(padTxtRow("รายได้รวม", formatCurrency(report.pnl.totalRevenue)));
+  L.push("");
+  L.push("ค่าใช้จ่าย");
+  Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => {
+    L.push(padTxtRow(cat, formatCurrency(amt)));
+  });
+  L.push("");
+  L.push(padTxtRow("ค่าใช้จ่ายรวม", formatCurrency(report.pnl.totalExpense)));
+  L.push("");
+  L.push(padTxtRow(report.pnl.netProfit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.pnl.netProfit))));
+  L.push("");
+  L.push(sep);
+  L.push("");
+  L.push("รายก๊วน");
+  L.push("");
+  if (report.sessions.length === 0) {
+    L.push("ไม่มีก๊วนในช่วงเวลานี้");
+  } else {
+    report.sessions.forEach(s => {
+      L.push(`${fmtThaiDateFull(s.date)} | ${s.name}`);
+      L.push(`ผู้เล่น ${s.playerCount} คน · ${s.matchCount} แมตช์ · ${s.courtCount} สนาม`);
+      L.push(`รายได้ ${formatCurrency(s.revenue)}`);
+      L.push(`ค่าใช้จ่าย ${formatCurrency(s.expense)}`);
+      L.push(`กำไร ${formatCurrency(s.profit)}`);
+      L.push("");
+    });
+  }
+  L.push(sep);
+  L.push("");
+  L.push("รายรับรายจ่าย");
+  L.push("");
+  if (report.transactions.length === 0) {
+    L.push("ไม่มีรายการ");
+  } else {
+    report.transactions.forEach(t => {
+      L.push(`${fmtThaiDateFull(t.date)} | ${t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย"} | ${t.category} | ${t.description} | ${t.session} | ${formatCurrency(t.amount)}`);
+    });
+  }
+  L.push("");
+  L.push(sep);
+  L.push("");
+  L.push("ค้างชำระ");
+  L.push("");
+  if (report.outstandingPayments.length === 0) {
+    L.push("ไม่มีรายการค้างชำระ");
+  } else {
+    report.outstandingPayments.forEach(o => {
+      L.push(`${fmtThaiDateFull(o.date)} | ${o.sessionName} | ${o.playerName} | ต้องชำระ ${formatCurrency(o.due)} | รับแล้ว ${formatCurrency(o.collected)} | ค้าง ${formatCurrency(o.outstanding)}`);
+    });
+  }
+  L.push("");
+  L.push(sep);
+  L.push("");
+  L.push("ส่วนลดคงเหลือ");
+  L.push("");
+  if (report.discountCredits.length === 0) {
+    L.push("ไม่มีส่วนลดคงเหลือ");
+  } else {
+    report.discountCredits.forEach(c => {
+      L.push(`${c.playerName} | ${formatCurrency(c.amount)} | จาก ${c.sourceSession} | ${c.status}`);
+    });
+  }
+  L.push("");
+  L.push(sep);
+  L.push("");
+  L.push("สร้างจาก BadQ");
+  return L.join("\n");
+}
+function downloadFinancialReportTxt(report) {
+  const text = buildFinancialReportTxt(report);
+  const blob = new Blob(["﻿" + text], {
+    type: "text/plain;charset=utf-8"
+  });
+  return shareOrDownloadBlob(blob, financeExportFilename(report.period, "txt"), "text/plain");
+}
+
+// ===================== MINIMAL ZIP WRITER (Requirement #13 — real .xlsx, no external library) =====================
+// A .xlsx IS a zip archive of XML parts. This app is one self-contained HTML file with no build step and no
+// external script loading (that's what makes offline PWA caching work), so a real xlsx needs its own tiny
+// zip writer rather than vendoring a library. STORE (uncompressed) entries are fully valid zip/xlsx — every
+// spreadsheet app accepts them — so no compression algorithm is needed either.
+function crc32Bytes(bytes) {
+  if (!crc32Bytes.table) {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ c >>> 1 : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    crc32Bytes.table = t;
+  }
+  const table = crc32Bytes.table;
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) crc = table[(crc ^ bytes[i]) & 0xff] ^ crc >>> 8;
+  return (crc ^ 0xffffffff) >>> 0;
+}
+function strToBytes(str) {
+  return new TextEncoder().encode(str);
+}
+function dosDateTimeNow() {
+  const d = new Date();
+  const dosTime = (d.getHours() & 0x1f) << 11 | (d.getMinutes() & 0x3f) << 5 | d.getSeconds() >> 1 & 0x1f;
+  const dosDate = (d.getFullYear() - 1980 & 0x7f) << 9 | (d.getMonth() + 1 & 0xf) << 5 | d.getDate() & 0x1f;
+  return {
+    dosTime,
+    dosDate
+  };
+}
+// files: [{ name, data: Uint8Array }] -> a complete, valid .zip as Uint8Array
+function buildZipArchive(files) {
+  const encoder = new TextEncoder();
+  const localParts = [];
+  const centralParts = [];
+  let offset = 0;
+  const {
+    dosTime,
+    dosDate
+  } = dosDateTimeNow();
+  files.forEach(f => {
+    const nameBytes = encoder.encode(f.name);
+    const data = f.data;
+    const crc = crc32Bytes(data);
+    const size = data.length;
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, dosTime, true);
+    lv.setUint16(12, dosDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, size, true);
+    lv.setUint32(22, size, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+    localParts.push(local, data);
+    const central = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, dosTime, true);
+    cv.setUint16(14, dosDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, size, true);
+    cv.setUint32(24, size, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(30, 0, true);
+    cv.setUint16(32, 0, true);
+    cv.setUint16(34, 0, true);
+    cv.setUint16(36, 0, true);
+    cv.setUint32(38, 0, true);
+    cv.setUint32(42, offset, true);
+    central.set(nameBytes, 46);
+    centralParts.push(central);
+    offset += local.length + data.length;
+  });
+  const centralStart = offset;
+  const centralSize = centralParts.reduce((s, p) => s + p.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(4, 0, true);
+  ev.setUint16(6, 0, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, centralSize, true);
+  ev.setUint32(16, centralStart, true);
+  ev.setUint16(20, 0, true);
+  const allParts = [...localParts, ...centralParts, eocd];
+  const total = allParts.reduce((s, p) => s + p.length, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  allParts.forEach(p => {
+    out.set(p, pos);
+    pos += p.length;
+  });
+  return out;
+}
+
+// ===================== XLSX EXPORT (Requirement #13/#14) =====================
+function xmlEscape(s) {
+  return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+function xlsxColLetter(n) {
+  let s = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+// "YYYY-MM-DD" -> Excel's day-count serial (days since the fake epoch 1899-12-30) — a REAL date value
+// (Requirement #14 "Recommended"), not just display text, so it sorts/filters like a date in Excel.
+function excelSerialDate(dateStr) {
+  if (!dateStr) return null;
+  const [y, m, d] = String(dateStr).split("-").map(Number);
+  if (!y || !m || !d) return null;
+  const utcMs = Date.UTC(y, m - 1, d);
+  const epochMs = Date.UTC(1899, 11, 30);
+  return Math.round((utcMs - epochMs) / 86400000);
+}
+// cellXfs indices — defined once in buildFinancialXlsxStylesXml() below, referenced by index everywhere else
+const XLSX_STYLE = {
+  normal: 0,
+  headerBold: 1,
+  money: 2,
+  boldText: 3,
+  boldMoney: 4,
+  date: 5
+};
+function xlsxCell(ref, value, styleIdx, kind) {
+  if (kind === "text") return `<c r="${ref}" s="${styleIdx}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(value)}</t></is></c>`;
+  const n = Number(value);
+  return `<c r="${ref}" s="${styleIdx}"><v>${isFinite(n) ? n : 0}</v></c>`;
+}
+// generic data-table worksheet — used by all 4 detail sheets (รายก๊วน / รายรับรายจ่าย / ค้างชำระ / ส่วนลดคงเหลือ).
+// colTypes[i]: "text" | "int" | "money" | "date". Money cells are REAL numbers with a currency numFmt
+// (Requirement #14 — never a formatted string like "฿13,235") so SUM/sort/filter/pivot all work in Excel.
+function buildFinancialXlsxTableSheet(headers, colTypes, rows, opts) {
+  const o = opts || {};
+  const lines = [`<row r="1">${headers.map((h, i) => xlsxCell(`${xlsxColLetter(i + 1)}1`, h, XLSX_STYLE.headerBold, "text")).join("")}</row>`];
+  rows.forEach((r, ri) => {
+    const rn = ri + 2;
+    const cells = r.map((val, ci) => {
+      const ref = `${xlsxColLetter(ci + 1)}${rn}`;
+      const type = colTypes[ci];
+      if (type === "money") return xlsxCell(ref, val, XLSX_STYLE.money, "number");
+      if (type === "int") return xlsxCell(ref, val, XLSX_STYLE.normal, "number");
+      if (type === "date") {
+        const serial = excelSerialDate(val);
+        return serial == null ? xlsxCell(ref, val || "", XLSX_STYLE.normal, "text") : xlsxCell(ref, serial, XLSX_STYLE.date, "number");
+      }
+      return xlsxCell(ref, val, XLSX_STYLE.normal, "text");
+    }).join("");
+    lines.push(`<row r="${rn}">${cells}</row>`);
+  });
+  let lastRow = rows.length + 1;
+  if (rows.length === 0 && o.emptyMessage) {
+    lines.push(`<row r="2">${xlsxCell("A2", o.emptyMessage, XLSX_STYLE.normal, "text")}</row>`);
+    lastRow = 2;
+  }
+  const lastCol = xlsxColLetter(headers.length);
+  const dim = `A1:${lastCol}${lastRow}`;
+  const cols = `<cols>${headers.map((h, i) => `<col min="${i + 1}" max="${i + 1}" width="${o.widths && o.widths[i] || 14}" customWidth="1"/>`).join("")}</cols>`;
+  const sheetView = `<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/><selection pane="bottomLeft" activeCell="A2" sqref="A2"/></sheetView></sheetViews>`;
+  const autoFilter = rows.length > 0 ? `<autoFilter ref="${dim}"/>` : "";
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="${dim}"/>${sheetView}${cols}<sheetData>${lines.join("")}</sheetData>${autoFilter}</worksheet>`;
+}
+// สรุป sheet — a key/value summary + P&L breakdown (not a filterable table, so it's built by hand rather than
+// through buildFinancialXlsxTableSheet).
+function buildFinancialXlsxSummarySheet(report) {
+  const rows = [];
+  let r = 1;
+  const pushRow = (a, b, styleA, styleB) => {
+    let cells = "";
+    const bIsText = typeof b === "string";
+    if (a != null) cells += xlsxCell(`A${r}`, a, styleA != null ? styleA : XLSX_STYLE.normal, "text");
+    if (b != null) cells += xlsxCell(`B${r}`, b, styleB != null ? styleB : bIsText ? XLSX_STYLE.normal : XLSX_STYLE.money, bIsText ? "text" : "number");
+    rows.push(`<row r="${r}">${cells}</row>`);
+    r++;
+  };
+  pushRow("BadQ — รายงานการเงิน", null, XLSX_STYLE.boldText);
+  pushRow("ช่วงเวลา", report.period.label);
+  pushRow("วันที่สร้างรายงาน", fmtGeneratedAt(report.generatedAt));
+  r++;
+  pushRow("สรุป", null, XLSX_STYLE.boldText);
+  pushRow("รายได้", report.summary.revenue);
+  pushRow("รับแล้ว", report.summary.collected);
+  pushRow("ค้างรับ", report.summary.receivable);
+  pushRow("ค่าใช้จ่าย", report.summary.expense);
+  pushRow(report.summary.profit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.summary.profit), XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  r++;
+  pushRow("สรุปกำไรขาดทุน", null, XLSX_STYLE.boldText);
+  pushRow("รายได้ค่าก๊วน", report.pnl.groupRevenue);
+  pushRow("รายได้อื่น", report.pnl.otherIncome);
+  pushRow("รายได้รวม", report.pnl.totalRevenue, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => pushRow(cat, amt));
+  pushRow("ค่าใช้จ่ายรวม", report.pnl.totalExpense, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  pushRow(report.pnl.netProfit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.pnl.netProfit), XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
+  const lastRow = r - 1;
+  const dim = `A1:B${lastRow}`;
+  const cols = `<cols><col min="1" max="1" width="26" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/></cols>`;
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><dimension ref="${dim}"/>${cols}<sheetData>${rows.join("")}</sheetData></worksheet>`;
+}
+function buildFinancialXlsxStylesXml() {
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;฿&quot;#,##0"/><numFmt numFmtId="165" formatCode="yyyy-mm-dd"/></numFmts><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEEF2F0"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
+}
+function buildFinancialReportXlsxBytes(report) {
+  const sheets = [{
+    name: "สรุป",
+    xml: buildFinancialXlsxSummarySheet(report)
+  }, {
+    name: "รายก๊วน",
+    xml: buildFinancialXlsxTableSheet(["วันที่", "ชื่อก๊วน", "จำนวนผู้เล่น", "จำนวนแมตช์", "จำนวนสนาม", "รายได้", "รับแล้ว", "ค้างรับ", "ค่าใช้จ่าย", "กำไร/ขาดทุน"], ["date", "text", "int", "int", "int", "money", "money", "money", "money", "money"], report.sessions.map(s => [s.date, s.name, s.playerCount, s.matchCount, s.courtCount, s.revenue, s.collected, s.receivable, s.expense, s.profit]), {
+      widths: [12, 20, 10, 8, 8, 12, 12, 12, 12, 12],
+      emptyMessage: "ไม่มีก๊วนในช่วงเวลานี้"
+    })
+  }, {
+    name: "รายรับรายจ่าย",
+    xml: buildFinancialXlsxTableSheet(["วันที่", "ประเภท", "หมวด", "รายละเอียด", "ก๊วน", "จำนวนเงิน"], ["date", "text", "text", "text", "text", "money"], report.transactions.map(t => [t.date, t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย", t.category, t.description, t.session, t.amount]), {
+      widths: [12, 10, 14, 28, 18, 12],
+      emptyMessage: "ไม่มีรายการ"
+    })
+  }, {
+    name: "ค้างชำระ",
+    xml: buildFinancialXlsxTableSheet(["วันที่", "ก๊วน", "ผู้เล่น", "ยอดที่ต้องชำระ", "รับแล้ว", "ค้างชำระ"], ["date", "text", "text", "money", "money", "money"], report.outstandingPayments.map(o => [o.date, o.sessionName, o.playerName, o.due, o.collected, o.outstanding]), {
+      widths: [12, 18, 16, 14, 12, 12],
+      emptyMessage: "ไม่มีรายการค้างชำระ"
+    })
+  }, {
+    name: "ส่วนลดคงเหลือ",
+    xml: buildFinancialXlsxTableSheet(["ผู้เล่น", "จำนวนเงิน", "ก๊วนต้นทาง", "วันที่ได้รับ", "สถานะ"], ["text", "money", "text", "date", "text"], report.discountCredits.map(c => [c.playerName, c.amount, c.sourceSession, c.createdAt ? new Date(c.createdAt).toISOString().slice(0, 10) : "", c.status === "available" ? "พร้อมใช้" : c.status]), {
+      widths: [18, 12, 22, 14, 12],
+      emptyMessage: "ไม่มีส่วนลดคงเหลือ"
+    })
+  }];
+  const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>${sheets.map((s, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>`;
+  const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`;
+  const workbookRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((s, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>`;
+  const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>${sheets.map((s, i) => `<sheet name="${xmlEscape(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("")}</sheets></workbook>`;
+  const files = [{
+    name: "[Content_Types].xml",
+    data: strToBytes(contentTypes)
+  }, {
+    name: "_rels/.rels",
+    data: strToBytes(rootRels)
+  }, {
+    name: "xl/workbook.xml",
+    data: strToBytes(workbookXml)
+  }, {
+    name: "xl/_rels/workbook.xml.rels",
+    data: strToBytes(workbookRels)
+  }, {
+    name: "xl/styles.xml",
+    data: strToBytes(buildFinancialXlsxStylesXml())
+  }, ...sheets.map((s, i) => ({
+    name: `xl/worksheets/sheet${i + 1}.xml`,
+    data: strToBytes(s.xml)
+  }))];
+  return buildZipArchive(files);
+}
+function downloadFinancialReportXlsx(report) {
+  const bytes = buildFinancialReportXlsxBytes(report);
+  const blob = new Blob([bytes], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  });
+  return shareOrDownloadBlob(blob, financeExportFilename(report.period, "xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 }
 
 // build the plain-text summary used by the Web Share API (with clipboard/alert fallback)
@@ -2984,6 +3604,10 @@ function App() {
   // onChange now only reads the raw file and opens this; the actual state write happens in onDone once the
   // user confirms the crop, so no existing save logic/shape changes — only WHEN the save happens moves later.
   const [cropJob, setCropJob] = useState(null);
+  // Financial Report Export (v1.9.14) — PDF path is a full-screen print-optimized view that REPLACES the
+  // entire app render (see the early return right after this component's other hooks) so bottom nav / tabs /
+  // edit buttons are simply never mounted while printing, instead of being CSS-hidden. `null` = not open.
+  const [financePrintReport, setFinancePrintReport] = useState(null);
   useEffect(() => {
     (async () => {
       try {
@@ -4751,6 +5375,16 @@ function App() {
       return false;
     }
   };
+  // Financial Report Export PDF path (Requirement #16): replace the ENTIRE app render with just the print
+  // view while open — guarantees bottom nav / tabs / edit buttons / every other interactive control is
+  // completely absent from both the on-screen preview and the printed/saved PDF, with zero extra CSS-hiding
+  // logic that could accidentally leak through print's default UA stylesheet handling.
+  if (financePrintReport) {
+    return /*#__PURE__*/React.createElement(FinancePrintView, {
+      report: financePrintReport,
+      onClose: () => setFinancePrintReport(null)
+    });
+  }
   return /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.bg,
@@ -4965,7 +5599,8 @@ function App() {
     endSession,
     qrRef,
     courtCount,
-    courtLabels
+    courtLabels,
+    onOpenFinancePrint: setFinancePrintReport
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       position: "fixed",
@@ -10602,7 +11237,8 @@ function FinanceTab({
   endSession,
   qrRef,
   courtCount,
-  courtLabels
+  courtLabels,
+  onOpenFinancePrint
 }) {
   // v1.9.9 IA cleanup (Phase 1): "ชำระเงิน" is no longer a standalone bottom-nav tab — it now lives here as
   // a sub-tab, reusing PaymentTab UNCHANGED (same payment logic/state/fee calc — no duplicated payment
@@ -10614,6 +11250,7 @@ function FinanceTab({
   const [openId, setOpenId] = useState(null); // sessionHistory id opened in SessionFinancialDetail
   const [discountSheetOpen, setDiscountSheetOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(null); // "day-month" | "month-month" | "year" | null
+  const [exportSheetOpen, setExportSheetOpen] = useState(false); // ส่งออกรายงานการเงิน (Financial Report Export)
 
   const allMonths = useMemo(() => getActiveMonths(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
   const allYears = useMemo(() => getActiveYears(sessionHistory, generalExpenses, otherIncome), [sessionHistory, generalExpenses, otherIncome]);
@@ -10625,6 +11262,9 @@ function FinanceTab({
 
   const datesInDayYm = useMemo(() => getActiveDates(dayYm, sessionHistory, generalExpenses, otherIncome), [dayYm, sessionHistory, generalExpenses, otherIncome]);
   const effectiveDate = datesInDayYm.includes(selectedDate) ? selectedDate : datesInDayYm[0] || null;
+  // ส่งออกรายงานการเงิน (Financial Report Export) — always follows whatever period is CURRENTLY selected on
+  // this page (Requirement #2); the sheet itself may additionally offer a custom-range override.
+  const exportDefaultPeriod = financePeriodMeta(mode, effectiveDate, monthYm, year, null);
 
   // drill-down: รายเดือน's daily-performance row -> รายวัน with that exact date selected (Requirement 8/11)
   const goDay = dateStr => {
@@ -10711,7 +11351,14 @@ function FinanceTab({
     applyDiscountCredits: applyDiscountCredits,
     courtCount: courtCount,
     courtLabels: courtLabels
-  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionHead, {
+  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 16
@@ -10719,7 +11366,23 @@ function FinanceTab({
     }, "💰"),
     title: "การเงิน",
     sub: "รายรับ-รายจ่ายของก๊วน"
-  }), /*#__PURE__*/React.createElement("div", {
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setExportSheetOpen(true),
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 5,
+      padding: "6px 11px",
+      borderRadius: 20,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: T.text,
+      flexShrink: 0,
+      marginBottom: 10
+    }
+  }, "📤 ส่งออก")), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 16
     }
@@ -10941,7 +11604,461 @@ function FinanceTab({
     years: allYears,
     onPick: setYear,
     onClose: () => setPickerOpen(null)
+  }), exportSheetOpen && /*#__PURE__*/React.createElement(FinanceExportSheet, {
+    defaultPeriod: exportDefaultPeriod,
+    sessionHistory: sessionHistory,
+    generalExpenses: generalExpenses,
+    otherIncome: otherIncome,
+    discountCredits: discountCredits,
+    onOpenPrint: onOpenFinancePrint,
+    onClose: () => setExportSheetOpen(false)
   })));
+}
+
+// ===================== FINANCIAL REPORT EXPORT — BOTTOM SHEET (Requirement #1) =====================
+// Compact entry point's sheet: shows the period currently being exported (always follows what's selected on
+// the Finance page — Requirement #2 — with an optional custom-range override scoped to export only, so it
+// never touches the Finance page's own period selection), a live preview, then TXT / Excel / PDF.
+function FinanceExportSheet({
+  defaultPeriod,
+  sessionHistory,
+  generalExpenses,
+  otherIncome,
+  discountCredits,
+  onOpenPrint,
+  onClose
+}) {
+  const [customOn, setCustomOn] = useState(false);
+  const [customFrom, setCustomFrom] = useState(defaultPeriod ? defaultPeriod.range.from.slice(0, 10) : "");
+  const [customTo, setCustomTo] = useState(defaultPeriod ? defaultPeriod.range.to.slice(0, 10) : "");
+  const [busy, setBusy] = useState(null); // "txt" | "xlsx" | null
+  const [status, setStatus] = useState(null); // { kind: "ok"|"error", msg } | null
+  const period = useMemo(() => {
+    if (customOn && customFrom && customTo) return financePeriodMeta(null, null, null, null, {
+      from: customFrom,
+      to: customTo
+    });
+    return defaultPeriod;
+  }, [customOn, customFrom, customTo, defaultPeriod]);
+  const ctx = {
+    sessionHistory,
+    generalExpenses,
+    otherIncome,
+    discountCredits
+  };
+  const report = useMemo(() => period ? buildFinancialReport(period, ctx) : null,
+  // eslint-disable-next-line
+  [period, sessionHistory, generalExpenses, otherIncome, discountCredits]);
+  const isEmpty = report && report.sessions.length === 0 && report.transactions.length === 0 && report.outstandingPayments.length === 0 && report.discountCredits.length === 0;
+  const doExport = async fmt => {
+    if (!report) return;
+    setBusy(fmt);
+    setStatus(null);
+    try {
+      const outcome = fmt === "txt" ? await downloadFinancialReportTxt(report) : await downloadFinancialReportXlsx(report);
+      if (outcome === "done") setStatus({
+        kind: "ok",
+        msg: "บันทึก/แชร์ไฟล์แล้ว"
+      });else if (outcome === "cancelled") setStatus(null);else setStatus({
+        kind: "error",
+        msg: "ส่งออกไม่สำเร็จ ลองอีกครั้ง"
+      });
+    } catch (e) {
+      setStatus({
+        kind: "error",
+        msg: "ส่งออกไม่สำเร็จ ลองอีกครั้ง"
+      });
+    }
+    setBusy(null);
+  };
+  const openPdf = () => {
+    if (!report || !onOpenPrint) return;
+    onOpenPrint(report);
+    onClose();
+  };
+  const rowStyle = {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: 13.5,
+    padding: "3px 0"
+  };
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 12
+    }
+  }, "ส่งออกรายงานการเงิน"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      fontWeight: 800,
+      color: T.muted,
+      marginBottom: 4
+    }
+  }, "ช่วงเวลา"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14.5,
+      fontWeight: 800,
+      marginBottom: 10
+    }
+  }, period ? period.label : "-"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setCustomOn(v => !v),
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: T.accent || T.green || T.text,
+      background: "none",
+      border: "none",
+      padding: 0,
+      marginBottom: customOn ? 8 : 14
+    }
+  }, customOn ? "✕ ยกเลิกกำหนดช่วงเอง" : "กำหนดช่วงวันที่เอง"), customOn && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: customFrom,
+    onChange: e => setCustomFrom(e.target.value),
+    style: {
+      flex: 1,
+      padding: "8px 10px",
+      borderRadius: 10,
+      border: `1px solid ${T.border}`,
+      background: T.surface,
+      color: T.text,
+      fontSize: 13
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: customTo,
+    onChange: e => setCustomTo(e.target.value),
+    style: {
+      flex: 1,
+      padding: "8px 10px",
+      borderRadius: 10,
+      border: `1px solid ${T.border}`,
+      background: T.surface,
+      color: T.text,
+      fontSize: 13
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: "10px 14px",
+      marginBottom: 16
+    }
+  }, isEmpty ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: T.muted,
+      textAlign: "center",
+      padding: "6px 0"
+    }
+  }, "ไม่พบข้อมูลการเงินในช่วงเวลานี้") : null, /*#__PURE__*/React.createElement("div", {
+    style: rowStyle
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: T.muted
+    }
+  }, report ? `${report.sessions.length} ก๊วน` : "-"), /*#__PURE__*/React.createElement("span", null)), /*#__PURE__*/React.createElement("div", {
+    style: rowStyle
+  }, /*#__PURE__*/React.createElement("span", null, "รายได้"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 800
+    }
+  }, report ? formatCurrency(report.summary.revenue) : "-")), /*#__PURE__*/React.createElement("div", {
+    style: rowStyle
+  }, /*#__PURE__*/React.createElement("span", null, "ค่าใช้จ่าย"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 800
+    }
+  }, report ? formatCurrency(report.summary.expense) : "-")), /*#__PURE__*/React.createElement("div", {
+    style: rowStyle
+  }, /*#__PURE__*/React.createElement("span", null, report && report.summary.profit < 0 ? "ขาดทุน" : "กำไร"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontWeight: 800,
+      color: report && report.summary.profit < 0 ? T.accent : T.green
+    }
+  }, report ? formatCurrency(Math.abs(report.summary.profit)) : "-"))), status && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 700,
+      color: status.kind === "ok" ? T.green : T.accent,
+      textAlign: "center",
+      marginBottom: 10
+    }
+  }, status.msg), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, [["txt", "📄 TXT"], ["xlsx", "📊 Excel"]].map(([fmt, label]) => /*#__PURE__*/React.createElement("button", {
+    key: fmt,
+    disabled: !report || busy !== null,
+    onClick: () => doExport(fmt),
+    style: {
+      width: "100%",
+      padding: "12px 14px",
+      borderRadius: 12,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 14,
+      fontWeight: 800,
+      color: T.text,
+      opacity: !report || busy !== null ? 0.6 : 1
+    }
+  }, busy === fmt ? "กำลังสร้างไฟล์…" : label)), /*#__PURE__*/React.createElement("button", {
+    disabled: !report,
+    onClick: openPdf,
+    style: {
+      width: "100%",
+      padding: "12px 14px",
+      borderRadius: 12,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 14,
+      fontWeight: 800,
+      color: T.text,
+      opacity: !report ? 0.6 : 1
+    }
+  }, "🖨️ PDF")));
+}
+
+// ===================== FINANCIAL REPORT EXPORT — PDF PRINT VIEW (Requirements #15/#16) =====================
+// Small reusable table for the print report's detail sections — plain <table>, browsers paginate long ones
+// across pages on their own (Requirement #16 "long tables may continue on the next page").
+function PrintTable({
+  headers,
+  rows,
+  rightCols
+}) {
+  const isRight = i => !!(rightCols && rightCols.includes(i));
+  const th = {
+    border: "1px solid #ccc",
+    padding: "4px 6px",
+    fontSize: 10.5,
+    fontWeight: 800,
+    background: "#f3f6f4"
+  };
+  const td = {
+    border: "1px solid #ddd",
+    padding: "4px 6px",
+    fontSize: 10.5
+  };
+  return /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: "100%",
+      borderCollapse: "collapse",
+      marginBottom: 4
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, headers.map((h, i) => /*#__PURE__*/React.createElement("th", {
+    key: i,
+    style: {
+      ...th,
+      textAlign: isRight(i) ? "right" : "left"
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, rows.length === 0 ? /*#__PURE__*/React.createElement("tr", null, /*#__PURE__*/React.createElement("td", {
+    colSpan: headers.length,
+    style: {
+      ...td,
+      textAlign: "center",
+      color: "#6b7d74"
+    }
+  }, "ไม่มีรายการ")) : rows.map((r, ri) => /*#__PURE__*/React.createElement("tr", {
+    key: ri
+  }, r.map((c, ci) => /*#__PURE__*/React.createElement("td", {
+    key: ci,
+    style: {
+      ...td,
+      textAlign: isRight(ci) ? "right" : "left"
+    }
+  }, c))))));
+}
+function PrintSectionTitle({
+  children
+}) {
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      margin: "18px 0 6px",
+      color: "#16241d"
+    }
+  }, children);
+}
+function FinancePrintView({
+  report,
+  onClose
+}) {
+  const negative = report.summary.profit < 0;
+  const negativePnl = report.pnl.netProfit < 0;
+  const expenseRows = Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0);
+  return /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#fff",
+      color: "#16241d",
+      minHeight: "100vh",
+      fontFamily: "ui-sans-serif, system-ui, sans-serif"
+    }
+  }, /*#__PURE__*/React.createElement("style", null, `
+      @media print {
+        @page { size: A4 portrait; margin: 14mm; }
+        .fpv-noprint { display: none !important; }
+        .fpv-page { padding: 0 !important; }
+        .fpv-avoidbreak { break-inside: avoid; }
+      }
+    `), /*#__PURE__*/React.createElement("div", {
+    className: "fpv-noprint",
+    style: {
+      position: "sticky",
+      top: 0,
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      padding: "12px 16px",
+      background: "#16241d",
+      color: "#fff",
+      zIndex: 5
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: {
+      background: "none",
+      border: "none",
+      color: "#fff",
+      fontSize: 14,
+      fontWeight: 700
+    }
+  }, "‹ ปิด"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => window.print(),
+    style: {
+      background: "#fff",
+      color: "#16241d",
+      border: "none",
+      borderRadius: 20,
+      padding: "8px 16px",
+      fontSize: 13.5,
+      fontWeight: 800
+    }
+  }, "🖨️ พิมพ์ / บันทึกเป็น PDF")), /*#__PURE__*/React.createElement("div", {
+    className: "fpv-page",
+    style: {
+      maxWidth: 780,
+      margin: "0 auto",
+      padding: "20px 18px 60px",
+      boxSizing: "border-box"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "fpv-avoidbreak",
+    style: {
+      textAlign: "center",
+      marginBottom: 18
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 20,
+      fontWeight: 800
+    }
+  }, "BadQ"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 700,
+      marginBottom: 6
+    }
+  }, "รายงานการเงิน"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: "#6b7d74"
+    }
+  }, "ช่วงเวลา: ", report.period.label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: "#6b7d74"
+    }
+  }, "วันที่สร้างรายงาน: ", fmtGeneratedAt(report.generatedAt))), /*#__PURE__*/React.createElement("div", {
+    className: "fpv-avoidbreak",
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, [["รายได้", report.summary.revenue, "#16241d"], ["ค่าใช้จ่าย", report.summary.expense, "#16241d"], [negative ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.summary.profit), negative ? "#ef5a44" : "#12986a"]].map(([label, amt, color], i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      flex: 1,
+      border: "1px solid #dde5e1",
+      borderRadius: 8,
+      padding: "8px 10px",
+      textAlign: "center"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: "#6b7d74",
+      marginBottom: 2
+    }
+  }, label), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 800,
+      color
+    }
+  }, formatCurrency(amt))))), /*#__PURE__*/React.createElement(PrintSectionTitle, null, "สรุป"), /*#__PURE__*/React.createElement(PrintTable, {
+    headers: ["รายการ", "จำนวนเงิน"],
+    rightCols: [1],
+    rows: [["รายได้", formatCurrency(report.summary.revenue)], ["รับแล้ว", formatCurrency(report.summary.collected)], ["ค้างรับ", formatCurrency(report.summary.receivable)], ["ค่าใช้จ่าย", formatCurrency(report.summary.expense)], [negative ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.summary.profit))]]
+  }), /*#__PURE__*/React.createElement(PrintSectionTitle, null, "สรุปกำไรขาดทุน"), /*#__PURE__*/React.createElement(PrintTable, {
+    headers: ["รายการ", "จำนวนเงิน"],
+    rightCols: [1],
+    rows: [["รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)], ["รายได้อื่น", formatCurrency(report.pnl.otherIncome)], ["รายได้รวม", formatCurrency(report.pnl.totalRevenue)], ...expenseRows.map(([cat, amt]) => [cat, formatCurrency(amt)]), ["ค่าใช้จ่ายรวม", formatCurrency(report.pnl.totalExpense)], [negativePnl ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.pnl.netProfit))]]
+  }), /*#__PURE__*/React.createElement(PrintSectionTitle, null, "รายก๊วน"), /*#__PURE__*/React.createElement(PrintTable, {
+    headers: ["วันที่", "ชื่อก๊วน", "ผู้เล่น", "แมตช์", "สนาม", "รายได้", "ค่าใช้จ่าย", "กำไร/ขาดทุน"],
+    rightCols: [2, 3, 4, 5, 6, 7],
+    rows: report.sessions.map(s => [fmtThaiDateFull(s.date), s.name, s.playerCount, s.matchCount, s.courtCount, formatCurrency(s.revenue), formatCurrency(s.expense), formatCurrency(s.profit)])
+  }), /*#__PURE__*/React.createElement(PrintSectionTitle, null, "รายรับรายจ่าย"), /*#__PURE__*/React.createElement(PrintTable, {
+    headers: ["วันที่", "ประเภท", "หมวด", "รายละเอียด", "ก๊วน", "จำนวนเงิน"],
+    rightCols: [5],
+    rows: report.transactions.map(t => [fmtThaiDateFull(t.date), t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย", t.category, t.description, t.session, formatCurrency(t.amount)])
+  }), /*#__PURE__*/React.createElement(PrintSectionTitle, null, "ค้างชำระ"), /*#__PURE__*/React.createElement(PrintTable, {
+    headers: ["วันที่", "ก๊วน", "ผู้เล่น", "ยอดที่ต้องชำระ", "รับแล้ว", "ค้างชำระ"],
+    rightCols: [3, 4, 5],
+    rows: report.outstandingPayments.length === 0 ? [] : report.outstandingPayments.map(o => [fmtThaiDateFull(o.date), o.sessionName, o.playerName, formatCurrency(o.due), formatCurrency(o.collected), formatCurrency(o.outstanding)])
+  }), report.outstandingPayments.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "#6b7d74",
+      marginTop: -6,
+      marginBottom: 8
+    }
+  }, "ไม่มีรายการค้างชำระ"), /*#__PURE__*/React.createElement(PrintSectionTitle, null, "ส่วนลดคงเหลือ"), /*#__PURE__*/React.createElement(PrintTable, {
+    headers: ["ผู้เล่น", "จำนวนเงิน", "ก๊วนต้นทาง", "สถานะ"],
+    rightCols: [1],
+    rows: report.discountCredits.length === 0 ? [] : report.discountCredits.map(c => [c.playerName, formatCurrency(c.amount), c.sourceSession, c.status])
+  }), report.discountCredits.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: "#6b7d74",
+      marginTop: -6,
+      marginBottom: 8
+    }
+  }, "ไม่มีส่วนลดคงเหลือ"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      textAlign: "center",
+      fontSize: 10.5,
+      color: "#6b7d74",
+      marginTop: 24,
+      borderTop: "1px solid #dde5e1",
+      paddingTop: 10
+    }
+  }, "สร้างจาก BadQ · ", fmtGeneratedAt(report.generatedAt))));
 }
 
 // ‹ month › nav shared by รายวัน and รายเดือน — arrows jump to the nearest ACTIVE month (can skip empty
