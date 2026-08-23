@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.4";
+const APP_VERSION = "1.11.5";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -92,6 +92,13 @@ const HAND_BADGE = {
   left: { color: "#db2777", bg: "#fce7f3" },
 };
 const HAND_LABEL = { left: "ซ้าย", right: "ขวา" };
+// v1.11.5: Member/Guest badge — informational only (see spec: must never affect matchmaking/skill/
+// attendance/tournament logic). Gold for Member (visually distinct from every skill-level color, every
+// PSTATUS color, and HAND_BADGE's violet/magenta), neutral gray for Guest.
+const MEMBER_TYPE_META = {
+  member: { label: "Member", color: "#92650a", bg: "#fdf1d9", border: "#e8c374" },
+  guest: { label: "Guest", color: "#5b6672", bg: "#eceff2", border: "#c7cdd4" },
+};
 const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
 // backward-compatible: old data used `present` boolean; old data also has no skillIndex yet — derive it
 // from the (isan-based) label so matchmaking strength is 100% preserved across the upgrade.
@@ -100,7 +107,11 @@ const LEVEL_HELP = "เรียงจากเริ่มต้น → เก�
 // here, same as a brand-new player (see addPlayer). `handPref` ("preferLeft"|"avoidLeft"|null) is the
 // optional SOFT matchmaking preference "อยากคู่/ไม่อยากคู่กับมือซ้าย" — set via the existing lock-pair
 // editor (see setHandPref/LockPairEditor), never a value the UI writes directly onto a fresh player.
-const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null });
+// v1.11.5: phone/lineId/memberType are PERMANENT player data, same category as handedness above — old
+// players/backups have none of these fields, so default them here exactly like every other back-compat
+// field: memberType defaults to "member" (never silently "guest"), phone/lineId default to "" (never
+// null, so controlled <input> elements never warn about switching from uncontrolled).
+const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : "member", phone: p.phone || "", lineId: p.lineId || "" });
 
 // true once the viewport is wide enough to benefit from a landscape/tablet layout (multi-column court
 // cards, wider content column) — re-evaluated live on rotate/resize, no page reload needed.
@@ -399,7 +410,7 @@ function playerStats(pid, matches) {
 // aggregates one player's Tournament record across tournamentHistory (archived Tournaments only —
 // kept fully separate from Casual playerStats(), though the two can be shown side by side).
 function tournamentStatsForPlayer(pid, tournamentHistory) {
-  let tournaments = 0, matches = 0, wins = 0, losses = 0, championships = 0, runnerUps = 0;
+  let tournaments = 0, matches = 0, wins = 0, losses = 0, championships = 0, runnerUps = 0, thirds = 0;
   (tournamentHistory || []).forEach((t) => {
     const teamIds = new Set((t.teams || []).filter((tm) => (tm.playerIds || []).includes(pid)).map((tm) => tm.id));
     if (teamIds.size === 0) return;
@@ -409,9 +420,14 @@ function tournamentStatsForPlayer(pid, tournamentHistory) {
     (t.divisions || []).forEach((d) => {
       if (d.champion && teamIds.has(d.champion)) championships++;
       else if (d.runnerUp && teamIds.has(d.runnerUp)) runnerUps++;
+      // v1.11.5: third place — prefer the newer d.thirdIds array (supports joint/shared 3rd, set by
+      // tCompleteTournament since the Podium redesign) and fall back to the legacy single d.third for
+      // tournaments archived before that field existed. Purely additive — championships/runnerUps above
+      // are untouched.
+      else if (Array.isArray(d.thirdIds) ? d.thirdIds.some((id) => teamIds.has(id)) : (d.third && teamIds.has(d.third))) thirds++;
     });
   });
-  return { tournaments, matches, wins, losses, championships, runnerUps };
+  return { tournaments, matches, wins, losses, championships, runnerUps, thirds };
 }
 // ===================== CURRENCY (v1.9.1) =====================
 // single source of truth for every money display in the app (Finance/Payment/Historical/Discount Credits)
@@ -2655,7 +2671,7 @@ export default function App() {
   const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim(); if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
-    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null }]);
+    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "" }]);
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
@@ -2761,6 +2777,16 @@ export default function App() {
     setCurrent((prev) => prev.map((m) => (m.queued && [...m.queued.teamA, ...m.queued.teamB].includes(id)
       ? { ...m, queued: { teamA: m.queued.teamA.map((x) => (x === id ? null : x)), teamB: m.queued.teamB.map((x) => (x === id ? null : x)) } }
       : m)));
+  };
+  // v1.11.5: "ลบข้อมูลสมาชิก" (Settings → ความเป็นส่วนตัวและข้อมูล) — bulk version of delPlayer for
+  // every member at once (same scrub rules: lockPairs + queued-next slots). Does NOT touch
+  // history/sessionHistory/tournamentHistory/finance — those store only player ids, never embedded
+  // player objects, so historical records stay structurally intact (name lookups just show "?"
+  // afterward, exactly like deleting one player already does today — see delPlayer above).
+  const deleteAllMembersData = () => {
+    setPlayers([]);
+    setLockPairs([]);
+    setCurrent((prev) => prev.map((m) => (m.queued ? { ...m, queued: null } : m)));
   };
   const openPhoto = (id) => { photoTarget.current = id; fileRef.current.click(); };
   const onPhotoFile = async (e) => {
@@ -3563,6 +3589,17 @@ export default function App() {
       });
     }
   };
+  // v1.11.5: "ล้างข้อมูลทั้งหมด" (Settings → ความเป็นส่วนตัวและข้อมูล) — full factory reset. Reuses the
+  // EXISTING applyRestore("replace", ...) path instead of a new deletion code path, so this destructive
+  // action automatically gets the same pre-restore safety snapshot + "ย้อนกลับการนำเข้าครั้งล่าสุด" undo
+  // that a normal backup restore already has — no new undo mechanism needed.
+  const wipeAllAppData = () => applyRestore("replace", { data: {
+    players: [], history: [], current: [], future: [], roundNo: 0, courtCount: 2, courtLabels: ["1", "2"],
+    mode: "doubles", settings: getDefaultSettings(),
+    session: { id: uid(), name: "", date: new Date().toISOString().slice(0, 10), mode: "casual" },
+    lockPairs: [], sessionHistory: [], generalExpenses: [], otherIncome: [], activeTournament: null,
+    tournamentHistory: [], discountCredits: [],
+  } });
   // revert the most recent "replace all" restore using the safety snapshot taken right before it.
   const undoRestore = async () => {
     try {
@@ -3673,7 +3710,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }} />}
+        {tab === "members" && <MembersTab {...{ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }} />}
         {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
@@ -3702,15 +3739,15 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels }) {
+function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }) {
   const [q, setQ] = useState(""); const [sort, setSort] = useState("levelDesc"); const [onlyPresent, setOnlyPresent] = useState(false);
   const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
+  const [profilePlayerId, setProfilePlayerId] = useState(null); // v1.11.5: id of player shown in the new Player Profile sheet, or null
+  const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false); // v1.11.5: the new ⚙️ ตั้งค่า (general settings, replaces the old skill-only sheet trigger)
   const levelOptions = activeLevelOptions(settings);
   const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
   const [name, setName] = useState(""); const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
-  const [levelSheetOpen, setLevelSheetOpen] = useState(false); // v1.9.9 IA cleanup (Phase 2): preset picker + skill-index descriptions moved out of the always-visible flow into one collapsed "ตั้งค่าระดับฝีมือ" sheet
   const [confirmResetAll, setConfirmResetAll] = useState(false);
-  const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
   const list = useMemo(() => {
     let l = players.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
     // v1.9.17: "registered" hasn't actually arrived yet, so it doesn't count as "ที่มา" here either —
@@ -3739,24 +3776,32 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อสมาชิก" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
       </div>
 
-      {/* v1.9.9: compact entry point into the "ตั้งค่าระดับฝีมือ" sheet — preset switch + skill descriptions moved there */}
-      <button onClick={() => setLevelSheetOpen(true)} style={{ width: "100%", textAlign: "left", padding: "9px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>ระบบระดับฝีมือ:</span>
-        <span style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{currentPreset.name}</span>
-        <span style={{ marginLeft: "auto", fontSize: 11.5, fontWeight: 700, color: T.accent, display: "flex", alignItems: "center", gap: 3 }}>⚙️ ตั้งค่า</span>
-      </button>
-      {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} onClose={() => setLevelSheetOpen(false)} />}
+      {/* v1.11.5: the old always-visible "ระบบระดับฝีมือ: อีสาน ⚙️ ตั้งค่า" row was removed entirely (no
+          blank gap left behind) — the active skill preset no longer needs permanent screen space; it's
+          now reached via ⚙️ ตั้งค่า → ระดับฝีมือ below, which still opens the exact same, unmodified
+          LevelSettingsSheet/LevelPresetEditor. Filter row rebuilt into one line: ตัวกรอง / เฉพาะที่มา /
+          ⚙️ ตั้งค่า (now GENERAL settings, not skill-only) — kept on one row on iPhone via flex + minWidth:0. */}
       {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
-        <div style={{ position: "relative", flex: 1 }}>
-          <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ width: "100%", appearance: "none", padding: "9px 30px 9px 12px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 600 }}>
-            <option value="levelDesc">ระดับฝีมือ: เก่ง → เริ่มต้น</option><option value="levelAsc">ระดับฝีมือ: เริ่มต้น → เก่ง</option><option value="name">ชื่อ (ก-ฮ)</option>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+          <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ width: "100%", appearance: "none", padding: "9px 26px 9px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 600, boxSizing: "border-box" }}>
+            <option value="levelDesc">ตัวกรอง: เก่ง → เริ่มต้น</option><option value="levelAsc">ตัวกรอง: เริ่มต้น → เก่ง</option><option value="name">ตัวกรอง: ชื่อ (ก-ฮ)</option>
           </select>
-          <ChevronDown size={16} style={{ position: "absolute", right: 10, top: 11, color: T.muted, pointerEvents: "none" }} />
+          <ChevronDown size={15} style={{ position: "absolute", right: 8, top: 11, color: T.muted, pointerEvents: "none" }} />
         </div>
-        <button onClick={() => setOnlyPresent((v) => !v)} style={{ padding: "9px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${onlyPresent ? T.green : T.border}`, background: onlyPresent ? "#e2f5ec" : T.surface, color: onlyPresent ? T.green : T.muted }}>เฉพาะที่มา</button>
+        <button onClick={() => setOnlyPresent((v) => !v)} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${onlyPresent ? T.green : T.border}`, background: onlyPresent ? "#e2f5ec" : T.surface, color: onlyPresent ? T.green : T.muted, whiteSpace: "nowrap" }}>เฉพาะที่มา</button>
+        <button onClick={() => setGeneralSettingsOpen(true)} title="ตั้งค่า" style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text, whiteSpace: "nowrap" }}>⚙️ ตั้งค่า</button>
       </div>
+      {generalSettingsOpen && (
+        <GeneralSettingsSheet
+          settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
+          exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore}
+          lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
+          deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
+          onClose={() => setGeneralSettingsOpen(false)}
+        />
+      )}
       {/* v1.9.11: Quick Add — photo button restored (snap/attach at creation time) + [ชื่อผู้เล่น][ระดับ][+]. Skill-index explanations still live in the ตั้งค่าระดับฝีมือ sheet above (unaffected). */}
       <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
         <input ref={newPlayerFileRef} type="file" accept="image/*" onChange={onDraftPhotoFile} style={{ display: "none" }} />
@@ -3800,14 +3845,20 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
               <span style={{ position: "absolute", right: -2, bottom: -2, width: 18, height: 18, borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={10} color={T.muted} /></span>
             </button>
             <div style={{ flex: 1, minWidth: 0 }}>
-              {/* v1.9.17: tapping the name opens "แก้ไขสมาชิก" — Quick Edit ระดับฝีมือ (the select below),
-                  Status dropdown, Delete, and photo (the Avatar button above) are all untouched/unchanged. */}
-              <button onClick={() => setEditPlayerId(p.id)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", background: "none", padding: 0, cursor: "pointer" }}>
+              {/* v1.11.5: tapping the name now opens the new read-only Player Profile (photo/name/skill/
+                  hand/type header + all-time stats) instead of jumping straight into edit — "แก้ไขสมาชิก"
+                  is still reached from inside the Profile's own edit action, so nothing about
+                  EditPlayerModal itself changes. Quick Edit ระดับฝีมือ (select below), Status dropdown,
+                  Delete, and photo (the Avatar button above) are all untouched/unchanged. */}
+              <button onClick={() => setProfilePlayerId(p.id)} style={{ display: "block", width: "100%", textAlign: "left", border: "none", background: "none", padding: 0, cursor: "pointer" }}>
                 <div style={{ fontSize: 14.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.text }}>{p.name}</div>
               </button>
-              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
                 <select value={p.skillIndex} onChange={(e) => setPLevel(p.id, Number(e.target.value))} style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, border: "none", borderRadius: 7, padding: "3px 6px" }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex} style={{ background: "#fff", color: "#000" }}>{o.label}</option>)}</select>
                 <span style={{ background: HAND_BADGE[p.handedness === "left" ? "left" : "right"].bg, color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span>
+                {/* v1.11.5: Member/Guest badge — order is Skill → Hand → Type per spec, informational
+                    only (never read by matchmaking/skill/attendance/tournament logic). */}
+                <span style={{ background: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].bg, color: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].label}</span>
               </div>
             </div>
             {playingIds && playingIds.has(p.id)
@@ -3828,6 +3879,18 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
           onClose={() => setEditPlayerId(null)}
         />
       )}
+      {profilePlayerId && players.find((p) => p.id === profilePlayerId) && (
+        <PlayerProfileSheet
+          player={players.find((p) => p.id === profilePlayerId)}
+          getP={getP}
+          history={history}
+          current={current}
+          sessionHistory={sessionHistory}
+          tournamentHistory={tournamentHistory}
+          onEdit={() => { setEditPlayerId(profilePlayerId); setProfilePlayerId(null); }}
+          onClose={() => setProfilePlayerId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -3842,10 +3905,15 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onClose })
   const [name, setName] = useState(player.name);
   const [skillIndex, setSkillIndex] = useState(player.skillIndex);
   const [handedness, setHandedness] = useState(player.handedness === "left" ? "left" : "right");
+  // v1.11.5: memberType/phone/lineId — informational-only fields (never read by matchmaking, skill
+  // calc, attendance, or tournament ranking; see MEMBER_TYPE_META for the badge shown on the main list).
+  const [memberType, setMemberType] = useState(player.memberType === "guest" ? "guest" : "member");
+  const [phone, setPhone] = useState(player.phone || "");
+  const [lineId, setLineId] = useState(player.lineId || "");
   const save = () => {
     const n = name.trim();
     if (!n) return;
-    onSave({ name: n, skillIndex, handedness });
+    onSave({ name: n, skillIndex, handedness, memberType, phone: phone.trim(), lineId: lineId.trim() });
     onClose();
   };
   const handBtn = (v, label) => (
@@ -3878,10 +3946,104 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onClose })
       <div style={{ fontSize: 11, color: T.muted, marginBottom: 16, lineHeight: 1.5 }}>
         ความต้องการจับคู่กับมือซ้าย (อยาก/ไม่อยาก) ตั้งค่าได้ที่ ตั้งค่าก๊วน → ล็อคคู่/ข้อจำกัดคู่
       </div>
+
+      <Label>ประเภทสมาชิก</Label>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+        <button onClick={() => setMemberType("member")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "member" ? MEMBER_TYPE_META.member.border : T.border}`, background: memberType === "member" ? MEMBER_TYPE_META.member.bg : T.surface, color: memberType === "member" ? MEMBER_TYPE_META.member.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Member</button>
+        <button onClick={() => setMemberType("guest")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "guest" ? MEMBER_TYPE_META.guest.border : T.border}`, background: memberType === "guest" ? MEMBER_TYPE_META.guest.bg : T.surface, color: memberType === "guest" ? MEMBER_TYPE_META.guest.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Guest</button>
+      </div>
+
+      {/* v1.11.5: optional contact info — display/storage only, explicitly never read by any
+          matchmaking/skill/attendance/tournament logic (see spec: informational-only). */}
+      <Label>ข้อมูลติดต่อ (ไม่บังคับ)</Label>
+      <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 8, marginTop: -6 }}>ใช้สำหรับติดต่อสมาชิกเท่านั้น</div>
+      <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="เบอร์โทรศัพท์" type="tel" inputMode="tel" style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 10 }} />
+      <input value={lineId} onChange={(e) => setLineId(e.target.value)} placeholder="LINE ID" style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 18 }} />
+
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
         <button onClick={save} style={btnPrimary}>บันทึก</button>
       </div>
+    </Overlay>
+  );
+}
+
+// v1.11.5: read-only Player Profile — opened by tapping a member's name on the main list (replacing the
+// old direct-to-edit behavior; "แก้ไข" here reopens the exact same EditPlayerModal, unchanged). Stats are
+// ALL-TIME (unlike SummaryTab's per-player detail drill-down, which is scoped to just today's session) —
+// reuses the existing playerStats/tournamentStatsForPlayer functions rather than reinventing counting
+// logic, so the "no-result matches never distort Win Rate" rule already built into playerStats (decided
+// = win+loss, noScore/draw excluded) is inherited for free.
+function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory, tournamentHistory, onEdit, onClose }) {
+  const [showPhoto, setShowPhoto] = useState(false);
+  // all-time casual matches this player could appear in: today's completed matches (history + any
+  // "done" match still sitting in current, not yet archived) + every archived session's matches.
+  const casualMatches = useMemo(() => [
+    ...(history || []),
+    ...((current || []).filter((m) => m.status === "done")),
+    ...((sessionHistory || []).flatMap((s) => s.matches || [])),
+  ], [history, current, sessionHistory]);
+  const cs = playerStats(p.id, casualMatches);
+  const ts = tournamentStatsForPlayer(p.id, tournamentHistory);
+  // IMPORTANT STAT RULE (per spec): matches without a recorded win/loss (cs.noScore) count toward the
+  // total below but are excluded from both the win/loss counts and the Win Rate denominator — exactly
+  // how playerStats already defines "decided" (win+loss only). Tournament matches are unaffected since
+  // computeTournamentPlayerStats only ever counts completed matches with a real winner in the first place.
+  const totalMatches = cs.win + cs.loss + cs.draw + cs.noScore + ts.matches;
+  const wins = cs.win + ts.wins;
+  const losses = cs.loss + ts.losses;
+  const decided = wins + losses;
+  const winRate = decided > 0 ? Math.round((wins / decided) * 100) : null;
+  // "จำนวนครั้งที่เข้าร่วมก๊วน" — count of archived sessions this player actually appears in at least one
+  // match of (reuses playerStats per session; no new attendance-tracking data invented).
+  const sessionsAttended = useMemo(() => (sessionHistory || []).filter((s) => {
+    const st = playerStats(p.id, s.matches || []);
+    return (st.win + st.loss + st.draw + st.noScore) > 0;
+  }).length, [sessionHistory, p.id]);
+  const hand = p.handedness === "left" ? "left" : "right";
+  const mtype = p.memberType === "guest" ? "guest" : "member";
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
+        {/* v1.11.5 section 10: tapping the profile photo opens a simple large view — separate from (and
+            does not interfere with) the existing change-photo flow used by the main list's Avatar button
+            and EditPlayerModal, which stays exactly as-is. */}
+        <button onClick={() => p.photo && setShowPhoto(true)} style={{ border: "none", background: "none", padding: 0, flexShrink: 0, cursor: p.photo ? "pointer" : "default" }}>
+          <Avatar p={p} size={58} />
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 17, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
+            <span style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{p.level}</span>
+            <span style={{ background: HAND_BADGE[hand].bg, color: HAND_BADGE[hand].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{HAND_LABEL[hand]}</span>
+            <span style={{ background: MEMBER_TYPE_META[mtype].bg, color: MEMBER_TYPE_META[mtype].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{MEMBER_TYPE_META[mtype].label}</span>
+          </div>
+        </div>
+        <button onClick={onEdit} title="แก้ไขสมาชิก" style={{ flexShrink: 0, padding: "7px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>✎ แก้ไข</button>
+      </div>
+
+      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title="สถิติผู้เล่น" />
+      <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <MiniStat label="แมตช์ทั้งหมด" value={totalMatches} />
+        <MiniStat label="ชนะ" value={wins} color={T.green} />
+        <MiniStat label="แพ้" value={losses} color={T.accent} />
+        <MiniStat label="Win Rate" value={winRate != null ? winRate + "%" : "—"} />
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+        <MiniStat label="เข้าร่วมก๊วน" value={sessionsAttended} />
+        <MiniStat label="Tournament" value={ts.tournaments} />
+        <MiniStat label="🥇 Champion" value={ts.championships} color={T.green} />
+        <MiniStat label="🥈 Runner-up" value={ts.runnerUps} />
+        <MiniStat label="🥉 Third" value={ts.thirds} />
+      </div>
+
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+
+      {showPhoto && p.photo && (
+        <div onClick={() => setShowPhoto(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <img src={p.photo} alt="" style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: 14, objectFit: "contain" }} />
+        </div>
+      )}
     </Overlay>
   );
 }
@@ -3899,6 +4061,110 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>⚙️ ตั้งค่าระดับฝีมือ</div>
       <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>เลือกระบบระดับที่ใช้ในพื้นที่/ก๊วนของคุณ และดูคำอธิบายแต่ละระดับ</div>
       <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} />
+    </Overlay>
+  );
+}
+
+// v1.11.5: the new GENERAL app settings sheet — replaces the old skill-only ⚙️ ตั้งค่า trigger on the
+// Members tab. "ระดับฝีมือ" here opens the EXISTING LevelSettingsSheet (unmodified, same
+// preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
+// BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
+// both reused in place rather than reimplemented, per "do not create duplicate implementations".
+function GeneralSettingsSheet({ settings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, onClose }) {
+  const [levelSheetOpen, setLevelSheetOpen] = useState(false);
+  const [backupSheetOpen, setBackupSheetOpen] = useState(false);
+  const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
+  const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
+  const [confirmWipeAll, setConfirmWipeAll] = useState(false);
+  const [wipedNotice, setWipedNotice] = useState(false);
+  const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
+
+  const NavRow = ({ children, onClick }) => (
+    <button onClick={onClick} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer" }}>{children}</button>
+  );
+  const ExpandRow = ({ title, id, children }) => (
+    <div style={{ marginBottom: 8, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, overflow: "hidden" }}>
+      <button onClick={() => setExpanded(expanded === id ? null : id)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", padding: "11px 12px", background: "none", border: "none", cursor: "pointer" }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flex: 1 }}>{title}</span>
+        <ChevronDown size={15} color={T.muted} style={{ transform: expanded === id ? "rotate(180deg)" : "none", flexShrink: 0 }} />
+      </button>
+      {expanded === id && <div style={{ padding: "0 12px 12px", fontSize: 11.5, color: T.muted, lineHeight: 1.7 }}>{children}</div>}
+    </div>
+  );
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>⚙️ ตั้งค่า</div>
+
+      <Label>🏸 ระดับฝีมือ</Label>
+      <NavRow onClick={() => setLevelSheetOpen(true)}>
+        <span style={{ fontSize: 12.5, color: T.muted }}>ระบบที่ใช้อยู่</span>
+        <span style={{ marginLeft: "auto", fontWeight: 800, fontSize: 13, color: T.text }}>{currentPreset.name}</span>
+        <ChevronRight size={15} color={T.muted} />
+      </NavRow>
+      {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} onClose={() => setLevelSheetOpen(false)} />}
+
+      <div style={{ marginTop: 14 }}><Label>🔒 ความเป็นส่วนตัวและข้อมูล</Label></div>
+
+      <ExpandRow title="นโยบายความเป็นส่วนตัว" id="policy">
+        BadQ เก็บข้อมูลสมาชิกและประวัติการเล่นไว้ในเครื่องของคุณเท่านั้น (ไม่มีการส่งข้อมูลขึ้นเซิร์ฟเวอร์ภายนอก) ใช้เพื่อจัดก๊วน จับคู่ และสรุปผลภายในแอปนี้เท่านั้น
+      </ExpandRow>
+      <ExpandRow title="ข้อมูลที่ BadQ จัดเก็บ" id="data">
+        ขึ้นอยู่กับการใช้งาน แอปอาจเก็บ: ชื่อสมาชิก, รูปโปรไฟล์, ระดับฝีมือ, มือถนัด, ประเภทสมาชิก, เบอร์โทรศัพท์ (ถ้ากรอก), LINE ID (ถ้ากรอก), ประวัติการเข้าร่วมก๊วน, ประวัติการแข่งขัน/ผลการแข่งขัน, สถิติผู้เล่น, ข้อมูลการชำระเงินที่เกี่ยวข้อง และ Tournament data
+        <div style={{ marginTop: 6 }}>เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น</div>
+      </ExpandRow>
+      <ExpandRow title="การจัดการข้อมูลส่วนบุคคล" id="manage">
+        แก้ไขหรือลบข้อมูลติดต่อ (เบอร์โทร/LINE ID) ของสมาชิกแต่ละคนได้ที่โปรไฟล์ผู้เล่น → แก้ไขสมาชิก ส่วนการลบข้อมูลสมาชิกทั้งหมดหรือล้างข้อมูลทั้งหมด ทำได้ด้านล่างในหมวดนี้
+      </ExpandRow>
+
+      <NavRow onClick={() => setBackupSheetOpen(true)}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>การสำรอง / นำเข้า / ส่งออกข้อมูล</span>
+        <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
+      </NavRow>
+      {backupSheetOpen && (
+        <Overlay onClose={() => setBackupSheetOpen(false)}>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>สำรอง / นำเข้า / ส่งออกข้อมูล</div>
+          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} />
+        </Overlay>
+      )}
+
+      {/* destructive actions — explicit confirmation required, never a single accidental tap */}
+      <button onClick={() => setConfirmDeleteMembers(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 700 }}>ลบข้อมูลสมาชิก</button>
+      <button onClick={() => setConfirmWipeAll(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 800 }}>ล้างข้อมูลทั้งหมด</button>
+
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>ปิด</button>
+
+      {confirmDeleteMembers && (
+        <Overlay onClose={() => setConfirmDeleteMembers(false)}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ลบข้อมูลสมาชิกทั้งหมด?</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
+            จะลบรายชื่อ รูป เบอร์โทร และ LINE ID ของสมาชิกทุกคนออกจากรายการผู้เล่นทันที — ประวัติก๊วน ผลการแข่งขัน และข้อมูลการเงินที่ผ่านมาจะยังอยู่ครบ (ชื่อผู้เล่นที่ถูกลบในประวัติเก่าจะแสดงเป็น "?" แทน) การกระทำนี้ไม่สามารถย้อนกลับได้
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setConfirmDeleteMembers(false)} style={btnSecondary}>ยกเลิก</button>
+            <button onClick={() => { deleteAllMembersData(); setConfirmDeleteMembers(false); }} style={{ ...btnPrimary, background: T.accent }}>ลบข้อมูลสมาชิก</button>
+          </div>
+        </Overlay>
+      )}
+      {confirmWipeAll && (
+        <Overlay onClose={() => setConfirmWipeAll(false)}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ล้างข้อมูลทั้งหมด?</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
+            จะลบข้อมูลทั้งหมดในแอปนี้: สมาชิกทุกคน, ประวัติก๊วนทุกครั้ง, ผลการแข่งขัน Tournament ทุกรายการ และข้อมูลการเงิน — เหมือนติดตั้งแอปใหม่ ระบบจะเก็บสำเนาไว้ให้กู้คืนได้ครั้งเดียวผ่าน "ย้อนกลับการนำเข้าครั้งล่าสุด" ในหน้าสำรองข้อมูล
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setConfirmWipeAll(false)} style={btnSecondary}>ยกเลิก</button>
+            <button onClick={() => { wipeAllAppData(); setConfirmWipeAll(false); setWipedNotice(true); }} style={{ ...btnPrimary, background: T.accent }}>ล้างข้อมูลทั้งหมด</button>
+          </div>
+        </Overlay>
+      )}
+      {wipedNotice && (
+        <Overlay onClose={() => { setWipedNotice(false); onClose(); }}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ล้างข้อมูลทั้งหมดแล้ว</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>หากล้างผิด กู้คืนได้ที่ การสำรอง / นำเข้า / ส่งออกข้อมูล → ย้อนกลับการนำเข้าครั้งล่าสุด (ใช้ได้ครั้งเดียว)</div>
+          <button onClick={() => { setWipedNotice(false); onClose(); }} style={btnPrimary}>ปิด</button>
+        </Overlay>
+      )}
     </Overlay>
   );
 }
