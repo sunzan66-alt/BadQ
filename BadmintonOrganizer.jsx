@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.14";
+const APP_VERSION = "1.11.15";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -7164,6 +7164,36 @@ function Seg({ options, value, onChange }) {
   );
 }
 
+// v1.11.15 — SECONDARY segmented control, visually subordinate to the primary `Seg` above. Used where a
+// sub-navigation level sits directly under a primary Seg (e.g. ชำระเงิน's [🏸 ก๊วน | 🏆 Tournament] switch)
+// so the two levels read as a clear hierarchy instead of four equally-weighted tabs: smaller height, no
+// heavy border, a soft "pill on a track" selected state rather than a bordered box.
+function SegSecondary({ options, value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 2, background: T.surface2, borderRadius: 9, padding: 3 }}>
+      {options.map(([v, lb]) => (
+        <button
+          key={String(v)}
+          onClick={() => onChange(v)}
+          style={{
+            flex: 1,
+            padding: "5px 0",
+            borderRadius: 7,
+            fontSize: 11.5,
+            fontWeight: 700,
+            border: "none",
+            background: value === v ? T.surface : "transparent",
+            color: value === v ? T.green : T.muted,
+            boxShadow: value === v ? "0 1px 2px rgba(0,0,0,0.07)" : "none",
+          }}
+        >
+          {lb}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 const TEAM_A_COLOR = "#2563eb"; // blue
 const TEAM_B_COLOR = "#e11d48"; // red (not the same hue as the error/unpaid accent color)
 function CompactMatch({ m, getP, onClick }) {
@@ -8891,8 +8921,8 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
   return (
     <div>
-      <div style={{ marginBottom: 14 }}>
-        <Seg options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
+      <div style={{ marginBottom: 12 }}>
+        <SegSecondary options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
       </div>
       {payerTab === "quan" ? (
         <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }} />
@@ -8907,6 +8937,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
   const [payFilter, setPayFilter] = useState("unpaid"); // "all" | "unpaid" | "paid"
+  const [search, setSearch] = useState(""); // v1.11.15 — filters the displayed list only, never touches bill/payment data
   const [wheelFor, setWheelFor] = useState(null); // player id currently spinning the wheel
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [openFinanceSettings, setOpenFinanceSettings] = useState(false);
@@ -8960,13 +8991,21 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
           <div style={{ fontSize: 16, fontWeight: 800, color: receivable > 0 ? T.accent : T.green }}>{formatCurrency(receivable)}</div>
         </div>
       </div>
-      <div style={{ marginBottom: 10 }}>
+      <div style={{ marginBottom: 8 }}>
         <Seg options={[["unpaid", "ยังไม่จ่าย"], ["all", "ทั้งหมด"], ["paid", "จ่ายแล้ว"]]} value={payFilter} onChange={setPayFilter} />
       </div>
+      <div style={{ position: "relative", marginBottom: 10 }}>
+        <Search size={15} style={{ position: "absolute", left: 10, top: 9.5, color: T.muted }} />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหาผู้เล่น" style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+      </div>
+      {(() => {
+        const q = search.trim().toLowerCase();
+        const visibleBill = bill.filter((b) => (payFilter === "all" ? true : payFilter === "paid" ? b.paid : !b.paid)).filter((b) => !q || (b.name || "").toLowerCase().includes(q));
+        return (
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
-        {bill.filter((b) => payFilter === "all" ? true : payFilter === "paid" ? b.paid : !b.paid).length === 0 ? (
-          <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีข้อมูลการชำระเงิน"}</div>
-        ) : bill.filter((b) => payFilter === "all" ? true : payFilter === "paid" ? b.paid : !b.paid).map((b) => (
+        {visibleBill.length === 0 ? (
+          <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{q ? "ไม่พบผู้เล่นที่ค้นหา" : payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีข้อมูลการชำระเงิน"}</div>
+        ) : visibleBill.map((b) => (
           <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
             <button onClick={() => setDetail(b.id)} style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", textAlign: "left", padding: 0 }}>
               <Avatar p={b} size={30} />
@@ -8979,6 +9018,8 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
           </div>
         ))}
       </div>
+        );
+      })()}
 
       <button
         onClick={() => allPaid && setConfirmEnd(true)}
@@ -9117,6 +9158,7 @@ function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersBy
   const all = [activeTournament, ...(tournamentHistory || [])].filter(Boolean);
   const [selectedId, setSelectedId] = useState(null);
   const [payFilter, setPayFilter] = useState("unpaid"); // "all" | "unpaid" | "paid"
+  const [search, setSearch] = useState(""); // v1.11.15 — filters the displayed list only, scoped to the selected Tournament's own registered players
 
   if (all.length === 0) {
     return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มี Tournament — สร้าง Tournament ได้ในแท็บ "วันนี้"</div>;
@@ -9135,7 +9177,8 @@ function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersBy
     amountDue: tournamentPlayerFeeAmount(t, pid),
     paid: isTournamentPlayerPaid(t, pid),
   }))).sort((a, b) => (a.person?.name || "").localeCompare(b.person?.name || ""));
-  const filteredRows = rows.filter((r) => (payFilter === "all" ? true : payFilter === "paid" ? r.paid : !r.paid));
+  const searchQ = search.trim().toLowerCase();
+  const filteredRows = rows.filter((r) => (payFilter === "all" ? true : payFilter === "paid" ? r.paid : !r.paid)).filter((r) => !searchQ || (r.person?.name || "").toLowerCase().includes(searchQ));
   const outstanding = Math.max(0, summary.expectedTotal - summary.receivedTotal);
   const progressPct = summary.totalPlayers > 0 ? Math.round((summary.paidPlayers / summary.totalPlayers) * 100) : 0;
 
@@ -9183,12 +9226,16 @@ function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersBy
             <div style={{ height: "100%", width: `${progressPct}%`, background: T.green, borderRadius: 4 }} />
           </div>
 
-          <div style={{ marginBottom: 10 }}>
+          <div style={{ marginBottom: 8 }}>
             <Seg options={[["unpaid", "ยังไม่จ่าย"], ["all", "ทั้งหมด"], ["paid", "จ่ายแล้ว"]]} value={payFilter} onChange={setPayFilter} />
+          </div>
+          <div style={{ position: "relative", marginBottom: 10 }}>
+            <Search size={15} style={{ position: "absolute", left: 10, top: 9.5, color: T.muted }} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหาผู้เล่น" style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 6 }}>
             {filteredRows.length === 0 ? (
-              <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีผู้เล่นลงทะเบียน"}</div>
+              <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{searchQ ? "ไม่พบผู้เล่นที่ค้นหา" : payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีผู้เล่นลงทะเบียน"}</div>
             ) : filteredRows.map((r) => (
               <div key={r.playerId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
                 <Avatar p={r.person || { name: "?" }} size={30} />
