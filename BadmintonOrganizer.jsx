@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.12";
+const APP_VERSION = "1.11.13";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -602,14 +602,12 @@ function courtsForMaxWait(active, playersPerCourt, avgMinutes, maxWaitMinutes) {
   const denom = playersPerCourt * (1 + maxWaitMinutes / effCycle);
   return Math.max(1, Math.ceil(active / denom));
 }
-// courts needed so each player gets ≥ minGames over a bucket of `bucketMinutes`, solved from the same
-// capacity formula the detail sheet displays back (effectiveMinutes/gamesPerCourt/playerGameSlots).
-function courtsForMinGames(active, playersPerCourt, avgMinutes, bucketMinutes, minGames) {
-  if (active < playersPerCourt || avgMinutes <= 0) return 0;
-  const effectiveMinutes = bucketMinutes * COURT_UTILIZATION;
-  const gamesPerCourt = effectiveMinutes / avgMinutes;
-  if (gamesPerCourt <= 0) return 0;
-  return Math.max(1, Math.ceil((minGames * active) / (gamesPerCourt * playersPerCourt)));
+// physical sanity guard (v1.11.13): no goal may EVER recommend more courts than could possibly be filled
+// by the players actually present in that bucket — e.g. 38 people can occupy at most ceil(38/4)=10 doubles
+// courts simultaneously, no matter how ambitious the games/person target is. This is the backstop that
+// keeps a bug elsewhere from ever surfacing as an absurd 35/43/40-court recommendation again.
+function physicalMaxCourts(active, playersPerCourt) {
+  return active < playersPerCourt ? 0 : Math.max(1, Math.ceil(active / playersPerCourt));
 }
 // core calc: 30-minute internal buckets -> merge adjacent buckets sharing the same recommended court count
 // for presentation (spec section 5: "combine consecutive periods when the recommended court count is
@@ -638,20 +636,42 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
   if (!(endMin > startMin) || totalRegistered === 0) {
     return { totalRegistered, buckets: [], merged: [], goal, maxWaitMinutes, minGamesPerPerson, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal: 0, startMin, endMin, playersPerCourt };
   }
+  // v1.11.13 BUG FIX: "เล่นอย่างน้อย X เกม/คน" is a target over each player's WHOLE attendance window, not a
+  // target to hit fresh inside every independent 30-min bucket (the old courtsForMinGames() bug — it asked
+  // for the full minGamesPerPerson to be deliverable within a single 30-min slice, which for a 30-min match
+  // duration means "4 completed games in 30 minutes", exploding into 35-43 recommended courts). Fixed by
+  // converting each player's total target into a per-minute RATE over their own attendance duration, then
+  // letting each bucket claim only its proportional share of that one target (spec section "PLAYER-LEVEL
+  // CALCULATION": allocate the demand across the periods the player is actually present for).
   const attendance = registered.map((p) => {
     const a = timeStrToMinutes(p.arrivalTime), d = timeStrToMinutes(p.departureTime);
-    return { arrival: a != null ? Math.max(startMin, a) : startMin, departure: d != null ? Math.min(endMin, d) : endMin };
+    const arrival = a != null ? Math.max(startMin, a) : startMin;
+    const departure = d != null ? Math.min(endMin, d) : endMin;
+    const duration = Math.max(0, departure - arrival);
+    const minGamesRate = duration > 0 ? minGamesPerPerson / duration : 0; // player-games needed per minute present
+    return { arrival, departure, minGamesRate };
   });
   const STEP = 30;
   const buckets = [];
   for (let t = startMin; t < endMin; t += STEP) {
     const bStart = t, bEnd = Math.min(t + STEP, endMin);
-    const active = attendance.filter((a) => a.arrival <= bStart && a.departure >= bEnd).length;
-    const courts = goal === "min_games"
-      ? courtsForMinGames(active, playersPerCourt, avgMatchMinutes, bEnd - bStart, minGamesPerPerson)
-      : courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, maxWaitMinutes);
-    const effectiveMinutes = (bEnd - bStart) * COURT_UTILIZATION;
+    const bucketMinutes = bEnd - bStart;
+    const activeEntries = attendance.filter((a) => a.arrival <= bStart && a.departure >= bEnd);
+    const active = activeEntries.length;
+    const effectiveMinutes = bucketMinutes * COURT_UTILIZATION;
     const gamesPerCourt = avgMatchMinutes > 0 ? effectiveMinutes / avgMatchMinutes : 0;
+    const cap = physicalMaxCourts(active, playersPerCourt);
+    let courts;
+    if (goal === "min_games") {
+      // this bucket's share of demand = sum of each present player's (total target ÷ their own attendance
+      // duration) × this bucket's length — NOT `minGamesPerPerson × active` (that was the bug).
+      const demand = activeEntries.reduce((s, a) => s + a.minGamesRate * bucketMinutes, 0);
+      const capacityPerCourt = gamesPerCourt * playersPerCourt;
+      const needed = capacityPerCourt > 0 ? Math.ceil(demand / capacityPerCourt) : 0;
+      courts = cap === 0 ? 0 : Math.max(1, Math.min(needed, cap));
+    } else {
+      courts = cap === 0 ? 0 : Math.min(courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, maxWaitMinutes), cap);
+    }
     const playerGameSlots = gamesPerCourt * playersPerCourt * courts;
     const expectedGamesPerPlayer = active > 0 ? playerGameSlots / active : 0;
     const playing = playersPerCourt * courts;
@@ -6677,7 +6697,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
             ) : (
               <>
                 <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>
-                  ลงทะเบียน {courtRec.totalRegistered} คน · เป้าหมาย: {courtRec.goal === "min_games" ? `เล่นอย่างน้อย ${courtRec.minGamesPerPerson} เกม/คน` : `รอไม่เกิน ${courtRec.maxWaitMinutes} นาที`}
+                  ลงทะเบียน {courtRec.totalRegistered} คน · เป้าหมาย: {courtRec.goal === "min_games" ? `อย่างน้อย ${courtRec.minGamesPerPerson} เกม/คน ตลอดช่วงเวลาที่แต่ละคนมาเล่น` : `รอไม่เกิน ${courtRec.maxWaitMinutes} นาที`}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
                   {courtRec.merged.map((b, i) => (
@@ -6757,12 +6777,18 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
       <div style={{ marginBottom: 10 }}>
         <Seg options={[["max_wait", "รอไม่เกิน"], ["min_games", "เล่นอย่างน้อย"]]} value={rec.goal} onChange={(v) => setSettings((s) => ({ ...s, courtRecommendationGoal: v }))} />
       </div>
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 8 }}>
         {rec.goal === "min_games" ? (
           <NumField label="เกม/คน (ขั้นต่ำ)" value={rec.minGamesPerPerson} onChange={(v) => setSettings((s) => ({ ...s, minGamesPerPerson: Math.max(1, v) }))} />
         ) : (
           <NumField label="รอไม่เกิน (นาที)" value={rec.maxWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, maxWaitMinutes: Math.max(1, v) }))} />
         )}
+      </div>
+      {/* v1.11.13: the target is per player's WHOLE attendance window, never re-applied fresh inside every
+          time block below — make that explicit so the per-block numbers are never mistaken for separate
+          per-block targets (bug report: this ambiguity is exactly what the old formula got wrong). */}
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 16 }}>
+        {rec.goal === "min_games" ? `เป้าหมาย: อย่างน้อย ${rec.minGamesPerPerson} เกม/คน ตลอดช่วงเวลาที่แต่ละคนมาเล่น (ไม่ใช่ต่อช่วงเวลาย่อยด้านล่าง)` : `เป้าหมาย: รอไม่เกิน ${rec.maxWaitMinutes} นาที ในแต่ละช่วงเวลา`}
       </div>
 
       <SectionHead icon={<span style={{ fontSize: 14 }}>🕐</span>} title="จำนวนคนที่คาดว่าจะอยู่เล่น ตามช่วงเวลา" />
@@ -6780,7 +6806,7 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
               {b.courts > 0 && (
                 <div style={{ fontSize: 11, color: T.muted }}>
                   {rec.goal === "min_games"
-                    ? `คาดว่าได้เล่นประมาณ ${Math.round(b.expectedGamesPerPlayer * 10) / 10} เกม/คน (ประมาณการ)`
+                    ? `ในช่วงนี้คาดว่าได้เล่นประมาณ ${Math.round(b.expectedGamesPerPlayer * 10) / 10} เกม/คน (ประมาณการ — ไม่ใช่เป้าหมายแยกของช่วงนี้)`
                     : `คาดว่ารอประมาณ ${b.estimatedWaitMinutes != null ? Math.round(b.estimatedWaitMinutes) : 0} นาที (ประมาณการ)`}
                 </div>
               )}
