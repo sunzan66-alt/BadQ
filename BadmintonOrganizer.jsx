@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.10";
+const APP_VERSION = "1.11.11";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -198,6 +198,9 @@ function normTournament(t) {
     // is NEVER stored here — it's always derived live from the existing registration.paidTeamIds/teams
     // (see tournamentRegStatusFor) so there is exactly one source of truth for payment, never duplicated.
     registrations: Array.isArray(t.registrations) ? t.registrations.filter((r) => r && r.playerId) : [],
+    // v1.11.11: knockout-only "ชิงที่ 3" toggle — old tournaments (created before this existed) never
+    // had a 3rd-place match, which is exactly what `false` means here, so this is a safe default.
+    hasThirdPlaceMatch: !!t.hasThirdPlaceMatch,
   };
 }
 // v1.11.7 (Part E): derive a player's Tournament registration status without ever storing "paid"
@@ -1949,6 +1952,11 @@ function makeTournamentMatch(overrides) {
   return {
     id: uid(), source: "tournament", divisionId: null, groupId: null, roundIndex: 0, roundLabel: "",
     court: null, teamAId: null, teamBId: null, nextMatchId: null, nextSlot: null,
+    // v1.11.11: loserNextMatchId/loserNextSlot mirror nextMatchId/nextSlot but carry the LOSER forward
+    // instead of the winner — used only by a semifinal match feeding an optional "ชิงที่ 3" (3rd place)
+    // match (see generateKnockoutBracket/advanceLoser). null on every other match.
+    loserNextMatchId: null, loserNextSlot: null,
+    isThirdPlaceMatch: false, // true only for the one extra 3rd-place match a knockout bracket may have
     status: "waiting", // waiting (dependency not ready) | ready | playing | completed | bye
     scores: [], winnerTeamId: null, handicapA: 0, handicapB: 0, startedAt: null, endedAt: null,
     ...overrides,
@@ -2066,7 +2074,14 @@ function roundLabelFor(teamsInRound) { return teamsInRound === 2 ? "รอบช
 // nextMatchId/nextSlot so a finished match auto-feeds its winner forward. A first-round match with only
 // one real team (uneven team count) is resolved immediately as status:"bye" (never counted as played)
 // and that team is advanced into round 2 right away — top seeds receive byes first per standard seeding.
-function generateKnockoutBracket(teams) {
+// v1.11.11: `hasThirdPlaceMatch` optionally appends ONE extra match after the semifinal round, fed by
+// loserNextMatchId/loserNextSlot on the two semifinal matches (see advanceLoser) instead of the normal
+// winner-forwarding nextMatchId — deliberately NOT added to `rounds` (so it never distorts the bracket
+// tree's recursive-centering layout in BracketFull/BracketRoundByRound), and rendered by its own separate
+// "ชิงที่ 3" card wherever the champion/final is shown. If either semifinal is itself a "bye" (no real
+// 2nd team, so no true loser exists), that slot of the 3rd-place match simply never fills — matches real
+// tournament practice: a walkover semifinal has no meaningful 3rd/4th playoff.
+function generateKnockoutBracket(teams, hasThirdPlaceMatch) {
   const size = nextPow2(Math.max(2, teams.length));
   const order = standardBracketOrder(size);
   const bySeed = {}; teams.forEach((t) => (bySeed[t.seed] = t));
@@ -2085,6 +2100,14 @@ function generateKnockoutBracket(teams) {
     }
     rounds.push({ index: roundIndex, label, matchIds: roundMatches.map((m) => m.id) });
     if (prevRoundMatches) prevRoundMatches.forEach((pm, i) => { pm.nextMatchId = roundMatches[Math.floor(i / 2)].id; pm.nextSlot = i % 2 === 0 ? "A" : "B"; });
+    // the semifinal round is whichever round has exactly 2 matches feeding a single final — wire the
+    // 3rd-place match here, one iteration before the final round is built, using the SAME roundMatches
+    // array reference so later winner-forwarding above doesn't need to know about it at all.
+    if (hasThirdPlaceMatch && roundMatches.length === 2) {
+      const thirdMatch = makeTournamentMatch({ roundIndex: roundIndex + 1, roundLabel: "ชิงที่ 3", isThirdPlaceMatch: true });
+      roundMatches.forEach((sm, i) => { sm.loserNextMatchId = thirdMatch.id; sm.loserNextSlot = i === 0 ? "A" : "B"; });
+      allMatches.push(thirdMatch);
+    }
     prevRoundMatches = roundMatches;
     roundSlots = roundMatches.map((m) => (m.status === "bye" ? teams.find((t) => t.id === m.winnerTeamId) || null : null));
     roundIndex++;
@@ -2111,6 +2134,31 @@ function retractWinner(matches, finishedMatch) {
     if (m.id !== finishedMatch.nextMatchId) return m;
     const upd = { ...m };
     if (finishedMatch.nextSlot === "A") upd.teamAId = null; else upd.teamBId = null;
+    if (upd.status === "ready") upd.status = "waiting";
+    return upd;
+  });
+}
+// v1.11.11: same shape as advanceWinner/retractWinner but carries the LOSER forward via
+// loserNextMatchId/loserNextSlot — the only consumer is an optional "ชิงที่ 3" (3rd place) match fed by
+// the two semifinal losers (see generateKnockoutBracket). A bye has no real loser, so nothing to forward.
+function advanceLoser(matches, finishedMatch) {
+  if (!finishedMatch.loserNextMatchId) return matches;
+  const loserTeamId = finishedMatch.teamAId === finishedMatch.winnerTeamId ? finishedMatch.teamBId : finishedMatch.teamAId;
+  if (!loserTeamId) return matches;
+  return matches.map((m) => {
+    if (m.id !== finishedMatch.loserNextMatchId) return m;
+    const upd = { ...m };
+    if (finishedMatch.loserNextSlot === "A") upd.teamAId = loserTeamId; else upd.teamBId = loserTeamId;
+    if (upd.teamAId && upd.teamBId && upd.status === "waiting") upd.status = "ready";
+    return upd;
+  });
+}
+function retractLoser(matches, finishedMatch) {
+  if (!finishedMatch.loserNextMatchId) return matches;
+  return matches.map((m) => {
+    if (m.id !== finishedMatch.loserNextMatchId) return m;
+    const upd = { ...m };
+    if (finishedMatch.loserNextSlot === "A") upd.teamAId = null; else upd.teamBId = null;
     if (upd.status === "ready") upd.status = "waiting";
     return upd;
   });
@@ -2337,17 +2385,28 @@ function tournamentBusyCourts(t) { return new Set(tournamentAllMatches(t).filter
 // champion/runnerUp/third for one division, from its CURRENT bracket or standings — works identically
 // whether the tournament is still active or already archived. Returns nulls (not guesses) when the
 // division hasn't produced a result yet, and supports a shared/joint third place (thirdIds: []).
+// v1.11.11: if the bracket was built with an actual "ชิงที่ 3" match (isThirdPlaceMatch), its winner
+// alone is 3rd (thirdIds has length 1, and stays [] until that match is actually completed) — otherwise
+// falls back to the original joint-3rd behavior (both semifinal losers share 3rd, no extra match).
 function computeDivisionPodium(d, teamsById, pointsConfig) {
   if (!d) return { champion: null, runnerUp: null, thirdIds: [] };
   if (d.bracket) {
-    const finalMatch = d.bracket.matches.find((m) => !m.nextMatchId && m.status === "completed");
+    // exclude isThirdPlaceMatch here — it also has no nextMatchId (it's terminal, like the final) and
+    // would otherwise sometimes be mistaken for the final itself.
+    const finalMatch = d.bracket.matches.find((m) => !m.nextMatchId && !m.isThirdPlaceMatch && m.status === "completed");
     if (!finalMatch) return { champion: null, runnerUp: null, thirdIds: [] };
     const champion = finalMatch.winnerTeamId;
     const runnerUp = finalMatch.teamAId === champion ? finalMatch.teamBId : finalMatch.teamAId;
-    // both semifinal losers share 3rd place — the bracket structure doesn't play a 3rd-place match,
-    // so we surface both losers rather than arbitrarily picking one (matches current Tournament rules).
-    const semis = d.bracket.matches.filter((m) => m.nextMatchId === finalMatch.id && m.status === "completed");
-    const thirdIds = semis.flatMap((m) => [m.teamAId, m.teamBId]).filter((id) => id && id !== champion && id !== runnerUp);
+    const thirdMatch = d.bracket.matches.find((m) => m.isThirdPlaceMatch);
+    let thirdIds;
+    if (thirdMatch) {
+      thirdIds = thirdMatch.status === "completed" && thirdMatch.winnerTeamId ? [thirdMatch.winnerTeamId] : [];
+    } else {
+      // both semifinal losers share 3rd place — the bracket structure doesn't play a 3rd-place match,
+      // so we surface both losers rather than arbitrarily picking one (matches original Tournament rules).
+      const semis = d.bracket.matches.filter((m) => m.nextMatchId === finalMatch.id && m.status === "completed");
+      thirdIds = semis.flatMap((m) => [m.teamAId, m.teamBId]).filter((id) => id && id !== champion && id !== runnerUp);
+    }
     return { champion, runnerUp, thirdIds };
   }
   const divTeams = (d.teamIds || []).map((id) => teamsById[id]).filter(Boolean);
@@ -2397,7 +2456,7 @@ function buildTournamentResultReport(t, peopleById) {
   const divisions = (t.divisions || []).map((d) => ({ ...d, podium: computeDivisionPodium(d, teamsById, t.pointsConfig) }));
   const mainDivision = divisions.length === 1 ? divisions[0] : null;
   const playerStats = (t.status === "completed" || t.status === "archived") && t.playerStats ? t.playerStats : computeTournamentPlayerStats(t);
-  const finalMatch = mainDivision?.bracket ? mainDivision.bracket.matches.find((m) => !m.nextMatchId) || null : null;
+  const finalMatch = mainDivision?.bracket ? mainDivision.bracket.matches.find((m) => !m.nextMatchId && !m.isThirdPlaceMatch) || null : null;
   return {
     t, teamsById, peopleById, divisions, mainDivision, totals, playerStats,
     podium: mainDivision ? mainDivision.podium : null,
@@ -3595,20 +3654,21 @@ export default function App() {
       let nt = updateTournamentMatch(t, matchId, (m) => ({ ...m, status: "completed", winnerTeamId, endedAt: Date.now() }));
       if (found.scope === "bracket") {
         const finished = findTMatch(nt, matchId).match;
-        nt = { ...nt, divisions: nt.divisions.map((d) => (d.id !== found.divisionId ? d : { ...d, bracket: { ...d.bracket, matches: advanceWinner(d.bracket.matches, finished) } })) };
+        nt = { ...nt, divisions: nt.divisions.map((d) => (d.id !== found.divisionId ? d : { ...d, bracket: { ...d.bracket, matches: advanceLoser(advanceWinner(d.bracket.matches, finished), finished) } })) };
       }
       return nt;
     });
     return ok;
   };
   // true if undoing/editing `matchId` would silently break bracket progress (its winner already started
-  // or finished the next round) — UI must show a warning and get explicit confirmation before calling
-  // tUndoMatch(matchId, true).
+  // or finished the next round, OR — for a semifinal with an optional "ชิงที่ 3" — its loser already
+  // started/finished the 3rd-place match) — UI must show a warning and get explicit confirmation before
+  // calling tUndoMatch(matchId, true).
   const tEditAffectsDownstream = (matchId) => {
     const found = findTMatch(activeTournament, matchId);
-    if (!found || !found.match.nextMatchId) return false;
-    const next = tournamentAllMatches(activeTournament).find((m) => m.id === found.match.nextMatchId);
-    return !!next && (next.status === "playing" || next.status === "completed");
+    const downstreamIds = found ? [found.match.nextMatchId, found.match.loserNextMatchId].filter(Boolean) : [];
+    if (!downstreamIds.length) return false;
+    return downstreamIds.some((id) => { const next = tournamentAllMatches(activeTournament).find((m) => m.id === id); return !!next && (next.status === "playing" || next.status === "completed"); });
   };
   const tUndoMatch = (matchId, force) => {
     if (!force && tEditAffectsDownstream(matchId)) return false;
@@ -3617,13 +3677,15 @@ export default function App() {
       const found = findTMatch(t, matchId);
       if (!found || found.match.status !== "completed") return t;
       let nt = updateTournamentMatch(t, matchId, (m) => ({ ...m, status: "playing", winnerTeamId: null, endedAt: null }));
-      if (found.scope === "bracket" && found.match.nextMatchId) {
+      if (found.scope === "bracket" && (found.match.nextMatchId || found.match.loserNextMatchId)) {
         nt = { ...nt, divisions: nt.divisions.map((d) => {
           if (d.id !== found.divisionId) return d;
-          const retracted = retractWinner(d.bracket.matches, found.match);
-          // the downstream match's own progress no longer has a confirmed source — force it back to
-          // waiting/ready so it can't be mistaken for a still-valid result
-          const matches = retracted.map((m) => (m.id === found.match.nextMatchId && (m.status === "playing" || m.status === "completed") ? { ...m, status: m.teamAId && m.teamBId ? "ready" : "waiting", winnerTeamId: null, scores: null, court: null, startedAt: null, endedAt: null } : m));
+          const retracted = retractLoser(retractWinner(d.bracket.matches, found.match), found.match);
+          // the downstream match(es) — winner's next round AND/OR the "ชิงที่ 3" match fed by this
+          // match's loser — no longer have a confirmed source, so force them back to waiting/ready so
+          // neither can be mistaken for a still-valid result.
+          const downstreamIds = [found.match.nextMatchId, found.match.loserNextMatchId].filter(Boolean);
+          const matches = retracted.map((m) => (downstreamIds.includes(m.id) && (m.status === "playing" || m.status === "completed") ? { ...m, status: m.teamAId && m.teamBId ? "ready" : "waiting", winnerTeamId: null, scores: null, court: null, startedAt: null, endedAt: null } : m));
           return { ...d, bracket: { ...d.bracket, matches } };
         }) };
       }
@@ -3666,7 +3728,7 @@ export default function App() {
       // the match objects themselves (round-1 matches only ever store teamAId/teamBId, by design).
       const originByTeamId = Object.fromEntries(seeded.map((q) => [q.teamId, { groupId: q.groupId, groupRank: q.groupRank }]));
       const bracketTeams = seeded.map((q) => ({ ...teamsById[q.teamId], seed: q.seed, ...originByTeamId[q.teamId] }));
-      const bracket = generateKnockoutBracket(bracketTeams);
+      const bracket = generateKnockoutBracket(bracketTeams, t.hasThirdPlaceMatch);
       return {
         ...t,
         teams: t.teams.map((tm) => (originByTeamId[tm.id] ? { ...tm, ...originByTeamId[tm.id] } : tm)),
@@ -5258,6 +5320,9 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
   const [qualifyTopN, setQualifyTopN] = useState(() => iv.qualifyTopN || 2);
   const [swissRounds, setSwissRounds] = useState(() => iv.swissRounds || 4);
   const [doubleRound, setDoubleRound] = useState(() => iv.doubleRound || false);
+  // v1.11.11: knockout-only — whether the two semifinal losers play an actual "ชิงที่ 3" (3rd place)
+  // match, or (default, matches pre-existing behavior) simply share 3rd place with no extra match.
+  const [hasThirdPlaceMatch, setHasThirdPlaceMatch] = useState(() => iv.hasThirdPlaceMatch || false);
   const [handicapMode, setHandicapMode] = useState(() => iv.handicapMode || "off");
   const [saveGuestsToRoster, setSaveGuestsToRoster] = useState(() => iv.saveGuestsToRoster || false);
   // v1.11.2: "บันทึกไว้ก่อน" — snapshots every piece of wizard state above into activeTournament as a
@@ -5271,7 +5336,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
       teamBuildMode, teams,
       divisionMode, divisionPreset, divisionRanges, teamDivisionMap,
       seedMode, advSeedKind, manualOrder,
-      groupCount, qualifyTopN, swissRounds, doubleRound, handicapMode, saveGuestsToRoster,
+      groupCount, qualifyTopN, swissRounds, doubleRound, handicapMode, saveGuestsToRoster, hasThirdPlaceMatch,
     });
     onClose();
   };
@@ -5322,7 +5387,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
 
   const estimateMatches = (divs) => divs.reduce((sum, d) => {
     const n = d.teamIds.length; if (n < 2) return sum;
-    if (format === "knockout") return sum + (n - 1);
+    if (format === "knockout") return sum + (n - 1) + (hasThirdPlaceMatch && nextPow2(n) >= 4 ? 1 : 0);
     if (format === "roundRobin" || format === "league") return sum + (n * (n - 1) / 2) * (doubleRound ? 2 : 1);
     if (format === "swiss") return sum + Math.floor(n / 2) * swissRounds;
     if (format === "group") { const perGroup = Math.ceil(n / groupCount); const g = Math.min(groupCount, n); const rr = g * (perGroup * (perGroup - 1) / 2); const ko = Math.max(0, g * qualifyTopN - 1); return sum + rr + ko; }
@@ -5336,7 +5401,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
       const teamsWithDivision = divTeams.map((t) => ({ ...t, divisionId: null }));
       let division = makeDivision({ name: d.name, skillMin: d.skillMin, skillMax: d.skillMax, teamIds: teamsWithDivision.map((t) => t.id) });
       if (format === "knockout") {
-        division = { ...division, bracket: generateKnockoutBracket(teamsWithDivision) };
+        division = { ...division, bracket: generateKnockoutBracket(teamsWithDivision, hasThirdPlaceMatch) };
       } else if (format === "roundRobin" || format === "league") {
         const { matches } = generateRoundRobinFixture(teamsWithDivision, format === "league" ? doubleRound : false);
         division = { ...division, matches };
@@ -5358,7 +5423,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
       status: "active", createdAt: Date.now(), startedAt: Date.now(),
       guestPlayers, teams: allTeams, divisions: divisionsClean,
       pointsConfig: { win: 3, draw: 1, loss: 0 }, handicap: { mode: handicapMode }, doubleRound,
-      qualifyTopN, groupCount, matchMode,
+      qualifyTopN, groupCount, matchMode, hasThirdPlaceMatch,
       logo: draftLogo,
     });
     onCreate(tournament);
@@ -5599,6 +5664,13 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
             <div style={{ marginTop: 14 }}>
               <Label>รอบการแข่งขัน</Label>
               <Seg options={[[false, "Single Round Robin"], [true, "Double Round Robin"]]} value={doubleRound} onChange={setDoubleRound} />
+            </div>
+          )}
+          {format === "knockout" && (
+            <div style={{ marginTop: 14 }}>
+              <Label>อันดับ 3</Label>
+              <Seg options={[[false, "ไม่มี (ที่ 3 ร่วม)"], [true, "มีชิงที่ 3"]]} value={hasThirdPlaceMatch} onChange={setHasThirdPlaceMatch} />
+              <div style={{ fontSize: 11.5, color: T.muted, marginTop: 5 }}>{hasThirdPlaceMatch ? "ผู้แพ้รอบรองชนะเลิศทั้ง 2 ทีมจะแข่งกันเพื่อชิงอันดับ 3" : "ผู้แพ้รอบรองชนะเลิศทั้ง 2 ทีมได้อันดับ 3 ร่วมกัน ไม่ต้องแข่งเพิ่ม"}</div>
             </div>
           )}
           <div style={{ marginTop: 14 }}>
@@ -5861,12 +5933,22 @@ function TournamentBracket({ bracket, teamsById, peopleById, champion, groupName
   // in-progress tournament); once everything is decided (completed tournament) that's simply the final.
   const firstIncompleteIdx = rounds.findIndex((r) => r.matchIds.some((mid) => { const m = bracket.matches.find((x) => x.id === mid); return m && m.status !== "completed" && m.status !== "bye"; }));
   const defaultIdx = firstIncompleteIdx === -1 ? rounds.length - 1 : firstIncompleteIdx;
+  // v1.11.11: the optional "ชิงที่ 3" match deliberately lives outside `rounds` (see
+  // generateKnockoutBracket) so it never distorts the bracket tree layout — shown here as its own small
+  // card instead, right below the main bracket.
+  const thirdMatch = bracket.matches.find((m) => m.isThirdPlaceMatch);
   return (
     <div>
       {rounds.length > 1 && <div style={{ marginBottom: 10 }}><Seg options={[["round", "ทีละรอบ"], ["full", "เต็มสาย"]]} value={mode} onChange={setMode} /></div>}
       {mode === "round" || rounds.length <= 1
         ? <BracketRoundByRound rounds={rounds} bracket={bracket} teamsById={teamsById} peopleById={peopleById} groupNameById={groupNameById} defaultIdx={defaultIdx} />
         : <BracketFull rounds={rounds} bracket={bracket} teamsById={teamsById} peopleById={peopleById} groupNameById={groupNameById} />}
+      {thirdMatch && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, textAlign: "center", marginBottom: 4 }}>ชิงที่ 3</div>
+          <BracketMatchCard m={thirdMatch} teamsById={teamsById} peopleById={peopleById} />
+        </div>
+      )}
       {champion && <div style={{ textAlign: "center", padding: 14, background: "#fff7e6", borderRadius: 12, marginTop: 10 }}><div style={{ fontSize: 22 }}>🏆</div><div style={{ fontWeight: 800, fontSize: 13.5 }}>{tTeamName(teamsById[champion], peopleById)}</div></div>}
     </div>
   );
@@ -6234,7 +6316,7 @@ function TournamentDashboard(props) {
       {confirmComplete && (() => {
         let champ = null;
         t.divisions.forEach((d) => {
-          if (d.bracket) { const fin = d.bracket.matches.find((m) => !m.nextMatchId && m.status === "completed"); if (fin) champ = fin.winnerTeamId; }
+          if (d.bracket) { const fin = d.bracket.matches.find((m) => !m.nextMatchId && !m.isThirdPlaceMatch && m.status === "completed"); if (fin) champ = fin.winnerTeamId; }
           else { const matches = d.matches?.length ? d.matches : d.swissMatches || []; const st = computeStandings(d.teamIds.map((id) => teamsById[id]), matches, t.pointsConfig); if (st[0]) champ = st[0].teamId; }
         });
         return (
@@ -7711,6 +7793,7 @@ function PrintBracket({ divisions, teamsById, peopleById }) {
         // of flowing naturally — leaving a near-blank page behind it (found via a real 32-team-bracket
         // PDF render during testing). Each match card/round-title chunk is small enough to paginate
         // cleanly on its own without needing the wrapper.
+        const thirdMatch = d.bracket.matches.find((m) => m.isThirdPlaceMatch);
         return (
           <div key={d.id} style={{ marginBottom: 16 }}>
             {divisions.length > 1 && <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 6 }}>{d.name}</div>}
@@ -7722,20 +7805,29 @@ function PrintBracket({ divisions, teamsById, peopleById }) {
                     {r.matchIds.map((mid) => { const m = d.bracket.matches.find((x) => x.id === mid); return m ? renderMatch(m) : null; })}
                   </div>
                 ))}
+                {thirdMatch && <div style={{ flex: 1, minWidth: 0 }}><div style={th}>ชิงที่ 3</div>{renderMatch(thirdMatch)}</div>}
               </div>
             ) : (
               // CSS grid, not flexbox, for the match cards: Chromium's print pagination treats a
               // flex container as one atomic unbreakable block, so a flex-wrap grid of many matches
               // either fits entirely on the current page or jumps whole to the next one — leaving a
               // near-blank page behind it for a big bracket. A grid's cells paginate individually.
-              rounds.map((r) => (
-                <div key={r.index} style={{ marginBottom: 10 }}>
-                  <div style={{ ...th, textAlign: "left" }}>{r.label}</div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    {r.matchIds.map((mid) => { const m = d.bracket.matches.find((x) => x.id === mid); return m ? <div key={mid}>{renderMatch(m)}</div> : null; })}
+              <>
+                {rounds.map((r) => (
+                  <div key={r.index} style={{ marginBottom: 10 }}>
+                    <div style={{ ...th, textAlign: "left" }}>{r.label}</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                      {r.matchIds.map((mid) => { const m = d.bracket.matches.find((x) => x.id === mid); return m ? <div key={mid}>{renderMatch(m)}</div> : null; })}
+                    </div>
                   </div>
-                </div>
-              ))
+                ))}
+                {thirdMatch && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ ...th, textAlign: "left" }}>ชิงที่ 3</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}><div>{renderMatch(thirdMatch)}</div></div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         );
