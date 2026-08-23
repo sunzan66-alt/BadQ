@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.15";
+const APP_VERSION = "1.11.16";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -9734,6 +9734,7 @@ function CustomLevelEditor({ customLevels, setCustomLevels }) {
 function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog }) {
   const [busy, setBusy] = useState(false);
   const [showBootLog, setShowBootLog] = useState(false); // v1.9.18: collapsed by default — diagnostic only
+  const [showAllAutoBackups, setShowAllAutoBackups] = useState(false); // v1.11.16: only the newest checkpoint shows by default — rest collapsed behind a tap
   const [successMsg, setSuccessMsg] = useState(null); // { kind: "export"|"import"|"undo", stats?, sizeLabel? }
   const [importError, setImportError] = useState(null);
   const [preview, setPreview] = useState(null); // validated backup object awaiting mode choice / confirm
@@ -9817,7 +9818,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
             ระบบบันทึกจุดกู้คืนให้อัตโนมัติทุกครั้งที่จบก๊วนหรือ Tournament — เก็บไว้ {autoBackups.length} จุดล่าสุดในเครื่องนี้เท่านั้น (ไม่ใช่ไฟล์แยกต่างหาก จึงยังควรกด "สำรองข้อมูล" ด้านบนเป็นระยะ เพื่อเก็บไฟล์ไว้นอกเครื่องด้วย)
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {autoBackups.map((entry) => (
+            {(showAllAutoBackups ? autoBackups : autoBackups.slice(0, 1)).map((entry) => (
               <div key={entry.savedAt} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
                 <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, color: T.text }}>{fmtThaiDateTime(entry.savedAt)}</div>
@@ -9830,6 +9831,12 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
               </div>
             ))}
           </div>
+          {autoBackups.length > 1 && (
+            <button onClick={() => setShowAllAutoBackups((v) => !v)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: "8px 0 0", cursor: "pointer" }}>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>{showAllAutoBackups ? "ซ่อนจุดสำรองอื่น ๆ" : `ดูจุดสำรองทั้งหมด (${autoBackups.length} จุด)`}</span>
+              <ChevronDown size={13} color={T.muted} style={{ transform: showAllAutoBackups ? "rotate(180deg)" : "none" }} />
+            </button>
+          )}
         </div>
       )}
 
