@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.13";
+const APP_VERSION = "1.11.14";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -179,6 +179,21 @@ function courtLabelFor(labels, idx) {
 // plus now also backfills every field added by the Tournament Profile/Finance upgrade) so old saved
 // tournaments — from before logo/venue/description/registration/finance existed — load with safe
 // defaults instead of `undefined`, without ever touching any of their existing data.
+// v1.11.14: registration.paidPlayerIds is the new PLAYER-LEVEL payment ledger (added for the Finance >
+// ชำระเงิน > Tournament payment page — see tTogglePlayerPaid). registration.paidTeamIds stays the ledger
+// every EXISTING revenue calculation reads (registrationProgress/registrationFeeAmountFor/
+// tournamentEntryFeeTotal are all left completely untouched) — a team only ever lands in paidTeamIds once
+// ALL of its players are individually marked paid, kept in sync by every write path (tToggleTeamPaid,
+// tTogglePlayerPaid, tToggleHistoricalPlayerPaid). This backfill migrates any tournament saved before this
+// existed: a team already in the old paidTeamIds ledger has all of its players seeded into paidPlayerIds so
+// nothing that was already marked paid ever appears to regress to unpaid.
+function migrateTournamentRegistration(t, base) {
+  const paidPlayerIds = new Set(Array.isArray(base.paidPlayerIds) ? base.paidPlayerIds : []);
+  (t.teams || []).forEach((tm) => {
+    if ((base.paidTeamIds || []).includes(tm.id)) (tm.playerIds || []).forEach((pid) => paidPlayerIds.add(pid));
+  });
+  return { ...base, paidPlayerIds: [...paidPlayerIds] };
+}
 function normTournament(t) {
   if (!t || typeof t !== "object") return t;
   return {
@@ -187,9 +202,9 @@ function normTournament(t) {
     logo: t.logo || null,
     venue: t.venue || "",
     description: t.description || "",
-    registration: t.registration && typeof t.registration === "object"
-      ? { feeMode: "none", feeAmount: 0, paidTeamIds: [], ...t.registration }
-      : { feeMode: "none", feeAmount: 0, paidTeamIds: [] },
+    registration: migrateTournamentRegistration(t, t.registration && typeof t.registration === "object"
+      ? { feeMode: "none", feeAmount: 0, paidTeamIds: [], paidPlayerIds: [], ...t.registration }
+      : { feeMode: "none", feeAmount: 0, paidTeamIds: [], paidPlayerIds: [] }),
     finance: t.finance && typeof t.finance === "object"
       ? { income: Array.isArray(t.finance.income) ? t.finance.income : [], expense: Array.isArray(t.finance.expense) ? t.finance.expense : [] }
       : { income: [], expense: [] },
@@ -2054,7 +2069,7 @@ function makeTournament(overrides) {
     logo: null, // data URL string, or null — same pattern as player photos (see openPhoto/photo)
     venue: "", // free-text venue name
     description: "", // optional short description
-    registration: { feeMode: "none", feeAmount: 0, paidTeamIds: [] }, // feeMode: "none" | "perPlayer" | "perTeam"
+    registration: { feeMode: "none", feeAmount: 0, paidTeamIds: [], paidPlayerIds: [] }, // feeMode: "none" | "perPlayer" | "perTeam"
     finance: { income: [], expense: [] }, // { id, category, label, amount }[] each — see TOURNAMENT_FINANCE_CATEGORIES
     ...overrides,
   };
@@ -2454,6 +2469,39 @@ function registrationFeeAmountFor(t, team) {
 function tournamentEntryFeeTotal(t) {
   if (!t || !t.registration || t.registration.feeMode === "none") return 0;
   return (t.teams || []).filter((tm) => (t.registration.paidTeamIds || []).includes(tm.id)).reduce((s, tm) => s + registrationFeeAmountFor(t, tm), 0);
+}
+// v1.11.14 (Finance > ชำระเงิน > 🏆 Tournament payment page) — PLAYER-level view on top of the same
+// registration config, purely for display: a player's "share" of their team's fee (perTeam splits evenly
+// across teammates so every player has a due amount to show, even though the actual revenue recognition —
+// tournamentEntryFeeTotal above — is still keyed off whole-team completion, unchanged).
+function tournamentPlayerFeeAmount(t, playerId) {
+  const reg = t && t.registration;
+  if (!reg || reg.feeMode === "none") return 0;
+  const team = (t.teams || []).find((tm) => (tm.playerIds || []).includes(playerId));
+  if (!team) return 0;
+  if (reg.feeMode === "perPlayer") return Number(reg.feeAmount) || 0;
+  if (reg.feeMode === "perTeam") return (Number(reg.feeAmount) || 0) / ((team.playerIds || []).length || 1);
+  return 0;
+}
+function isTournamentPlayerPaid(t, playerId) { return !!(t && t.registration && (t.registration.paidPlayerIds || []).includes(playerId)); }
+// shared toggle body for both tTogglePlayerPaid (active tournament) and tToggleHistoricalPlayerPaid
+// (an archived tournamentHistory entry) — pure function, returns a new tournament object.
+function togglePlayerPaidInTournament(t, playerId) {
+  const paidPlayers = new Set(t.registration?.paidPlayerIds || []);
+  paidPlayers.has(playerId) ? paidPlayers.delete(playerId) : paidPlayers.add(playerId);
+  const paidTeamIds = (t.teams || []).filter((tm) => (tm.playerIds || []).length > 0 && (tm.playerIds || []).every((pid) => paidPlayers.has(pid))).map((tm) => tm.id);
+  return { ...t, registration: { ...t.registration, paidPlayerIds: [...paidPlayers], paidTeamIds } };
+}
+// compact payment summary for the Tournament payment page — "expected" sums every team's full fee
+// (regardless of paid status, via the UNCHANGED registrationFeeAmountFor); "received" reuses the UNCHANGED
+// tournamentEntryFeeTotal (only counts a team once ALL its players are paid) so this can never show more
+// "received" than what's actually been collected (spec: never recognize unpaid registrations as received).
+function tournamentPaymentSummary(t) {
+  if (!t) return { totalPlayers: 0, paidPlayers: 0, expectedTotal: 0, receivedTotal: 0 };
+  const allPlayerIds = (t.teams || []).flatMap((tm) => tm.playerIds || []);
+  const paidPlayers = allPlayerIds.filter((pid) => isTournamentPlayerPaid(t, pid)).length;
+  const expectedTotal = (t.teams || []).reduce((s, tm) => s + registrationFeeAmountFor(t, tm), 0);
+  return { totalPlayers: allPlayerIds.length, paidPlayers, expectedTotal, receivedTotal: tournamentEntryFeeTotal(t) };
 }
 function tournamentFinanceTotals(t) {
   if (!t) return { income: 0, expense: 0, profit: 0, entryFee: 0, otherIncome: 0 };
@@ -3913,12 +3961,26 @@ export default function App() {
   // v1.10.0: Registration fee + payment — organizer sets feeMode/feeAmount once; paidTeamIds tracks which
   // teams have paid. Kept as a small toggle (not a full ledger) per spec section 14's "do not clutter".
   const tSetRegistrationConfig = (patch) => setActiveTournament((t) => (t ? { ...t, registration: { ...t.registration, ...patch } } : t));
+  // v1.11.14: whichever ledger is toggled (whole team here, or a single player via tTogglePlayerPaid below),
+  // both paidTeamIds AND paidPlayerIds are always kept in sync with each other — a team is "paid" (and so
+  // counted in the UNCHANGED revenue functions above) iff every one of its players is individually paid.
   const tToggleTeamPaid = (teamId) => setActiveTournament((t) => {
     if (!t) return t;
-    const paid = new Set(t.registration.paidTeamIds || []);
-    paid.has(teamId) ? paid.delete(teamId) : paid.add(teamId);
-    return { ...t, registration: { ...t.registration, paidTeamIds: [...paid] } };
+    const paidTeams = new Set(t.registration.paidTeamIds || []);
+    const nowPaid = !paidTeams.has(teamId);
+    nowPaid ? paidTeams.add(teamId) : paidTeams.delete(teamId);
+    const team = (t.teams || []).find((tm) => tm.id === teamId);
+    const paidPlayers = new Set(t.registration.paidPlayerIds || []);
+    (team?.playerIds || []).forEach((pid) => (nowPaid ? paidPlayers.add(pid) : paidPlayers.delete(pid)));
+    return { ...t, registration: { ...t.registration, paidTeamIds: [...paidTeams], paidPlayerIds: [...paidPlayers] } };
   });
+  // v1.11.14 (Finance > ชำระเงิน > 🏆 Tournament): toggles ONE player's paid flag on the ACTIVE tournament —
+  // the primary write path for the new player-level payment page. See migrateTournamentRegistration/
+  // tToggleTeamPaid for why paidTeamIds is recomputed here too (keeps every existing revenue calc correct).
+  const tTogglePlayerPaid = (playerId) => setActiveTournament((t) => (t ? togglePlayerPaidInTournament(t, playerId) : t));
+  // same toggle, but for a tournament already archived into tournamentHistory (e.g. chasing a late payment
+  // after the event ended) — never touches activeTournament, and only the ONE matching history entry.
+  const tToggleHistoricalPlayerPaid = (tournamentId, playerId) => setTournamentHistory((prev) => prev.map((t) => (t.id === tournamentId ? togglePlayerPaidInTournament(t, playerId) : t)));
   // v1.11.7 (Part E): Tournament registration ("ยังไม่สมัคร"/"สมัครแล้ว") — completely independent of
   // Group attendance (player.status). References the SAME playerId, never copies/creates a player, and
   // never writes payment ("ชำระแล้ว" is always derived — see tournamentRegStatusFor — so there is no
@@ -4171,7 +4233,7 @@ export default function App() {
         {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory }} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -7560,13 +7622,12 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint, tournamentHistory }) {
-  // v1.9.9 IA cleanup (Phase 1): "ชำระเงิน" is no longer a standalone bottom-nav tab — it now lives here as
-  // a sub-tab, reusing PaymentTab UNCHANGED (same payment logic/state/fee calc — no duplicated payment
-  // system). Defaults to ชำระเงิน while a group session is actively running so the organizer lands where
-  // they need to be during play; otherwise defaults to the finance dashboard. This only reads `current`
-  // once on mount (by design) — manually switching away doesn't get overridden mid-session.
-  const [payTab, setPayTab] = useState((current && current.length > 0) ? "payment" : "overview");
+function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+  // v1.9.9 IA cleanup (Phase 1) / v1.11.14: "ชำระเงิน" is no longer a standalone bottom-nav tab — it now
+  // lives here as a sub-tab, reusing PaymentTab UNCHANGED (same payment logic/state/fee calc — no
+  // duplicated payment system). v1.11.14: always defaults to "ชำระเงิน" per spec — the organizer should
+  // land on payment status every time they tap เข้าการเงิน, not just while a session is mid-play.
+  const [payTab, setPayTab] = useState("payment");
   const [mode, setMode] = useState("day"); // "day" | "month" | "overview"
   const [openId, setOpenId] = useState(null); // sessionHistory id opened in SessionFinancialDetail
   const [discountSheetOpen, setDiscountSheetOpen] = useState(false);
@@ -7623,7 +7684,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
           sees every player regardless of archive status, and a member who played earlier today keeps
           showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
-        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} />
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
       ) : (
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -8821,7 +8882,27 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
 }
 
 /* ============ PAYMENT (separated from Summary — sits between "สรุป" and "ประวัติ") ============ */
-function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }) {
+// v1.11.14: "ชำระเงิน" now splits into [🏸 ก๊วน] [🏆 Tournament] sub-tabs (spec: reach Tournament payment
+// with exactly one extra tap after entering การเงิน). ก๊วน payment is QuanPaymentPanel below — the EXACT
+// same component/logic/state that used to be this entire file, just renamed and unpinched from the outer
+// switcher; zero behavior change. Tournament payment is a NEW sibling reusing the same visual patterns
+// (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
+function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+  const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
+  return (
+    <div>
+      <div style={{ marginBottom: 14 }}>
+        <Seg options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
+      </div>
+      {payerTab === "quan" ? (
+        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }} />
+      ) : (
+        <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
+      )}
+    </div>
+  );
+}
+function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -9021,6 +9102,107 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// v1.11.14 (Finance > ชำระเงิน > 🏆 Tournament): player-level payment tracking for Tournament registration
+// fees — same reachable-in-one-tap idea and same visual language as QuanPaymentPanel above, but reads the
+// SELECTED Tournament's own teams/registration/fee config (never mixed with ก๊วน fees, per spec section 9).
+// Selector covers the live activeTournament plus anything in tournamentHistory so an organizer can still
+// chase a late payment after a Tournament has ended (each toggle only ever touches the ONE selected
+// Tournament — see tTogglePlayerPaid / tToggleHistoricalPlayerPaid).
+function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+  const all = [activeTournament, ...(tournamentHistory || [])].filter(Boolean);
+  const [selectedId, setSelectedId] = useState(null);
+  const [payFilter, setPayFilter] = useState("unpaid"); // "all" | "unpaid" | "paid"
+
+  if (all.length === 0) {
+    return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มี Tournament — สร้าง Tournament ได้ในแท็บ "วันนี้"</div>;
+  }
+  const t = all.find((x) => x.id === selectedId) || all[0];
+  const isActive = !!activeTournament && t.id === activeTournament.id;
+  const togglePaidFor = (playerId) => (isActive ? tTogglePlayerPaid(playerId) : tToggleHistoricalPlayerPaid(t.id, playerId));
+
+  const peopleById = { ...(playersById || {}), ...Object.fromEntries((t.guestPlayers || []).map((g) => [g.id, g])) };
+  const summary = tournamentPaymentSummary(t);
+  const noFee = !t.registration || t.registration.feeMode === "none";
+  const rows = (t.teams || []).flatMap((tm) => (tm.playerIds || []).map((pid) => ({
+    playerId: pid,
+    person: peopleById[pid],
+    teammates: (tm.playerIds || []).length > 1 ? tTeamName(tm, peopleById) : null,
+    amountDue: tournamentPlayerFeeAmount(t, pid),
+    paid: isTournamentPlayerPaid(t, pid),
+  }))).sort((a, b) => (a.person?.name || "").localeCompare(b.person?.name || ""));
+  const filteredRows = rows.filter((r) => (payFilter === "all" ? true : payFilter === "paid" ? r.paid : !r.paid));
+  const outstanding = Math.max(0, summary.expectedTotal - summary.receivedTotal);
+  const progressPct = summary.totalPlayers > 0 ? Math.round((summary.paidPlayers / summary.totalPlayers) * 100) : 0;
+
+  return (
+    <div>
+      {all.length > 1 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>🏆 Tournament</div>
+          <select
+            value={t.id}
+            onChange={(e) => setSelectedId(e.target.value)}
+            style={{ width: "100%", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, outline: "none" }}
+          >
+            {all.map((x) => (
+              <option key={x.id} value={x.id}>{x.name || "Tournament ไม่มีชื่อ"} — {x.date || ""}{!activeTournament || x.id !== activeTournament.id ? " (จบแล้ว)" : ""}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", marginBottom: 12 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 800 }}>{t.name || "Tournament ไม่มีชื่อ"}</div>
+        <div style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{t.date || "-"} · {summary.totalPlayers} คนลงทะเบียน</div>
+      </div>
+
+      {noFee ? (
+        <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "24px 0" }}>Tournament นี้ไม่ได้เก็บค่าสมัคร</div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11, color: T.muted }}>ชำระแล้ว</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{summary.paidPlayers}/{summary.totalPlayers} คน</div>
+            </div>
+            <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11, color: T.muted }}>รับแล้ว</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{formatCurrency(summary.receivedTotal)} <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>/ {formatCurrency(summary.expectedTotal)}</span></div>
+            </div>
+            <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11, color: T.muted }}>ค้างชำระ</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: outstanding > 0 ? T.accent : T.green }}>{formatCurrency(outstanding)}</div>
+            </div>
+          </div>
+          <div style={{ height: 6, borderRadius: 4, background: T.surface2, overflow: "hidden", marginBottom: 12 }}>
+            <div style={{ height: "100%", width: `${progressPct}%`, background: T.green, borderRadius: 4 }} />
+          </div>
+
+          <div style={{ marginBottom: 10 }}>
+            <Seg options={[["unpaid", "ยังไม่จ่าย"], ["all", "ทั้งหมด"], ["paid", "จ่ายแล้ว"]]} value={payFilter} onChange={setPayFilter} />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 6 }}>
+            {filteredRows.length === 0 ? (
+              <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีผู้เล่นลงทะเบียน"}</div>
+            ) : filteredRows.map((r) => (
+              <div key={r.playerId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+                <Avatar p={r.person || { name: "?" }} size={30} />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.person?.name || "?"}</span>
+                  <span style={{ display: "block", fontSize: 11.5, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {formatCurrency(r.amountDue)}{r.teammates ? ` · คู่: ${r.teammates}` : ""}
+                  </span>
+                </span>
+                <button onClick={() => togglePaidFor(r.playerId)} style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: r.paid ? "#e2f5ec" : "#fdecea", color: r.paid ? T.green : T.accent }}>{r.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+              </div>
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
