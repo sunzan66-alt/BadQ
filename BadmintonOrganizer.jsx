@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.9";
+const APP_VERSION = "1.11.10";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5737,78 +5737,118 @@ function BracketRoundByRound({ rounds, bracket, teamsById, peopleById, groupName
 }
 // "เต็มสาย" — full connected bracket, horizontal scroll, one column per round.
 // v1.11.9: replaced the old CSS-only connector hack (flexbox `space-around` + ::before/::after
-// pseudo-element right-angle borders) with a measured SVG overlay. The CSS trick only lines up
-// correctly when every round cleanly halves and every card is exactly the same height — real
-// brackets break that assumption constantly (BYEs, group-stage carry-over tags wrapping to 2 lines,
-// odd team counts), which is exactly the crossed/disconnected lines seen in practice. Instead, each
-// match card gets a ref; after every layout pass we read real getBoundingClientRect() positions and
-// draw an exact elbow path from each match to its nextMatchId (the bracket's own already-correct
-// parent/child link — see generateKnockoutBracket), so connectors always land dead-center on the
-// actual cards no matter how irregular the round is. A decided match's line is drawn in green so the
-// confirmed advancement path is visually traceable at a glance (a small extra beyond "just fix the
-// lines", but essentially free once real positions are known).
+// pseudo-element right-angle borders) with a measured SVG overlay drawing exact elbow paths between
+// each match and its nextMatchId (the bracket's own already-correct parent/child link — see
+// generateKnockoutBracket). A decided/bye match's line is drawn in green so the confirmed advancement
+// path is visually traceable at a glance.
+// v1.11.10: went further and replaced the flex `space-around` VERTICAL POSITIONING too, not just the
+// lines. space-around only centers a later-round match relative to its own two immediate neighbors —
+// it does NOT recursively center it relative to the full width of everything feeding into it, so with
+// BYEs mixed in (uneven card heights) a round-2+ match visibly drifts off-center from its real subtree
+// (exactly what was reported from a live 16-team bracket screenshot). Real bracket layout requires each
+// match's vertical center = the average of its two children's centers, computed recursively round by
+// round — a classic tree layout, not something flexbox can express. So: every match card is now
+// absolutely positioned at a JS-computed `top`, derived from real measured card heights (round 0 stacks
+// top-to-bottom with a fixed gap; every later round's matches sit at the exact midpoint of their two
+// feeder matches, recursively) — this is what actually produces the "staircase toward center" shape the
+// spec asked for, and it also feeds the connector line Y-coordinates so lines and cards can never drift
+// apart from each other.
 function BracketFull({ rounds, bracket, teamsById, peopleById, groupNameById }) {
-  const CARD_H = 52;
+  const CARD_H = 52; // fallback height for the very first measurement pass, before real heights are known
+  const COL_W = 132, COL_GAP = 26, ROW_GAP = 10, LABEL_H = 22;
   const containerRef = useRef(null);
-  const cardRefs = useRef({}); // matchId -> DOM node
-  const [paths, setPaths] = useState([]);
-  const [svgSize, setSvgSize] = useState({ w: 0, h: 0 });
+  const cardRefs = useRef({}); // matchId -> DOM node, used to read each card's real rendered height
+  const [tops, setTops] = useState({});   // matchId -> computed top (px, relative to the column/container)
+  const [paths, setPaths] = useState([]); // connector <path> d strings
+  const [containerH, setContainerH] = useState(0);
 
   const recompute = useCallback(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    const cRect = container.getBoundingClientRect();
-    const next = [];
-    (bracket.matches || []).forEach((m) => {
-      if (!m.nextMatchId) return;
-      const fromEl = cardRefs.current[m.id];
-      const toEl = cardRefs.current[m.nextMatchId];
-      if (!fromEl || !toEl) return;
-      const fr = fromEl.getBoundingClientRect(), tr = toEl.getBoundingClientRect();
-      const x1 = fr.right - cRect.left, y1 = fr.top + fr.height / 2 - cRect.top;
-      const x2 = tr.left - cRect.left, y2 = tr.top + tr.height / 2 - cRect.top;
-      const midX = x1 + (x2 - x1) / 2;
-      next.push({ id: m.id, d: `M ${x1} ${y1} H ${midX} V ${y2} H ${x2}`, done: m.status === "completed" || m.status === "bye" });
+    if (!containerRef.current) return;
+    // parent match id -> the 1-2 match ids in the PREVIOUS round that feed into it
+    const childrenOf = {};
+    (bracket.matches || []).forEach((m) => { if (m.nextMatchId) (childrenOf[m.nextMatchId] = childrenOf[m.nextMatchId] || []).push(m.id); });
+    const heightOf = (mid) => cardRefs.current[mid]?.offsetHeight || CARD_H;
+    const centerY = {}, newTops = {};
+    let maxBottom = 0;
+    rounds.forEach((r, ri) => {
+      if (ri === 0) {
+        // round 1 is the only round with no children to average — just stack top-to-bottom, real
+        // measured height + a fixed gap. This is the "ground truth" every later round centers against.
+        let y = LABEL_H;
+        r.matchIds.forEach((mid) => {
+          const h = heightOf(mid);
+          newTops[mid] = y;
+          centerY[mid] = y + h / 2;
+          y += h + ROW_GAP;
+        });
+        maxBottom = Math.max(maxBottom, y - ROW_GAP);
+      } else {
+        r.matchIds.forEach((mid) => {
+          const kids = childrenOf[mid] || [];
+          const h = heightOf(mid);
+          // the actual "center on your subtree, not just your two neighbors" fix: average the REAL
+          // computed centers of this match's own feeder matches (which, for round 2+, are themselves
+          // already subtree-averaged) — this recursion is what makes round 3+ land in the true middle
+          // of everything beneath it instead of drifting toward whichever side has taller BYE cards.
+          const avg = kids.length ? kids.reduce((s, k) => s + (centerY[k] ?? 0), 0) / kids.length : maxBottom / 2;
+          centerY[mid] = avg;
+          newTops[mid] = avg - h / 2;
+          maxBottom = Math.max(maxBottom, avg - h / 2 + h);
+        });
+      }
     });
-    setPaths(next);
-    setSvgSize({ w: container.scrollWidth, h: container.scrollHeight });
-  }, [bracket]);
+    // connector lines: column x-positions are fixed by layout (COL_W/COL_GAP), so only y needs the
+    // just-computed centers — this keeps lines and cards mathematically inseparable from each other.
+    const nextPaths = [];
+    (bracket.matches || []).forEach((m) => {
+      if (!m.nextMatchId || centerY[m.id] == null || centerY[m.nextMatchId] == null) return;
+      const fromRi = rounds.findIndex((r) => r.matchIds.includes(m.id));
+      if (fromRi === -1) return;
+      const x1 = fromRi * (COL_W + COL_GAP) + COL_W, x2 = (fromRi + 1) * (COL_W + COL_GAP);
+      const y1 = centerY[m.id], y2 = centerY[m.nextMatchId];
+      const midX = x1 + (x2 - x1) / 2;
+      nextPaths.push({ id: m.id, d: `M ${x1} ${y1} H ${midX} V ${y2} H ${x2}`, done: m.status === "completed" || m.status === "bye" });
+    });
+    setTops(newTops);
+    setPaths(nextPaths);
+    setContainerH(maxBottom + 10);
+  }, [bracket, rounds]);
 
+  useLayoutEffect(() => { recompute(); }, [recompute]);
+  // real card heights can shift a hair after the first measurement (e.g. a BYE note reflowing) —
+  // ResizeObserver catches that and re-centers everything, same as font/content settling.
   useLayoutEffect(() => {
-    recompute();
-    const container = containerRef.current;
-    if (!container || typeof ResizeObserver === "undefined") return;
+    if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(() => recompute());
-    ro.observe(container);
+    Object.values(cardRefs.current).forEach((el) => el && ro.observe(el));
     return () => ro.disconnect();
   }, [recompute, rounds]);
 
+  const totalW = rounds.length * COL_W + Math.max(0, rounds.length - 1) * COL_GAP;
   return (
     <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch", marginBottom: 4 }}>
-      <div ref={containerRef} style={{ position: "relative", display: "inline-block", minWidth: "100%" }}>
-        <svg width={svgSize.w} height={svgSize.h} style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}>
+      <div ref={containerRef} style={{ position: "relative", width: totalW, minWidth: "100%", height: containerH }}>
+        <svg width={totalW} height={containerH} style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}>
           {paths.map((p) => (
             <path key={p.id} d={p.d} fill="none" stroke={p.done ? T.green : "#cbd5c9"} strokeWidth={2} strokeLinecap="round" />
           ))}
         </svg>
-        <div style={{ position: "relative", display: "flex", alignItems: "stretch", gap: 26, minWidth: "max-content", padding: "4px 2px 10px" }}>
-          {rounds.map((r) => (
-            <div key={r.index} style={{ display: "flex", flexDirection: "column", justifyContent: "space-around", gap: 10, width: 132, flexShrink: 0 }}>
-              <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, textAlign: "center", marginBottom: 2 }}>{r.label}</div>
-              {r.matchIds.map((mid) => {
-                const m = bracket.matches.find((x) => x.id === mid);
-                if (!m) return null;
-                const tagA = r.index === 0 ? groupOriginTag(teamsById[m.teamAId], groupNameById) : null;
-                const tagB = r.index === 0 ? groupOriginTag(teamsById[m.teamBId], groupNameById) : null;
-                return (
-                  <div key={mid} ref={(el) => { if (el) cardRefs.current[mid] = el; else delete cardRefs.current[mid]; }} style={{ minHeight: CARD_H }}>
-                    <BracketMatchCard m={m} teamsById={teamsById} peopleById={peopleById} tagA={tagA} tagB={tagB} compact />
-                  </div>
-                );
-              })}
-            </div>
-          ))}
-        </div>
+        {rounds.map((r, ri) => (
+          <div key={r.index} style={{ position: "absolute", top: 0, left: ri * (COL_W + COL_GAP), width: COL_W }}>
+            <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, textAlign: "center" }}>{r.label}</div>
+            {r.matchIds.map((mid) => {
+              const m = bracket.matches.find((x) => x.id === mid);
+              if (!m) return null;
+              const tagA = r.index === 0 ? groupOriginTag(teamsById[m.teamAId], groupNameById) : null;
+              const tagB = r.index === 0 ? groupOriginTag(teamsById[m.teamBId], groupNameById) : null;
+              return (
+                <div key={mid} data-mid={mid} ref={(el) => { if (el) cardRefs.current[mid] = el; else delete cardRefs.current[mid]; }} style={{ position: "absolute", top: tops[mid] ?? 0, left: 0, width: COL_W }}>
+                  <BracketMatchCard m={m} teamsById={teamsById} peopleById={peopleById} tagA={tagA} tagB={tagB} compact />
+                </div>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </div>
   );
