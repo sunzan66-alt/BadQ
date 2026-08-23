@@ -4820,6 +4820,15 @@ function SessionTab(props) {
           <input type="date" value={session.date} onChange={(e) => setSession((s) => ({ ...s, date: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
           {session.photo && <button onClick={clearSessionPhoto} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700 }}>ลบรูปก๊วน</button>}
         </div>
+        {/* v1.11.7 (Part D/F): เวลาเริ่ม-จบก๊วน — this IS session.sessionStartTime/sessionEndTime, the
+            same field the attendance-time defaulting (มาตลอด) and the Court Recommendation engine both
+            read. Editing it here just corrects "today's actual hours"; it never touches courtCount. */}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, color: T.muted }}>
+          <Clock size={15} />
+          <input type="time" value={session.sessionStartTime || "19:00"} onChange={(e) => setSession((s) => ({ ...s, sessionStartTime: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
+          <span style={{ fontSize: 13 }}>–</span>
+          <input type="time" value={session.sessionEndTime || "23:00"} onChange={(e) => setSession((s) => ({ ...s, sessionEndTime: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
+        </div>
       </div>
 
       {/* compact format badge */}
