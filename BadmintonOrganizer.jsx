@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.7";
+const APP_VERSION = "1.11.8";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -399,7 +399,20 @@ function matchWinner(m) {
 // should show right now — a new set is revealed only once the previous one is decided, and revealing
 // stops the moment either side has already clinched the needed wins (so a 2-0 match never shows a
 // pointless 3rd set, but a 1-1 match does).
-function maxSetsFor(neededWins) { return Math.max(1, (neededWins || 1) * 2 - 1); }
+// v1.11.8: "2fixed" is a THIRD, casual-ก๊วน-only sentinel (not a number of needed wins) — exactly 2 sets,
+// no decider, a 1-1 result is a genuine tie. Kept structurally distinct from the numeric best-of-N scheme
+// (rather than e.g. reusing 2) precisely so Tournament — which reads this same settings.rounds field for
+// its own ScoreEditor — can be guarded to never receive it (see tournamentRoundsFor below); a Tournament
+// match must always have a real winner.
+function maxSetsFor(neededWins) {
+  if (neededWins === "2fixed") return 2;
+  return Math.max(1, (neededWins || 1) * 2 - 1);
+}
+// v1.11.8 (casual-only "2 เซต เสมอได้" format): Tournament's tSetScore/tSetWin and its two ScoreEditor
+// call sites must NEVER see the "2fixed" sentinel — a competitive Tournament match always needs a real
+// winner, so it's coerced to the nearest real best-of-N (best-of-3) instead, exactly like an
+// un-configured rounds value would be.
+function tournamentRoundsFor(rounds) { return rounds === "2fixed" ? 2 : (rounds || 1); }
 function visibleSetCount(m, neededWins) {
   const need = neededWins || 1;
   const maxSets = maxSetsFor(need);
@@ -414,24 +427,40 @@ function visibleSetCount(m, neededWins) {
   return visible;
 }
 function roundsLabel(rounds) {
+  if (rounds === "2fixed") return "2 เซต";
   const r = rounds || 1;
   return r <= 1 ? "1 เซต" : `${r} ใน ${maxSetsFor(r)} เซต`;
 }
+// v1.11.8: `draw` is now split into two causes that used to be indistinguishable — `fixedDraw` is a
+// GENUINE tie under the "2fixed" 2-เซต-เสมอได้ format (exactly 2 scored sets, 1-1 — a real, intentional
+// completed result), while `draw` stays the old meaning: an ambiguous/incomplete best-of-N scorecard
+// (e.g. a decider 3rd set that was never played). Discriminated by m.scores.length === 2, which only the
+// "2fixed" format ever produces (every other format pads to an odd length via maxSetsFor). This directly
+// feeds PlayerProfileSheet's stat reconciliation — see the v1.11.7 comment there.
 function playerStats(pid, matches) {
-  let win = 0, loss = 0, draw = 0, noScore = 0; const partners = {}, opps = {};
+  let win = 0, loss = 0, draw = 0, fixedDraw = 0, noScore = 0; const partners = {}, opps = {};
+  const partnerRecord = {}; // partnerId -> { games, wins, losses } — decided casual matches only, for "คู่หูที่เล่นด้วยบ่อยที่สุด"
   for (const m of matches) {
     const A = (m.teamA || []).filter(Boolean), B = (m.teamB || []).filter(Boolean);
     const inA = A.includes(pid), inB = B.includes(pid);
     if (!inA && !inB) continue;
-    (inA ? A : B).filter((id) => id !== pid).forEach((id) => (partners[id] = (partners[id] || 0) + 1));
+    const myPartners = (inA ? A : B).filter((id) => id !== pid);
+    myPartners.forEach((id) => (partners[id] = (partners[id] || 0) + 1));
     (inA ? B : A).forEach((id) => (opps[id] = (opps[id] || 0) + 1));
     if (!hasScore(m)) { noScore++; continue; }
     const w = matchWinner(m);
-    if (w) { if (w === (inA ? "A" : "B")) win++; else loss++; }
-    else draw++; // hasScore true but no winner => genuine draw/tie, distinct from noScore
+    let outcome = null; // "win" | "loss" | null (draw/undecided)
+    if (w) { outcome = w === (inA ? "A" : "B") ? "win" : "loss"; if (outcome === "win") win++; else loss++; }
+    else if (m.scores && m.scores.length === 2) fixedDraw++; // genuine 2-เซต-เสมอได้ tie
+    else draw++; // ambiguous/incomplete best-of-N scorecard — distinct from noScore
+    if (outcome) myPartners.forEach((id) => {
+      const rec = partnerRecord[id] || { games: 0, wins: 0, losses: 0 };
+      rec.games++; outcome === "win" ? rec.wins++ : rec.losses++;
+      partnerRecord[id] = rec;
+    });
   }
   const decided = win + loss;
-  return { win, loss, draw, noScore, winRate: decided ? Math.round((win / decided) * 100) : null, partners, opps };
+  return { win, loss, draw, fixedDraw, noScore, winRate: decided ? Math.round((win / decided) * 100) : null, partners, opps, partnerRecord };
 }
 // aggregates one player's Tournament record across tournamentHistory (archived Tournaments only —
 // kept fully separate from Casual playerStats(), though the two can be shown side by side).
@@ -454,6 +483,55 @@ function tournamentStatsForPlayer(pid, tournamentHistory) {
     });
   });
   return { tournaments, matches, wins, losses, championships, runnerUps, thirds };
+}
+// v1.11.8: per-match casual history for "ดูประวัติการเล่น" — mirrors playerStats()'s aggregate logic
+// but returns one row per match instead of totals. `taggedMatches` must already carry a `__date` field
+// (raw match records have no date of their own) — see PlayerProfileSheet's casualMatchesWithDate.
+function casualMatchHistoryForPlayer(pid, taggedMatches, getP) {
+  const nameOf = (id) => getP(id)?.name || "?";
+  const rows = [];
+  for (const m of taggedMatches || []) {
+    const A = (m.teamA || []).filter(Boolean), B = (m.teamB || []).filter(Boolean);
+    const inA = A.includes(pid), inB = B.includes(pid);
+    if (!inA && !inB) continue;
+    const mine = inA ? A : B, theirs = inA ? B : A;
+    const partnerNames = mine.filter((id) => id !== pid).map(nameOf).join(" + ") || "-";
+    const oppNames = theirs.map(nameOf).join(" + ") || "-";
+    let resultLabel = "ไม่มีคะแนน";
+    if (hasScore(m)) {
+      const w = matchWinner(m);
+      if (w) resultLabel = w === (inA ? "A" : "B") ? "ชนะ" : "แพ้";
+      else if (m.scores && m.scores.length === 2) resultLabel = "เสมอ";
+      else resultLabel = "ไม่ระบุผล";
+    }
+    rows.push({ id: m.id, date: m.__date || null, partnerNames, oppNames, resultLabel, scoreStr: matchScoreText(m) || "-" });
+  }
+  return rows.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+}
+// v1.11.8: per-match Tournament history for "ดูประวัติการเล่น" — mirrors tournamentStatsForPlayer()'s
+// aggregate logic but returns one completed match per row (event name, round, opponent, result, score).
+function tournamentMatchesForPlayer(pid, tournamentHistory, getP) {
+  const rows = [];
+  (tournamentHistory || []).forEach((t) => {
+    const teamsById = Object.fromEntries((t.teams || []).map((tm) => [tm.id, tm]));
+    const guestById = Object.fromEntries((t.guestPlayers || []).map((g) => [g.id, g]));
+    const nameOf = (id) => getP(id)?.name || guestById[id]?.name || "?";
+    const myTeamIds = new Set((t.teams || []).filter((tm) => (tm.playerIds || []).includes(pid)).map((tm) => tm.id));
+    if (myTeamIds.size === 0) return;
+    tournamentAllMatches(t).filter((m) => m.status === "completed").forEach((m) => {
+      const isA = myTeamIds.has(m.teamAId), isB = myTeamIds.has(m.teamBId);
+      if (!isA && !isB) return;
+      const myTeam = teamsById[isA ? m.teamAId : m.teamBId];
+      const oppTeam = teamsById[isA ? m.teamBId : m.teamAId];
+      const partnerNames = (myTeam?.playerIds || []).filter((id) => id !== pid).map(nameOf).join(" + ") || "-";
+      const oppNames = (oppTeam?.playerIds || []).map(nameOf).join(" + ") || "?";
+      rows.push({
+        id: m.id, event: t.name || "Tournament ไม่มีชื่อ", date: t.date || null, roundLabel: m.roundLabel || "-",
+        partnerNames, oppNames, resultLabel: m.winnerTeamId === myTeam?.id ? "ชนะ" : "แพ้", scoreStr: matchScoreText(m) || "-",
+      });
+    });
+  });
+  return rows.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 }
 // v1.11.7 (Part L): simple historical average match duration for THIS group — no ML, just an average of
 // recent real (startedAt+finishedAt) casual matches, guarded against abandoned/left-open matches
@@ -3485,7 +3563,7 @@ export default function App() {
   };
   const tSetScore = (matchId, ri, side, val) => {
     setActiveTournament((t) => updateTournamentMatch(t, matchId, (m) => {
-      const maxSets = maxSetsFor(settings.rounds || 1);
+      const maxSets = maxSetsFor(tournamentRoundsFor(settings.rounds));
       const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: maxSets }, () => ({ a: null, b: null, win: null }));
       while (scores.length < maxSets) scores.push({ a: null, b: null, win: null });
       scores[ri] = { ...scores[ri], [side]: val === "" ? null : Number(val) };
@@ -3495,7 +3573,7 @@ export default function App() {
   // manual win/lose pick for a round with no numeric score — see casual setWin() for the same behavior.
   const tSetWin = (matchId, ri, side) => {
     setActiveTournament((t) => updateTournamentMatch(t, matchId, (m) => {
-      const maxSets = maxSetsFor(settings.rounds || 1);
+      const maxSets = maxSetsFor(tournamentRoundsFor(settings.rounds));
       const scores = m.scores ? m.scores.map((r) => ({ ...r })) : Array.from({ length: maxSets }, () => ({ a: null, b: null, win: null }));
       while (scores.length < maxSets) scores.push({ a: null, b: null, win: null });
       scores[ri] = { ...scores[ri], win: side };
@@ -4145,6 +4223,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           current={current}
           sessionHistory={sessionHistory}
           tournamentHistory={tournamentHistory}
+          session={session}
           onEdit={() => { setEditPlayerId(profilePlayerId); setProfilePlayerId(null); }}
           onClose={() => setProfilePlayerId(null)}
         />
@@ -4355,8 +4434,9 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
 // reuses the existing playerStats/tournamentStatsForPlayer functions rather than reinventing counting
 // logic, so the "no-result matches never distort Win Rate" rule already built into playerStats (decided
 // = win+loss, noScore/draw excluded) is inherited for free.
-function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory, tournamentHistory, onEdit, onClose }) {
+function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory, tournamentHistory, session, onEdit, onClose }) {
   const [showPhoto, setShowPhoto] = useState(false);
+  const [showHistory, setShowHistory] = useState(false); // v1.11.8: "ดูประวัติการเล่น" drill-down sheet
   // all-time casual matches this player could appear in: today's completed matches (history + any
   // "done" match still sitting in current, not yet archived) + every archived session's matches.
   const casualMatches = useMemo(() => [
@@ -4364,6 +4444,14 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
     ...((current || []).filter((m) => m.status === "done")),
     ...((sessionHistory || []).flatMap((s) => s.matches || [])),
   ], [history, current, sessionHistory]);
+  // v1.11.8: same matches, but date-tagged for the match-history drill-down — today's matches (history +
+  // done current) use session.date since those records carry no date of their own; each archived
+  // session's matches use that session's own date.
+  const casualMatchesWithDate = useMemo(() => [
+    ...(history || []).map((m) => ({ ...m, __date: session?.date || null })),
+    ...((current || []).filter((m) => m.status === "done")).map((m) => ({ ...m, __date: session?.date || null })),
+    ...((sessionHistory || []).flatMap((s) => (s.matches || []).map((m) => ({ ...m, __date: s.date })))),
+  ], [history, current, sessionHistory, session]);
   const cs = playerStats(p.id, casualMatches);
   const ts = tournamentStatsForPlayer(p.id, tournamentHistory);
   // v1.11.7 STAT RECONCILIATION FIX: "แมตช์ทั้งหมด" must equal ชนะ+แพ้ (matchesPlayed = wins + losses).
@@ -4374,9 +4462,13 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
   // a result — so the three numbers always reconcile exactly. BYE tournament matches were already
   // excluded upstream (tournamentAllMatches(...).filter(m => m.status !== "bye") inside
   // computeTournamentPlayerStats), so ts.matches is already wins+losses only and needs no change here.
+  // v1.11.8: "2 เซต" casual format allows a genuine completed tie (cs.fixedDraw) — per the original
+  // reconciliation comment above, that's exactly the "application genuinely supports another completed
+  // result type" carve-out, so it now folds into the headline total alongside wins+losses. ts (Tournament)
+  // never produces fixedDraw — Tournament matches are guarded (tournamentRoundsFor) to always need a winner.
   const wins = cs.win + ts.wins;
   const losses = cs.loss + ts.losses;
-  const totalMatches = wins + losses;
+  const totalMatches = wins + losses + cs.fixedDraw;
   const decided = wins + losses;
   const winRate = decided > 0 ? Math.round((wins / decided) * 100) : null;
   // "จำนวนครั้งที่มาเล่น" (v1.11.7 rename from "เข้าร่วมก๊วน") — count of archived sessions this player
@@ -4414,6 +4506,7 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
         <MiniStat label="แมตช์ทั้งหมด" value={totalMatches} />
         <MiniStat label="ชนะ" value={wins} color={T.green} />
         <MiniStat label="แพ้" value={losses} color={T.accent} />
+        {cs.fixedDraw > 0 && <MiniStat label="เสมอ" value={cs.fixedDraw} />}
         <MiniStat label="Win Rate" value={winRate != null ? winRate + "%" : "—"} />
       </div>
       {/* v1.11.7: compact, single-language achievement labels (was a Thai/English mix: "เข้าร่วมก๊วน" /
@@ -4426,6 +4519,12 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
         <MiniStat label="🥉 อันดับ 3" value={ts.thirds} />
       </div>
 
+      {/* v1.11.8: entry point into the new full match-history drill-down (casual log / Tournament log /
+          most-frequent-partner win rates) — placed right below the achievement stats per spec mockup. */}
+      <button onClick={() => setShowHistory(true)} style={{ width: "100%", textAlign: "left", background: "none", border: "none", padding: "2px 0 16px", color: T.green, fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", gap: 4 }}>
+        ดูประวัติการเล่น <ChevronRight size={15} />
+      </button>
+
       <button onClick={onClose} style={btnSecondary}>ปิด</button>
 
       {showPhoto && p.photo && (
@@ -4433,6 +4532,94 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
           <img src={p.photo} alt="" style={{ maxWidth: "100%", maxHeight: "100%", borderRadius: 14, objectFit: "contain" }} />
         </div>
       )}
+
+      {showHistory && (
+        <PlayerMatchHistorySheet
+          player={p}
+          casualRows={casualMatchHistoryForPlayer(p.id, casualMatchesWithDate, getP)}
+          tournamentRows={tournamentMatchesForPlayer(p.id, tournamentHistory, getP)}
+          partnerRecord={cs.partnerRecord}
+          getP={getP}
+          onClose={() => setShowHistory(false)}
+        />
+      )}
+    </Overlay>
+  );
+}
+// v1.11.8: "ดูประวัติการเล่น" — full match-history drill-down opened from PlayerProfileSheet. Three
+// sections: casual match log, Tournament match log, and most-frequent-partner win rates (reuses
+// playerStats()'s partnerRecord map rather than recomputing partner win/loss here).
+function PlayerMatchHistorySheet({ player: p, casualRows, tournamentRows, partnerRecord, getP, onClose }) {
+  const [tab, setTab] = useState("casual"); // "casual" | "tournament" | "partners"
+  const partnerRows = useMemo(() => Object.entries(partnerRecord || {})
+    .map(([id, rec]) => ({ id, name: getP(id)?.name || "?", ...rec, winRate: rec.games ? Math.round((rec.wins / rec.games) * 100) : null }))
+    .sort((a, b) => b.games - a.games), [partnerRecord, getP]);
+  const rowStyle = { background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 11px" };
+  const resultColor = (label) => (label === "ชนะ" ? T.green : label === "แพ้" ? T.accent : T.muted);
+  return (
+    <Overlay onClose={onClose}>
+      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title={`ประวัติการเล่น — ${p.name}`} />
+      <div style={{ marginBottom: 14 }}>
+        <Seg options={[["casual", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"], ["partners", "📈 คู่หู"]]} value={tab} onChange={setTab} />
+      </div>
+
+      {tab === "casual" && (
+        casualRows.length === 0 ? (
+          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีประวัติการเล่นก๊วน</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {casualRows.map((r) => (
+              <div key={r.id} style={rowStyle}>
+                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 3 }}>{r.date ? fmtThaiDate(r.date) : "ไม่ระบุวันที่"}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>คู่: {r.partnerNames} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {r.oppNames}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: resultColor(r.resultLabel) }}>{r.resultLabel}</span>
+                  <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>{r.scoreStr}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {tab === "tournament" && (
+        tournamentRows.length === 0 ? (
+          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีประวัติการแข่งขัน</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {tournamentRows.map((r) => (
+              <div key={r.id} style={rowStyle}>
+                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 3 }}>{r.event}{r.date ? ` · ${fmtThaiDate(r.date)}` : ""} · {r.roundLabel}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>คู่: {r.partnerNames} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {r.oppNames}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: resultColor(r.resultLabel) }}>{r.resultLabel}</span>
+                  <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>{r.scoreStr}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+
+      {tab === "partners" && (
+        partnerRows.length === 0 ? (
+          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีข้อมูลคู่หู</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+            {partnerRows.map((r) => (
+              <div key={r.id} style={{ ...rowStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{r.name}</div>
+                  <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{r.games} เกม · ชนะ {r.wins} แพ้ {r.losses}</div>
+                </div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{r.winRate != null ? r.winRate + "%" : "—"}</div>
+              </div>
+            ))}
+          </div>
+        )
+      )}
+
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
     </Overlay>
   );
 }
@@ -5831,7 +6018,7 @@ function TournamentDashboard(props) {
                 <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 2 }}>{tags.a || "?"} <span style={{ fontWeight: 400 }}>vs</span> {tags.b || "?"}</div>
               ); })()}
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{tMatchLabel(m, teamsById, peopleById).a} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {tMatchLabel(m, teamsById, peopleById).b}</div>
-              <ScoreEditor m={m} rounds={settings.rounds || 1} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} />
+              <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} />
               <button onClick={() => tFinishMatch(m.id)} disabled={!hasScore(m) || !matchWinner(m)} style={{ ...btnPrimary, marginTop: 8, opacity: (!hasScore(m) || !matchWinner(m)) ? 0.5 : 1 }}><Check size={16} /> จบแมตช์</button>
             </div>
           ))}
@@ -5927,7 +6114,7 @@ function TournamentDashboard(props) {
               {matchScoreText(m) && <div style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{matchScoreText(m)}</div>}
               {editingMatch === m.id ? (
                 <div>
-                  <ScoreEditor m={m} rounds={settings.rounds || 1} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} />
+                  <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} />
                   <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                     <button onClick={() => { if (tEditAffectsDownstream(m.id)) setPendingCascade(m.id); else { tUndoMatch(m.id, false); tFinishMatch(m.id); } setEditingMatch(null); }} style={btnPrimary}>บันทึกผลใหม่</button>
                     <button onClick={() => setEditingMatch(null)} style={btnSecondary}>ยกเลิก</button>
@@ -6183,7 +6370,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           </div>
           <div style={{ marginBottom: 8 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนเซต</div>
-            <Seg options={[[1, "1 เซต"], [2, "2 ใน 3 เซต"], [3, "3 ใน 5 เซต"]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
+            <Seg options={[[1, "1 เซต"], ["2fixed", "2 เซต"], [2, "2 ใน 3 เซต"]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
           </div>
           <div style={{ marginBottom: 8 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เล่นถึง</div>
