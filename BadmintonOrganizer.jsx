@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.5";
+const APP_VERSION = "1.11.6";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -111,7 +111,7 @@ const LEVEL_HELP = "เรียงจากเริ่มต้น → เก�
 // players/backups have none of these fields, so default them here exactly like every other back-compat
 // field: memberType defaults to "member" (never silently "guest"), phone/lineId default to "" (never
 // null, so controlled <input> elements never warn about switching from uncontrolled).
-const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : "member", phone: p.phone || "", lineId: p.lineId || "" });
+const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : "member", phone: p.phone || "", lineId: p.lineId || "", archived: p.archived === true, archivedAt: p.archivedAt || null });
 
 // true once the viewport is wide enough to benefit from a landscape/tablet layout (multi-column court
 // cards, wider content column) — re-evaluated live on rotate/resize, no page reload needed.
@@ -2656,6 +2656,14 @@ export default function App() {
 
   const getP = (id) => players.find((p) => p.id === id);
   const playersById = useMemo(() => Object.fromEntries(players.map((p) => [p.id, p])), [players]);
+  // v1.11.6: active/archived split. playersById/getP above stay fed by the FULL roster (players) so
+  // historical match/tournament/finance displays keep resolving an archived player's name/photo exactly
+  // as before (see spec section 6 — archiving/deleting must never make old records unreadable). Every
+  // "pick someone for new work" surface (main member list, wait queue, matchmaking pool, tournament
+  // wizard, lock-pair/hand-pref editor) instead reads from activePlayers so an archived member simply
+  // stops being selectable, without ever being removed from the underlying `players` state array.
+  const activePlayers = useMemo(() => players.filter((p) => !p.archived), [players]);
+  const archivedPlayers = useMemo(() => players.filter((p) => p.archived), [players]);
   // ANY current-match slot (next/playing/done) — used only to keep waitQueue (the truly-free "รอเล่น"
   // pool) from double-listing someone who's already seated on a court, whatever that court's status.
   const inPlay = useMemo(() => new Set(current.flatMap((m) => [...m.teamA, ...m.teamB].filter(Boolean))), [current]);
@@ -2663,15 +2671,15 @@ export default function App() {
   // (still editable) for anyone sitting in a paired-but-not-started "next" court, not just free players.
   const playingIds = useMemo(() => new Set(current.filter((m) => m.status === "playing").flatMap((m) => [...m.teamA, ...m.teamB].filter(Boolean))), [current]);
   const waitQueue = useMemo(
-    () => players.filter((p) => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order),
-    [players, inPlay]
+    () => activePlayers.filter((p) => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order),
+    [activePlayers, inPlay]
   );
 
   // members
   const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim(); if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
-    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "" }]);
+    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null }]);
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
@@ -2778,6 +2786,26 @@ export default function App() {
       ? { ...m, queued: { teamA: m.queued.teamA.map((x) => (x === id ? null : x)), teamB: m.queued.teamB.map((x) => (x === id ? null : x)) } }
       : m)));
   };
+  // v1.11.6: "เก็บสมาชิก" (Archive) — soft-removal, no confirmation needed (fully reversible). Only ever
+  // flips archived/archivedAt on the SAME player object; id/name/photo/skill/handedness/memberType/
+  // phone/lineId/games/stats caches are all left completely untouched, and playersById/getP (fed by the
+  // full `players` array, see above) still resolve this id afterward — every historical match/tournament/
+  // finance display keeps showing their name/photo exactly as before. Scrubbed from lockPairs + any
+  // queued "เกมถัดไป" slot for the same reason delPlayer already does above — an archived player must not
+  // linger half-selected in a future match the moment they're archived.
+  const archivePlayer = (id) => {
+    setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, archived: true, archivedAt: Date.now() } : p)));
+    setLockPairs((prev) => prev.filter((r) => r.a !== id && r.b !== id));
+    setCurrent((prev) => prev.map((m) => (m.queued && [...m.queued.teamA, ...m.queued.teamB].includes(id)
+      ? { ...m, queued: { teamA: m.queued.teamA.map((x) => (x === id ? null : x)), teamB: m.queued.teamB.map((x) => (x === id ? null : x)) } }
+      : m)));
+  };
+  // "กู้คืนสมาชิก" (Restore) — flips archived back off on the SAME id/object. All history/stats were
+  // already fully intact throughout (archiving never touched them), so the player simply becomes
+  // selectable again everywhere with zero data loss and no new id.
+  const restorePlayer = (id) => {
+    setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, archived: false, archivedAt: null } : p)));
+  };
   // v1.11.5: "ลบข้อมูลสมาชิก" (Settings → ความเป็นส่วนตัวและข้อมูล) — bulk version of delPlayer for
   // every member at once (same scrub rules: lockPairs + queued-next slots). Does NOT touch
   // history/sessionHistory/tournamentHistory/finance — those store only player ids, never embedded
@@ -2820,7 +2848,9 @@ export default function App() {
       setHistory([]); setCurrent(cur); setFuture([]); setRoundNo(0); setSel(null);
       return;
     }
-    const base = players.map((p) => ({ ...p, lastPlayedRound: -1 }));
+    // v1.11.6: exclude archived players from the pool genRound draws matches from — they must not be
+    // freshly selectable for a new round even if their (pre-archive) status happened to be "ready".
+    const base = players.filter((p) => !p.archived).map((p) => ({ ...p, lastPlayedRound: -1 }));
     const cur = genRound(base, mode, courtCount, lockPairs, counts([]), 0);
     const round0 = base.map((p) => ({ ...p }));
     const enterIds = new Set(cur.flatMap((m) => [...m.teamA, ...m.teamB].filter(Boolean)));
@@ -2862,7 +2892,7 @@ export default function App() {
       const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
       const base = np.map((p) => ({ ...p }));
       const stats = counts([...history, m, ...others]);
-      const order = base.filter((p) => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+      const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
       const nm = buildMatch(order, mode, lockPairs, base, stats);
       newMatch = null;
       if (nm) {
@@ -2902,7 +2932,7 @@ export default function App() {
       const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
       const base = np.map((p) => ({ ...p }));
       const stats = counts([...history, doneM, ...others]);
-      const order = base.filter((p) => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+      const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
       const nm = buildMatch(order, mode, lockPairs, base, stats);
       if (nm) {
         const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
@@ -2935,7 +2965,7 @@ export default function App() {
     const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...others]);
-    const order = base.filter((p) => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+    const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
     const nm = buildMatch(order, mode, lockPairs, base, stats);
     if (!nm) return;
     setCurrent((prev) => prev.map((c) => (c.id === mid ? { ...c, teamA: nm.teamA, teamB: nm.teamB } : c)));
@@ -2953,7 +2983,7 @@ export default function App() {
     const reserved = reservedIdsFromCurrent(current); // excludes players queued into any court's next match too
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...current]);
-    const order = base.filter((p) => p.status === "ready" && !reserved.has(p.id)).sort(SORT);
+    const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
     const nm = buildMatch(order, mode, lockPairs, base, stats);
     if (!nm) return;
     const nc = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
@@ -2975,7 +3005,7 @@ export default function App() {
     const stats = counts([...history, ...fixed]);
     const out = current.map((c) => {
       if (c.status !== "next" || c.locked) return c;
-      const order = base.filter((p) => p.status === "ready" && !used.has(p.id)).sort(SORT);
+      const order = base.filter((p) => p.status === "ready" && !p.archived && !used.has(p.id)).sort(SORT);
       const nm = buildMatch(order, mode, lockPairs, base, stats);
       if (!nm) return c;
       [...nm.teamA, ...nm.teamB].filter(Boolean).forEach((id) => used.add(id));
@@ -3098,7 +3128,7 @@ export default function App() {
   // (playing/next/done court slot OR another court's own queued match) — see reservedIdsFromCurrent.
   const queueEligiblePool = () => {
     const reserved = reservedIdsFromCurrent(current);
-    return players.filter((p) => p.status === "ready" && !reserved.has(p.id));
+    return activePlayers.filter((p) => p.status === "ready" && !reserved.has(p.id));
   };
   // manual slot edit inside a court's queued match. The bench here (waitQueue, see SessionTab) deliberately
   // includes players already soft-reserved into SOME court's .queued (own or another's) — a queued
@@ -3710,8 +3740,8 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }} />}
-        {tab === "session" && <SessionTab {...{ players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }} />}
+        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory }} />}
@@ -3739,7 +3769,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }) {
   const [q, setQ] = useState(""); const [sort, setSort] = useState("levelDesc"); const [onlyPresent, setOnlyPresent] = useState(false);
   const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
   const [profilePlayerId, setProfilePlayerId] = useState(null); // v1.11.5: id of player shown in the new Player Profile sheet, or null
@@ -3799,6 +3829,7 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
           exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore}
           lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
           deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
+          archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
           onClose={() => setGeneralSettingsOpen(false)}
         />
       )}
@@ -3866,7 +3897,9 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
               : <select value={p.status || "absent"} onChange={(e) => setStatus(p.id, e.target.value)} style={{ appearance: "none", textAlign: "center", padding: "7px 10px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", minWidth: 76, background: PSTATUS[p.status || "absent"].bg, color: PSTATUS[p.status || "absent"].color }}>
                   {PSTATUS_OPTS.map((s) => <option key={s} value={s} style={{ background: "#fff", color: "#000" }}>{PSTATUS[s].label}</option>)}
                 </select>}
-            <button onClick={() => delPlayer(p.id)} style={{ color: T.muted, background: "none", border: "none", display: "flex" }}><Trash2 size={15} /></button>
+            {/* v1.11.6: the per-card trash icon is removed per spec — deleting/archiving a member is a
+                destructive/management action and must not sit on the main frequently-tapped screen where
+                it can be hit by accident. Both actions now live inside "แก้ไขสมาชิก" → การจัดการสมาชิก. */}
           </div>
         ))}
       </div>
@@ -3876,6 +3909,8 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
           levelOptions={levelOptions}
           onOpenPhoto={openPhoto}
           onSave={(patch) => updatePlayer(editPlayerId, patch)}
+          onArchive={() => { archivePlayer(editPlayerId); setEditPlayerId(null); }}
+          onDelete={() => { delPlayer(editPlayerId); setEditPlayerId(null); }}
           onClose={() => setEditPlayerId(null)}
         />
       )}
@@ -3901,7 +3936,7 @@ function MembersTab({ players, playingIds, addPlayer, resetAllToAbsent, setStatu
 // photo crop flow used everywhere else (onOpenPhoto = the existing openPhoto(id)). Pairing preference
 // ("อยากคู่/ไม่อยากคู่กับมือซ้าย") deliberately has NO control here — per spec it stays exclusively on
 // the existing ล็อคคู่/ข้อจำกัดคู่ editor (ตั้งค่าก๊วน sheet) rather than a new/duplicate one.
-function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onClose }) {
+function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive, onDelete, onClose }) {
   const [name, setName] = useState(player.name);
   const [skillIndex, setSkillIndex] = useState(player.skillIndex);
   const [handedness, setHandedness] = useState(player.handedness === "left" ? "left" : "right");
@@ -3910,6 +3945,9 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onClose })
   const [memberType, setMemberType] = useState(player.memberType === "guest" ? "guest" : "member");
   const [phone, setPhone] = useState(player.phone || "");
   const [lineId, setLineId] = useState(player.lineId || "");
+  // v1.11.6: permanent-delete confirmation — never a single accidental tap (Archive needs none, it's
+  // fully reversible; see "การจัดการสมาชิก" below).
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const save = () => {
     const n = name.trim();
     if (!n) return;
@@ -3964,6 +4002,29 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onClose })
         <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
         <button onClick={save} style={btnPrimary}>บันทึก</button>
       </div>
+
+      {/* v1.11.6: "การจัดการสมาชิก" — deliberately separated (spacing + divider) and visually quiet so it
+          never competes with the green บันทึก button above, per spec sections 2/8. Archive is a normal
+          secondary action (no confirmation — it's fully reversible from ⚙️ ตั้งค่า → สมาชิกที่เก็บไว้);
+          permanent delete is styled destructive/red and always requires an explicit confirm (section 5). */}
+      <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${T.border}` }}>
+        <Label>การจัดการสมาชิก</Label>
+        <button onClick={onArchive} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>📦 เก็บสมาชิก</button>
+        <button onClick={() => setConfirmDelete(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: "none", border: `1px solid ${T.accent}`, color: T.accent, fontSize: 13, fontWeight: 700 }}>🗑️ ลบสมาชิกถาวร</button>
+      </div>
+
+      {confirmDelete && (
+        <Overlay onClose={() => setConfirmDelete(false)}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ลบสมาชิกถาวร?</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
+            ข้อมูลสมาชิกนี้จะถูกลบและไม่สามารถกู้คืนได้
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setConfirmDelete(false)} style={btnSecondary}>ยกเลิก</button>
+            <button onClick={() => { setConfirmDelete(false); onDelete(); }} style={{ ...btnPrimary, background: T.accent }}>ลบถาวร</button>
+          </div>
+        </Overlay>
+      )}
     </Overlay>
   );
 }
@@ -4070,9 +4131,10 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
 // BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
 // both reused in place rather than reimplemented, per "do not create duplicate implementations".
-function GeneralSettingsSheet({ settings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, onClose }) {
+function GeneralSettingsSheet({ settings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
+  const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
@@ -4116,6 +4178,15 @@ function GeneralSettingsSheet({ settings, changeLevelPreset, setCustomLevels, ex
       <ExpandRow title="การจัดการข้อมูลส่วนบุคคล" id="manage">
         แก้ไขหรือลบข้อมูลติดต่อ (เบอร์โทร/LINE ID) ของสมาชิกแต่ละคนได้ที่โปรไฟล์ผู้เล่น → แก้ไขสมาชิก ส่วนการลบข้อมูลสมาชิกทั้งหมดหรือล้างข้อมูลทั้งหมด ทำได้ด้านล่างในหมวดนี้
       </ExpandRow>
+
+      {/* v1.11.6: "สมาชิกที่เก็บไว้" — recovery list for players archived from แก้ไขสมาชิก → เก็บสมาชิก.
+          Archiving never deletes anything, so this is where they're found again and restored. */}
+      <NavRow onClick={() => setArchivedSheetOpen(true)}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>สมาชิกที่เก็บไว้</span>
+        {archivedPlayers && archivedPlayers.length > 0 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginLeft: 8 }}>{archivedPlayers.length}</span>}
+        <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
+      </NavRow>
+      {archivedSheetOpen && <ArchivedPlayersSheet archivedPlayers={archivedPlayers || []} restorePlayer={restorePlayer} onClose={() => setArchivedSheetOpen(false)} />}
 
       <NavRow onClick={() => setBackupSheetOpen(true)}>
         <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>การสำรอง / นำเข้า / ส่งออกข้อมูล</span>
@@ -4165,6 +4236,44 @@ function GeneralSettingsSheet({ settings, changeLevelPreset, setCustomLevels, ex
           <button onClick={() => { setWipedNotice(false); onClose(); }} style={btnPrimary}>ปิด</button>
         </Overlay>
       )}
+    </Overlay>
+  );
+}
+
+// v1.11.6: "สมาชิกที่เก็บไว้" — reached from ⚙️ ตั้งค่า. Deliberately minimal (photo/name/skill/hand/type
+// + a single "กู้คืนสมาชิก" action) per spec section 4: this is a recovery list, not a second member-
+// management surface — full editing/stats are still only reachable from the normal Player Profile/
+// แก้ไขสมาชิก once a player is restored. Restore flips the SAME player's archived flag back off (see
+// restorePlayer in App()) — same id, same object, no data is recreated or touched.
+function ArchivedPlayersSheet({ archivedPlayers, restorePlayer, onClose }) {
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>สมาชิกที่เก็บไว้</div>
+      {archivedPlayers.length === 0 ? (
+        <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>ยังไม่มีสมาชิกที่เก็บไว้</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
+          {archivedPlayers.map((p) => {
+            const hand = p.handedness === "left" ? "left" : "right";
+            const mtype = p.memberType === "guest" ? "guest" : "member";
+            return (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 12px", borderRadius: 13, background: T.surface, border: `1px solid ${T.border}` }}>
+                <Avatar p={p} size={40} />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.text }}>{p.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
+                    <span style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{p.level}</span>
+                    <span style={{ background: HAND_BADGE[hand].bg, color: HAND_BADGE[hand].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[hand]}</span>
+                    <span style={{ background: MEMBER_TYPE_META[mtype].bg, color: MEMBER_TYPE_META[mtype].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[mtype].label}</span>
+                  </div>
+                </div>
+                <button onClick={() => restorePlayer(p.id)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 10, background: "#e2f5ec", border: `1px solid ${T.green}`, color: T.green, fontSize: 12, fontWeight: 800, whiteSpace: "nowrap" }}>กู้คืนสมาชิก</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
     </Overlay>
   );
 }
@@ -6453,6 +6562,10 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
         <Seg options={[["payment", "ชำระเงิน"], ["overview", "ภาพรวมการเงิน"]]} value={payTab} onChange={setPayTab} />
       </div>
 
+      {/* v1.11.6: FinanceTab already receives the FULL top-level roster as `players` (its own call site
+          in App() was never changed to the archived-filtered activePlayers) — so PaymentTab below already
+          sees every player regardless of archive status, and a member who played earlier today keeps
+          showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
         <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} />
       ) : (
