@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.6";
+const APP_VERSION = "1.11.7";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -111,7 +111,12 @@ const LEVEL_HELP = "เรียงจากเริ่มต้น → เก�
 // players/backups have none of these fields, so default them here exactly like every other back-compat
 // field: memberType defaults to "member" (never silently "guest"), phone/lineId default to "" (never
 // null, so controlled <input> elements never warn about switching from uncontrolled).
-const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : "member", phone: p.phone || "", lineId: p.lineId || "", archived: p.archived === true, archivedAt: p.archivedAt || null });
+const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : "member", phone: p.phone || "", lineId: p.lineId || "", archived: p.archived === true, archivedAt: p.archivedAt || null,
+  // v1.11.7 (Part D): per-session attendance window. null = "full session" (use session.sessionStartTime/
+  // sessionEndTime as-is) — this is the correct default for both a brand-new registration AND every
+  // pre-existing registered/ready player from a save made before this field existed, so nobody's
+  // attendance silently changes on upgrade and nobody has to re-enter anything.
+  arrivalTime: p.arrivalTime || null, departureTime: p.departureTime || null });
 
 // true once the viewport is wide enough to benefit from a landscape/tablet layout (multi-column court
 // cards, wider content column) — re-evaluated live on rotate/resize, no page reload needed.
@@ -158,6 +163,13 @@ function syncCourtLabels(labels, count) {
   while (arr.length < count) arr.push(String(arr.length + 1));
   return arr;
 }
+// v1.11.7 (Part D/M): backward-compatible session defaults — old saved sessions have no
+// sessionStartTime/sessionEndTime at all; default to a typical evening quan (19:00-23:00) so the
+// Court Recommendation engine and attendance-time defaulting always have something sane to fall back to.
+function normSession(s) {
+  const base = s && typeof s === "object" ? s : {};
+  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00" };
+}
 function courtLabelFor(labels, idx) {
   const v = Array.isArray(labels) ? labels[idx - 1] : null;
   return v != null && String(v).trim() !== "" ? String(v) : String(idx);
@@ -181,7 +193,21 @@ function normTournament(t) {
     finance: t.finance && typeof t.finance === "object"
       ? { income: Array.isArray(t.finance.income) ? t.finance.income : [], expense: Array.isArray(t.finance.expense) ? t.finance.expense : [] }
       : { income: [], expense: [] },
+    // v1.11.7 (Part E): Tournament registration — kept 100% independent of Group attendance (p.status).
+    // { playerId, status: "registered" } entries only; absence from this array = "ยังไม่สมัคร". "ชำระแล้ว"
+    // is NEVER stored here — it's always derived live from the existing registration.paidTeamIds/teams
+    // (see tournamentRegStatusFor) so there is exactly one source of truth for payment, never duplicated.
+    registrations: Array.isArray(t.registrations) ? t.registrations.filter((r) => r && r.playerId) : [],
   };
+}
+// v1.11.7 (Part E): derive a player's Tournament registration status without ever storing "paid"
+// separately — reads the SAME registration.paidTeamIds ledger TournamentFinancePanel already uses.
+function tournamentRegStatusFor(t, playerId) {
+  if (!t) return "none"; // ยังไม่สมัคร
+  const team = (t.teams || []).find((tm) => (tm.playerIds || []).includes(playerId));
+  if (team && (t.registration?.paidTeamIds || []).includes(team.id)) return "paid"; // ชำระแล้ว
+  const reg = (t.registrations || []).find((r) => r.playerId === playerId);
+  return reg && reg.status === "registered" ? "registered" : "none"; // สมัครแล้ว | ยังไม่สมัคร
 }
 const kcomb = (arr, k) => {
   const res = [];
@@ -428,6 +454,97 @@ function tournamentStatsForPlayer(pid, tournamentHistory) {
     });
   });
   return { tournaments, matches, wins, losses, championships, runnerUps, thirds };
+}
+// v1.11.7 (Part L): simple historical average match duration for THIS group — no ML, just an average of
+// recent real (startedAt+finishedAt) casual matches, guarded against abandoned/left-open matches
+// distorting it (anything under 3 or over 90 minutes is almost certainly not a genuine badminton game
+// left running/forgotten, so it's excluded rather than averaged in). Falls back to the configured
+// settings.averageMatchMinutes (itself defaulting to 15) until at least 5 reliable samples exist.
+function estimateAverageMatchMinutes(sessionHistory, fallbackMinutes) {
+  const fallback = Number(fallbackMinutes) > 0 ? Number(fallbackMinutes) : 15;
+  const durations = [];
+  for (const s of sessionHistory || []) {
+    for (const m of s.matches || []) {
+      if (!m || !m.startedAt || !m.finishedAt) continue;
+      const mins = (m.finishedAt - m.startedAt) / 60000;
+      if (mins >= 3 && mins <= 90) durations.push(mins);
+    }
+  }
+  if (durations.length < 5) return { minutes: fallback, source: "default", sampleSize: durations.length };
+  const recent = durations.slice(-50); // most recent 50 samples — recent play pace matters more than all-time
+  const avg = recent.reduce((s, v) => s + v, 0) / recent.length;
+  return { minutes: Math.round(avg * 10) / 10, source: "history", sampleSize: recent.length };
+}
+
+// ===================== COURT RECOMMENDATION ENGINE (v1.11.7, Parts F-K) =====================
+// DECISION SUPPORT ONLY — nothing here ever writes to courtCount. The organizer always makes the final
+// call (Part K); this only computes a suggestion from expected attendance-by-time.
+const REC_MODE_RANGES = { busy: [5, 6], balanced: [6, 8], saving: [8, 10] }; // players/court guideline (doubles)
+const REC_MODE_LABELS = { busy: "ตีเยอะ", balanced: "สมดุล", saving: "ประหยัด" };
+function timeStrToMinutes(t) {
+  if (!t || typeof t !== "string" || !t.includes(":")) return null;
+  const [h, m] = t.split(":").map(Number);
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return null;
+  return h * 60 + m;
+}
+function minutesToTimeStr(mins) {
+  const m = ((Math.round(mins) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+}
+// core calc: 30-minute internal buckets (Part F) -> merge adjacent buckets sharing the same recommended
+// court count for presentation (Part F's "merge adjacent intervals with identical recommendations").
+// Court count per bucket = ceil(activePlayers / upperBoundOfMode'sPlayersPerCourtRange) — this divisor
+// (not the lower bound or midpoint) is what reproduces every worked example in the spec exactly, while
+// still being fully driven by the mode's players-per-court guideline rather than a fixed constant (Part
+// G's "do NOT blindly divide by a fixed number" — the divisor changes with the chosen mode).
+// Part H's capacity formulas (effectiveMinutes/gamesPerCourt/playerGameSlots/expectedGamesPerPlayer) are
+// computed per bucket too and surfaced in the detail sheet so the organizer can see whether that court
+// count leaves realistic rotation, without a second layer silently overriding the court count above.
+function buildCourtRecommendation(players, session, settings, sessionHistory) {
+  const startMin = timeStrToMinutes(session && session.sessionStartTime) ?? 19 * 60;
+  const endMin = timeStrToMinutes(session && session.sessionEndTime) ?? 23 * 60;
+  const mode = REC_MODE_RANGES[settings && settings.courtRecommendationMode] ? settings.courtRecommendationMode : "balanced";
+  const hi = REC_MODE_RANGES[mode][1];
+  // v1.11.7 (Part L): prefer this group's own real historical average match duration once enough
+  // reliable samples exist (estimateAverageMatchMinutes already excludes abandoned/left-open matches);
+  // the organizer's configured settings.averageMatchMinutes (itself defaulting to 15) is both the
+  // fallback AND stays fully in the organizer's control whenever history is too thin to trust yet.
+  const configuredMinutes = Number(settings && settings.averageMatchMinutes) > 0 ? Number(settings.averageMatchMinutes) : 15;
+  const avgEstimate = estimateAverageMatchMinutes(sessionHistory, configuredMinutes);
+  const avgMatchMinutes = avgEstimate.minutes;
+  const utilization = Number(settings && settings.courtUtilization) > 0 && Number(settings.courtUtilization) <= 1 ? Number(settings.courtUtilization) : 0.9;
+  // "registered" (coming later)/"ready"/"playing"/"resting" all represent someone who intends to be (or
+  // already is) physically present for their attendance window; "absent"/"left" contribute nothing —
+  // completely independent of Tournament registration (Part E), reads ONLY the existing Group p.status.
+  const registered = (players || []).filter((p) => !p.archived && ["registered", "ready", "playing", "resting"].includes(p.status));
+  const totalRegistered = registered.length;
+  if (!(endMin > startMin) || totalRegistered === 0) {
+    return { totalRegistered, buckets: [], merged: [], mode, avgMatchMinutes, avgSource: avgEstimate.source, utilization, courtHoursTotal: 0, startMin, endMin };
+  }
+  const attendance = registered.map((p) => {
+    const a = timeStrToMinutes(p.arrivalTime), d = timeStrToMinutes(p.departureTime);
+    return { arrival: a != null ? Math.max(startMin, a) : startMin, departure: d != null ? Math.min(endMin, d) : endMin };
+  });
+  const STEP = 30;
+  const buckets = [];
+  for (let t = startMin; t < endMin; t += STEP) {
+    const bStart = t, bEnd = Math.min(t + STEP, endMin);
+    const active = attendance.filter((a) => a.arrival <= bStart && a.departure >= bEnd).length;
+    const courts = active < 4 ? 0 : Math.max(1, Math.ceil(active / hi));
+    const effectiveMinutes = (bEnd - bStart) * utilization;
+    const gamesPerCourt = avgMatchMinutes > 0 ? effectiveMinutes / avgMatchMinutes : 0;
+    const playerGameSlots = gamesPerCourt * 4 * courts;
+    const expectedGamesPerPlayer = active > 0 ? playerGameSlots / active : 0;
+    buckets.push({ start: bStart, end: bEnd, active, courts, expectedGamesPerPlayer });
+  }
+  const merged = [];
+  for (const b of buckets) {
+    const last = merged[merged.length - 1];
+    if (last && last.courts === b.courts) { last.end = b.end; last.active = Math.max(last.active, b.active); last.expectedGamesPerPlayer = (last.expectedGamesPerPlayer + b.expectedGamesPerPlayer) / 2; }
+    else merged.push({ ...b });
+  }
+  const courtHoursTotal = buckets.reduce((s, b) => s + (b.courts * (b.end - b.start)) / 60, 0);
+  return { totalRegistered, buckets, merged, mode, avgMatchMinutes, avgSource: avgEstimate.source, utilization, courtHoursTotal, startMin, endMin };
 }
 // ===================== CURRENCY (v1.9.1) =====================
 // single source of truth for every money display in the app (Finance/Payment/Historical/Discount Credits)
@@ -1408,6 +1525,25 @@ function getDefaultSettings() {
       { id: uid(), label: "เสียใจด้วย ไม่ได้รางวัล", type: "none", amount: 0, qty: 40 },
     ],
     lastBackupAt: null,
+    // ===== COURT RECOMMENDATION ENGINE (v1.11.7, Part G) — configurable, kept OFF the normal Group
+    // screen per spec (lives in a small settings sub-sheet reached from the recommendation detail sheet).
+    averageMatchMinutes: 15, // default match duration used until enough real history exists (Part L)
+    courtUtilization: 0.9, // accounts for warm-up/changeover/no-show buffer between games
+    courtRecommendationMode: "balanced", // "busy" (ตีเยอะ) | "balanced" (สมดุล) | "saving" (ประหยัด)
+  };
+}
+// v1.11.7 (Part M): backward-compatible settings defaults — old saved settings objects predate the
+// Court Recommendation fields above; backfill them without touching any existing customized value.
+function normSettings(s) {
+  const base = s && typeof s === "object" ? s : {};
+  const amm = Number(base.averageMatchMinutes);
+  const util = Number(base.courtUtilization);
+  return {
+    ...getDefaultSettings(),
+    ...base,
+    averageMatchMinutes: amm > 0 ? amm : 15,
+    courtUtilization: util > 0 && util <= 1 ? util : 0.9,
+    courtRecommendationMode: ["busy", "balanced", "saving"].includes(base.courtRecommendationMode) ? base.courtRecommendationMode : "balanced",
   };
 }
 
@@ -2224,7 +2360,7 @@ export default function App() {
   const setCourtLabel = (i, value) => setCourtLabelsRaw((prev) => { const next = syncCourtLabels(prev, courtCount); next[i] = value; return next; });
   const [mode, setMode] = useState("doubles");
   const [settings, setSettings] = useState(getDefaultSettings);
-  const [session, setSession] = useState({ id: uid(), name: "", date: new Date().toISOString().slice(0, 10), mode: "casual" }); // session.mode: "casual" (only mode in use today) | "tournament" (future) — see GAME MODE / TOURNAMENT block above; session.id (v1.9.1): stable id so live discountCredits can reference "this session" before it's archived
+  const [session, setSession] = useState(() => normSession(null)); // session.mode: "casual" (only mode in use today) | "tournament" (future) — see GAME MODE / TOURNAMENT block above; session.id (v1.9.1): stable id so live discountCredits can reference "this session" before it's archived
   const [lockPairs, setLockPairs] = useState([]);
   const [sel, setSel] = useState(null);
   const [sessionHistory, setSessionHistory] = useState([]); // archived (ended) sessions — see endSession()
@@ -2338,7 +2474,7 @@ export default function App() {
     setCourtLabelsRaw(syncCourtLabels(s.courtLabels, s.courtCount || 2)); // absent on old saves -> sequential default, backward-compatible
     s.mode && setMode(s.mode);
     s.settings && setSettings((d) => ({ ...d, ...s.settings }));
-    s.session && setSession({ ...s.session, mode: s.session.mode || "casual", id: s.session.id || uid() }); // old saves have no `mode`/`id` — default them, backward-compatible
+    s.session && setSession(normSession(s.session)); // old saves have no `mode`/`id`/session times — default them, backward-compatible
     s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
     setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
     setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
@@ -2679,12 +2815,12 @@ export default function App() {
   const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim(); if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
-    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null }]);
+    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null }]);
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
   // status, leaving games/stats/paid/discount untouched so it's safe to use mid-session too.
-  const resetAllToAbsent = () => setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent" })));
+  const resetAllToAbsent = () => setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", arrivalTime: null, departureTime: null })));
   const setPDiscount = (id, v) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, discount: Math.max(0, Number(v) || 0) } : p)));
   // apply a spin-wheel prize to a player: "now" discounts this session's bill immediately (locked, not manually editable),
   // "next" (v1.9.1) creates an explicit discountCredit ledger entry INSTEAD of auto-queuing into pendingDiscount —
@@ -2735,7 +2871,23 @@ export default function App() {
   const cancelDiscountCredit = (creditId, note) => {
     setDiscountCredits((prev) => prev.map((c) => (c.id === creditId && c.status === "available" ? { ...c, status: "cancelled", cancelledAt: Date.now(), note: note || c.note } : c)));
   };
-  const setStatus = (id, st) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, status: st, waitingSince: st === "ready" && p.status !== "ready" ? Date.now() : p.waitingSince } : p)));
+  // v1.11.7 (Part D): the moment a player is first marked as coming this session (absent -> registered/
+  // ready), default their attendance window to the FULL session (arrivalTime/departureTime = null, which
+  // every consumer treats as sessionStartTime/sessionEndTime) — so the common case needs zero extra taps.
+  // Going back to "ไม่ได้มา" clears the window again (matches resetAllToAbsent/endSession's own reset).
+  const setStatus = (id, st) => setPlayers((prev) => prev.map((p) => {
+    if (p.id !== id) return p;
+    const wasComing = p.status !== "absent";
+    const isComing = st !== "absent";
+    return {
+      ...p, status: st, waitingSince: st === "ready" && p.status !== "ready" ? Date.now() : p.waitingSince,
+      arrivalTime: !isComing ? null : (!wasComing ? null : p.arrivalTime),
+      departureTime: !isComing ? null : (!wasComing ? null : p.departureTime),
+    };
+  }));
+  // v1.11.7 (Part D): explicit attendance-time editor writes (มาตลอด/มาสาย/กลับก่อน/กำหนดเอง) — kept as
+  // its own setter, separate from setStatus, so opening the time sheet never touches PSTATUS.
+  const setAttendanceTime = (id, arrivalTime, departureTime) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, arrivalTime, departureTime } : p)));
   const setPLevel = (id, skillIndex) => {
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
     setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, skillIndex: si, level: displayLevelFor(si, settings) } : p)));
@@ -2864,13 +3016,16 @@ export default function App() {
     setHistory([]); setCurrent(cur); setFuture([]); setRoundNo(0); setSel(null);
   };
 
-  const startGame = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, status: "playing" } : m)));
+  // v1.11.7 (Part L): stamp startedAt/finishedAt so a future averageMatchMinutes calculation (Part L —
+  // simple historical average, no ML) has real elapsed time to work from. Purely additive: nothing reads
+  // these two fields anywhere in existing pairing/scoring/finance logic.
+  const startGame = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, status: "playing", startedAt: Date.now() } : m)));
   const endGame = (mid) => {
     const m = current.find((x) => x.id === mid);
     if (!m || m.status !== "playing") return;
     const ids = [...m.teamA, ...m.teamB].filter(Boolean);
     setPlayers((prev) => prev.map((p) => (ids.includes(p.id) ? { ...p, games: p.games + 1 } : p)));
-    setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "done" } : x)));
+    setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "done", finishedAt: Date.now() } : x)));
   };
 
   // INDEPENDENT per-court: finish a court's done match & prepare its own next match, others untouched
@@ -2918,7 +3073,7 @@ export default function App() {
     if (!m || m.status !== "playing") return;
     const finIds = [...m.teamA, ...m.teamB].filter(Boolean);
     const court = m.court, t = Date.now(), seq = roundNo + 1;
-    const doneM = { ...m, status: "done" };
+    const doneM = { ...m, status: "done", finishedAt: t }; // v1.11.7 (Part L)
     let np = players.map((p) => (finIds.includes(p.id) ? { ...p, games: p.games + 1, waitingSince: t, lastPlayedRound: seq } : { ...p }));
     // a prepared "เกมถัดไป" queued match always takes priority over fresh auto-pairing — see promoteQueued
     let newMatch = promoteQueued(m, seq, court);
@@ -2944,7 +3099,7 @@ export default function App() {
       // no eligible next match right now — fall back to the plain finish (same as endGame), so the
       // court still shows up in "เพิ่งจบ" for the organizer to advance manually once possible
       setPlayers((prev) => prev.map((p) => (finIds.includes(p.id) ? { ...p, games: p.games + 1 } : p)));
-      setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "done" } : x)));
+      setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "done", finishedAt: Date.now() } : x)));
       return;
     }
     const newCurrent = current.map((c) => (c.id === mid ? newMatch : c));
@@ -3235,11 +3390,11 @@ export default function App() {
     // จบก๊วน also clears everyone's attendance back to "ไม่ได้มา" — the next session starts from a
     // clean slate and the organizer marks people "พร้อมเล่น" again as they actually show up, instead of
     // carrying over today's roster as still-checked-in into a brand new quan.
-    setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", games: 0, paid: false, discount: 0, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, spun: false, wheelResult: null, wheelDiscount: p.pendingDiscount || 0, pendingDiscount: 0, carriedInDiscount: p.pendingDiscount || 0 })));
+    setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", games: 0, paid: false, discount: 0, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, spun: false, wheelResult: null, wheelDiscount: p.pendingDiscount || 0, pendingDiscount: 0, carriedInDiscount: p.pendingDiscount || 0, arrivalTime: null, departureTime: null })));
     setHistory([]); setCurrent([]); setFuture([]); setRoundNo(0); setLockPairs([]); setSel(null);
-    // keep the quan name + photo (most groups reuse the same name/photo every time, e.g. "ก๊วนวันอาทิตย์")
-    // — only the date resets to today; the organizer no longer has to re-set these after every session
-    setSession((s) => ({ id: uid(), name: s.name, date: new Date().toISOString().slice(0, 10), mode: "casual", photo: s.photo || null }));
+    // keep the quan name + photo + the expected session time window (most groups reuse the same
+    // name/photo/hours every time, e.g. "ก๊วนวันอาทิตย์ 19:00-23:00") — only the date resets to today
+    setSession((s) => ({ id: uid(), name: s.name, date: new Date().toISOString().slice(0, 10), mode: "casual", photo: s.photo || null, sessionStartTime: s.sessionStartTime || "19:00", sessionEndTime: s.sessionEndTime || "23:00" }));
   };
   // toggle payment status inside an archived session (independent of the current session's players/paid state)
   const toggleHistoricalPaid = (sessId, playerId) => {
@@ -3502,6 +3657,16 @@ export default function App() {
     paid.has(teamId) ? paid.delete(teamId) : paid.add(teamId);
     return { ...t, registration: { ...t.registration, paidTeamIds: [...paid] } };
   });
+  // v1.11.7 (Part E): Tournament registration ("ยังไม่สมัคร"/"สมัครแล้ว") — completely independent of
+  // Group attendance (player.status). References the SAME playerId, never copies/creates a player, and
+  // never writes payment ("ชำระแล้ว" is always derived — see tournamentRegStatusFor — so there is no
+  // "paid" state to write here at all).
+  const tournamentRegister = (playerId) => setActiveTournament((t) => {
+    if (!t) return t;
+    const already = (t.registrations || []).some((r) => r.playerId === playerId);
+    return already ? t : { ...t, registrations: [...(t.registrations || []), { playerId, status: "registered", registeredAt: Date.now() }] };
+  });
+  const tournamentUnregister = (playerId) => setActiveTournament((t) => (t ? { ...t, registrations: (t.registrations || []).filter((r) => r.playerId !== playerId) } : t));
   // v1.10.0: Tournament Finance — a small income/expense ledger scoped to this Tournament (spec sections
   // 15-17). Deliberately its own array pair rather than reusing generalExpenses/otherIncome (which are
   // Casual-session-scoped) so a Tournament's P&L is always computable in isolation without any risk of
@@ -3592,11 +3757,11 @@ export default function App() {
       setCourtCount(data.courtCount);
       setCourtLabelsRaw(syncCourtLabels(data.courtLabels, data.courtCount));
       setMode(data.mode);
-      setSettings(data.settings);
-      setSession({ ...data.session, mode: (data.session && data.session.mode) || "casual", id: (data.session && data.session.id) || uid() });
+      setSettings(normSettings(data.settings));
+      setSession(normSession(data.session));
       setLockPairs(data.lockPairs);
       setSessionHistory(data.sessionHistory);
-      setActiveTournament(data.activeTournament || null);
+      setActiveTournament(normTournament(data.activeTournament) || null);
       setTournamentHistory(data.tournamentHistory || []);
       setGeneralExpenses(data.generalExpenses || []);
       setOtherIncome(data.otherIncome || []);
@@ -3645,8 +3810,8 @@ export default function App() {
       setCourtCount(data.courtCount || 2);
       setCourtLabelsRaw(syncCourtLabels(data.courtLabels, data.courtCount || 2));
       setMode(data.mode || "doubles");
-      setSettings(data.settings || getDefaultSettings());
-      setSession(data.session ? { ...data.session, mode: data.session.mode || "casual", id: data.session.id || uid() } : { id: uid(), name: "", date: new Date().toISOString().slice(0, 10), mode: "casual" });
+      setSettings(normSettings(data.settings));
+      setSession(normSession(data.session));
       setLockPairs(migrateLockPairs(data.lockPairs));
       setSessionHistory(data.sessionHistory || []);
       setActiveTournament(normTournament(data.activeTournament) || null);
@@ -3740,7 +3905,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }} />}
         {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
@@ -3769,7 +3934,12 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }) {
+  // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
+  // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
+  // never touches p.status (Group) or activeTournament.registrations (Tournament).
+  const [regTab, setRegTab] = useState("group"); // "group" | "tournament"
+  const [attendanceTimeFor, setAttendanceTimeFor] = useState(null); // player id whose attendance-time sheet is open, or null
   const [q, setQ] = useState(""); const [sort, setSort] = useState("levelDesc"); const [onlyPresent, setOnlyPresent] = useState(false);
   const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
   const [profilePlayerId, setProfilePlayerId] = useState(null); // v1.11.5: id of player shown in the new Player Profile sheet, or null
@@ -3843,6 +4013,18 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ padding: "0 8px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700 }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}</select>
         <button onClick={submit} style={{ padding: "0 15px", borderRadius: 11, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={19} /></button>
       </div>
+
+      {/* v1.11.7 (Part B): [ 🏸 ก๊วน ][ 🏆 Tournament ] — same pill visual language as the existing
+          Casual/Tournament ModeSelector on "วันนี้" (SessionTab), but this is an INDEPENDENT view toggle
+          local to this screen. Switching it never touches session.mode, p.status, or activeTournament —
+          Group attendance and Tournament registration remain completely separate state (Part C/E). */}
+      <div style={{ display: "flex", gap: 6, background: T.surface2, borderRadius: 12, padding: 4, marginBottom: 12 }}>
+        <button onClick={() => setRegTab("group")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "group" ? T.surface : "none", color: regTab === "group" ? T.text : T.muted, boxShadow: regTab === "group" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏸 ก๊วน</button>
+        <button onClick={() => setRegTab("tournament")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "tournament" ? T.surface : "none", color: regTab === "tournament" ? T.text : T.muted, boxShadow: regTab === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 Tournament</button>
+      </div>
+
+      {regTab === "group" && (
+      <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.muted, marginBottom: 8 }}>
         <span>สมาชิก {players.length} คน</span>
         <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -3869,7 +4051,14 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
       )}
       {list.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>{players.length === 0 ? "ยังไม่มีสมาชิก" : "ไม่พบสมาชิก"}</div>}
       <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-        {list.map((p) => (
+        {list.map((p) => {
+          const isComing = p.status && p.status !== "absent";
+          // v1.11.7 (Part D): full-session attendance (the common case) needs no label at all; only show
+          // the compact secondary time label when it actually differs from the full session window.
+          const fullStart = session?.sessionStartTime || "19:00", fullEnd = session?.sessionEndTime || "23:00";
+          const shownStart = p.arrivalTime || fullStart, shownEnd = p.departureTime || fullEnd;
+          const customWindow = isComing && (shownStart !== fullStart || shownEnd !== fullEnd);
+          return (
           <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 12px", borderRadius: 13, background: T.surface, border: `1px solid ${T.border}` }}>
             <button onClick={() => openPhoto(p.id)} style={{ position: "relative", border: "none", background: "none", padding: 0, flexShrink: 0 }}>
               <Avatar p={p} size={44} />
@@ -3890,6 +4079,11 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
                 {/* v1.11.5: Member/Guest badge — order is Skill → Hand → Type per spec, informational
                     only (never read by matchmaking/skill/attendance/tournament logic). */}
                 <span style={{ background: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].bg, color: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].label}</span>
+                {/* v1.11.7 (Part D): compact secondary attendance-time label — only rendered when it
+                    differs from the full session window, tappable to open the (also compact) time editor. */}
+                {customWindow && (
+                  <button onClick={() => setAttendanceTimeFor(p.id)} style={{ background: "none", border: `1px solid ${T.border}`, borderRadius: 7, padding: "2px 6px", fontSize: 10.5, fontWeight: 700, color: T.muted }}>{shownStart}–{shownEnd}</button>
+                )}
               </div>
             </div>
             {playingIds && playingIds.has(p.id)
@@ -3897,12 +4091,41 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
               : <select value={p.status || "absent"} onChange={(e) => setStatus(p.id, e.target.value)} style={{ appearance: "none", textAlign: "center", padding: "7px 10px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", minWidth: 76, background: PSTATUS[p.status || "absent"].bg, color: PSTATUS[p.status || "absent"].color }}>
                   {PSTATUS_OPTS.map((s) => <option key={s} value={s} style={{ background: "#fff", color: "#000" }}>{PSTATUS[s].label}</option>)}
                 </select>}
+            {/* v1.11.7 (Part D): small clock icon — only shown for someone actually marked as coming (not
+                permanently on every card, per spec) — opens the attendance-time editor (มาตลอด/มาสาย/
+                กลับก่อน/กำหนดเอง). Absent from "กำลังเล่น" cards on purpose: mid-game is too late to edit
+                when you're arriving/leaving, and the label above already covers a custom window. */}
+            {isComing && !(playingIds && playingIds.has(p.id)) && (
+              <button onClick={() => setAttendanceTimeFor(p.id)} title="เวลาที่คาดว่าจะอยู่เล่น" style={{ flexShrink: 0, width: 30, height: 30, borderRadius: 15, background: T.surface2, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>🕐</button>
+            )}
             {/* v1.11.6: the per-card trash icon is removed per spec — deleting/archiving a member is a
                 destructive/management action and must not sit on the main frequently-tapped screen where
                 it can be hit by accident. Both actions now live inside "แก้ไขสมาชิก" → การจัดการสมาชิก. */}
           </div>
-        ))}
+          );
+        })}
       </div>
+      {attendanceTimeFor && players.find((p) => p.id === attendanceTimeFor) && (
+        <AttendanceTimeSheet
+          player={players.find((p) => p.id === attendanceTimeFor)}
+          session={session}
+          onSave={(arrivalTime, departureTime) => { setAttendanceTime(attendanceTimeFor, arrivalTime, departureTime); setAttendanceTimeFor(null); }}
+          onClose={() => setAttendanceTimeFor(null)}
+        />
+      )}
+      </>
+      )}
+
+      {regTab === "tournament" && (
+        <TournamentRegistrationList
+          players={list}
+          activeTournament={activeTournament}
+          tournamentRegister={tournamentRegister}
+          tournamentUnregister={tournamentUnregister}
+          onOpenProfile={setProfilePlayerId}
+        />
+      )}
+
       {editPlayerId && players.find((p) => p.id === editPlayerId) && (
         <EditPlayerModal
           player={players.find((p) => p.id === editPlayerId)}
@@ -3926,6 +4149,103 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           onClose={() => setProfilePlayerId(null)}
         />
       )}
+    </div>
+  );
+}
+
+// v1.11.7 (Part D): compact attendance-time editor — opened from either the small 🕐 icon or the
+// secondary time label on a player's card. มาตลอด/มาสาย/กลับก่อน/กำหนดเอง per spec; มาตลอด always
+// resolves to the exact full session window so it never drifts from sessionStartTime/sessionEndTime.
+function AttendanceTimeSheet({ player, session, onSave, onClose }) {
+  const fullStart = session?.sessionStartTime || "19:00", fullEnd = session?.sessionEndTime || "23:00";
+  const curStart = player.arrivalTime || fullStart, curEnd = player.departureTime || fullEnd;
+  const initialMode = curStart === fullStart && curEnd === fullEnd ? "full" : curStart !== fullStart && curEnd === fullEnd ? "late" : curStart === fullStart && curEnd !== fullEnd ? "early" : "custom";
+  const [modeSel, setModeSel] = useState(initialMode);
+  const [arrival, setArrival] = useState(curStart);
+  const [departure, setDeparture] = useState(curEnd);
+
+  const apply = (m) => {
+    setModeSel(m);
+    if (m === "full") { setArrival(fullStart); setDeparture(fullEnd); }
+    else if (m === "late") { setDeparture(fullEnd); }
+    else if (m === "early") { setArrival(fullStart); }
+    // "custom" leaves both fields as-is for the organizer to pick
+  };
+  const save = () => {
+    if (modeSel === "full") onSave(null, null); // null = "full session" per the arrivalTime/departureTime schema
+    else onSave(arrival || fullStart, departure || fullEnd);
+  };
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>เวลาที่คาดว่าจะอยู่เล่น</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>{player.name} · ก๊วนวันนี้ {fullStart}–{fullEnd}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+        {[["full", "มาตลอด (เต็มก๊วน)"], ["late", "มาสาย"], ["early", "กลับก่อน"], ["custom", "กำหนดเอง"]].map(([v, lb]) => (
+          <button key={v} onClick={() => apply(v)} style={{ textAlign: "left", padding: "11px 12px", borderRadius: 11, border: `1.5px solid ${modeSel === v ? T.green : T.border}`, background: modeSel === v ? "#e2f5ec" : T.surface, color: modeSel === v ? T.green : T.text, fontSize: 13.5, fontWeight: 700 }}>{lb}</button>
+        ))}
+      </div>
+      {modeSel !== "full" && (
+        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เวลามา</div>
+            <input type="time" value={arrival} disabled={modeSel === "early"} onChange={(e) => setArrival(e.target.value)} style={{ width: "100%", padding: "9px 10px", borderRadius: 10, background: modeSel === "early" ? T.surface2 : T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700, boxSizing: "border-box" }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เวลากลับ</div>
+            <input type="time" value={departure} disabled={modeSel === "late"} onChange={(e) => setDeparture(e.target.value)} style={{ width: "100%", padding: "9px 10px", borderRadius: 10, background: modeSel === "late" ? T.surface2 : T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700, boxSizing: "border-box" }} />
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
+        <button onClick={save} style={btnPrimary}>บันทึก</button>
+      </div>
+    </Overlay>
+  );
+}
+
+// v1.11.7 (Part E): "🏆 Tournament" tab body — Tournament registration, kept 100% independent of Group
+// attendance. Only ONE Tournament can be active/draft at a time in this app today, so the "if multiple
+// tournaments exist, show a selector" case never actually triggers yet — written so it would if the app
+// ever supported concurrent tournaments, without inventing multi-tournament infrastructure that doesn't
+// otherwise exist (out of scope here).
+function TournamentRegistrationList({ players, activeTournament, tournamentRegister, tournamentUnregister, onOpenProfile }) {
+  if (!activeTournament || activeTournament.status === "completed" || activeTournament.status === "archived") {
+    return <div style={{ textAlign: "center", padding: "40px 20px", color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14 }}>
+      <div style={{ fontSize: 32, marginBottom: 8 }}>🏆</div>
+      <div style={{ fontSize: 13.5 }}>ยังไม่มี Tournament ที่เปิดรับสมัคร</div>
+      <div style={{ fontSize: 11.5, marginTop: 4 }}>สร้าง Tournament ได้ที่แท็บ "วันนี้"</div>
+    </div>;
+  }
+  const REG_LABEL = { none: "ยังไม่สมัคร", registered: "สมัครแล้ว", paid: "ชำระแล้ว" };
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, marginBottom: 10, fontSize: 12.5 }}>
+        <span style={{ color: T.muted }}>Tournament:</span>
+        <span style={{ fontWeight: 800 }}>{activeTournament.name || "(ยังไม่ตั้งชื่อ)"}</span>
+      </div>
+      {players.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>ไม่พบสมาชิก</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+        {players.map((p) => {
+          const status = tournamentRegStatusFor(activeTournament, p.id);
+          return (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 12px", borderRadius: 13, background: T.surface, border: `1px solid ${T.border}` }}>
+              <Avatar p={p} size={40} />
+              <button onClick={() => onOpenProfile(p.id)} style={{ flex: 1, minWidth: 0, textAlign: "left", border: "none", background: "none", padding: 0, cursor: "pointer" }}>
+                <div style={{ fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.text }}>{p.name}</div>
+              </button>
+              {status === "paid" ? (
+                <span style={{ padding: "7px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 800, background: "#e2f5ec", color: T.green, whiteSpace: "nowrap" }}>{REG_LABEL.paid}</span>
+              ) : status === "registered" ? (
+                <button onClick={() => tournamentUnregister(p.id)} style={{ padding: "7px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 800, border: "none", background: "#eef0fd", color: "#4f46e5", whiteSpace: "nowrap" }}>{REG_LABEL.registered}</button>
+              ) : (
+                <button onClick={() => tournamentRegister(p.id)} style={{ padding: "7px 12px", borderRadius: 20, fontSize: 11.5, fontWeight: 800, border: `1px solid ${T.border}`, background: T.surface2, color: T.muted, whiteSpace: "nowrap" }}>{REG_LABEL.none}</button>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -4046,17 +4366,23 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
   ], [history, current, sessionHistory]);
   const cs = playerStats(p.id, casualMatches);
   const ts = tournamentStatsForPlayer(p.id, tournamentHistory);
-  // IMPORTANT STAT RULE (per spec): matches without a recorded win/loss (cs.noScore) count toward the
-  // total below but are excluded from both the win/loss counts and the Win Rate denominator — exactly
-  // how playerStats already defines "decided" (win+loss only). Tournament matches are unaffected since
-  // computeTournamentPlayerStats only ever counts completed matches with a real winner in the first place.
-  const totalMatches = cs.win + cs.loss + cs.draw + cs.noScore + ts.matches;
+  // v1.11.7 STAT RECONCILIATION FIX: "แมตช์ทั้งหมด" must equal ชนะ+แพ้ (matchesPlayed = wins + losses).
+  // Badminton has no genuine "draw" result, so a casual match that finished with no score entered
+  // (cs.noScore — the organizer tapped "จบเกม" without using ScoreEditor, which is a normal, common
+  // flow) or with an ambiguous/undecided score (cs.draw) has no real winner to report and must NOT be
+  // fabricated. Per spec, the correct fix is to EXCLUDE those from the headline total rather than invent
+  // a result — so the three numbers always reconcile exactly. BYE tournament matches were already
+  // excluded upstream (tournamentAllMatches(...).filter(m => m.status !== "bye") inside
+  // computeTournamentPlayerStats), so ts.matches is already wins+losses only and needs no change here.
   const wins = cs.win + ts.wins;
   const losses = cs.loss + ts.losses;
+  const totalMatches = wins + losses;
   const decided = wins + losses;
   const winRate = decided > 0 ? Math.round((wins / decided) * 100) : null;
-  // "จำนวนครั้งที่เข้าร่วมก๊วน" — count of archived sessions this player actually appears in at least one
-  // match of (reuses playerStats per session; no new attendance-tracking data invented).
+  // "จำนวนครั้งที่มาเล่น" (v1.11.7 rename from "เข้าร่วมก๊วน") — count of archived sessions this player
+  // actually appears in at least one match of (reuses playerStats per session; no new attendance-tracking
+  // data invented). Unlike the headline Matches stat above, an unscored/ambiguous match still proves the
+  // player physically showed up and played, so it still counts toward session attendance here.
   const sessionsAttended = useMemo(() => (sessionHistory || []).filter((s) => {
     const st = playerStats(p.id, s.matches || []);
     return (st.win + st.loss + st.draw + st.noScore) > 0;
@@ -4090,12 +4416,14 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
         <MiniStat label="แพ้" value={losses} color={T.accent} />
         <MiniStat label="Win Rate" value={winRate != null ? winRate + "%" : "—"} />
       </div>
+      {/* v1.11.7: compact, single-language achievement labels (was a Thai/English mix: "เข้าร่วมก๊วน" /
+          "Champion" / "Runner-up" / "Third") — same 5 cards, no new stats added per spec. */}
       <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        <MiniStat label="เข้าร่วมก๊วน" value={sessionsAttended} />
+        <MiniStat label="มาเล่น" value={sessionsAttended} />
         <MiniStat label="Tournament" value={ts.tournaments} />
-        <MiniStat label="🥇 Champion" value={ts.championships} color={T.green} />
-        <MiniStat label="🥈 Runner-up" value={ts.runnerUps} />
-        <MiniStat label="🥉 Third" value={ts.thirds} />
+        <MiniStat label="🥇 แชมป์" value={ts.championships} color={T.green} />
+        <MiniStat label="🥈 รองแชมป์" value={ts.runnerUps} />
+        <MiniStat label="🥉 อันดับ 3" value={ts.thirds} />
       </div>
 
       <button onClick={onClose} style={btnSecondary}>ปิด</button>
@@ -4511,7 +4839,7 @@ function SessionTab(props) {
       {openQuanSettings && (
         <QuanSettingsSheet
           mode={mode} setMode={setMode} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} setCourtLabel={setCourtLabel}
-          settings={settings} setSettings={setSettings}
+          settings={settings} setSettings={setSettings} session={session} sessionHistory={sessionHistory}
           players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
           resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
           onClose={() => setOpenQuanSettings(false)}
@@ -4702,11 +5030,16 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
   };
   // step 2
   const [teamEntryMode, setTeamEntryMode] = useState(() => iv.teamEntryMode || "individual");
-  // v1.11.2: players who already marked themselves "ลงทะเบียน" (registered) for this tournament come
-  // in pre-checked — organizers otherwise have to re-tap every name that already RSVP'd, which is most
-  // of them in real usage (see Step 2 list below for the checkbox itself). A resumed draft's own saved
-  // selection always wins over this default.
-  const [selectedIds, setSelectedIds] = useState(() => iv.selectedIds || players.filter((p) => p.status === "registered").map((p) => p.id));
+  // v1.11.2: players who already marked themselves registered for THIS tournament come in pre-checked —
+  // organizers otherwise have to re-tap every name that already signed up, which is most of them in real
+  // usage (see Step 2 list below for the checkbox itself). A resumed draft's own saved selection always
+  // wins over this default.
+  // v1.11.7 (Part E fix): this used to read Group attendance (p.status === "registered") — the exact
+  // conflation the spec calls out ("Group attendance and Tournament registration must NOT share state").
+  // Now reads ONLY the independent Tournament registration list (activeDraft.registrations, written by
+  // the new "🏆 Tournament" tab on the Player page) — a brand-new tournament with no draft yet correctly
+  // starts with nobody pre-checked, since there is no tournament for anyone to have registered against.
+  const [selectedIds, setSelectedIds] = useState(() => iv.selectedIds || (activeDraft?.registrations || []).filter((r) => r.status === "registered").map((r) => r.playerId));
   const [q, setQ] = useState("");
   const [guestName, setGuestName] = useState(""); const [guestSkill, setGuestSkill] = useState(6);
   const [guestPlayers, setGuestPlayers] = useState(() => iv.guestPlayers || []);
@@ -5815,11 +6148,13 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
   );
 }
 
-function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, onClose }) {
+function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, session, sessionHistory, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, onClose }) {
   // v1.8.4: ค่าใช้จ่าย (💳) and รางวัล (🏆) moved out of this sheet into FinanceSettingsSheet, opened from the
   // ชำระเงิน tab instead — Today/ตั้งค่าก๊วน is now Game Operations only, money settings live with money UI.
   const [open, setOpen] = useState("play"); // "play" | "level" | null — one section open at a time
   const [editCourtLabels, setEditCourtLabels] = useState(false);
+  const [showCourtRecDetail, setShowCourtRecDetail] = useState(false); // v1.11.7 (Part I/J)
+  const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory), [players, session, settings, sessionHistory]);
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
 
   return (
@@ -5873,6 +6208,33 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
               ))}
             </div>
           )}
+
+          {/* v1.11.7 (Part I): compact Court Recommendation card, placed right below จำนวนสนาม per spec.
+              DECISION SUPPORT ONLY — never writes to courtCount/setCourtCount above. */}
+          <div style={{ marginBottom: 16, padding: 12, borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}` }}>
+            <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 6 }}>🏸 คำแนะนำการจองสนาม</div>
+            {courtRec.totalRegistered === 0 ? (
+              <div style={{ fontSize: 12, color: T.muted }}>ยังไม่มีคนลงทะเบียนก๊วนนี้ — ไปที่แท็บผู้เล่นก่อน</div>
+            ) : (
+              <>
+                <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>ลงทะเบียน {courtRec.totalRegistered} คน</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
+                  {courtRec.merged.map((b, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
+                      <span style={{ color: T.text, fontWeight: 600 }}>{minutesToTimeStr(b.start)}–{minutesToTimeStr(b.end)}</span>
+                      <span style={{ fontWeight: 800, color: b.courts > 0 ? T.green : T.muted }}>{b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น (< 4 คน)"}</span>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 10 }}>รวม {Math.round(courtRec.courtHoursTotal * 10) / 10} Court-hours · {REC_MODE_LABELS[courtRec.mode]} · ประมาณ {REC_MODE_RANGES[courtRec.mode][0]}–{REC_MODE_RANGES[courtRec.mode][1]} คน/สนาม</div>
+              </>
+            )}
+            <button onClick={() => setShowCourtRecDetail(true)} style={{ width: "100%", textAlign: "center", padding: "8px 0", borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>ดูรายละเอียด</button>
+          </div>
+          {showCourtRecDetail && (
+            <CourtRecommendationDetailSheet players={players} session={session} settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} courtCount={courtCount} onClose={() => setShowCourtRecDetail(false)} />
+          )}
+
           <Label>ล็อคคู่ / เลี่ยงคู่ (เฉพาะโหมดตีคู่ ยกเว้น "ไม่อยากสู้/ไม่อยากเจอเลย" ใช้ได้ทั้งเดี่ยว-คู่)</Label>
           <LockPairEditor {...{ players, lockPairs, addLockPair, removeLockPair, setHandPref, getP }} />
           <button onClick={resetGames} style={{ marginTop: 14, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><RotateCcw size={14} /> รีเซ็ตจำนวนเกม</button>
@@ -5889,6 +6251,93 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} />
         </div>
       )}
+    </Overlay>
+  );
+}
+
+// v1.11.7 (Part J/K): Court Recommendation detail sheet — mode switcher (live recalculation), per-time
+// expected attendance, capacity metrics (Part H), and the "จองจริง" (actual booked) vs "BadQ แนะนำ"
+// comparison (Part K). Organizer makes the final call — this NEVER writes to courtCount.
+function CourtRecommendationDetailSheet({ players, session, settings, setSettings, sessionHistory, courtCount, onClose }) {
+  const [showCalcSettings, setShowCalcSettings] = useState(false);
+  const rec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory), [players, session, settings, sessionHistory]);
+  const sessionMinutes = Math.max(0, (rec.endMin || 0) - (rec.startMin || 0));
+  const actualCourtHours = (courtCount * sessionMinutes) / 60;
+  const diffCourtHours = Math.round((actualCourtHours - rec.courtHoursTotal) * 10) / 10;
+  // Part K: "if cost-per-court-hour already exists" — the ONLY existing per-court-per-hour price field in
+  // the app is the "hourly" cost model's rate (จำนวนสนาม × ราคา/ชั่วโมง × ชั่วโมง); every other cost model
+  // prices per-person or per-court-flat, not per-court-hour, so no comparable rate exists for them. Never
+  // invents a new price field — silently omits the cost estimate rather than duplicate/guess a rate.
+  const hourlyRate = settings.costModel === "hourly" ? Number(settings.hourly?.rate) || 0 : 0;
+  const costDiff = hourlyRate > 0 ? Math.round(diffCourtHours * hourlyRate) : null;
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>คำแนะนำการจองสนาม</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>คำนวณจากช่วงเวลาที่คาดว่าแต่ละคนจะอยู่เล่น (19:00-23:00 ฯลฯ) ไม่ใช่แค่จำนวนคนลงทะเบียนทั้งหมด</div>
+
+      <Label>โหมด</Label>
+      <div style={{ marginBottom: 16 }}>
+        <Seg options={[["busy", "ตีเยอะ"], ["balanced", "สมดุล"], ["saving", "ประหยัด"]]} value={rec.mode} onChange={(v) => setSettings((s) => ({ ...s, courtRecommendationMode: v }))} />
+      </div>
+
+      <SectionHead icon={<span style={{ fontSize: 14 }}>🕐</span>} title="จำนวนคนที่คาดว่าจะอยู่เล่น ตามช่วงเวลา" />
+      {rec.buckets.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ยังไม่มีคนลงทะเบียนก๊วนนี้</div>
+      ) : (
+        <div style={{ marginBottom: 14 }}>
+          {rec.buckets.map((b, i) => (
+            <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 2px", borderBottom: i < rec.buckets.length - 1 ? `1px solid ${T.border}` : "none", fontSize: 12.5 }}>
+              <span style={{ color: T.muted }}>{minutesToTimeStr(b.start)}</span>
+              <span style={{ fontWeight: 700 }}>{b.active} คน</span>
+              <span style={{ fontWeight: 800, color: b.courts > 0 ? T.green : T.muted }}>→ {b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น"}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        <MiniStat label="Court-hours (แนะนำ)" value={Math.round(rec.courtHoursTotal * 10) / 10} />
+        <MiniStat label="เกม/คน (ประมาณ)" value={rec.buckets.length ? (Math.round((rec.buckets.reduce((s, b) => s + b.expectedGamesPerPlayer, 0) / rec.buckets.length) * 10) / 10) : "—"} />
+      </div>
+
+      <SectionHead icon={<span style={{ fontSize: 14 }}>📋</span>} title="จองจริง เทียบกับ BadQ แนะนำ" />
+      <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: 12, marginBottom: 16, fontSize: 12.5 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+          <span style={{ color: T.muted }}>จองจริง</span>
+          <span style={{ fontWeight: 700 }}>{courtCount} สนาม × {(sessionMinutes / 60).toFixed(1)} ชม. = {Math.round(actualCourtHours * 10) / 10} Court-hours</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: costDiff != null || diffCourtHours !== 0 ? 6 : 0 }}>
+          <span style={{ color: T.muted }}>BadQ แนะนำ</span>
+          <span style={{ fontWeight: 700 }}>{Math.round(rec.courtHoursTotal * 10) / 10} Court-hours</span>
+        </div>
+        {diffCourtHours !== 0 && (
+          <div style={{ color: diffCourtHours > 0 ? T.green : T.accent, fontWeight: 700 }}>
+            {diffCourtHours > 0 ? `ลด ${diffCourtHours} Court-hours ได้` : `แนะนำเพิ่ม ${Math.abs(diffCourtHours)} Court-hours`}
+            {costDiff != null && diffCourtHours > 0 && ` · ประหยัดประมาณ ${formatCurrency(costDiff)}`}
+            {costDiff != null && diffCourtHours < 0 && ` · เพิ่มประมาณ ${formatCurrency(Math.abs(costDiff))}`}
+          </div>
+        )}
+        <div style={{ color: T.muted, fontSize: 11, marginTop: 6 }}>เป็นคำแนะนำเท่านั้น — ระบบจะไม่แก้ไขจำนวนสนามที่จองจริงให้อัตโนมัติ ผู้จัดก๊วนเป็นผู้ตัดสินใจสุดท้าย</div>
+      </div>
+
+      <button onClick={() => setShowCalcSettings((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: showCalcSettings ? 10 : 16, display: "flex", alignItems: "center", gap: 6 }}>
+        <span>⚙️ ตั้งค่าการคำนวณ</span><ChevronDown size={14} style={{ marginLeft: "auto", transform: showCalcSettings ? "rotate(180deg)" : "none" }} />
+      </button>
+      {showCalcSettings && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <NumField label="นาที/แมตช์ (เฉลี่ย)" value={settings.averageMatchMinutes || 15} onChange={(v) => setSettings((s) => ({ ...s, averageMatchMinutes: Math.max(1, v) }))} />
+            <NumField label="การใช้สนาม (%)" value={Math.round((settings.courtUtilization || 0.9) * 100)} onChange={(v) => setSettings((s) => ({ ...s, courtUtilization: Math.min(100, Math.max(1, v)) / 100 }))} />
+          </div>
+          {/* v1.11.7 (Part L): transparency only — never a separate editable field, so there is exactly
+              one averageMatchMinutes value in play at any time (either the config above, or this real
+              historical average once enough reliable samples exist). */}
+          <div style={{ fontSize: 11, color: T.muted }}>{rec.avgSource === "history" ? `กำลังใช้ค่าเฉลี่ยจากประวัติจริงของก๊วนนี้ (${rec.avgMatchMinutes} นาที/แมตช์) แทนค่าด้านบน เพราะมีข้อมูลเพียงพอแล้ว` : "ยังไม่มีประวัติแมตช์เพียงพอ — ใช้ค่าที่ตั้งไว้ด้านบนไปก่อน"}</div>
+        </div>
+      )}
+
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
     </Overlay>
   );
 }
