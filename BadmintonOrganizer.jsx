@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.19";
+const APP_VERSION = "1.11.20";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -796,7 +796,7 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr) {
   const out = [];
   const shuttleLine = () => {
     const { qty, pricePerUnit } = settings.shuttleCalc || {};
-    if (qty > 0 && pricePerUnit > 0) out.push({ id: uid(), category: "ค่าลูกแบด", description: `ค่าลูก ${qty} ลูก × ฿${pricePerUnit}`, amount: qty * pricePerUnit, date: dateStr, auto: true });
+    if (qty > 0 && pricePerUnit > 0) out.push({ id: uid(), category: "ค่าลูกแบต", description: `ค่าลูก ${qty} ลูก × ฿${pricePerUnit}`, amount: qty * pricePerUnit, date: dateStr, auto: true });
   };
   if (model === "perCourt") {
     const rates = settings.perCourtRates || [];
@@ -805,22 +805,22 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr) {
       const r = rates.find((x) => x.court === c);
       if (r && r.amount > 0) sum += Number(r.amount) || 0;
     }
-    if (sum > 0) out.push({ id: uid(), category: "ค่าคอร์ท", description: `ค่าคอร์ท ${courtCount} สนาม (แยกราคา)`, amount: sum, date: dateStr, auto: true });
+    if (sum > 0) out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: `ค่าคอร์ท ${courtCount} สนาม (แยกราคา)`, amount: sum, date: dateStr, auto: true });
     shuttleLine();
   } else if (model === "hourly") {
     const { courts, rate, hours } = settings.hourly || {};
-    if (courts > 0 && rate > 0 && hours > 0) out.push({ id: uid(), category: "ค่าคอร์ท", description: `ค่าคอร์ท ${courts} สนาม × ${hours} ชม. × ฿${rate}`, amount: courts * rate * hours, date: dateStr, auto: true });
+    if (courts > 0 && rate > 0 && hours > 0) out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: `ค่าคอร์ท ${courts} สนาม × ${hours} ชม. × ฿${rate}`, amount: courts * rate * hours, date: dateStr, auto: true });
     shuttleLine();
   } else if (model === "custom") {
-    (settings.customCostRows || []).forEach((r) => { if ((Number(r.amount) || 0) > 0) out.push({ id: uid(), category: r.category || "อื่น ๆ", description: r.description || r.category || "รายการ", amount: Number(r.amount) || 0, date: dateStr, auto: true }); });
+    (settings.customCostRows || []).forEach((r) => { if ((Number(r.amount) || 0) > 0) out.push({ id: uid(), category: r.category || "ค่าใช้จ่ายอื่น", description: r.description || r.category || "รายการ", amount: Number(r.amount) || 0, date: dateStr, auto: true }); });
   } else if (model === "splitExpenses") {
     // v1.11.12: files the 4 real cost lines the organizer entered as normal Expense items — feeds the
     // EXISTING financial summary (รายรับจากผู้เล่น − ค่าใช้จ่ายจริง = คงเหลือ/ขาด) with zero duplicate records.
     const se = settings.splitExpenses || {};
-    if (Number(se.court) > 0) out.push({ id: uid(), category: "ค่าคอร์ท", description: "ค่าสนาม (หารค่าใช้จ่าย)", amount: Number(se.court), date: dateStr, auto: true });
-    if (Number(se.shuttle) > 0) out.push({ id: uid(), category: "ค่าลูกแบด", description: "ค่าลูก (หารค่าใช้จ่าย)", amount: Number(se.shuttle), date: dateStr, auto: true });
-    if (Number(se.water) > 0) out.push({ id: uid(), category: "อาหาร/น้ำ", description: "ค่าน้ำ (หารค่าใช้จ่าย)", amount: Number(se.water), date: dateStr, auto: true });
-    if (Number(se.other) > 0) out.push({ id: uid(), category: "อื่น ๆ", description: "ค่าอื่นๆ (หารค่าใช้จ่าย)", amount: Number(se.other), date: dateStr, auto: true });
+    if (Number(se.court) > 0) out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: "ค่าสนาม (หารค่าใช้จ่าย)", amount: Number(se.court), date: dateStr, auto: true });
+    if (Number(se.shuttle) > 0) out.push({ id: uid(), category: "ค่าลูกแบต", description: "ค่าลูก (หารค่าใช้จ่าย)", amount: Number(se.shuttle), date: dateStr, auto: true });
+    if (Number(se.water) > 0) out.push({ id: uid(), category: "ค่าอาหาร/น้ำ", description: "ค่าน้ำ (หารค่าใช้จ่าย)", amount: Number(se.water), date: dateStr, auto: true });
+    if (Number(se.other) > 0) out.push({ id: uid(), category: "ค่าใช้จ่ายอื่น", description: "ค่าอื่นๆ (หารค่าใช้จ่าย)", amount: Number(se.other), date: dateStr, auto: true });
   }
   return out; // "simple" | "perPerson" -> []
 }
@@ -833,7 +833,36 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr) {
 //                         "now"/"next" wheel-prize discounts are NOT counted here — they already reduce
 //                         Revenue directly via computeBill, so counting them again here would double-count.
 //   กำไร/ขาดทุน (Profit) = Revenue - Expense
-const EXPENSE_CATEGORIES = ["ค่าคอร์ท", "ค่าลูกแบด", "รางวัล", "อาหาร/น้ำ", "ค่าเดินทาง", "อื่น ๆ"];
+const EXPENSE_CATEGORIES = ["ค่าสนาม/สถานที่", "ค่าลูกแบต", "ค่ารางวัล", "ค่าอาหาร/น้ำ", "ค่าเดินทาง", "ค่าใช้จ่ายอื่น"];
+// v1.11.20: renamed from ค่าคอร์ท/ค่าลูกแบด/รางวัล/อาหาร/น้ำ/อื่น ๆ so ก๊วน expense names read consistently
+// with Tournament's (TOURNAMENT_EXPENSE_CATEGORIES below) in the combined P&L. OLD sessions already have
+// the old strings saved on their expense records — nothing there is rewritten (still 100%
+// backward-compatible) — instead `normExpenseCategoryLabel` below maps old -> new only when AGGREGATING
+// for display (see computeFinanceForRange), so an old and a new record of "the same" category merge into
+// one line in every P&L view instead of showing as two separate rows.
+const LEGACY_EXPENSE_CATEGORY_LABEL = {
+  "ค่าคอร์ท": "ค่าสนาม/สถานที่",
+  "ค่าลูกแบด": "ค่าลูกแบต",
+  "รางวัล": "ค่ารางวัล",
+  "อาหาร/น้ำ": "ค่าอาหาร/น้ำ",
+  "อื่น ๆ": "ค่าใช้จ่ายอื่น",
+};
+function normExpenseCategoryLabel(cat) { return LEGACY_EXPENSE_CATEGORY_LABEL[cat] || cat; }
+// v1.11.20: fixed display order for the P&L expense breakdown (computeFinanceForRange) — ก๊วนแบต
+// categories first, then Tournament, per the organizer's requested statement layout. A category not
+// listed here (an organizer's own custom label, or ค่ารางวัล/ค่าเดินทาง when actually used) is appended
+// after these in encounter order — never hidden, just unordered relative to this fixed list.
+const EXPENSE_CATEGORY_ORDER = [
+  "ค่าสนาม/สถานที่ - ก๊วนแบต",
+  "ค่าลูกแบต - ก๊วนแบต",
+  "ค่าอาหาร/น้ำ - ก๊วนแบต",
+  "ค่าใช้จ่ายอื่น - ก๊วนแบต",
+  "ค่าสนาม/สถานที่ - Tournament",
+  "ค่าลูกแบต - Tournament",
+  "ค่าอาหาร/น้ำ - Tournament",
+  "ค่ารางวัลการแข่งขัน - Tournament",
+  "ค่าใช้จ่ายอื่น - Tournament",
+];
 // Expense is ONLY what the organizer actually records — never auto-guessed from the ค่าสนาม/ค่าลูก billing
 // rate settings (those set what's CHARGED to players, i.e. Revenue — not what the organizer actually paid
 // out). A session with no recorded expense items shows ฿0 expense until the organizer adds real ones here.
@@ -894,16 +923,20 @@ function computeFinanceForRange(range, sessionHistory, generalExpenses, otherInc
   const collected = sessionCollectedTotal + otherIncomeTotal + tournamentIncomeTotal;
   const expense = sessionExpenseSum + genExpenseTotal + tournamentExpenseTotal;
   const profit = revenue - expense; // กำไร/ขาดทุน = รายได้ - ค่าใช้จ่าย เสมอ (ไม่ใช่ รับแล้ว - ค่าใช้จ่าย)
+  // v1.11.20: every expense category is suffixed by its source ("... - ก๊วนแบต" / "... - Tournament", per
+  // the organizer's requested statement format) and legacy ก๊วน category strings are normalized to the
+  // current unified label (normExpenseCategoryLabel) so an old-format record and a new-format record of
+  // the same category merge into ONE line instead of appearing twice. Tournament categories are already
+  // key/label pairs (TOURNAMENT_EXPENSE_CATEGORIES) so no legacy remap is needed there. Final order is
+  // fixed to EXPENSE_CATEGORY_ORDER, with anything not on that list appended after — nothing dropped.
+  const rawCatTotals = {};
+  const addCatTotal = (key, amt) => { rawCatTotals[key] = (rawCatTotals[key] || 0) + (Number(amt) || 0); };
+  sessionsInRange.forEach((s) => sessionExpenseList(s).forEach((e) => addCatTotal(`${normExpenseCategoryLabel(e.category)} - ก๊วนแบต`, e.amount)));
+  genExpInRange.forEach((e) => addCatTotal(`${normExpenseCategoryLabel(e.category)} - ก๊วนแบต`, e.amount));
+  tournamentsInRange.forEach((t) => (t.finance?.expense || []).forEach((e) => addCatTotal(`${TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category} - Tournament`, e.amount)));
   const catTotals = {};
-  sessionsInRange.forEach((s) => sessionExpenseList(s).forEach((e) => { catTotals[e.category] = (catTotals[e.category] || 0) + (Number(e.amount) || 0); }));
-  genExpInRange.forEach((e) => { catTotals[e.category] = (catTotals[e.category] || 0) + (Number(e.amount) || 0); });
-  // Tournament expense categories use their own key namespace (see TOURNAMENT_EXPENSE_CATEGORIES) —
-  // translated to Thai and prefixed with 🏆 so they read clearly alongside ก๊วน expense categories
-  // without colliding with (or being confused for) them in the breakdown.
-  tournamentsInRange.forEach((t) => (t.finance?.expense || []).forEach((e) => {
-    const key = `🏆 ${TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category}`;
-    catTotals[key] = (catTotals[key] || 0) + (Number(e.amount) || 0);
-  }));
+  EXPENSE_CATEGORY_ORDER.forEach((k) => { if (rawCatTotals[k] != null) catTotals[k] = rawCatTotals[k]; });
+  Object.keys(rawCatTotals).forEach((k) => { if (!(k in catTotals)) catTotals[k] = rawCatTotals[k]; });
   return { range, sessionsInRange, genExpInRange, otherIncInRange, tournamentsInRange, sessionRevenueTotal, sessionCollectedTotal, otherIncomeTotal, genExpenseTotal, tournamentIncomeTotal, tournamentExpenseTotal, revenue, collected, expense, profit, catTotals };
 }
 function getFinanceForDate(dateStr, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
@@ -1185,9 +1218,9 @@ function buildFinancialReportTxt(report) {
   L.push(padTxtRow(report.summary.profit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.summary.profit))));
   L.push(""); L.push(sep); L.push("");
   L.push("กำไรขาดทุน"); L.push("");
-  L.push(padTxtRow("รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)));
+  L.push(padTxtRow("รายได้จากการจัดก๊วน", formatCurrency(report.pnl.groupRevenue)));
+  if (report.pnl.tournamentIncome > 0) L.push(padTxtRow("รายได้จากการจัด Tournament", formatCurrency(report.pnl.tournamentIncome)));
   L.push(padTxtRow("รายได้อื่น", formatCurrency(report.pnl.otherIncome)));
-  if (report.pnl.tournamentIncome > 0) L.push(padTxtRow("รายได้ Tournament", formatCurrency(report.pnl.tournamentIncome)));
   L.push(padTxtRow("รายได้รวม", formatCurrency(report.pnl.totalRevenue)));
   L.push(""); L.push("ค่าใช้จ่าย");
   Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => { L.push(padTxtRow(cat, formatCurrency(amt))); });
@@ -1429,9 +1462,9 @@ function buildFinancialXlsxSummarySheet(report) {
   pushRow(report.summary.profit < 0 ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.summary.profit), XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
   r++;
   pushRow("สรุปกำไรขาดทุน", null, XLSX_STYLE.boldText);
-  pushRow("รายได้ค่าก๊วน", report.pnl.groupRevenue);
+  pushRow("รายได้จากการจัดก๊วน", report.pnl.groupRevenue);
+  if (report.pnl.tournamentIncome > 0) pushRow("รายได้จากการจัด Tournament", report.pnl.tournamentIncome);
   pushRow("รายได้อื่น", report.pnl.otherIncome);
-  if (report.pnl.tournamentIncome > 0) pushRow("รายได้ Tournament", report.pnl.tournamentIncome);
   pushRow("รายได้รวม", report.pnl.totalRevenue, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
   Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => pushRow(cat, amt));
   pushRow("ค่าใช้จ่ายรวม", report.pnl.totalExpense, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
@@ -2456,10 +2489,15 @@ function totalTournamentMatchCount(tournament) {
 }
 // v1.10.0: registration-fee progress. Fee income from PAID teams is what feeds tournamentFinanceTotals()
 // below as "entry fee" revenue — unpaid teams contribute nothing until toggled paid (tToggleTeamPaid).
-const TOURNAMENT_EXPENSE_CATEGORIES = [["court", "สนาม/สถานที่"], ["shuttle", "ลูกขนไก่"], ["prize", "รางวัล/ถ้วย"], ["other", "อื่นๆ"]];
+// v1.11.20: added "food" (ค่าอาหาร/น้ำ) as its own Tournament expense category (previously only
+// court/shuttle/prize/other existed) and renamed labels to match ก๊วน's unified naming
+// (EXPENSE_CATEGORIES) so the same cost type reads identically on both sides of the combined P&L.
+// Storage KEYS (court/shuttle/food/prize/other) are unchanged — only the display labels moved — so
+// existing Tournament finance entries keep working exactly as before.
+const TOURNAMENT_EXPENSE_CATEGORIES = [["court", "ค่าสนาม/สถานที่"], ["shuttle", "ค่าลูกแบต"], ["food", "ค่าอาหาร/น้ำ"], ["prize", "ค่ารางวัลการแข่งขัน"], ["other", "ค่าใช้จ่ายอื่น"]];
 // v1.11.1: Thai label lookup for the keys above — used when a completed Tournament's expense entries
 // get merged into the overall financial report's catTotals breakdown (see computeFinanceForRange), so
-// they render as readable Thai text ("🏆 สนาม/สถานที่") instead of the raw storage key ("court").
+// they render as readable Thai text ("ค่าสนาม/สถานที่ - Tournament") instead of the raw storage key ("court").
 const TOURNAMENT_EXPENSE_CAT_LABEL = Object.fromEntries(TOURNAMENT_EXPENSE_CATEGORIES);
 // "entry" (ค่าสมัคร) is deliberately NOT a selectable manual category here — it's shown as a read-only
 // auto-computed row in TournamentFinancePanel (tournamentEntryFeeTotal) instead, so there is exactly one
@@ -6724,9 +6762,9 @@ function TournamentFinancePanel({ t, teamsById, peopleById, tSetRegistrationConf
 
       <SectionHead icon={<span style={{ fontSize: 14 }}>💵</span>} title="รายรับ-รายจ่าย" />
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 11, marginBottom: 10 }}>
-        <Row label="ค่าสมัคร (อัตโนมัติ)" value={`฿${totals.entryFee.toLocaleString()}`} />
-        <Row label="รายรับอื่นๆ" value={`฿${totals.otherIncome.toLocaleString()}`} />
-        <Row label="รายจ่ายรวม" value={`฿${totals.expense.toLocaleString()}`} />
+        <Row label="ค่าสมัคร (อัตโนมัติ)" value={`฿${totals.entryFee.toLocaleString()}`} color={T.green} />
+        <Row label="รายรับอื่นๆ" value={`฿${totals.otherIncome.toLocaleString()}`} color={T.green} />
+        <Row label="รายจ่ายรวม" value={`฿${totals.expense.toLocaleString()}`} color={T.accent} />
         <div style={{ height: 1, background: T.border, margin: "7px 0" }} />
         <Row label={totals.profit >= 0 ? "กำไร" : "ขาดทุน"} value={`฿${Math.abs(totals.profit).toLocaleString()}`} bold color={totals.profit >= 0 ? T.green : T.accent} />
       </div>
@@ -7718,10 +7756,10 @@ function HistoricalDetail({ s, toggleHistoricalPaid, onDelete, openHistPhoto, cl
       </div>
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 18 }}>
         <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 8 }}>สรุปกำไรขาดทุน</div>
-        <BillRow label="รายได้ (ยอดเรียกเก็บ)" v={grandTotal} />
-        <BillRow label="รับแล้วจริง" v={collected} />
-        <BillRow label="ค้างรับ" v={receivable} />
-        <BillRow label="ค่าใช้จ่ายรวม" v={expenseTotal} />
+        <BillRow label="รายได้ (ยอดเรียกเก็บ)" v={grandTotal} kind="revenue" />
+        <BillRow label="รับแล้วจริง" v={collected} kind="revenue" />
+        <BillRow label="ค้างรับ" v={receivable} kind="revenue" />
+        <BillRow label="ค่าใช้จ่ายรวม" v={expenseTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
           <span>{profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"}</span>
           <span style={{ color: profit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(profit))}</span>
@@ -7757,9 +7795,9 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 
       <SectionHead icon={<Wallet size={16} color={T.green} />} title="รายได้" />
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 14 }}>
-        <BillRow label="ยอดเรียกเก็บ" v={revenue} />
-        <BillRow label="รับจริง" v={collected} />
-        <BillRow label="ค้างรับ" v={receivable} />
+        <BillRow label="ยอดเรียกเก็บ" v={revenue} kind="revenue" />
+        <BillRow label="รับจริง" v={collected} kind="revenue" />
+        <BillRow label="ค้างรับ" v={receivable} kind="revenue" />
       </div>
 
       <SectionHead icon={<Wallet size={16} color={T.accent} />} title="ค่าใช้จ่าย" sub="แก้ไขได้" />
@@ -7774,7 +7812,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
       </div>
 
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12 }}>
-        <BillRow label="ค่าใช้จ่ายรวม" v={expenseTotal} />
+        <BillRow label="ค่าใช้จ่ายรวม" v={expenseTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
           <span>{profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"}</span>
           <span style={{ color: profit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(profit))}</span>
@@ -8112,7 +8150,7 @@ function FinancePrintView({ report, onClose }) {
         </div>
 
         <div className="fpv-avoidbreak" style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-          {[["รายได้", report.summary.revenue, "#16241d"], ["ค่าใช้จ่าย", report.summary.expense, "#16241d"], [negative ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.summary.profit), negative ? "#ef5a44" : "#12986a"]].map(([label, amt, color], i) => (
+          {[["รายได้", report.summary.revenue, "#12986a"], ["ค่าใช้จ่าย", report.summary.expense, "#ef5a44"], [negative ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", Math.abs(report.summary.profit), negative ? "#ef5a44" : "#12986a"]].map(([label, amt, color], i) => (
             <div key={i} style={{ flex: 1, border: "1px solid #dde5e1", borderRadius: 8, padding: "8px 10px", textAlign: "center" }}>
               <div style={{ fontSize: 10.5, color: "#6b7d74", marginBottom: 2 }}>{label}</div>
               <div style={{ fontSize: 13.5, fontWeight: 800, color }}>{formatCurrency(amt)}</div>
@@ -8134,16 +8172,20 @@ function FinancePrintView({ report, onClose }) {
         />
 
         <PrintSectionTitle>สรุปกำไรขาดทุน</PrintSectionTitle>
+        {/* v1.11.20: revenue rows green, expense rows red (organizer request) — PrintTable's cells accept
+            any content, so a colored <span> works here without touching PrintTable itself. Order:
+            ก๊วนแบต revenue, Tournament revenue, other revenue, then the already-ordered/labeled
+            expense categories from computeFinanceForRange (see EXPENSE_CATEGORY_ORDER). */}
         <PrintTable
           headers={["รายการ", "จำนวนเงิน"]}
           rightCols={[1]}
           rows={[
-            ["รายได้ค่าก๊วน", formatCurrency(report.pnl.groupRevenue)],
-            ["รายได้อื่น", formatCurrency(report.pnl.otherIncome)],
-            ...(report.pnl.tournamentIncome > 0 ? [["รายได้ Tournament", formatCurrency(report.pnl.tournamentIncome)]] : []),
-            ["รายได้รวม", formatCurrency(report.pnl.totalRevenue)],
-            ...expenseRows.map(([cat, amt]) => [cat, formatCurrency(amt)]),
-            ["ค่าใช้จ่ายรวม", formatCurrency(report.pnl.totalExpense)],
+            ["รายได้จากการจัดก๊วน", <span style={{ color: "#12986a" }}>{formatCurrency(report.pnl.groupRevenue)}</span>],
+            ...(report.pnl.tournamentIncome > 0 ? [["รายได้จากการจัด Tournament", <span style={{ color: "#12986a" }}>{formatCurrency(report.pnl.tournamentIncome)}</span>]] : []),
+            ["รายได้อื่น", <span style={{ color: "#12986a" }}>{formatCurrency(report.pnl.otherIncome)}</span>],
+            ["รายได้รวม", <span style={{ color: "#12986a", fontWeight: 800 }}>{formatCurrency(report.pnl.totalRevenue)}</span>],
+            ...expenseRows.map(([cat, amt]) => [cat, <span style={{ color: "#ef5a44" }}>{formatCurrency(amt)}</span>]),
+            ["ค่าใช้จ่ายรวม", <span style={{ color: "#ef5a44", fontWeight: 800 }}>{formatCurrency(report.pnl.totalExpense)}</span>],
             [negativePnl ? "ขาดทุนสุทธิ" : "กำไรสุทธิ", formatCurrency(Math.abs(report.pnl.netProfit))],
           ]}
         />
@@ -8443,7 +8485,7 @@ function FinanceSummaryCard({ revenue, expense, profit }) {
     <div style={{ display: "flex", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, marginBottom: 16, overflow: "hidden" }}>
       <div style={{ ...col, borderRight: `1px solid ${T.border}` }}>
         <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>รายได้</div>
-        <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{formatCurrency(revenue)}</div>
+        <div style={{ fontSize: 14.5, fontWeight: 800, color: T.green, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{formatCurrency(revenue)}</div>
       </div>
       <div style={{ ...col, borderRight: `1px solid ${T.border}` }}>
         <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>ค่าใช้จ่าย</div>
@@ -8463,15 +8505,19 @@ function FinancePL({ sessionRevenueTotal, otherIncomeTotal, tournamentIncomeTota
     <>
       <SectionHead title="สรุปกำไรขาดทุน" />
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 18 }}>
-        <BillRow label="รายได้ (ค่าก๊วน)" v={sessionRevenueTotal} />
-        <BillRow label="รายได้อื่น" v={otherIncomeTotal} />
-        {tournamentIncomeTotal > 0 && <BillRow label="รายได้ 🏆 Tournament" v={tournamentIncomeTotal} />}
+        {/* v1.11.20: order + labels + colors per organizer request — ก๊วน revenue, then Tournament
+            revenue, then other revenue (all green); expense categories below (all red), already
+            suffixed "- ก๊วนแบต"/"- Tournament" and fixed-ordered by EXPENSE_CATEGORY_ORDER upstream in
+            computeFinanceForRange, so this component only renders — it never re-sorts or re-labels. */}
+        <BillRow label="รายได้จากการจัดก๊วน" v={sessionRevenueTotal} kind="revenue" />
+        {tournamentIncomeTotal > 0 && <BillRow label="รายได้จากการจัด Tournament" v={tournamentIncomeTotal} kind="revenue" />}
+        <BillRow label="รายได้อื่น" v={otherIncomeTotal} kind="revenue" />
         <div style={{ height: 4 }} />
         {Object.keys(catTotals).length === 0
           ? <div style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>ไม่มีค่าใช้จ่ายในช่วงนี้</div>
-          : Object.entries(catTotals).map(([cat, amt]) => <BillRow key={cat} label={`หัก ${cat}`} v={-amt} />)}
+          : Object.entries(catTotals).map(([cat, amt]) => <BillRow key={cat} label={`หัก ${cat}`} v={-amt} kind="expense" />)}
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700, padding: "3px 0", borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 6 }}>
-          <span>ค่าใช้จ่ายรวม</span><span>{formatCurrency(-expense)}</span>
+          <span>ค่าใช้จ่ายรวม</span><span style={{ color: T.accent }}>{formatCurrency(-expense)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
           <span>{profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"}</span>
@@ -9394,9 +9440,13 @@ function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersBy
 function MiniStat({ label, value, color }) {
   return <div style={{ flex: 1, background: T.surface2, borderRadius: 11, padding: "10px 6px", textAlign: "center" }}><div style={{ fontSize: 18, fontWeight: 800, color: color || T.text }}>{value}</div><div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{label}</div></div>;
 }
-function BillRow({ label, v }) {
-  const neg = v < 0;
-  return <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0", color: neg ? T.green : T.muted }}><span>{label}</span><span>{formatCurrency(v)}</span></div>;
+// v1.11.20: `kind` ("revenue" | "expense") colors a P&L/statement row green or red per the organizer's
+// request — explicit rather than sign-based, since some callers pass expense totals as positive numbers
+// and others as already-negated. Omit `kind` for non-statement contexts (e.g. a player's bill breakdown)
+// to keep the original neutral gray — unchanged there.
+function BillRow({ label, v, kind }) {
+  const color = kind === "revenue" ? T.green : kind === "expense" ? T.accent : T.muted;
+  return <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0", color }}><span>{label}</span><span>{formatCurrency(v)}</span></div>;
 }
 function DetailList({ title, map, getP }) {
   const entries = Object.entries(map || {}).sort((a, b) => b[1] - a[1]);
