@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.17";
+const APP_VERSION = "1.11.19";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5431,7 +5431,28 @@ function SessionTab(props) {
         );
       })}
 
-      {/* 4. HISTORY */}
+      {/* 4. WAITING — moved above ประวัติแมตช์ (v1.11.18, explicit user request) so the wait queue sits
+          right after the live courts, keeping the Playing→Done→"เกมถัดไป" action flow close to the
+          organizer's next decision (who to pull in next) without scrolling past match history first. */}
+      {started && (
+        <div style={{ marginTop: 12, marginBottom: 8 }}>
+          <SectionHead icon={<Clock size={16} color={T.amber} />} title={`รอเล่น — ${waitQueue.length} คน`} sub="เลือกคนรอนานก่อน" />
+          {waitQueue.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีคนรอ</div> : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {waitQueue.slice(0, 10).map((p, i) => (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+                  <span style={{ width: 20, textAlign: "center", fontWeight: 800, fontSize: 13, color: i < 3 ? T.amber : T.muted }}>{i + 1}</span>
+                  <Avatar p={p} size={30} />
+                  <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: levelColor(p.skillIndex), fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
+                  <span style={{ fontSize: 12, color: T.muted, fontWeight: 600, textAlign: "right" }}>รอ {waitMin(p)} น.<br /><span style={{ fontSize: 11 }}>{p.games || 0} เกม</span></span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* 5. HISTORY — now the last/bottom-most block (see note above) */}
       {history.length > 0 && (
         <div style={{ marginTop: 12 }}>
           <button onClick={() => setShowHistory((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 13, fontWeight: 700 }}>
@@ -5459,26 +5480,6 @@ function SessionTab(props) {
               </div>
             );
           })()}
-        </div>
-      )}
-
-      {/* 5. WAITING — kept last/bottom-most on purpose: keeps the Playing→Done→"เกมถัดไป" action flow
-          uninterrupted (organizer doesn't have to scroll past the wait queue between court actions) */}
-      {started && (
-        <div style={{ marginTop: 12, marginBottom: 8 }}>
-          <SectionHead icon={<Clock size={16} color={T.amber} />} title={`รอเล่น — ${waitQueue.length} คน`} sub="เลือกคนรอนานก่อน" />
-          {waitQueue.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีคนรอ</div> : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              {waitQueue.slice(0, 10).map((p, i) => (
-                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
-                  <span style={{ width: 20, textAlign: "center", fontWeight: 800, fontSize: 13, color: i < 3 ? T.amber : T.muted }}>{i + 1}</span>
-                  <Avatar p={p} size={30} />
-                  <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: levelColor(p.skillIndex), fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
-                  <span style={{ fontSize: 12, color: T.muted, fontWeight: 600, textAlign: "right" }}>รอ {waitMin(p)} น.<br /><span style={{ fontSize: 11 }}>{p.games || 0} เกม</span></span>
-                </div>
-              ))}
-            </div>
-          )}
         </div>
       )}
 
@@ -10179,7 +10180,11 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 80, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
       <div style={{ color: "#fff", fontSize: 17, fontWeight: 800, marginBottom: 6 }}>🎡 หมุนวงล้อรางวัล</div>
-      {totalPlayers > 0 && <div style={{ color: "#cbd5cf", fontSize: 11.5, marginBottom: 12 }}>เหลือรางวัล {totalPrizeQty} จาก {totalPlayers} คนที่ยังไม่ได้หมุน</div>}
+      {/* v1.11.19: when "แสดงทั้งหมด" (showSoldOut) is on, the wheel deliberately still displays sold-out
+          slices so players can't tell prizes ran out (see wheelShowSoldOut) — showing this "เหลือรางวัล 0
+          จาก N" line would immediately give that away, so it's hidden in that mode. Still shown normally
+          under "แค่ที่เหลือ" (the default), where seeing the live count is the point. */}
+      {!showSoldOut && totalPlayers > 0 && <div style={{ color: "#cbd5cf", fontSize: 11.5, marginBottom: 12 }}>เหลือรางวัล {totalPrizeQty} จาก {totalPlayers} คนที่ยังไม่ได้หมุน</div>}
       <div style={{ position: "relative", width: wheelSize, height: wheelSize, flexShrink: 0 }}>
         <div style={{ position: "absolute", top: -10, left: "50%", transform: "translateX(-50%)", zIndex: 2, fontSize: "min(7vw, 32px)" }}>🔻</div>
         <div style={{ width: "100%", height: "100%", borderRadius: "50%", boxShadow: "0 8px 30px rgba(0,0,0,0.4)", transition: "transform 4.2s cubic-bezier(0.17,0.67,0.24,1)", transform: `rotate(${rotation}deg)`, overflow: "hidden", border: "6px solid #fff", boxSizing: "border-box", background: T.surface2 }}>
