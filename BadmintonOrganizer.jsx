@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.11";
+const APP_VERSION = "1.11.12";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -434,6 +434,19 @@ function roundsLabel(rounds) {
   const r = rounds || 1;
   return r <= 1 ? "1 เซต" : `${r} ใน ${maxSetsFor(r)} เซต`;
 }
+// v1.11.12: expected NUMBER OF SETS a match actually takes, given the existing settings.rounds format —
+// used ONLY by the Court Recommendation engine to turn "เวลาเฉลี่ยต่อ 1 เซต" into a per-match time estimate,
+// so there is never a second user-facing "sets per game" field (per spec). "1 เซต" and "2 เซต" (2fixed) are
+// exact (every match plays exactly that many sets, no decider). "2 ใน 3 เซต" (best-of-3) is NOT exact — it
+// varies match to match — so we use a documented estimate: 2.5, i.e. the midpoint between the best case
+// (2 straight sets) and the worst case (a full 3-set decider). This is a simple, transparent assumption
+// (not derived from real match history) that keeps the calculation predictable for the organizer.
+function expectedSetsFor(rounds) {
+  if (rounds === "2fixed") return 2;
+  const r = rounds || 1;
+  if (r <= 1) return 1;
+  return maxSetsFor(r) - 0.5; // best-of-3 -> 2.5, best-of-5 -> 4.5, etc.
+}
 // v1.11.8: `draw` is now split into two causes that used to be indistinguishable — `fixedDraw` is a
 // GENUINE tie under the "2fixed" 2-เซต-เสมอได้ format (exactly 2 scored sets, 1-1 — a real, intentional
 // completed result), while `draw` stays the old meaning: an ambiguous/incomplete best-of-N scorecard
@@ -557,11 +570,16 @@ function estimateAverageMatchMinutes(sessionHistory, fallbackMinutes) {
   return { minutes: Math.round(avg * 10) / 10, source: "history", sampleSize: recent.length };
 }
 
-// ===================== COURT RECOMMENDATION ENGINE (v1.11.7, Parts F-K) =====================
-// DECISION SUPPORT ONLY — nothing here ever writes to courtCount. The organizer always makes the final
-// call (Part K); this only computes a suggestion from expected attendance-by-time.
-const REC_MODE_RANGES = { busy: [5, 6], balanced: [6, 8], saving: [8, 10] }; // players/court guideline (doubles)
-const REC_MODE_LABELS = { busy: "ตีเยอะ", balanced: "สมดุล", saving: "ประหยัด" };
+// ===================== COURT RECOMMENDATION ENGINE (v1.11.7 Parts F-K; goal-based rewrite v1.11.12) =====
+// DECISION SUPPORT ONLY — nothing here ever writes to courtCount. The organizer always makes the final call;
+// this only computes a suggestion from expected attendance-by-time.
+// v1.11.12: the old ตีเยอะ/สมดุล/ประหยัด "players-per-court" modes are gone. The organizer instead picks ONE
+// goal — "รอไม่เกิน X นาที" (max_wait) or "เล่นอย่างน้อย X เกม/คน" (min_games) — and the engine solves for the
+// smallest court count, per time bucket, that meets it. GOAL_LABELS kept only for display strings.
+const GOAL_LABELS = { max_wait: "รอไม่เกิน", min_games: "เล่นอย่างน้อย" };
+// internal-only safety/utilization buffer (warm-up, changeover, no-shows) — deliberately NOT settings-driven
+// and NEVER shown to the organizer as a technical percentage (spec section 3).
+const COURT_UTILIZATION = 0.9;
 function timeStrToMinutes(t) {
   if (!t || typeof t !== "string" || !t.includes(":")) return null;
   const [h, m] = t.split(":").map(Number);
@@ -572,35 +590,53 @@ function minutesToTimeStr(mins) {
   const m = ((Math.round(mins) % 1440) + 1440) % 1440;
   return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 }
-// core calc: 30-minute internal buckets (Part F) -> merge adjacent buckets sharing the same recommended
-// court count for presentation (Part F's "merge adjacent intervals with identical recommendations").
-// Court count per bucket = ceil(activePlayers / upperBoundOfMode'sPlayersPerCourtRange) — this divisor
-// (not the lower bound or midpoint) is what reproduces every worked example in the spec exactly, while
-// still being fully driven by the mode's players-per-court guideline rather than a fixed constant (Part
-// G's "do NOT blindly divide by a fixed number" — the divisor changes with the chosen mode).
-// Part H's capacity formulas (effectiveMinutes/gamesPerCourt/playerGameSlots/expectedGamesPerPlayer) are
-// computed per bucket too and surfaced in the detail sheet so the organizer can see whether that court
-// count leaves realistic rotation, without a second layer silently overriding the court count above.
-function buildCourtRecommendation(players, session, settings, sessionHistory) {
+// courts needed so a NEW arrival's expected wait stays within maxWaitMinutes, given `active` players sharing
+// `courts` courts of `playersPerCourt` each, with matches averaging `avgMinutes`. Model: at any instant
+// `courts*playersPerCourt` people are playing and the rest are queued; a fair rotation clears the queue at
+// one "queue-length's worth" per match cycle, so expected wait ≈ (waiting / playing) × avgMinutes. Solving
+// waiting/playing × avgMinutes ≤ maxWaitMinutes for courts gives the closed form below (the effective cycle
+// time is stretched by 1/COURT_UTILIZATION to account for warm-up/changeover overhead between matches).
+function courtsForMaxWait(active, playersPerCourt, avgMinutes, maxWaitMinutes) {
+  if (active < playersPerCourt) return 0;
+  const effCycle = avgMinutes / COURT_UTILIZATION;
+  const denom = playersPerCourt * (1 + maxWaitMinutes / effCycle);
+  return Math.max(1, Math.ceil(active / denom));
+}
+// courts needed so each player gets ≥ minGames over a bucket of `bucketMinutes`, solved from the same
+// capacity formula the detail sheet displays back (effectiveMinutes/gamesPerCourt/playerGameSlots).
+function courtsForMinGames(active, playersPerCourt, avgMinutes, bucketMinutes, minGames) {
+  if (active < playersPerCourt || avgMinutes <= 0) return 0;
+  const effectiveMinutes = bucketMinutes * COURT_UTILIZATION;
+  const gamesPerCourt = effectiveMinutes / avgMinutes;
+  if (gamesPerCourt <= 0) return 0;
+  return Math.max(1, Math.ceil((minGames * active) / (gamesPerCourt * playersPerCourt)));
+}
+// core calc: 30-minute internal buckets -> merge adjacent buckets sharing the same recommended court count
+// for presentation (spec section 5: "combine consecutive periods when the recommended court count is
+// identical"). `matchMode` ("doubles"|"singles") sets playersPerCourt (4 or 2).
+function buildCourtRecommendation(players, session, settings, sessionHistory, matchMode) {
   const startMin = timeStrToMinutes(session && session.sessionStartTime) ?? 19 * 60;
   const endMin = timeStrToMinutes(session && session.sessionEndTime) ?? 23 * 60;
-  const mode = REC_MODE_RANGES[settings && settings.courtRecommendationMode] ? settings.courtRecommendationMode : "balanced";
-  const hi = REC_MODE_RANGES[mode][1];
-  // v1.11.7 (Part L): prefer this group's own real historical average match duration once enough
-  // reliable samples exist (estimateAverageMatchMinutes already excludes abandoned/left-open matches);
-  // the organizer's configured settings.averageMatchMinutes (itself defaulting to 15) is both the
-  // fallback AND stays fully in the organizer's control whenever history is too thin to trust yet.
-  const configuredMinutes = Number(settings && settings.averageMatchMinutes) > 0 ? Number(settings.averageMatchMinutes) : 15;
+  const playersPerCourt = matchMode === "singles" ? 2 : 4;
+  const goal = ["max_wait", "min_games"].includes(settings && settings.courtRecommendationGoal) ? settings.courtRecommendationGoal : "max_wait";
+  const maxWaitMinutes = Number(settings && settings.maxWaitMinutes) > 0 ? Number(settings.maxWaitMinutes) : 30;
+  const minGamesPerPerson = Number(settings && settings.minGamesPerPerson) > 0 ? Number(settings.minGamesPerPerson) : 4;
+  // v1.11.12: per-match time = เวลาเฉลี่ยต่อ 1 เซต (the ONE user-facing setting) × the expected number of sets
+  // for the group's EXISTING จำนวนเซต format (settings.rounds) — never a second, duplicate "sets/game" field.
+  const averageSetMinutes = Number(settings && settings.averageSetMinutes) > 0 ? Number(settings.averageSetMinutes) : 15;
+  const configuredMinutes = averageSetMinutes * expectedSetsFor(settings && settings.rounds);
+  // still prefer this group's own real historical average match duration once enough reliable samples
+  // exist (unchanged from v1.11.7 Part L) — the setting above is both the fallback AND stays fully in the
+  // organizer's control whenever history is too thin to trust yet.
   const avgEstimate = estimateAverageMatchMinutes(sessionHistory, configuredMinutes);
   const avgMatchMinutes = avgEstimate.minutes;
-  const utilization = Number(settings && settings.courtUtilization) > 0 && Number(settings.courtUtilization) <= 1 ? Number(settings.courtUtilization) : 0.9;
   // "registered" (coming later)/"ready"/"playing"/"resting" all represent someone who intends to be (or
   // already is) physically present for their attendance window; "absent"/"left" contribute nothing —
-  // completely independent of Tournament registration (Part E), reads ONLY the existing Group p.status.
+  // completely independent of Tournament registration, reads ONLY the existing Group p.status.
   const registered = (players || []).filter((p) => !p.archived && ["registered", "ready", "playing", "resting"].includes(p.status));
   const totalRegistered = registered.length;
   if (!(endMin > startMin) || totalRegistered === 0) {
-    return { totalRegistered, buckets: [], merged: [], mode, avgMatchMinutes, avgSource: avgEstimate.source, utilization, courtHoursTotal: 0, startMin, endMin };
+    return { totalRegistered, buckets: [], merged: [], goal, maxWaitMinutes, minGamesPerPerson, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal: 0, startMin, endMin, playersPerCourt };
   }
   const attendance = registered.map((p) => {
     const a = timeStrToMinutes(p.arrivalTime), d = timeStrToMinutes(p.departureTime);
@@ -611,21 +647,29 @@ function buildCourtRecommendation(players, session, settings, sessionHistory) {
   for (let t = startMin; t < endMin; t += STEP) {
     const bStart = t, bEnd = Math.min(t + STEP, endMin);
     const active = attendance.filter((a) => a.arrival <= bStart && a.departure >= bEnd).length;
-    const courts = active < 4 ? 0 : Math.max(1, Math.ceil(active / hi));
-    const effectiveMinutes = (bEnd - bStart) * utilization;
+    const courts = goal === "min_games"
+      ? courtsForMinGames(active, playersPerCourt, avgMatchMinutes, bEnd - bStart, minGamesPerPerson)
+      : courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, maxWaitMinutes);
+    const effectiveMinutes = (bEnd - bStart) * COURT_UTILIZATION;
     const gamesPerCourt = avgMatchMinutes > 0 ? effectiveMinutes / avgMatchMinutes : 0;
-    const playerGameSlots = gamesPerCourt * 4 * courts;
+    const playerGameSlots = gamesPerCourt * playersPerCourt * courts;
     const expectedGamesPerPlayer = active > 0 ? playerGameSlots / active : 0;
-    buckets.push({ start: bStart, end: bEnd, active, courts, expectedGamesPerPlayer });
+    const playing = playersPerCourt * courts;
+    const waiting = Math.max(0, active - playing);
+    const estimatedWaitMinutes = playing > 0 ? (waiting / playing) * (avgMatchMinutes / COURT_UTILIZATION) : null;
+    buckets.push({ start: bStart, end: bEnd, active, courts, expectedGamesPerPlayer, estimatedWaitMinutes });
   }
   const merged = [];
   for (const b of buckets) {
     const last = merged[merged.length - 1];
-    if (last && last.courts === b.courts) { last.end = b.end; last.active = Math.max(last.active, b.active); last.expectedGamesPerPlayer = (last.expectedGamesPerPlayer + b.expectedGamesPerPlayer) / 2; }
-    else merged.push({ ...b });
+    if (last && last.courts === b.courts) {
+      last.end = b.end; last.active = Math.max(last.active, b.active);
+      last.expectedGamesPerPlayer = (last.expectedGamesPerPlayer + b.expectedGamesPerPlayer) / 2;
+      last.estimatedWaitMinutes = last.estimatedWaitMinutes == null ? b.estimatedWaitMinutes : (b.estimatedWaitMinutes == null ? last.estimatedWaitMinutes : (last.estimatedWaitMinutes + b.estimatedWaitMinutes) / 2);
+    } else merged.push({ ...b });
   }
   const courtHoursTotal = buckets.reduce((s, b) => s + (b.courts * (b.end - b.start)) / 60, 0);
-  return { totalRegistered, buckets, merged, mode, avgMatchMinutes, avgSource: avgEstimate.source, utilization, courtHoursTotal, startMin, endMin };
+  return { totalRegistered, buckets, merged, goal, maxWaitMinutes, minGamesPerPerson, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal, startMin, endMin, playersPerCourt };
 }
 // ===================== CURRENCY (v1.9.1) =====================
 // single source of truth for every money display in the app (Finance/Payment/Historical/Discount Credits)
@@ -641,6 +685,33 @@ function formatCurrency(amount, opts) {
   const sign = n < 0 ? "-" : (showPlus && n > 0 ? "+" : "");
   return `${sign}฿${withCommas}${dec}`;
 }
+// v1.11.12: rounds a per-person charge per the organizer's chosen "การปัดยอดเรียกเก็บ" setting.
+function roundCharge(amount, roundingMode) {
+  if (roundingMode === "round5") return Math.round(amount / 5) * 5;
+  if (roundingMode === "round10") return Math.round(amount / 10) * 10;
+  return Math.round(amount);
+}
+// v1.11.12 (model F: หารค่าใช้จ่าย) — divides the 4 real cost lines ONLY by players who ACTUALLY ATTENDED,
+// never by total registered/roster count (spec: CRITICAL). "attended" uses the exact same definition
+// computeBill already uses for who gets billed at all (status present, not "absent"/"registered"), so the
+// charge here and the payer count in computeBill can never disagree. If nobody has been marked attended
+// yet, hasAttendance is false and callers must NOT silently bill against the registered/projected count —
+// they may show it only as a clearly separate "ประมาณการ" (estimate).
+function computeSplitExpenseSummary(players, settings) {
+  const se = (settings && settings.splitExpenses) || {};
+  const total = (Number(se.court) || 0) + (Number(se.shuttle) || 0) + (Number(se.water) || 0) + (Number(se.other) || 0);
+  const attended = (players || []).filter((p) => p.status && p.status !== "absent" && p.status !== "registered");
+  const registeredOnly = (players || []).filter((p) => p.status === "registered").length;
+  const projectedRegistered = attended.length + registeredOnly;
+  const hasAttendance = attended.length > 0;
+  const roundingMode = (settings && settings.roundingMode) || "none";
+  const perPersonRaw = hasAttendance ? total / attended.length : 0;
+  const perPersonEstimate = !hasAttendance && projectedRegistered > 0 ? total / projectedRegistered : 0;
+  const charge = hasAttendance ? roundCharge(perPersonRaw, roundingMode) : 0;
+  const totalCollected = charge * attended.length;
+  const diff = totalCollected - total;
+  return { total, attendedCount: attended.length, projectedRegistered, hasAttendance, roundingMode, perPersonRaw, perPersonEstimate, charge, totalCollected, diff };
+}
 // expense: reuse existing court+shuttle logic; split "other" equally among attendees
 function computeBill(players, settings) {
   // v1.9.17: "registered" (said they're coming, not arrived/eligible yet) is excluded from billing same
@@ -648,14 +719,18 @@ function computeBill(players, settings) {
   const payers = players.filter((p) => p.status && p.status !== "absent" && p.status !== "registered");
   const n = payers.length || 1;
   const otherShare = (settings.other || 0) / n;
-  // model D (รายคน) is the ONLY cost model that changes REVENUE — it overrides the flat per-person court
-  // charge with settings.perPersonRate and drops the per-game shuttle charge (shuttlecock cost is assumed
-  // baked into the flat rate). Every other model (simple/perCourt/hourly/custom) leaves billing byte-for-byte
-  // unchanged and instead feeds an auto-suggested EXPENSE line via computeCostModelExpenses() at endSession().
+  // model D (รายคน) and model F (หารค่าใช้จ่าย) are the only cost models that change REVENUE — model D
+  // overrides the flat per-person court charge with settings.perPersonRate, model F overrides it with the
+  // auto-computed splitExpenses charge (see computeSplitExpenseSummary) — both drop the per-game shuttle
+  // charge (its cost is assumed baked into the flat/split rate). Every other model (simple/perCourt/hourly/
+  // custom) leaves billing byte-for-byte unchanged and instead feeds an auto-suggested EXPENSE line via
+  // computeCostModelExpenses() at endSession().
   const perPerson = settings.costModel === "perPerson";
+  const splitEq = settings.costModel === "splitExpenses";
+  const splitSummary = splitEq ? computeSplitExpenseSummary(players, settings) : null;
   return payers.map((p) => {
-    const court = perPerson ? (settings.perPersonRate || 0) : (settings.court || 0);
-    const shuttle = perPerson ? 0 : (p.games || 0) * (settings.shuttle || 0);
+    const court = perPerson ? (settings.perPersonRate || 0) : splitEq ? splitSummary.charge : (settings.court || 0);
+    const shuttle = (perPerson || splitEq) ? 0 : (p.games || 0) * (settings.shuttle || 0);
     const other = otherShare;
     const discount = p.discount || 0; // per-person discount, entered manually in the player's summary detail
     const wheelDiscount = p.wheelDiscount || 0; // locked discount won from the spin wheel (not manually editable)
@@ -692,6 +767,14 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr) {
     shuttleLine();
   } else if (model === "custom") {
     (settings.customCostRows || []).forEach((r) => { if ((Number(r.amount) || 0) > 0) out.push({ id: uid(), category: r.category || "อื่น ๆ", description: r.description || r.category || "รายการ", amount: Number(r.amount) || 0, date: dateStr, auto: true }); });
+  } else if (model === "splitExpenses") {
+    // v1.11.12: files the 4 real cost lines the organizer entered as normal Expense items — feeds the
+    // EXISTING financial summary (รายรับจากผู้เล่น − ค่าใช้จ่ายจริง = คงเหลือ/ขาด) with zero duplicate records.
+    const se = settings.splitExpenses || {};
+    if (Number(se.court) > 0) out.push({ id: uid(), category: "ค่าคอร์ท", description: "ค่าสนาม (หารค่าใช้จ่าย)", amount: Number(se.court), date: dateStr, auto: true });
+    if (Number(se.shuttle) > 0) out.push({ id: uid(), category: "ค่าลูกแบด", description: "ค่าลูก (หารค่าใช้จ่าย)", amount: Number(se.shuttle), date: dateStr, auto: true });
+    if (Number(se.water) > 0) out.push({ id: uid(), category: "อาหาร/น้ำ", description: "ค่าน้ำ (หารค่าใช้จ่าย)", amount: Number(se.water), date: dateStr, auto: true });
+    if (Number(se.other) > 0) out.push({ id: uid(), category: "อื่น ๆ", description: "ค่าอื่นๆ (หารค่าใช้จ่าย)", amount: Number(se.other), date: dateStr, auto: true });
   }
   return out; // "simple" | "perPerson" -> []
 }
@@ -1408,7 +1491,7 @@ function quanSettingsSummary(settings, mode, courtCount) {
   return `${modeLabel} · ${courtCount} สนาม · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
 }
 // dynamic subtitle for the "ตั้งค่าค่าก๊วนและรางวัล" compact entry point on the ชำระเงิน tab
-const COST_MODEL_LABEL = { simple: "แบบง่าย", perCourt: "แยกรายสนาม", hourly: "รายชั่วโมง", perPerson: "รายคน", custom: "กำหนดเอง" };
+const COST_MODEL_LABEL = { splitExpenses: "หารค่าใช้จ่าย", simple: "แบบง่าย", perCourt: "แยกรายสนาม", hourly: "รายชั่วโมง", perPerson: "รายคน", custom: "กำหนดเอง" };
 function financeSettingsSummary(settings) {
   const model = settings.costModel || "simple";
   const parts = model === "simple"
@@ -1587,12 +1670,16 @@ function getDefaultSettings() {
     // "simple" is the untouched original ค่าคอร์ท/ค่าลูก/ค่าใช้จ่ายอื่น model above (default — zero behavior
     // change for existing groups). The other 4 modes are OPTIONAL alternates the organizer opts into; see
     // computeCostModelExpenses() for how each one feeds the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline.
-    costModel: "simple", // "simple" | "perCourt" | "hourly" | "perPerson" | "custom"
+    costModel: "simple", // "splitExpenses" | "simple" | "perCourt" | "hourly" | "perPerson" | "custom"
     perCourtRates: [], // [{ court: 1, amount: 500 }, ...] — model B: แยกรายสนาม
     hourly: { courts: 0, rate: 0, hours: 0 }, // model C: รายชั่วโมง (จำนวนสนาม × ราคา/ชั่วโมง × ชั่วโมง)
     shuttleCalc: { qty: 0, pricePerUnit: 0 }, // optional shared ค่าลูกแบด line, usable alongside perCourt/hourly
     perPersonRate: 0, // model D: รายคน — overrides computeBill's per-person court charge directly (revenue-side)
     customCostRows: [], // model E: กำหนดเอง — [{ id, category, description, amount }, ...], reuses ExpenseListEditor
+    // v1.11.12: model F (first in the picker) — หารค่าใช้จ่าย: organizer enters the 4 real cost lines below,
+    // app auto-splits by ผู้เล่นที่มาจริง (see computeSplitExpenseSummary) instead of a manually-set rate.
+    splitExpenses: { court: 0, shuttle: 0, water: 0, other: 0 },
+    roundingMode: "none", // "none" | "round5" | "round10" — how the per-person charge from splitExpenses is rounded
     wheelEnabled: true,
     wheelEnabled: true,
     // v1.9.19: when true, prizes that have run out (qty 0) still appear on the wheel — grayed out, purely
@@ -1606,25 +1693,40 @@ function getDefaultSettings() {
       { id: uid(), label: "เสียใจด้วย ไม่ได้รางวัล", type: "none", amount: 0, qty: 40 },
     ],
     lastBackupAt: null,
-    // ===== COURT RECOMMENDATION ENGINE (v1.11.7, Part G) — configurable, kept OFF the normal Group
-    // screen per spec (lives in a small settings sub-sheet reached from the recommendation detail sheet).
-    averageMatchMinutes: 15, // default match duration used until enough real history exists (Part L)
-    courtUtilization: 0.9, // accounts for warm-up/changeover/no-show buffer between games
-    courtRecommendationMode: "balanced", // "busy" (ตีเยอะ) | "balanced" (สมดุล) | "saving" (ประหยัด)
+    // ===== COURT RECOMMENDATION ENGINE (v1.11.7, Part G; goal-based rewrite in v1.11.12) — configurable,
+    // kept OFF the normal Group screen per spec (lives in a small settings sub-sheet reached from the
+    // recommendation detail sheet).
+    averageMatchMinutes: 15, // legacy per-MATCH default, kept only as a migration seed — no longer user-facing
+    courtUtilization: 0.9, // internal warm-up/changeover buffer factor — never shown to the organizer as a %
+    courtRecommendationMode: "balanced", // legacy "busy"/"balanced"/"saving" — no longer read by the calc engine, kept for old backups
+    averageSetMinutes: 15, // v1.11.12: เวลาเฉลี่ยต่อ 1 เซต — the ONE user-facing time input; per-match time = this × expected sets from settings.rounds
+    courtRecommendationGoal: "max_wait", // v1.11.12: "max_wait" (รอไม่เกิน X นาที) | "min_games" (เล่นอย่างน้อย X เกม/คน)
+    maxWaitMinutes: 30,
+    minGamesPerPerson: 4,
   };
 }
-// v1.11.7 (Part M): backward-compatible settings defaults — old saved settings objects predate the
-// Court Recommendation fields above; backfill them without touching any existing customized value.
+// v1.11.7 (Part M) / v1.11.12: backward-compatible settings defaults — old saved settings objects predate
+// these fields; backfill them without touching any existing customized value.
 function normSettings(s) {
   const base = s && typeof s === "object" ? s : {};
   const amm = Number(base.averageMatchMinutes);
   const util = Number(base.courtUtilization);
+  const asm = Number(base.averageSetMinutes);
+  const mwm = Number(base.maxWaitMinutes);
+  const mgp = Number(base.minGamesPerPerson);
+  const se = base.splitExpenses && typeof base.splitExpenses === "object" ? base.splitExpenses : {};
   return {
     ...getDefaultSettings(),
     ...base,
     averageMatchMinutes: amm > 0 ? amm : 15,
     courtUtilization: util > 0 && util <= 1 ? util : 0.9,
     courtRecommendationMode: ["busy", "balanced", "saving"].includes(base.courtRecommendationMode) ? base.courtRecommendationMode : "balanced",
+    averageSetMinutes: asm > 0 ? asm : 15,
+    courtRecommendationGoal: ["max_wait", "min_games"].includes(base.courtRecommendationGoal) ? base.courtRecommendationGoal : "max_wait",
+    maxWaitMinutes: mwm > 0 ? mwm : 30,
+    minGamesPerPerson: mgp > 0 ? mgp : 4,
+    splitExpenses: { court: Number(se.court) || 0, shuttle: Number(se.shuttle) || 0, water: Number(se.water) || 0, other: Number(se.other) || 0 },
+    roundingMode: ["none", "round5", "round10"].includes(base.roundingMode) ? base.roundingMode : "none",
   };
 }
 
@@ -6511,7 +6613,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
   const [open, setOpen] = useState("play"); // "play" | "level" | null — one section open at a time
   const [editCourtLabels, setEditCourtLabels] = useState(false);
   const [showCourtRecDetail, setShowCourtRecDetail] = useState(false); // v1.11.7 (Part I/J)
-  const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory), [players, session, settings, sessionHistory]);
+  const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
 
   return (
@@ -6566,30 +6668,32 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
             </div>
           )}
 
-          {/* v1.11.7 (Part I): compact Court Recommendation card, placed right below จำนวนสนาม per spec.
-              DECISION SUPPORT ONLY — never writes to courtCount/setCourtCount above. */}
+          {/* v1.11.7 (Part I) / v1.11.12 (goal-based rewrite): compact Court Recommendation card, placed
+              right below จำนวนสนาม per spec. DECISION SUPPORT ONLY — never writes to courtCount/setCourtCount. */}
           <div style={{ marginBottom: 16, padding: 12, borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}` }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 6 }}>🏸 คำแนะนำการจองสนาม</div>
             {courtRec.totalRegistered === 0 ? (
               <div style={{ fontSize: 12, color: T.muted }}>ยังไม่มีคนลงทะเบียนก๊วนนี้ — ไปที่แท็บผู้เล่นก่อน</div>
             ) : (
               <>
-                <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>ลงทะเบียน {courtRec.totalRegistered} คน</div>
+                <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>
+                  ลงทะเบียน {courtRec.totalRegistered} คน · เป้าหมาย: {courtRec.goal === "min_games" ? `เล่นอย่างน้อย ${courtRec.minGamesPerPerson} เกม/คน` : `รอไม่เกิน ${courtRec.maxWaitMinutes} นาที`}
+                </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
                   {courtRec.merged.map((b, i) => (
                     <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
                       <span style={{ color: T.text, fontWeight: 600 }}>{minutesToTimeStr(b.start)}–{minutesToTimeStr(b.end)}</span>
-                      <span style={{ fontWeight: 800, color: b.courts > 0 ? T.green : T.muted }}>{b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น (< 4 คน)"}</span>
+                      <span style={{ fontWeight: 800, color: b.courts > 0 ? T.green : T.muted }}>{b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น"}</span>
                     </div>
                   ))}
                 </div>
-                <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 10 }}>รวม {Math.round(courtRec.courtHoursTotal * 10) / 10} Court-hours · {REC_MODE_LABELS[courtRec.mode]} · ประมาณ {REC_MODE_RANGES[courtRec.mode][0]}–{REC_MODE_RANGES[courtRec.mode][1]} คน/สนาม</div>
+                <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 10 }}>รวม {Math.round(courtRec.courtHoursTotal * 10) / 10} Court-hours (ประมาณการ)</div>
               </>
             )}
             <button onClick={() => setShowCourtRecDetail(true)} style={{ width: "100%", textAlign: "center", padding: "8px 0", borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>ดูรายละเอียด</button>
           </div>
           {showCourtRecDetail && (
-            <CourtRecommendationDetailSheet players={players} session={session} settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} courtCount={courtCount} onClose={() => setShowCourtRecDetail(false)} />
+            <CourtRecommendationDetailSheet players={players} session={session} settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} courtCount={courtCount} mode={mode} onClose={() => setShowCourtRecDetail(false)} />
           )}
 
           <Label>ล็อคคู่ / เลี่ยงคู่ (เฉพาะโหมดตีคู่ ยกเว้น "ไม่อยากสู้/ไม่อยากเจอเลย" ใช้ได้ทั้งเดี่ยว-คู่)</Label>
@@ -6612,19 +6716,35 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
   );
 }
 
-// v1.11.7 (Part J/K): Court Recommendation detail sheet — mode switcher (live recalculation), per-time
-// expected attendance, capacity metrics (Part H), and the "จองจริง" (actual booked) vs "BadQ แนะนำ"
-// comparison (Part K). Organizer makes the final call — this NEVER writes to courtCount.
-function CourtRecommendationDetailSheet({ players, session, settings, setSettings, sessionHistory, courtCount, onClose }) {
+// v1.11.7 (Part J/K) / v1.11.12 (goal-based rewrite): Court Recommendation detail sheet — goal selector
+// (live recalculation), per-time expected attendance with a goal-relative explanation (estimated wait OR
+// estimated games/person), and the "จองจริง" (actual booked) vs "BadQ แนะนำ" comparison broken down by time
+// period. Organizer makes the final call — this NEVER writes to courtCount.
+function CourtRecommendationDetailSheet({ players, session, settings, setSettings, sessionHistory, courtCount, mode, onClose }) {
   const [showCalcSettings, setShowCalcSettings] = useState(false);
-  const rec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory), [players, session, settings, sessionHistory]);
+  const rec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
   const sessionMinutes = Math.max(0, (rec.endMin || 0) - (rec.startMin || 0));
   const actualCourtHours = (courtCount * sessionMinutes) / 60;
   const diffCourtHours = Math.round((actualCourtHours - rec.courtHoursTotal) * 10) / 10;
-  // Part K: "if cost-per-court-hour already exists" — the ONLY existing per-court-per-hour price field in
-  // the app is the "hourly" cost model's rate (จำนวนสนาม × ราคา/ชั่วโมง × ชั่วโมง); every other cost model
-  // prices per-person or per-court-flat, not per-court-hour, so no comparable rate exists for them. Never
-  // invents a new price field — silently omits the cost estimate rather than duplicate/guess a rate.
+  // v1.11.12 (spec section 7): break down exactly which time periods need MORE courts than what's actually
+  // booked — merges consecutive buckets needing the identical extra court count, same merge rule as the
+  // main recommendation table. Never auto-changes courtCount — decision support only.
+  const shortfallPeriods = useMemo(() => {
+    const merged = [];
+    for (const b of rec.buckets) {
+      const extra = Math.max(0, b.courts - (courtCount || 0));
+      if (extra === 0) { merged.push(null); continue; }
+      const last = merged[merged.length - 1];
+      if (last && last.extra === extra) last.end = b.end;
+      else merged.push({ start: b.start, end: b.end, extra });
+    }
+    return merged.filter(Boolean);
+  }, [rec.buckets, courtCount]);
+  const totalShortfallCourtHours = Math.max(0, Math.round((rec.courtHoursTotal - actualCourtHours) * 10) / 10);
+  // "if cost-per-court-hour already exists" — the ONLY existing per-court-per-hour price field in the app
+  // is the "hourly" cost model's rate (จำนวนสนาม × ราคา/ชั่วโมง × ชั่วโมง); every other cost model prices
+  // per-person or per-court-flat, not per-court-hour, so no comparable rate exists for them. Never invents
+  // a new price field — silently omits the cost estimate rather than duplicate/guess a rate.
   const hourlyRate = settings.costModel === "hourly" ? Number(settings.hourly?.rate) || 0 : 0;
   const costDiff = hourlyRate > 0 ? Math.round(diffCourtHours * hourlyRate) : null;
 
@@ -6633,30 +6753,43 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>คำแนะนำการจองสนาม</div>
       <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>คำนวณจากช่วงเวลาที่คาดว่าแต่ละคนจะอยู่เล่น (19:00-23:00 ฯลฯ) ไม่ใช่แค่จำนวนคนลงทะเบียนทั้งหมด</div>
 
-      <Label>โหมด</Label>
+      <Label>🎯 เป้าหมายการจองสนาม</Label>
+      <div style={{ marginBottom: 10 }}>
+        <Seg options={[["max_wait", "รอไม่เกิน"], ["min_games", "เล่นอย่างน้อย"]]} value={rec.goal} onChange={(v) => setSettings((s) => ({ ...s, courtRecommendationGoal: v }))} />
+      </div>
       <div style={{ marginBottom: 16 }}>
-        <Seg options={[["busy", "ตีเยอะ"], ["balanced", "สมดุล"], ["saving", "ประหยัด"]]} value={rec.mode} onChange={(v) => setSettings((s) => ({ ...s, courtRecommendationMode: v }))} />
+        {rec.goal === "min_games" ? (
+          <NumField label="เกม/คน (ขั้นต่ำ)" value={rec.minGamesPerPerson} onChange={(v) => setSettings((s) => ({ ...s, minGamesPerPerson: Math.max(1, v) }))} />
+        ) : (
+          <NumField label="รอไม่เกิน (นาที)" value={rec.maxWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, maxWaitMinutes: Math.max(1, v) }))} />
+        )}
       </div>
 
       <SectionHead icon={<span style={{ fontSize: 14 }}>🕐</span>} title="จำนวนคนที่คาดว่าจะอยู่เล่น ตามช่วงเวลา" />
-      {rec.buckets.length === 0 ? (
+      {rec.merged.length === 0 ? (
         <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ยังไม่มีคนลงทะเบียนก๊วนนี้</div>
       ) : (
-        <div style={{ marginBottom: 14 }}>
-          {rec.buckets.map((b, i) => (
-            <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 2px", borderBottom: i < rec.buckets.length - 1 ? `1px solid ${T.border}` : "none", fontSize: 12.5 }}>
-              <span style={{ color: T.muted }}>{minutesToTimeStr(b.start)}</span>
-              <span style={{ fontWeight: 700 }}>{b.active} คน</span>
-              <span style={{ fontWeight: 800, color: b.courts > 0 ? T.green : T.muted }}>→ {b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น"}</span>
+        <div style={{ marginBottom: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+          {rec.merged.map((b, i) => (
+            <div key={i} style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 11px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700 }}>{minutesToTimeStr(b.start)}–{minutesToTimeStr(b.end)}</span>
+                <span style={{ fontSize: 12.5, color: T.muted }}>{b.active} คน</span>
+                <span style={{ fontWeight: 800, fontSize: 13, color: b.courts > 0 ? T.green : T.muted }}>→ {b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น"}</span>
+              </div>
+              {b.courts > 0 && (
+                <div style={{ fontSize: 11, color: T.muted }}>
+                  {rec.goal === "min_games"
+                    ? `คาดว่าได้เล่นประมาณ ${Math.round(b.expectedGamesPerPlayer * 10) / 10} เกม/คน (ประมาณการ)`
+                    : `คาดว่ารอประมาณ ${b.estimatedWaitMinutes != null ? Math.round(b.estimatedWaitMinutes) : 0} นาที (ประมาณการ)`}
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <MiniStat label="Court-hours (แนะนำ)" value={Math.round(rec.courtHoursTotal * 10) / 10} />
-        <MiniStat label="เกม/คน (ประมาณ)" value={rec.buckets.length ? (Math.round((rec.buckets.reduce((s, b) => s + b.expectedGamesPerPlayer, 0) / rec.buckets.length) * 10) / 10) : "—"} />
-      </div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>รวม {Math.round(rec.courtHoursTotal * 10) / 10} Court-hours (ประมาณการ)</div>
 
       <SectionHead icon={<span style={{ fontSize: 14 }}>📋</span>} title="จองจริง เทียบกับ BadQ แนะนำ" />
       <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: 12, marginBottom: 16, fontSize: 12.5 }}>
@@ -6669,10 +6802,21 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
           <span style={{ fontWeight: 700 }}>{Math.round(rec.courtHoursTotal * 10) / 10} Court-hours</span>
         </div>
         {diffCourtHours !== 0 && (
-          <div style={{ color: diffCourtHours > 0 ? T.green : T.accent, fontWeight: 700 }}>
-            {diffCourtHours > 0 ? `ลด ${diffCourtHours} Court-hours ได้` : `แนะนำเพิ่ม ${Math.abs(diffCourtHours)} Court-hours`}
+          <div style={{ color: diffCourtHours > 0 ? T.green : T.accent, fontWeight: 700, marginBottom: shortfallPeriods.length ? 8 : 0 }}>
+            {diffCourtHours > 0 ? `ลด ${diffCourtHours} Court-hours ได้` : `แนะนำเพิ่ม ${totalShortfallCourtHours} Court-hours`}
             {costDiff != null && diffCourtHours > 0 && ` · ประหยัดประมาณ ${formatCurrency(costDiff)}`}
             {costDiff != null && diffCourtHours < 0 && ` · เพิ่มประมาณ ${formatCurrency(Math.abs(costDiff))}`}
+          </div>
+        )}
+        {shortfallPeriods.length > 0 && (
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 4 }}>แนะนำเพิ่ม:</div>
+            {shortfallPeriods.map((p, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
+                <span style={{ color: T.text }}>{minutesToTimeStr(p.start)}–{minutesToTimeStr(p.end)}</span>
+                <span style={{ fontWeight: 700, color: T.accent }}>+{p.extra} สนาม</span>
+              </div>
+            ))}
           </div>
         )}
         <div style={{ color: T.muted, fontSize: 11, marginTop: 6 }}>เป็นคำแนะนำเท่านั้น — ระบบจะไม่แก้ไขจำนวนสนามที่จองจริงให้อัตโนมัติ ผู้จัดก๊วนเป็นผู้ตัดสินใจสุดท้าย</div>
@@ -6683,14 +6827,14 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
       </button>
       {showCalcSettings && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <NumField label="นาที/แมตช์ (เฉลี่ย)" value={settings.averageMatchMinutes || 15} onChange={(v) => setSettings((s) => ({ ...s, averageMatchMinutes: Math.max(1, v) }))} />
-            <NumField label="การใช้สนาม (%)" value={Math.round((settings.courtUtilization || 0.9) * 100)} onChange={(v) => setSettings((s) => ({ ...s, courtUtilization: Math.min(100, Math.max(1, v)) / 100 }))} />
+          <div style={{ marginBottom: 8 }}>
+            <NumField label="เวลาเฉลี่ยต่อ 1 เซต (นาที)" value={settings.averageSetMinutes || 15} onChange={(v) => setSettings((s) => ({ ...s, averageSetMinutes: Math.max(1, v) }))} />
           </div>
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 4 }}>จำนวนเซตต่อแมตช์อ่านจากการตั้งค่า "จำนวนเซต" ของก๊วนนี้อัตโนมัติ ({roundsLabel(settings.rounds)}) ไม่ต้องตั้งซ้ำที่นี่</div>
           {/* v1.11.7 (Part L): transparency only — never a separate editable field, so there is exactly
-              one averageMatchMinutes value in play at any time (either the config above, or this real
+              one avgMatchMinutes value in play at any time (either the config above, or this real
               historical average once enough reliable samples exist). */}
-          <div style={{ fontSize: 11, color: T.muted }}>{rec.avgSource === "history" ? `กำลังใช้ค่าเฉลี่ยจากประวัติจริงของก๊วนนี้ (${rec.avgMatchMinutes} นาที/แมตช์) แทนค่าด้านบน เพราะมีข้อมูลเพียงพอแล้ว` : "ยังไม่มีประวัติแมตช์เพียงพอ — ใช้ค่าที่ตั้งไว้ด้านบนไปก่อน"}</div>
+          <div style={{ fontSize: 11, color: T.muted }}>{rec.avgSource === "history" ? `กำลังใช้ค่าเฉลี่ยจากประวัติจริงของก๊วนนี้ (${rec.avgMatchMinutes} นาที/แมตช์) แทนค่าด้านบน เพราะมีข้อมูลเพียงพอแล้ว` : `ยังไม่มีประวัติแมตช์เพียงพอ — ใช้ค่าที่ตั้งไว้ด้านบน (${rec.avgMatchMinutes} นาที/แมตช์)`}</div>
         </div>
       )}
 
@@ -6702,7 +6846,83 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
 // v1.8.4: ค่าใช้จ่ายก๊วน + รางวัล — moved here from QuanSettingsSheet (formerly the "💳"/"🏆" accordions
 // inside Today's ตั้งค่าก๊วน) so money settings live with the money UI (ชำระเงิน tab), not the play UI.
 // Same fields, same state (settings.court/shuttle/other/qr/bank/wheelEnabled/wheelPrizes), just relocated.
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, onClose }) {
+// v1.11.12 (model F: หารค่าใช้จ่าย) — organizer enters the 4 real cost lines, app auto-splits ONLY by
+// ผู้เล่นที่มาจริง (never registered/roster count — see computeSplitExpenseSummary). Feeds computeBill's
+// revenue side directly and computeCostModelExpenses' expense side at endSession — no isolated records.
+function SplitExpensesEditor({ settings, setSettings, players }) {
+  const se = settings.splitExpenses || {};
+  const setField = (key) => (v) => setSettings((s) => ({ ...s, splitExpenses: { ...(s.splitExpenses || {}), [key]: v } }));
+  const summary = useMemo(() => computeSplitExpenseSummary(players, settings), [players, settings]);
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <Label>💰 ค่าใช้จ่าย</Label>
+      <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+        <NumField label="ค่าสนาม (฿)" value={se.court || 0} onChange={setField("court")} />
+        <NumField label="ค่าลูก (฿)" value={se.shuttle || 0} onChange={setField("shuttle")} />
+      </div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        <NumField label="ค่าน้ำ (฿)" value={se.water || 0} onChange={setField("water")} />
+        <NumField label="ค่าอื่น ๆ (฿)" value={se.other || 0} onChange={setField("other")} />
+      </div>
+
+      <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginBottom: 12, fontSize: 12.5 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+          <span style={{ color: T.muted }}>รวมค่าใช้จ่าย</span>
+          <span style={{ fontWeight: 800 }}>{formatCurrency(summary.total)}</span>
+        </div>
+        {summary.hasAttendance ? (
+          <>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+              <span style={{ color: T.muted }}>ผู้เล่นที่มาจริง</span>
+              <span style={{ fontWeight: 800 }}>{summary.attendedCount} คน</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: T.muted }}>เฉลี่ย</span>
+              <span style={{ fontWeight: 800 }}>{summary.perPersonRaw.toFixed(2)} บาท/คน</span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{ color: T.accent, fontWeight: 700, marginBottom: summary.projectedRegistered > 0 ? 4 : 0 }}>ยังไม่มีข้อมูลผู้เล่นที่มาจริง</div>
+            {summary.projectedRegistered > 0 && (
+              <div style={{ color: T.muted, fontSize: 11.5 }}>ประมาณการจากผู้ลงทะเบียน {summary.projectedRegistered} คน · {formatCurrency(Math.round(summary.perPersonEstimate * 100) / 100)}/คน (ประมาณการ ไม่ใช่ยอดจริง)</div>
+            )}
+          </>
+        )}
+      </div>
+
+      <Label>การปัดยอดเรียกเก็บ</Label>
+      <div style={{ marginBottom: 12 }}>
+        <Seg options={[["none", "ไม่ปัด"], ["round5", "ปัดเป็น 5 บาท"], ["round10", "ปัดเป็น 10 บาท"]]} value={settings.roundingMode || "none"} onChange={(v) => setSettings((s) => ({ ...s, roundingMode: v }))} />
+      </div>
+
+      {summary.hasAttendance && (
+        <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginBottom: 6, fontSize: 12.5 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+            <span style={{ color: T.muted }}>ต้นทุนจริงเฉลี่ย</span>
+            <span>{summary.perPersonRaw.toFixed(2)} บาท</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
+            <span style={{ color: T.muted }}>ยอดเรียกเก็บ</span>
+            <span style={{ fontWeight: 800 }}>{formatCurrency(summary.charge)}/คน</span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: summary.diff !== 0 ? 5 : 0 }}>
+            <span style={{ color: T.muted }}>รวมเรียกเก็บ</span>
+            <span style={{ fontWeight: 800 }}>{formatCurrency(summary.totalCollected)}</span>
+          </div>
+          {summary.diff !== 0 && (
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: T.muted }}>ส่วนต่างจากต้นทุน</span>
+              <span style={{ fontWeight: 800, color: summary.diff > 0 ? T.green : T.accent }}>{formatCurrency(summary.diff, { showPlus: true })}</span>
+            </div>
+          )}
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>ยอดนี้จะเรียกเก็บแทนค่าสนาม/ค่าลูกแบบเดิม และค่าใช้จ่าย 4 รายการด้านบนจะถูกบันทึกลงสรุปการเงินอัตโนมัติเมื่อจบก๊วน</div>
+    </div>
+  );
+}
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, onClose }) {
   const [open, setOpen] = useState("payment"); // "payment" | "prize" | null
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
   const model = settings.costModel || "simple";
@@ -6730,11 +6950,15 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
               "simple" = the original ค่าสนาม/ค่าลูก fields, unchanged behavior/position for existing groups. */}
           <Label>รูปแบบคิดค่าใช้จ่าย</Label>
           <div style={{ marginBottom: 14 }}>
-            <Seg options={[["simple", "แบบง่าย"], ["perPerson", "รายคน"]]} value={model === "perCourt" || model === "hourly" || model === "custom" ? "" : model} onChange={(v) => setSettings((s) => ({ ...s, costModel: v }))} />
+            <Seg options={[["splitExpenses", "หารค่าใช้จ่าย"], ["simple", "แบบง่าย"], ["perPerson", "รายคน"]]} value={model === "perCourt" || model === "hourly" || model === "custom" ? "" : model} onChange={(v) => setSettings((s) => ({ ...s, costModel: v }))} />
             <div style={{ marginTop: 6 }}>
               <Seg options={[["perCourt", "แยกรายสนาม"], ["hourly", "รายชั่วโมง"], ["custom", "กำหนดเอง"]]} value={["perCourt", "hourly", "custom"].includes(model) ? model : ""} onChange={(v) => setSettings((s) => ({ ...s, costModel: v }))} />
             </div>
           </div>
+
+          {model === "splitExpenses" && (
+            <SplitExpensesEditor settings={settings} setSettings={setSettings} players={players || []} />
+          )}
 
           {model === "simple" && (<>
             <Label>อัตราเรียกเก็บจากผู้เล่น</Label>
@@ -8612,7 +8836,7 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
         <ChevronRight size={18} color={T.muted} />
       </button>
       {openFinanceSettings && (
-        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} onClose={() => setOpenFinanceSettings(false)} />
+        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} onClose={() => setOpenFinanceSettings(false)} />
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
