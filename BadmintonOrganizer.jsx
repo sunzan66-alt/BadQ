@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.16";
+const APP_VERSION = "1.11.17";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -76,12 +76,19 @@ const STATUS = {
 const PSTATUS = {
   absent: { label: "ไม่ได้มา", color: "#6b7d74", bg: "#eef2f0" },
   registered: { label: "ลงทะเบียน", color: "#4f46e5", bg: "#eef0fd" },
+  // v1.11.17: Waiting List — someone who registered/checked in AFTER the group's optional player-limit
+  // cap was already full (see settings.maxPlayers / setStatus below). NOT matchmaking-eligible (every
+  // eligibility filter in this file checks `status === "ready"` specifically, so this is excluded with
+  // zero further changes, exactly like "registered" already is) and NOT billed/counted toward court
+  // planning (see computeBill/computeSplitExpenseSummary/buildCourtRecommendation — all explicitly
+  // exclude it). Session-scoped exactly like every other status here.
+  waiting: { label: "รอคิว", color: "#b45309", bg: "#fef3c7" },
   ready: { label: "พร้อมเล่น", color: "#12986a", bg: "#e2f5ec" },
   playing: { label: "กำลังเล่น", color: "#2563eb", bg: "#e7effd" },
   resting: { label: "พัก", color: "#d97706", bg: "#fef3ec" },
   left: { label: "กลับแล้ว", color: "#9333ea", bg: "#f1eafd" },
 };
-const PSTATUS_OPTS = ["absent", "registered", "ready", "resting", "left"];
+const PSTATUS_OPTS = ["absent", "registered", "waiting", "ready", "resting", "left"];
 // v1.9.17: handedness badge on the Player Card — a violet distinct from every skill-level color
 // (LEVEL_COLORS_BY_INDEX has no purple), every PSTATUS color, T.blue, and T.accent, as specified.
 // v1.11.1: ขวา (right) and ซ้าย (left) now get their own distinct colors (previously both purple,
@@ -116,7 +123,11 @@ const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "a
   // sessionEndTime as-is) — this is the correct default for both a brand-new registration AND every
   // pre-existing registered/ready player from a save made before this field existed, so nobody's
   // attendance silently changes on upgrade and nobody has to re-enter anything.
-  arrivalTime: p.arrivalTime || null, departureTime: p.departureTime || null });
+  arrivalTime: p.arrivalTime || null, departureTime: p.departureTime || null,
+  // v1.11.17: timestamp a player entered the Waiting List — drives queue position (#1/#2/#3), null once
+  // they're moved off "waiting" (promoted, or marked absent). Missing on every pre-existing player/backup
+  // -> null, meaning nobody is ever silently treated as already-waiting on upgrade.
+  waitlistedAt: p.waitlistedAt || null });
 
 // true once the viewport is wide enough to benefit from a landscape/tablet layout (multi-column court
 // cards, wider content column) — re-evaluated live on rotate/resize, no page reload needed.
@@ -735,7 +746,7 @@ function roundCharge(amount, roundingMode) {
 function computeSplitExpenseSummary(players, settings) {
   const se = (settings && settings.splitExpenses) || {};
   const total = (Number(se.court) || 0) + (Number(se.shuttle) || 0) + (Number(se.water) || 0) + (Number(se.other) || 0);
-  const attended = (players || []).filter((p) => p.status && p.status !== "absent" && p.status !== "registered");
+  const attended = (players || []).filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
   const registeredOnly = (players || []).filter((p) => p.status === "registered").length;
   const projectedRegistered = attended.length + registeredOnly;
   const hasAttendance = attended.length > 0;
@@ -751,7 +762,7 @@ function computeSplitExpenseSummary(players, settings) {
 function computeBill(players, settings) {
   // v1.9.17: "registered" (said they're coming, not arrived/eligible yet) is excluded from billing same
   // as "absent" — only players who actually attended in some capacity (ready/resting/left) are payers.
-  const payers = players.filter((p) => p.status && p.status !== "absent" && p.status !== "registered");
+  const payers = players.filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
   const n = payers.length || 1;
   const otherShare = (settings.other || 0) / n;
   // model D (รายคน) and model F (หารค่าใช้จ่าย) are the only cost models that change REVENUE — model D
@@ -1738,6 +1749,9 @@ function getDefaultSettings() {
     courtRecommendationGoal: "max_wait", // v1.11.12: "max_wait" (รอไม่เกิน X นาที) | "min_games" (เล่นอย่างน้อย X เกม/คน)
     maxWaitMinutes: 30,
     minGamesPerPerson: 4,
+    // v1.11.17: จำนวนผู้เล่น — null/0 = ไม่จำกัด. Once registered/ready headcount reaches this cap, any
+    // NEW check-in goes to the Waiting List instead (see setStatus) until the organizer promotes someone.
+    maxPlayers: null,
   };
 }
 // v1.11.7 (Part M) / v1.11.12: backward-compatible settings defaults — old saved settings objects predate
@@ -1762,6 +1776,7 @@ function normSettings(s) {
     minGamesPerPerson: mgp > 0 ? mgp : 4,
     splitExpenses: { court: Number(se.court) || 0, shuttle: Number(se.shuttle) || 0, water: Number(se.water) || 0, other: Number(se.other) || 0 },
     roundingMode: ["none", "round5", "round10"].includes(base.roundingMode) ? base.roundingMode : "none",
+    maxPlayers: Number(base.maxPlayers) > 0 ? Number(base.maxPlayers) : null,
   };
 }
 
@@ -1891,6 +1906,7 @@ function buildBackupPayload(state) {
       generalExpenses: state.generalExpenses || [], otherIncome: state.otherIncome || [],
       activeTournament: state.activeTournament || null, tournamentHistory: state.tournamentHistory || [],
       discountCredits: state.discountCredits || [],
+      groupDefaults: state.groupDefaults || {},
     },
   };
 }
@@ -1945,6 +1961,7 @@ function migrateBackupData(parsed) {
   data.activeTournament = normTournament(data.activeTournament && typeof data.activeTournament === "object" ? data.activeTournament : null); // no field at all (old backup) -> no active Tournament
   data.tournamentHistory = (Array.isArray(data.tournamentHistory) ? data.tournamentHistory : []).map(normTournament);
   data.discountCredits = (Array.isArray(data.discountCredits) ? data.discountCredits : []).map(normDiscountCredit); // no field at all (old backup) -> []
+  data.groupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {}; // no field at all (old backup) -> no saved group defaults
   return { ...parsed, schemaVersion: SCHEMA_VERSION, data };
 }
 // deeper integrity check AFTER migration — corrupted core structure rejects the whole restore;
@@ -2679,6 +2696,12 @@ export default function App() {
   const [discountCredits, setDiscountCredits] = useState([]); // "ส่วนลดครั้งหน้า" ledger (v1.9.1) — see DISCOUNT CREDITS block
   const [activeTournament, setActiveTournament] = useState(null); // the one Tournament being run right now (or null) — see TOURNAMENT ENGINE block
   const [tournamentHistory, setTournamentHistory] = useState([]); // archived/completed Tournaments — separate from sessionHistory
+  // v1.11.17: GROUP DEFAULT SETTINGS — { [groupName]: bundle }, keyed by session.name (the same identity
+  // already used by the "ชื่อก๊วนที่เคยใช้" dropdown). CONFIGURATION ONLY (settings/mode/courtCount/
+  // courtLabels/session hours) — never transactional data. Saving is always an explicit organizer action
+  // (saveGroupDefault); applying happens when the organizer picks a previously-used name from that
+  // dropdown (applyGroupDefaultsFor) — see both, defined near endSession below.
+  const [groupDefaults, setGroupDefaults] = useState({});
   const [now, setNow] = useState(Date.now());
   const [loaded, setLoaded] = useState(false);
   const [hasPreRestoreBackup, setHasPreRestoreBackup] = useState(false); // safety snapshot exists -> show "undo last restore"
@@ -2789,6 +2812,7 @@ export default function App() {
     setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
     setActiveTournament(normTournament(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
     setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(normTournament));
+    setGroupDefaults(s.groupDefaults && typeof s.groupDefaults === "object" ? s.groupDefaults : {}); // new field: absent on old saves -> no saved group defaults yet
     // old saves (pre-v1.9.15) have no `savedAt` — treat them as "current as of right now" rather than 0,
     // so upgrading doesn't itself trigger a false "newer data elsewhere" flag on the very next save.
     lastKnownSavedAtRef.current = typeof s.savedAt === "number" ? s.savedAt : Date.now();
@@ -2822,7 +2846,7 @@ export default function App() {
   };
   const saveAutoBackup = async (reason) => {
     try {
-      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits });
+      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, groupDefaults });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
@@ -3044,7 +3068,7 @@ export default function App() {
         // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
         if (await refreshFromStorageIfNewer(true)) return;
         const savedAt = Date.now();
-        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, savedAt });
+        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, groupDefaults, savedAt });
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         const result = await window.storage.set("bg-v11", json);
         lastKnownSavedAtRef.current = savedAt;
@@ -3057,7 +3081,7 @@ export default function App() {
         }
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, loaded, loadCorrupted, bootStatus]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, groupDefaults, loaded, loadCorrupted, bootStatus]);
   // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
   // most recently computed save payload when the app backgrounds — insurance for the narrow window
   // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
@@ -3122,12 +3146,12 @@ export default function App() {
   const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim(); if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
-    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null }]);
+    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: null }]);
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
   // status, leaving games/stats/paid/discount untouched so it's safe to use mid-session too.
-  const resetAllToAbsent = () => setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", arrivalTime: null, departureTime: null })));
+  const resetAllToAbsent = () => setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", arrivalTime: null, departureTime: null, waitlistedAt: null })));
   const setPDiscount = (id, v) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, discount: Math.max(0, Number(v) || 0) } : p)));
   // apply a spin-wheel prize to a player: "now" discounts this session's bill immediately (locked, not manually editable),
   // "next" (v1.9.1) creates an explicit discountCredit ledger entry INSTEAD of auto-queuing into pendingDiscount —
@@ -3182,16 +3206,29 @@ export default function App() {
   // ready), default their attendance window to the FULL session (arrivalTime/departureTime = null, which
   // every consumer treats as sessionStartTime/sessionEndTime) — so the common case needs zero extra taps.
   // Going back to "ไม่ได้มา" clears the window again (matches resetAllToAbsent/endSession's own reset).
-  const setStatus = (id, st) => setPlayers((prev) => prev.map((p) => {
-    if (p.id !== id) return p;
-    const wasComing = p.status !== "absent";
-    const isComing = st !== "absent";
-    return {
-      ...p, status: st, waitingSince: st === "ready" && p.status !== "ready" ? Date.now() : p.waitingSince,
-      arrivalTime: !isComing ? null : (!wasComing ? null : p.arrivalTime),
-      departureTime: !isComing ? null : (!wasComing ? null : p.departureTime),
-    };
-  }));
+  // v1.11.17: PLAYER LIMIT + WAITING LIST — when settings.maxPlayers is set, a fresh check-in (coming FROM
+  // "absent" into "registered"/"ready") that would push the registered+ready headcount over the cap is
+  // silently redirected to "waiting" instead. This ONLY intercepts a fresh absent->coming transition — an
+  // organizer explicitly promoting someone already on the Waiting List (or manually picking any status
+  // from the dropdown) is always honored as-is, even right at/over the cap, since that's the deliberate
+  // manual override the feature explicitly calls for.
+  const setStatus = (id, st) => setPlayers((prev) => {
+    const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
+    const comingCount = prev.filter((p) => p.id !== id && (p.status === "registered" || p.status === "ready")).length;
+    return prev.map((p) => {
+      if (p.id !== id) return p;
+      const capped = cap > 0 && p.status === "absent" && (st === "registered" || st === "ready") && comingCount >= cap;
+      const finalSt = capped ? "waiting" : st;
+      const wasComing = p.status !== "absent";
+      const isComing = finalSt !== "absent";
+      return {
+        ...p, status: finalSt, waitingSince: finalSt === "ready" && p.status !== "ready" ? Date.now() : p.waitingSince,
+        waitlistedAt: finalSt === "waiting" ? (p.waitlistedAt || Date.now()) : null,
+        arrivalTime: !isComing ? null : (!wasComing ? null : p.arrivalTime),
+        departureTime: !isComing ? null : (!wasComing ? null : p.departureTime),
+      };
+    });
+  });
   // v1.11.7 (Part D): explicit attendance-time editor writes (มาตลอด/มาสาย/กลับก่อน/กำหนดเอง) — kept as
   // its own setter, separate from setStatus, so opening the time sheet never touches PSTATUS.
   const setAttendanceTime = (id, arrivalTime, departureTime) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, arrivalTime, departureTime } : p)));
@@ -3697,11 +3734,51 @@ export default function App() {
     // จบก๊วน also clears everyone's attendance back to "ไม่ได้มา" — the next session starts from a
     // clean slate and the organizer marks people "พร้อมเล่น" again as they actually show up, instead of
     // carrying over today's roster as still-checked-in into a brand new quan.
-    setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", games: 0, paid: false, discount: 0, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, spun: false, wheelResult: null, wheelDiscount: p.pendingDiscount || 0, pendingDiscount: 0, carriedInDiscount: p.pendingDiscount || 0, arrivalTime: null, departureTime: null })));
+    setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", games: 0, paid: false, discount: 0, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, spun: false, wheelResult: null, wheelDiscount: p.pendingDiscount || 0, pendingDiscount: 0, carriedInDiscount: p.pendingDiscount || 0, arrivalTime: null, departureTime: null, waitlistedAt: null })));
     setHistory([]); setCurrent([]); setFuture([]); setRoundNo(0); setLockPairs([]); setSel(null);
+    // v1.11.17 (spec section 4/F): restock every wheel prize back to full stock at the start of each new
+    // session — prizes used up in the session just archived must never carry over depleted into the next
+    // one for the same ก๊วน. Config (labels/type/amount/totalQty) is untouched, only the live remaining
+    // count resets.
+    setSettings((s) => ({ ...s, wheelPrizes: (s.wheelPrizes || []).map((wp) => ({ ...wp, qty: wp.totalQty != null ? wp.totalQty : prizeQty(wp) })) }));
     // keep the quan name + photo + the expected session time window (most groups reuse the same
     // name/photo/hours every time, e.g. "ก๊วนวันอาทิตย์ 19:00-23:00") — only the date resets to today
     setSession((s) => ({ id: uid(), name: s.name, date: new Date().toISOString().slice(0, 10), mode: "casual", photo: s.photo || null, sessionStartTime: s.sessionStartTime || "19:00", sessionEndTime: s.sessionEndTime || "23:00" }));
+  };
+  // ===== GROUP DEFAULT SETTINGS (v1.11.17, spec section 1) =====
+  // Each named ก๊วน (session.name) can remember its own default configuration — game settings, court
+  // count/labels, mode, finance/reward settings (all of `settings`), and session hours. CONFIGURATION
+  // ONLY: never players present, results, payments, or actual revenue/expenses. Saving is always an
+  // explicit organizer action (never automatic — see saveGroupDefault); applying happens only when the
+  // organizer deliberately picks a previously-used name from the "ชื่อก๊วนที่เคยใช้" dropdown
+  // (applyGroupDefaultsFor) — see SessionTab. `settings` already contains every finance/reward field
+  // (court/shuttle fee, QR, bank, wheel prizes, etc), so one bundle covers everything the spec lists
+  // without threading extra state through the Finance settings sheet.
+  const buildGroupDefaultBundle = () => {
+    const { lastBackupAt, ...restSettings } = settings; // lastBackupAt is app-wide bookkeeping, not group config
+    return {
+      savedAt: Date.now(),
+      mode, courtCount, courtLabels: [...courtLabels],
+      sessionStartTime: session.sessionStartTime || "19:00",
+      sessionEndTime: session.sessionEndTime || "23:00",
+      // snapshot wheel prizes at FULL stock (totalQty), not whatever's currently partially depleted —
+      // a "default" should always mean "how this ก๊วน starts", not "however much stock happens to be left".
+      settings: { ...restSettings, wheelPrizes: (restSettings.wheelPrizes || []).map((wp) => ({ ...wp, qty: wp.totalQty != null ? wp.totalQty : prizeQty(wp) })) },
+    };
+  };
+  const saveGroupDefault = () => {
+    const name = (session.name || "").trim();
+    if (!name) return;
+    setGroupDefaults((prev) => ({ ...prev, [name]: buildGroupDefaultBundle() }));
+  };
+  const applyGroupDefaultsFor = (name) => {
+    const bundle = groupDefaults[name];
+    if (!bundle) return;
+    setSettings((s) => ({ ...s, ...bundle.settings, wheelPrizes: (bundle.settings.wheelPrizes || []).map((wp) => ({ ...wp })) }));
+    if (bundle.mode) setMode(bundle.mode);
+    if (bundle.courtCount) setCourtCount(bundle.courtCount);
+    if (Array.isArray(bundle.courtLabels)) setCourtLabelsRaw(syncCourtLabels(bundle.courtLabels, bundle.courtCount || bundle.courtLabels.length));
+    setSession((s) => ({ ...s, sessionStartTime: bundle.sessionStartTime || s.sessionStartTime, sessionEndTime: bundle.sessionEndTime || s.sessionEndTime }));
   };
   // toggle payment status inside an archived session (independent of the current session's players/paid state)
   const toggleHistoricalPaid = (sessId, playerId) => {
@@ -4013,7 +4090,7 @@ export default function App() {
   // Returns null if the user cancelled the native share sheet or every fallback failed; otherwise
   // { stats, sizeLabel } for the caller to show a success banner with.
   const exportBackup = async () => {
-    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits });
+    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, groupDefaults });
     const json = JSON.stringify(payload);
     // v1.9.19: "BadQ Back-up <date> <time>.json" per explicit naming request — colon-free time (HH-mm)
     // so the filename stays valid on every OS (Windows rejects ":" in filenames).
@@ -4069,7 +4146,7 @@ export default function App() {
     const data = backup.data;
     if (restoreMode === "replace") {
       try {
-        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits });
+        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, groupDefaults });
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
       } catch (e) {}
@@ -4090,6 +4167,7 @@ export default function App() {
       setGeneralExpenses(data.generalExpenses || []);
       setOtherIncome(data.otherIncome || []);
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
+      setGroupDefaults(data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {});
     } else if (restoreMode === "mergeHistory") {
       setSessionHistory((prev) => {
         const existing = new Set(prev.map((s) => s.id));
@@ -4230,7 +4308,7 @@ export default function App() {
         )}
 
         {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }} />}
-        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
@@ -4276,7 +4354,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
     let l = players.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
     // v1.9.17: "registered" hasn't actually arrived yet, so it doesn't count as "ที่มา" here either —
     // same treatment as "absent" for this filter (everything else about "absent" logic is unchanged).
-    if (onlyPresent) l = l.filter((p) => p.status !== "absent" && p.status !== "registered");
+    if (onlyPresent) l = l.filter((p) => p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
     return [...l].sort((a, b) => sort === "levelDesc" ? (b.skillIndex || 0) - (a.skillIndex || 0) || a.name.localeCompare(b.name) : sort === "levelAsc" ? (a.skillIndex || 0) - (b.skillIndex || 0) || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
   }, [players, q, sort, onlyPresent]);
   const readyCount = players.filter((p) => p.status === "ready").length;
@@ -4284,6 +4362,15 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   // the count a future court-count recommendation feature will build on; readyCount above stays the
   // narrower "actually here right now" number, unchanged).
   const registeredCount = players.filter((p) => p.status === "registered" || p.status === "ready").length;
+  // v1.11.17 (spec section 3): Waiting List — queue position (#1, #2, ...) ordered by whoever was
+  // waitlisted first (waitlistedAt, set once in setStatus and never touched again while still waiting).
+  const waitingCount = players.filter((p) => p.status === "waiting").length;
+  const waitingOrder = useMemo(() => {
+    const waiting = players.filter((p) => p.status === "waiting").sort((a, b) => (a.waitlistedAt || 0) - (b.waitlistedAt || 0));
+    const map = {};
+    waiting.forEach((p, i) => { map[p.id] = i + 1; });
+    return map;
+  }, [players]);
   // v1.9.11: brought the photo-at-creation control back into Quick Add (per explicit request) — lets the
   // organizer snap/attach a photo right when adding a new member, instead of only after via tap-to-edit.
   // v1.9.13: picking a file now opens the same crop/position step used everywhere else, instead of an
@@ -4354,9 +4441,15 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {/* v1.9.17: compact "ลงทะเบียน N · พร้อมเล่น N" — same row, no extra vertical space */}
           <span>
-            <span style={{ color: PSTATUS.registered.color, fontWeight: 700 }}>ลงทะเบียน {registeredCount}</span>
+            <span style={{ color: PSTATUS.registered.color, fontWeight: 700 }}>ลงทะเบียน {registeredCount}{!!settings.maxPlayers && `/${settings.maxPlayers}`}</span>
             <span style={{ color: T.muted }}> · </span>
             <span style={{ color: T.green, fontWeight: 700 }}>พร้อมเล่น {readyCount}</span>
+            {waitingCount > 0 && (
+              <>
+                <span style={{ color: T.muted }}> · </span>
+                <span style={{ color: PSTATUS.waiting.color, fontWeight: 700 }}>รอคิว {waitingCount}</span>
+              </>
+            )}
           </span>
           {players.length > 0 && <button onClick={() => setConfirmResetAll(true)} title="รีเซ็ตทุกคนเป็นไม่ได้มา (เริ่มวันใหม่)" style={{ padding: "5px 9px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><RotateCcw size={12} /> ไม่มาทั้งหมด</button>}
         </span>
@@ -4412,9 +4505,22 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
             </div>
             {playingIds && playingIds.has(p.id)
               ? <span style={{ padding: "7px 12px", borderRadius: 20, fontSize: 12, fontWeight: 800, minWidth: 76, textAlign: "center", background: PSTATUS.playing.bg, color: PSTATUS.playing.color }}>กำลังเล่น</span>
-              : <select value={p.status || "absent"} onChange={(e) => setStatus(p.id, e.target.value)} style={{ appearance: "none", textAlign: "center", padding: "7px 10px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", minWidth: 76, background: PSTATUS[p.status || "absent"].bg, color: PSTATUS[p.status || "absent"].color }}>
-                  {PSTATUS_OPTS.map((s) => <option key={s} value={s} style={{ background: "#fff", color: "#000" }}>{PSTATUS[s].label}</option>)}
-                </select>}
+              : (
+                <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                  {/* v1.11.17 (spec section 3): waiting-list queue position + one-tap promote — promoting
+                      always goes through setStatus like every other status change, so the same cap-aware
+                      logic applies uniformly (an explicit promote is honored even right at/over the cap). */}
+                  {p.status === "waiting" && waitingOrder[p.id] && (
+                    <span title="ลำดับคิว" style={{ fontSize: 11, fontWeight: 800, color: PSTATUS.waiting.color }}>#{waitingOrder[p.id]}</span>
+                  )}
+                  {p.status === "waiting" && (
+                    <button onClick={() => setStatus(p.id, "ready")} title="เลื่อนเข้าเล่น" style={{ flexShrink: 0, width: 26, height: 26, borderRadius: 13, background: T.surface2, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>⬆️</button>
+                  )}
+                  <select value={p.status || "absent"} onChange={(e) => setStatus(p.id, e.target.value)} style={{ appearance: "none", textAlign: "center", padding: "7px 10px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", minWidth: 76, background: PSTATUS[p.status || "absent"].bg, color: PSTATUS[p.status || "absent"].color }}>
+                    {PSTATUS_OPTS.map((s) => <option key={s} value={s} style={{ background: "#fff", color: "#000" }}>{PSTATUS[s].label}</option>)}
+                  </select>
+                </div>
+              )}
             {/* v1.11.7 (Part D): small clock icon — only shown for someone actually marked as coming (not
                 permanently on every card, per spec) — opens the attendance-time editor (มาตลอด/มาสาย/
                 กลับก่อน/กำหนดเอง). Absent from "กำลังเล่น" cards on purpose: mid-game is too late to edit
@@ -5069,7 +5175,7 @@ function Fairness({ sA, sB }) {
 
 /* ============ SESSION ============ */
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
@@ -5230,7 +5336,7 @@ function SessionTab(props) {
                     {pastQuans.map((q) => (
                       <button
                         key={q.name}
-                        onClick={() => { setSession((s) => ({ ...s, name: q.name, photo: q.photo })); setShowNameDropdown(false); }}
+                        onClick={() => { setSession((s) => ({ ...s, name: q.name, photo: q.photo })); applyGroupDefaultsFor(q.name); setShowNameDropdown(false); }}
                         style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: 9, background: "none", border: "none", textAlign: "left" }}
                       >
                         {q.photo ? (
@@ -5284,6 +5390,7 @@ function SessionTab(props) {
           settings={settings} setSettings={setSettings} session={session} sessionHistory={sessionHistory}
           players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
           resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
+          groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
           onClose={() => setOpenQuanSettings(false)}
         />
       )}
@@ -6689,7 +6796,7 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
   );
 }
 
-function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, session, sessionHistory, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, onClose }) {
+function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, session, sessionHistory, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, onClose }) {
   // v1.8.4: ค่าใช้จ่าย (💳) and รางวัล (🏆) moved out of this sheet into FinanceSettingsSheet, opened from the
   // ชำระเงิน tab instead — Today/ตั้งค่าก๊วน is now Game Operations only, money settings live with money UI.
   const [open, setOpen] = useState("play"); // "play" | "level" | null — one section open at a time
@@ -6728,6 +6835,18 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>โหมดจัดคู่</div>
             <Seg options={[["auto", "สุ่มอัตโนมัติ"], ["manual", "เลือกเอง (Manual)"]]} value={settings.pairingMode || "auto"} onChange={(v) => setSettings((s) => ({ ...s, pairingMode: v }))} />
+          </div>
+          {/* v1.11.17 (spec section 3): จำนวนผู้เล่น cap — null/0 = ไม่จำกัด. When จำกัดจำนวน is picked, a
+              new check-in past the cap is redirected to the Waiting List (see setStatus) instead of
+              being blocked outright, so the organizer never loses the ability to register someone. */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนผู้เล่น</div>
+            <Seg options={[[false, "ไม่จำกัด"], [true, "จำกัดจำนวน"]]} value={!!settings.maxPlayers} onChange={(v) => setSettings((s) => ({ ...s, maxPlayers: v ? (s.maxPlayers || 24) : null }))} />
+            {!!settings.maxPlayers && (
+              <div style={{ marginTop: 8 }}>
+                <Stepper value={settings.maxPlayers} setValue={(v) => setSettings((s) => ({ ...s, maxPlayers: Math.max(1, v) }))} min={1} max={200} />
+              </div>
+            )}
           </div>
           <Label>จำนวนสนาม</Label>
           <div style={{ marginBottom: 10 }}><Stepper value={courtCount} setValue={setCourtCount} min={1} max={12} /></div>
@@ -6792,6 +6911,22 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
       {open === "level" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14 }}>
           <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} />
+        </div>
+      )}
+
+      {/* v1.11.17 (spec section 1): explicit "save as group default" action — never automatic. Always
+          visible at the bottom of the sheet regardless of which accordion is open, per the spec's
+          requirement that changing a session's settings must never silently change the group's Default. */}
+      {(session.name || "").trim() && (
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${T.border}` }}>
+          <button onClick={saveGroupDefault} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 800 }}>
+            💾 บันทึกเป็นค่าเริ่มต้นของก๊วน "{session.name}"
+          </button>
+          <div style={{ fontSize: 10.5, color: T.muted, textAlign: "center", marginTop: 6 }}>
+            {groupDefaults[session.name]
+              ? `บันทึกล่าสุด: ${new Date(groupDefaults[session.name].savedAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}`
+              : "ยังไม่เคยบันทึกค่าเริ่มต้นของก๊วนนี้"}
+          </div>
         </div>
       )}
     </Overlay>
@@ -8800,7 +8935,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
   const [detail, setDetail] = useState(null); // player id for detail
   const doneCurrent = current.filter((m) => m.status === "done");
   const totalMatches = history.length + doneCurrent.length;
-  const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered"));
+  const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered" && p.status !== "waiting"));
   const gamesArr = played.map((p) => p.games || 0);
   const minGames = gamesArr.length ? Math.min(...gamesArr) : 0;
   const maxGames = gamesArr.length ? Math.max(...gamesArr) : 0;
@@ -8942,7 +9077,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [openFinanceSettings, setOpenFinanceSettings] = useState(false);
   const doneCurrent = current.filter((m) => m.status === "done");
-  const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered"));
+  const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered" && p.status !== "waiting"));
   const bill = computeBill(players, settings);
   const billBy = (id) => bill.find((b) => b.id === id);
   const grandTotal = bill.reduce((s, b) => s + b.total, 0);
@@ -9591,7 +9726,7 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
                   <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>ไม่จำกัด</span>
                 ) : (
                   <span style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-                    <input type="number" value={remaining} onChange={(e) => editQty(p.id, e.target.value)} title="จำนวนคงเหลือ — แก้เพื่อเติมสต็อก" style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", color: remaining === 0 ? T.accent : T.text, fontWeight: 800 }} />
+                    <input type="number" value={remaining} onChange={(e) => editQty(p.id, e.target.value)} onFocus={(e) => e.target.select()} title="จำนวนคงเหลือ — แก้เพื่อเติมสต็อก" style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", color: remaining === 0 ? T.accent : T.text, fontWeight: 800 }} />
                     <span style={{ fontSize: 10.5, color: T.muted }}>{remaining === 0 ? "หมด" : "เหลือ"}</span>
                   </span>
                 )}
@@ -9609,8 +9744,8 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
           <option value="item">ของรางวัล (ไม่ใช่ส่วนลด)</option>
           <option value="none">ไม่ได้รางวัล</option>
         </select>
-        {needsAmount && <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="฿" style={{ ...sty, width: 58, flexShrink: 0 }} />}
-        {type !== "none" && <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} placeholder="จำนวน" title="จำนวนรางวัลทั้งหมด" style={{ ...sty, width: 62, flexShrink: 0 }} />}
+        {needsAmount && <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} onFocus={(e) => e.target.select()} placeholder="฿" style={{ ...sty, width: 58, flexShrink: 0 }} />}
+        {type !== "none" && <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} onFocus={(e) => e.target.select()} placeholder="จำนวน" title="จำนวนรางวัลทั้งหมด" style={{ ...sty, width: 62, flexShrink: 0 }} />}
         <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center", flexShrink: 0 }}><Plus size={17} /></button>
       </div>
       <div style={{ fontSize: 10.5, color: T.muted, marginTop: 6 }}>ตัวเลข "จำนวน" คือจำนวนรางวัลที่มีจริง — หมุนถูกแล้วจะลดลง 1 ทุกครั้ง จนกว่าจะหมด (ยกเว้น "ไม่ได้รางวัล" ที่ไม่จำกัด) — เลือก "ของรางวัล" สำหรับของที่ไม่ใช่ส่วนลด เช่น ไม้แบต รองเท้า น้ำดื่ม</div>
@@ -10093,7 +10228,10 @@ function Stepper({ value, setValue, min, max }) {
   return <div style={{ display: "flex", alignItems: "center", gap: 12 }}><button onClick={() => setValue(Math.max(min, value - 1))} style={btn}><Minus size={17} /></button><span style={{ fontSize: 22, fontWeight: 800, minWidth: 26, textAlign: "center" }}>{value}</span><button onClick={() => setValue(Math.min(max, value + 1))} style={btn}><Plus size={17} /></button></div>;
 }
 function NumField({ label, value, onChange }) {
-  return <div style={{ flex: 1 }}><div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{label}</div><input type="number" value={value} onChange={(e) => onChange(Number(e.target.value) || 0)} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 15, fontWeight: 700, outline: "none", boxSizing: "border-box" }} /></div>;
+  // v1.11.17 fix: select-all on focus so tapping a field showing "0" and typing "1" replaces it (giving
+  // "1"), instead of the browser inserting before the existing digit (giving "10"). Applies uniformly to
+  // every NumField consumer (court/shuttle fees, min games, max wait, hourly/per-court rates, etc).
+  return <div style={{ flex: 1 }}><div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{label}</div><input type="number" value={value} onChange={(e) => onChange(Number(e.target.value) || 0)} onFocus={(e) => e.target.select()} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 15, fontWeight: 700, outline: "none", boxSizing: "border-box" }} /></div>;
 }
 const btnPrimary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 800 };
 const btnSecondary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700 };
