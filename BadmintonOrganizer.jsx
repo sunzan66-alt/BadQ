@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.21";
+const APP_VERSION = "1.11.22";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -3181,10 +3181,20 @@ export default function App() {
   );
 
   // members
+  // v1.11.22: a freshly-added member starts "พร้อมเล่น" (ready) immediately per explicit request — the
+  // organizer no longer has to add the person then separately scroll/find them to flip their status by
+  // hand, since adding them here already means they're present and ready to play. Still respects the
+  // court-capacity cap exactly like setStatus does: if the club is already full (comingCount >= maxPlayers),
+  // the new member is queued into "waiting" instead of silently blowing past the cap.
   const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim(); if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
-    setPlayers((prev) => [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: "absent", games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: null }]);
+    setPlayers((prev) => {
+      const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
+      const comingCount = prev.filter((p) => p.status === "registered" || p.status === "ready").length;
+      const initialStatus = cap > 0 && comingCount >= cap ? "waiting" : "ready";
+      return [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null }];
+    });
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
