@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.27";
+const APP_VERSION = "1.11.29";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -79,7 +79,10 @@ const STATUS_OPTIONS = [
   { key: "next", label: "เกมต่อไป" },
 ];
 function allowedNextStatuses(status) {
-  if (status === "next") return new Set(["next", "playing"]); // can't pause/finish a game that hasn't started
+  // v1.11.29: "next" can no longer reach "playing" via this dropdown at all — starting a queued match is
+  // now a dedicated "▶ เริ่มเกม" button (see MatchRow) so it can be a clearer, deliberate, single tap
+  // instead of picking "กำลังเล่น" off a list of options that mostly don't apply yet.
+  if (status === "next") return new Set(["next"]);
   if (status === "playing") return new Set(["playing", "paused", "done", "next"]);
   if (status === "paused") return new Set(["paused", "playing", "done", "next"]);
   return new Set(["done", "playing", "paused", "next"]); // a reopenable finished (history) row
@@ -3440,19 +3443,21 @@ export default function App() {
 
   // v1.11.27: build a fresh "next" placeholder for `court` — reserving everyone already seated ANYWHERE
   // in `curArr` (any status, any court — see reservedIdsFromCurrent) — auto-paired immediately in "auto"
-  // pairing mode if enough ready players remain free, or left empty for manual hand-picking. Returns null
-  // if auto mode currently has nobody eligible (caller just doesn't create one; it'll get another chance
-  // next time something relevant changes, e.g. a player becomes ready or another court frees up).
+  // pairing mode if enough ready players remain free, or left empty for manual hand-picking. v1.11.28:
+  // ALWAYS returns a record (never null) — even when auto mode currently has nobody eligible, an empty
+  // placeholder row is still created (same shape as manual mode) so every actively-playing/paused court
+  // keeps a visible "เกมต่อไป" row waiting for it. Explicit request: with e.g. 3 courts running but only
+  // enough free players to auto-pair 2 of them, court 3 must still show an empty row rather than nothing —
+  // that way the organizer can hand-pick it, and it's already there the instant a court is about to finish.
   const buildFreshNextRecord = (court, curArr, seq) => {
-    if (settings.pairingMode === "manual") {
-      return { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false };
-    }
+    const emptyRecord = () => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false });
+    if (settings.pairingMode === "manual") return emptyRecord();
     const reserved = reservedIdsFromCurrent(curArr);
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...curArr]);
     const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
     const nm = buildMatch(order, mode, lockPairs, base, stats);
-    return nm ? { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false } : null;
+    return nm ? { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false } : emptyRecord();
   };
   // v1.11.27: explicit request — "เมื่อสถานะเป็นกำลังเล่น ให้เพิ่มเกมถัดไปของสนามนั้น" (the moment a court
   // starts playing, add a "เกมต่อไป" row for that SAME court right away) — lets the organizer prep who
@@ -3465,12 +3470,11 @@ export default function App() {
   const startGame = (mid) => {
     const m = current.find((x) => x.id === mid);
     if (!m) return;
-    // v1.11.27: guard against double-booking a court — this can only happen if the organizer manually
-    // forces "กำลังเล่น" on a court's queued-next companion while its primary match is still playing/
-    // paused (the dropdown doesn't disable this combination since "next" companions look like any other
-    // เกมต่อไป row). The companion is promoted automatically once the primary actually finishes.
+    // v1.11.27: guard against double-booking a court — normally can't happen since v1.11.29 hides this
+    // court's "▶ เริ่มเกม" button while its primary match is still playing/paused (see MatchRow), but kept
+    // as defense-in-depth (e.g. a stale render, or a very fast double-tap).
     if (current.some((c) => c.id !== mid && c.court === m.court && (c.status === "playing" || c.status === "paused"))) {
-      alert("สนามนี้กำลังเล่นอยู่ — คู่นี้จะขึ้นเล่นแทนอัตโนมัติเมื่อเกมปัจจุบันจบ");
+      alert("สนามนี้กำลังเล่นอยู่ — รอให้เกมปัจจุบันจบก่อน แล้วค่อยกดเริ่มเกมคู่นี้");
       return;
     }
     const updated = current.map((x) => (x.id === mid ? { ...x, status: "playing", startedAt: Date.now() } : x));
@@ -3520,16 +3524,19 @@ export default function App() {
   };
 
   // v1.11.24: "จบแล้ว" (from the unified status dropdown) — finishes the match AND ALWAYS archives it to
-  // history immediately (court frees up right away). v1.11.27: this court's already-queued "next" row —
-  // created the moment THIS match started playing, see startGame/buildFreshNextRecord — always wins over
-  // building a brand-new match from scratch, and now takes over PLAYING that court IMMEDIATELY (no manual
-  // "เริ่มเกม" tap needed), per explicit request. `promoteQueued`'s old m.queued-based path (and the
-  // manual/auto-build fallbacks below it) only ever fire for a pre-1.11.27 saved session that doesn't have
-  // a real queued-next row yet, or if the queued row was left incomplete (still shows "เกมต่อไป", not
-  // started, exactly like any other unfilled next row). Callable from "playing", "paused", and legacy
-  // "done" (a court left mid-advance by a pre-1.11.24 session — treated as already-finished, just needs
-  // archiving). If nothing can be built at all, the court simply goes empty (same "+ จัดเกม" affordance as
-  // any other empty court once players are ready) — no "stuck เพิ่งจบ" in-between state.
+  // history immediately (court frees up right away). v1.11.27 introduced auto-promoting this court's
+  // already-queued "next" row straight to "playing" the instant the primary match finished; v1.11.29
+  // REMOVES that auto-promotion per explicit request — "เมื่อกดจบเกม อย่าพึ่งเปลี่ยนสถานะเกมถัดไป ให้รอ
+  // ผู้ดำเนินการกดเปลี่ยนเป็นเริ่มเกม" (finishing must NOT change the queued row's status; the organizer
+  // presses the dedicated "▶ เริ่มเกม" button on it themselves, whenever ready). The queued companion (if
+  // any) is now left completely untouched here — this function's ONLY job when one exists is to archive
+  // the finished match; the freed court simply sits with its companion still "เกมต่อไป" until started.
+  // `promoteQueued`'s old m.queued-based path (and the manual/auto-build fallbacks below it) only ever
+  // fire when there's NO queued companion yet (pre-1.11.27 saved session, or the court's companion was
+  // removed) — those still build a fresh "เกมต่อไป" row immediately, same as always; they were never
+  // auto-started either (starting has always been a separate, manual "เริ่มเกม" step for them). If nothing
+  // can be built at all, the court simply goes empty (same "+ จัดเกม" affordance as any other empty court
+  // once players are ready) — no "stuck เพิ่งจบ" in-between state.
   const finishAndAdvance = (mid) => {
     const m = current.find((x) => x.id === mid);
     if (!m || (m.status !== "playing" && m.status !== "paused" && m.status !== "done")) return;
@@ -3549,11 +3556,13 @@ export default function App() {
     let usedFreshRound = false;
 
     if (queuedNext) {
+      // v1.11.29: no auto-promotion — the companion stays exactly "เกมต่อไป" (fully staffed or not) until
+      // the organizer explicitly presses "▶ เริ่มเกม" on it. Wait-time bumping still happens now (same
+      // convention as the fallback branches below: a court's next occupant is considered "queued" — no
+      // longer idly waiting — from the moment it's finalized here, not from whenever it's actually started).
       const ids = new Set([...queuedNext.teamA, ...queuedNext.teamB].filter(Boolean));
       np = bumpWait(np, ids, roundNo + 1);
-      // an incomplete queued row just stays "next" as-is — organizer fills the rest, same as any other
-      // unfilled next row (see startReadyMatch/"เลือกผู้เล่นให้ครบก่อนเริ่มเกม").
-      newMatch = startReadyMatch(queuedNext) ? { ...queuedNext, status: "playing", startedAt: t } : queuedNext;
+      newMatch = queuedNext;
     } else {
       newMatch = promoteQueued(m, roundNo + 1, court); // legacy m.queued fallback (pre-1.11.27 sessions)
       if (newMatch) {
@@ -3579,17 +3588,13 @@ export default function App() {
     }
 
     // newMatch may still be null here (auto mode, nobody eligible right now) — .filter(Boolean) drops that
-    // court's entry entirely, leaving it empty, instead of the old "stuck done" fallback.
+    // court's entry entirely, leaving it empty, instead of the old "stuck done" fallback. v1.11.29: a
+    // companion built by THIS function is never "playing" any more (see above), so there is no longer a
+    // "spawn the next companion right away" step here — that only ever happens when a match actually
+    // starts playing (startGame/resumeMatch/reopenMatch), which for a court's queued row now only happens
+    // via its own explicit "▶ เริ่มเกม" button, not as a side effect of finishing a DIFFERENT match.
     let finalCurrent = [...survivors, newMatch].filter(Boolean);
     let finalRound = usedFreshRound ? roundNo + 1 : roundNo;
-
-    // the freed court is playing again (promoted from its queued row, or freshly auto-paired) — spawn its
-    // NEXT companion immediately too, repeating the prep-ahead cycle (v1.11.27).
-    if (newMatch && newMatch.status === "playing") {
-      const freshSeq = finalRound + 1;
-      const fresh = buildFreshNextRecord(court, finalCurrent, freshSeq);
-      if (fresh) { finalCurrent = [...finalCurrent, fresh]; finalRound = freshSeq; }
-    }
 
     setPlayers(np); setHistory([...history, doneM]); setCurrent(finalCurrent); setRoundNo(finalRound); setSel(null);
   };
@@ -5540,9 +5545,19 @@ function SessionTab(props) {
     const setRowOpenSlot = (v) => setOpenSlot(v ? { mid: m.id, ...v } : null);
     const allowed = allowedNextStatuses(st);
     const sc = matchScoreText(m);
+    // v1.11.29: a "next" row's court might already be occupied by its own playing/paused primary match
+    // (the prep-ahead companion case) — its "▶ เริ่มเกม" button stays disabled until that court frees up,
+    // instead of letting the tap through and relying only on startGame's alert as the only guard.
+    const busyCourt = !done && st === "next" && current.some((c) => c.id !== m.id && c.court === m.court && (c.status === "playing" || c.status === "paused"));
+    const canStart = !done && st === "next" && startReady(m) && !busyCourt;
+    // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
+    // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
+    // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
+    // apart at a glance while scrolling, without adding any extra header/divider rows to the table.
+    const rowBg = done ? "#f4f6f5" : st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : st === "next" ? "#f5f8ff" : "transparent";
     return (
       <div key={m.id}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`, background: st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : "transparent", minWidth: TABLE_MIN_WIDTH }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`, background: rowBg, minWidth: TABLE_MIN_WIDTH }}>
           <span style={{ width: COLW.no, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>{String(no).padStart(2, "0")}</span>
           <select
             value={m.court}
@@ -5571,13 +5586,27 @@ function SessionTab(props) {
               document.body
             )}
           </div>
-          <select
-            value={st}
-            onChange={(e) => setMatchStatus(m.id, e.target.value)}
-            style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", color: STATUS[st].color, background: STATUS[st].bg }}
-          >
-            {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{o.label}</option>)}
-          </select>
+          {!done && st === "next" ? (
+            // v1.11.29: starting a queued match is now a dedicated "▶ เริ่มเกม" button instead of picking
+            // "กำลังเล่น" off the สถานะ dropdown — a queued row has nothing else it can validly become via
+            // the dropdown anyway (see allowedNextStatuses), so this replaces it in the same column/width.
+            <button
+              onClick={() => setMatchStatus(m.id, "playing")}
+              disabled={!canStart}
+              title={busyCourt ? "สนามนี้กำลังเล่นอยู่ — รอให้จบก่อน" : !startReady(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
+              style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, color: canStart ? STATUS.playing.color : T.muted, background: canStart ? STATUS.playing.bg : T.surface2, opacity: canStart ? 1 : 0.6 }}
+            >
+              <Play size={12} /> เริ่มเกม
+            </button>
+          ) : (
+            <select
+              value={st}
+              onChange={(e) => setMatchStatus(m.id, e.target.value)}
+              style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", color: STATUS[st].color, background: STATUS[st].bg }}
+            >
+              {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{o.label}</option>)}
+            </select>
+          )}
           <div style={{ width: COLW.actions, flexShrink: 0, display: "flex", justifyContent: "center", gap: 2 }}>
             {/* lock + จัดใหม่ (existing pre-1.11.24 systems, explicitly preserved) only ever applied to a
                 not-yet-started "next" match — locking/reshuffling a live or finished game doesn't apply,
