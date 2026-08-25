@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.24";
+const APP_VERSION = "1.11.25";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5356,7 +5356,12 @@ function SessionTab(props) {
     </button>
   );
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
-  const [queueEditFor, setQueueEditFor] = useState(null); // court/match id currently in inline "แก้ไข" (Edit Next Match Mode) — replaces the old modal-based queueSheetFor
+  // v1.11.25: the old "จัดเกมถัดไป" prep-ahead-while-playing widget (NextMatchBlock, m.queued) is
+  // retired from this table per explicit request — a court's next match now only ever appears once its
+  // current occupant actually finishes (a real "เกมต่อไป" row, grouped at the bottom — see orderedMatches
+  // below), never as a separate dashed-box format mixed into the table. queueEditFor/NextMatchBlock are
+  // no longer rendered here; finishAndAdvance's own promoteQueued fallback is harmless dead weight for any
+  // OLD saved session that still has an m.queued sitting around (it just won't happen anymore going forward).
   const started = current.length > 0;
   const waitMin = (p) => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
   // Requirement 16: block starting a match with unfilled slots — surfaced as a disabled+dimmed button
@@ -5368,19 +5373,22 @@ function SessionTab(props) {
   const empties = []; for (let c = 1; c <= courtCount; c++) if (!occupied.has(c)) empties.push(c);
   const rounds = settings.rounds || 1;
 
-  // v1.11.23: UNIFIED MATCH TABLE — explicit user request to replace the old "many cards, one per
-  // court" layout with ONE continuously-numbered table (Match No | สนาม | ทีม A | ทีม B | ผล | สถานะ).
-  // Numbering reuses the `round` field ALREADY stamped on every match object (a global counter that only
-  // advances when a genuinely NEW match record is created — genStart/fillCourt/finishAndAdvance/
-  // promoteQueued — and is left untouched by regenCourt/regenFuture, which mutate teamA/teamB of the
-  // SAME record in place) — so sorting history++current by (round asc, court asc) reproduces creation
-  // order with zero new state/fields, and is safe on old saved sessions too (missing round -> 0).
-  // "จัดใหม่" on an already-numbered "คิวต่อไป" row therefore keeps its number; only a brand-new match
-  // record (a court's next batch after finishing, or filling an empty court) gets the next number.
+  // UNIFIED MATCH TABLE — one continuously-numbered table (Match No | สนาม | ทีม A | ทีม B | ผล |
+  // สถานะ) replacing the old per-court cards. v1.11.25 correction: rows are grouped by STATUS first —
+  // จบแล้ว (done) on top, then กำลังเล่น/พักเกม (currently occupying a court), then เกมต่อไป (not yet
+  // started) at the bottom — with one running number across all three groups (จบแล้ว 1,2,3.. กำลังเล่น
+  // continues 4,5,6.. เกมต่อไป continues after that). Previously this sorted purely by `round` (creation
+  // order), which could interleave a stale "next" row ahead of an older still-"playing" one; grouping by
+  // status first is what makes a fresh "เกมต่อไป" row for a just-freed court visibly "pop up at the
+  // bottom" the instant that court's match finishes, per explicit request. Within each group, ties break
+  // by (round asc, court asc) — `round` is a global counter stamped once at match-record creation and
+  // left untouched by in-place reshuffles (regenCourt/regenFuture), so ordering within a group still
+  // reflects creation order, and old saved sessions without `round` just default to 0.
   const orderedMatches = useMemo(() => {
     const historySet = new Set(history);
     const merged = [...history, ...current];
-    merged.sort((a, b) => (a.round ?? 0) - (b.round ?? 0) || (a.court ?? 0) - (b.court ?? 0));
+    const rank = (m) => (historySet.has(m) ? 0 : m.status === "playing" || m.status === "paused" ? 1 : 2);
+    merged.sort((a, b) => rank(a) - rank(b) || (a.round ?? 0) - (b.round ?? 0) || (a.court ?? 0) - (b.court ?? 0));
     return merged.map((m, i) => ({ m, no: i + 1, done: historySet.has(m) }));
   }, [history, current]);
   const finishedOrdered = orderedMatches.filter((x) => x.done);
@@ -5473,23 +5481,6 @@ function SessionTab(props) {
           </div>
         </div>
         {!done && st === "next" && !startReady(m) && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, padding: "0 11px 8px", textAlign: "center" }}>เลือกผู้เล่นให้ครบก่อนเริ่มเกม</div>}
-        {!done && st === "playing" && (
-          <div style={{ padding: "0 11px 10px" }}>
-            <NextMatchBlock
-              m={m}
-              getP={getP}
-              pool={waitQueue}
-              autoQueueNext={autoQueueNext}
-              setQueuedSlot={setQueuedSlot}
-              swapQueuedTeams={swapQueuedTeams}
-              clearQueuedNext={clearQueuedNext}
-              now={now}
-              editing={queueEditFor === m.id}
-              onEdit={() => setQueueEditFor(m.id)}
-              onDone={() => setQueueEditFor(null)}
-            />
-          </div>
-        )}
       </div>
     );
   };
@@ -5630,12 +5621,15 @@ function SessionTab(props) {
         </div>
       )}
 
-      {/* UNIFIED MATCH TABLE (v1.11.24) — one continuously-numbered table replacing the old per-court
-          card list + separate ประวัติแมตช์ accordion (explicit user request). Row order is ascending
-          Match No: จบแล้ว (permanently archived, history[]) first, then the live courts (current[] —
-          กำลังเล่น/พักเกม/คิวต่อไป) in creation order, then any still-empty courts last (no number yet).
-          The whole thing sits inside a horizontal-scroll container — columns use fixed pixel widths
-          (COLW) and never compress to fit the screen, per explicit request. */}
+      {/* UNIFIED MATCH TABLE (v1.11.25) — one continuously-numbered table replacing the old per-court
+          card list + separate ประวัติแมตช์ accordion (explicit user request). Row order is grouped by
+          status, ascending Match No throughout: จบแล้ว (permanently archived, history[]) first, then
+          กำลังเล่น/พักเกม (currently occupying a court), then เกมต่อไป (not yet started) — any still-empty
+          courts last (no number yet). Every row uses the exact same layout — no separate "prep next
+          match" widget mixed in; a freed court's next match simply appears as its own new เกมต่อไป row at
+          the bottom the instant its old match finishes. The whole thing sits inside a horizontal-scroll
+          container — columns use fixed pixel widths (COLW) and never compress to fit the screen, per
+          explicit request. */}
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, marginBottom: 12, overflowX: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 11px", background: T.surface2, fontSize: 10, fontWeight: 800, color: T.muted, textTransform: "uppercase", letterSpacing: 0.3, minWidth: TABLE_MIN_WIDTH }}>
           <span style={{ width: COLW.no, flexShrink: 0 }}>No</span>
