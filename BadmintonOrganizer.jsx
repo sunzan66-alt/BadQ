@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.23";
+const APP_VERSION = "1.11.22";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5234,6 +5234,7 @@ function SessionTab(props) {
     (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push({ name: s.name, photo: s.photo || null }); } });
     return out;
   }, [sessionHistory]);
+  const [showHistory, setShowHistory] = useState(false);
   const [historyShowAll, setHistoryShowAll] = useState(false); // v1.9.9: cap the expanded match-history list so it never outweighs active courts/queue (Phase 2)
   const HISTORY_PAGE = 8;
   const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
@@ -5264,77 +5265,33 @@ function SessionTab(props) {
   const [queueEditFor, setQueueEditFor] = useState(null); // court/match id currently in inline "แก้ไข" (Edit Next Match Mode) — replaces the old modal-based queueSheetFor
   const started = current.length > 0;
   const waitMin = (p) => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
+  const teamScore = (arr) => arr.reduce((s, id) => s + (id ? getP(id)?.skillIndex || 0 : 0), 0);
   // Requirement 16: block starting a match with unfilled slots — surfaced as a disabled+dimmed button
   // rather than a silent no-op, plus a short hint line under the action row.
   const startReady = (m) => [...m.teamA, ...m.teamB].every(Boolean);
   const byCourt = (a, b) => a.court - b.court;
+  const playing = current.filter((m) => m.status === "playing").sort(byCourt);
   const nexts = current.filter((m) => m.status === "next").sort(byCourt);
+  const dones = current.filter((m) => m.status === "done").sort(byCourt);
   const occupied = new Set(current.map((m) => m.court));
   const empties = []; for (let c = 1; c <= courtCount; c++) if (!occupied.has(c)) empties.push(c);
   const rounds = settings.rounds || 1;
 
-  // v1.11.23: UNIFIED MATCH TABLE — explicit user request to replace the old "many cards, one per
-  // court" layout with ONE continuously-numbered table (Match No | สนาม | ทีม A | ทีม B | ผล | สถานะ).
-  // Numbering reuses the `round` field ALREADY stamped on every match object (a global counter that only
-  // advances when a genuinely NEW match record is created — genStart/fillCourt/finishAndAdvance/
-  // promoteQueued — and is left untouched by regenCourt/regenFuture, which mutate teamA/teamB of the
-  // SAME record in place) — so sorting history++current by (round asc, court asc) reproduces creation
-  // order with zero new state/fields, and is safe on old saved sessions too (missing round -> 0).
-  // "จัดใหม่" on an already-numbered "คิวต่อไป" row therefore keeps its number; only a brand-new match
-  // record (a court's next batch after finishing, or filling an empty court) gets the next number.
-  const orderedMatches = useMemo(() => {
-    const historySet = new Set(history);
-    const merged = [...history, ...current];
-    merged.sort((a, b) => (a.round ?? 0) - (b.round ?? 0) || (a.court ?? 0) - (b.court ?? 0));
-    return merged.map((m, i) => ({ m, no: i + 1, done: historySet.has(m) }));
-  }, [history, current]);
-  const finishedOrdered = orderedMatches.filter((x) => x.done);
-  const liveOrdered = orderedMatches.filter((x) => !x.done);
-  // same cap the old ประวัติแมตช์ accordion used (HISTORY_PAGE) — keeps a long day's match log from
-  // outweighing the live courts; "แสดงแมตช์ที่จบแล้วเพิ่มเติม" reveals the rest (oldest first, since the
-  // table now reads top-to-bottom in ascending Match No order like the reference layout).
-  const finishedShown = historyShowAll ? finishedOrdered : finishedOrdered.slice(-HISTORY_PAGE);
-  const hiddenFinishedCount = finishedOrdered.length - finishedShown.length;
-
-  // one compact row per PERMANENTLY finished match (history[]) — same info CompactMatch used to show,
-  // just laid out as a row of the unified table (No / สนาม / ทีม A / ทีม B / ผล / สถานะ) instead of its
-  // own little card. Tapping a row still opens the exact same inline ScoreEditor as before.
-  const FinishedRow = ({ m, no }) => {
-    const nm = (id) => getP(id)?.name || "-";
-    const lv = (id) => getP(id)?.level || "";
-    const side = (arr) => arr.filter(Boolean).map((id) => `${nm(id)} (${lv(id)})`).join(" + ");
-    const sc = matchScoreText(m);
-    return (
-      <div key={m.id}>
-        <button onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} style={{ width: "100%", textAlign: "left", background: "none", border: "none", borderBottom: `1px solid ${T.border}`, padding: "9px 11px", display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={{ width: 22, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>{String(no).padStart(2, "0")}</span>
-          <span style={{ width: 52, flexShrink: 0, fontSize: 10.5, fontWeight: 700, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>สนาม {courtLabelFor(courtLabels, m.court)}</span>
-          <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: TEAM_A_COLOR, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{side(m.teamA)}</span>
-          <span style={{ flex: 1, minWidth: 0, fontSize: 12, fontWeight: 700, color: TEAM_B_COLOR, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{side(m.teamB)}</span>
-          <span style={{ width: 54, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.text, textAlign: "center" }}>{sc || "-"}</span>
-          <span style={{ flexShrink: 0, fontSize: 10.5, fontWeight: 800, color: T.green, background: "#e2f5ec", padding: "3px 7px", borderRadius: 20 }}>จบแล้ว</span>
-        </button>
-        {scoreOpen === m.id && <div style={{ padding: "0 11px 10px", borderBottom: `1px solid ${T.border}` }}><ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} /></div>}
-      </div>
-    );
-  };
-
-  // one row per LIVE court slot (status next/playing/done-transitional) — same content FullCard used to
-  // render (MatchTeams swap grid, NextMatchBlock, จัดใหม่/เริ่มเกม/จบเกม/ScoreEditor buttons — ALL 100%
-  // unchanged per explicit request), just as a row of the table (No + สนาม + สถานะ header strip, border-
-  // bottom separator) instead of its own boxed card. Balance/% (Fairness) is dropped from this view only
-  // per explicit request — the underlying fairness calculation that PICKS the pairing is untouched.
-  const LiveRow = ({ m, no }) => {
+  // renders a court's card in ANY status (next/playing/done) with the SAME layout — only the badge,
+  // buttons, and (for "done") the score editor change. Kept as one component so a given court's card
+  // never remounts/jumps position when its status changes; the caller always renders exactly one of
+  // these per occupied court, in fixed court-number order (see the unified list below).
+  const FullCard = (m) => {
     const st = STATUS[m.status]; const editable = m.status === "next";
-    const badgeText = m.status === "playing" ? "🔴 กำลังเล่น" : m.status === "done" ? "จบแล้ว" : "คิวต่อไป";
+    const sA = teamScore(m.teamA), sB = teamScore(m.teamB);
+    const badgeText = m.status === "playing" ? "🔴 กำลังเล่น" : m.status === "done" ? "✅ จบแล้ว" : "🔵 เกมถัดไป";
     // a "next" court's swap dropdown also offers players already paired into OTHER not-yet-started
     // courts (not just the free/waiting pool) — see nextPoolFor/replaceSlot for how the actual swap
     // avoids duplicating anyone onto two courts at once.
     const bench = editable ? [...waitQueue, ...nextPoolFor(m.id)] : waitQueue;
     return (
-      <div key={m.id} style={{ borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${m.locked ? T.accent : "transparent"}`, padding: 11, background: m.status === "playing" ? "#f3faf7" : "transparent" }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: 8, gap: 4 }}>
-          <span style={{ fontSize: 11, fontWeight: 800, color: T.muted }}>{String(no).padStart(2, "0")}</span>
+      <div key={m.id} style={{ background: T.surface, border: `1px solid ${m.locked ? T.accent : (m.status === "playing" ? T.green : T.border)}`, borderRadius: 14, padding: 11, marginBottom: 9 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
           {CourtLabelTag(m.court)}
           {editable && (
             <button onClick={() => toggleCurrentLock(m.id)} title={m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)"} style={{ marginLeft: 8, display: "flex", alignItems: "center", gap: 4, background: m.locked ? "#fdecea" : "none", border: "none", borderRadius: 8, padding: m.locked ? "3px 7px" : 0, color: m.locked ? T.accent : T.muted }}>
@@ -5345,8 +5302,12 @@ function SessionTab(props) {
           <span style={{ marginLeft: "auto", fontSize: 11.5, fontWeight: 800, color: st.color, background: st.bg, padding: "4px 10px", borderRadius: 20 }}>{badgeText}</span>
         </div>
         <MatchTeams m={m} getP={getP} editable={editable} tapSlot={tapSlot} isSel={isSel} replaceSlot={replaceSlot} bench={bench} big={m.status === "playing"} now={now} />
-        {m.status === "next" && !startReady(m) && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 7, textAlign: "center" }}>เลือกผู้เล่นให้ครบก่อนเริ่มเกม</div>}
-        {m.status === "done" && matchScoreText(m) && <div style={{ fontSize: 11.5, fontWeight: 800, color: T.text, marginTop: 7, textAlign: "center" }}>ผล: {matchScoreText(m)}</div>}
+        {/* Balance is a pre-game decision aid only (Requirement 2/4): once a court is actually playing,
+            the CURRENT match never shows Balance/%/bar. "next" (not-yet-started) and "done" keep it —
+            but ONLY once every slot is filled (FIX: an incomplete "next" court used to show a bogus
+            0%/ห่างกัน/team-score reading computed from partial teams — now it shows a plain hint instead,
+            with no % / status label / team score / bar at all until the match is fully selected). */}
+        {m.status !== "playing" && (startReady(m) ? <Fairness sA={sA} sB={sB} /> : <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: 7, textAlign: "center" }}>เลือกผู้เล่นให้ครบก่อนเริ่มเกม</div>)}
         {m.status === "playing" && (
           <NextMatchBlock
             m={m}
@@ -5378,17 +5339,6 @@ function SessionTab(props) {
       </div>
     );
   };
-
-  // an unoccupied court — same "ว่าง" + "จัดเกม" placeholder as before, now a table row (no Match No yet,
-  // since no match record exists there until fillCourt creates one).
-  const EmptyRow = (c) => (
-    <div key={"e" + c} style={{ borderBottom: `1px solid ${T.border}`, padding: 11, display: "flex", alignItems: "center", gap: 10 }}>
-      <span style={{ width: 22, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>–</span>
-      {CourtLabelTag(c, true)}
-      <span style={{ fontSize: 12.5, color: T.muted }}>ว่าง</span>
-      {started && <button onClick={() => fillCourt(c)} style={{ marginLeft: "auto", ...btnSecondary, flex: "none", padding: "9px 14px" }}><Plus size={15} /> จัดเกม</button>}
-    </div>
-  );
 
   // compact mode selector — the only place Tournament and Casual meet on Today; switching it never
   // touches Casual `current`/`history`/`session` state, it only changes what's rendered below
@@ -5514,30 +5464,24 @@ function SessionTab(props) {
         </div>
       )}
 
-      {/* UNIFIED MATCH TABLE (v1.11.23) — one continuously-numbered table replacing the old per-court
-          card list + separate ประวัติแมตช์ accordion (explicit user request). Row order is ascending
-          Match No: จบแล้ว (permanently archived, history[]) first, then the live courts (current[] —
-          กำลังเล่น/คิวต่อไป/เพิ่งจบ) in creation order, then any still-empty courts last (no number yet). */}
-      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, overflow: "hidden", marginBottom: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 11px", background: T.surface2, fontSize: 10, fontWeight: 800, color: T.muted, textTransform: "uppercase", letterSpacing: 0.3 }}>
-          <span style={{ width: 22, flexShrink: 0 }}>No</span>
-          <span style={{ width: 52, flexShrink: 0 }}>สนาม</span>
-          <span style={{ flex: 1 }}>ทีม A</span>
-          <span style={{ flex: 1 }}>ทีม B</span>
-          <span style={{ width: 54, flexShrink: 0, textAlign: "center" }}>ผล</span>
-          <span style={{ flexShrink: 0 }}>สถานะ</span>
-        </div>
-        {!historyShowAll && hiddenFinishedCount > 0 && (
-          <button onClick={() => setHistoryShowAll(true)} style={{ width: "100%", padding: "8px 0", background: "none", border: "none", borderBottom: `1px dashed ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>
-            <History size={13} style={{ verticalAlign: -2, marginRight: 4 }} /> แสดงแมตช์ที่จบแล้วเพิ่มเติม ({hiddenFinishedCount})
-          </button>
-        )}
-        {finishedShown.map(FinishedRow)}
-        {liveOrdered.map(LiveRow)}
-        {empties.map(EmptyRow)}
-      </div>
+      {/* COURTS — one flat list in fixed court-number order (not grouped by status), so a court's card
+          never jumps to a different section/position on screen when it finishes, gets paired, or starts —
+          only its badge/buttons change in place. Status is still shown per-card via the badge. */}
+      {Array.from({ length: courtCount }, (_, i) => i + 1).map((c) => {
+        const m = current.find((x) => x.court === c);
+        if (m) return FullCard(m);
+        return (
+          <div key={"e" + c} style={{ background: T.surface, border: `1px dashed ${T.border}`, borderRadius: 14, padding: 11, marginBottom: 9, display: "flex", alignItems: "center", gap: 10 }}>
+            {CourtLabelTag(c, true)}
+            <span style={{ fontSize: 12.5, color: T.muted }}>ว่าง</span>
+            {started && <button onClick={() => fillCourt(c)} style={{ marginLeft: "auto", ...btnSecondary, flex: "none", padding: "9px 14px" }}><Plus size={15} /> จัดเกม</button>}
+          </div>
+        );
+      })}
 
-      {/* WAITING — คงรูปแบบเดิมทั้งหมดตามคำขอ (v1.11.18 ตำแหน่งเดิม: ใต้ตารางแมตช์) */}
+      {/* 4. WAITING — moved above ประวัติแมตช์ (v1.11.18, explicit user request) so the wait queue sits
+          right after the live courts, keeping the Playing→Done→"เกมถัดไป" action flow close to the
+          organizer's next decision (who to pull in next) without scrolling past match history first. */}
       {started && (
         <div style={{ marginTop: 12, marginBottom: 8 }}>
           <SectionHead icon={<Clock size={16} color={T.amber} />} title={`รอเล่น — ${waitQueue.length} คน`} sub="เลือกคนรอนานก่อน" />
@@ -5553,6 +5497,37 @@ function SessionTab(props) {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* 5. HISTORY — now the last/bottom-most block (see note above) */}
+      {history.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <button onClick={() => setShowHistory((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 13, fontWeight: 700 }}>
+            <History size={15} /> ประวัติแมตช์ ({history.length})
+            <ChevronDown size={16} style={{ marginLeft: "auto", transform: showHistory ? "rotate(180deg)" : "none" }} />
+          </button>
+          {showHistory && (() => {
+            // recent-first (history is stored oldest -> newest); capped to HISTORY_PAGE unless expanded,
+            // so a long match log never competes visually with active courts/queue (Phase 2 cleanup).
+            const recent = [...history].reverse();
+            const shown = historyShowAll ? recent : recent.slice(0, HISTORY_PAGE);
+            return (
+              <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                {shown.map((m) => (
+                  <div key={m.id}>
+                    <CompactMatch m={m} getP={getP} onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} />
+                    {scoreOpen === m.id && <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} />}
+                  </div>
+                ))}
+                {!historyShowAll && recent.length > HISTORY_PAGE && (
+                  <button onClick={() => setHistoryShowAll(true)} style={{ width: "100%", padding: "8px 0", borderRadius: 10, background: "none", border: `1px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}>
+                    ดูทั้งหมด ({recent.length})
+                  </button>
+                )}
+              </div>
+            );
+          })()}
         </div>
       )}
 
