@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.25";
+const APP_VERSION = "1.11.27";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -201,6 +201,15 @@ function normSession(s) {
 function courtLabelFor(labels, idx) {
   const v = Array.isArray(labels) ? labels[idx - 1] : null;
   return v != null && String(v).trim() !== "" ? String(v) : String(idx);
+}
+// v1.11.26: plain-object snapshot of an element's on-screen position — used to anchor a portal-rendered
+// popover (PlayerPicker, ScoreEditor) via position:fixed so it can never be clipped by an ancestor's
+// overflow (the unified match table scrolls horizontally, which forces the browser to also clip
+// vertically — see the table container's overflowX:auto). A DOMRect's fields are prototype getters, so
+// they don't survive a plain {...rect} spread — pull them out explicitly instead.
+function rectOf(el) {
+  const r = el.getBoundingClientRect();
+  return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width };
 }
 // backward-compat for Tournament objects saved before per-court labels existed (or missing/short arrays)
 // v1.10.0: renamed from ensureTournamentCourtLabels (kept doing exactly what it did, court-label sync,
@@ -3429,10 +3438,47 @@ export default function App() {
     setHistory([]); setCurrent(cur); setFuture([]); setRoundNo(0); setSel(null);
   };
 
+  // v1.11.27: build a fresh "next" placeholder for `court` — reserving everyone already seated ANYWHERE
+  // in `curArr` (any status, any court — see reservedIdsFromCurrent) — auto-paired immediately in "auto"
+  // pairing mode if enough ready players remain free, or left empty for manual hand-picking. Returns null
+  // if auto mode currently has nobody eligible (caller just doesn't create one; it'll get another chance
+  // next time something relevant changes, e.g. a player becomes ready or another court frees up).
+  const buildFreshNextRecord = (court, curArr, seq) => {
+    if (settings.pairingMode === "manual") {
+      return { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false };
+    }
+    const reserved = reservedIdsFromCurrent(curArr);
+    const base = players.map((p) => ({ ...p }));
+    const stats = counts([...history, ...curArr]);
+    const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
+    const nm = buildMatch(order, mode, lockPairs, base, stats);
+    return nm ? { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false } : null;
+  };
+  // v1.11.27: explicit request — "เมื่อสถานะเป็นกำลังเล่น ให้เพิ่มเกมถัดไปของสนามนั้น" (the moment a court
+  // starts playing, add a "เกมต่อไป" row for that SAME court right away) — lets the organizer prep who
+  // plays next on a court WHILE its current match is still going, as an ordinary table row (no separate
+  // widget). At most one "next" companion ever exists per court (see unstartMatch/finishAndAdvance for how
+  // it's removed/consumed) so this only creates one if that court doesn't already have one.
   // v1.11.7 (Part L): stamp startedAt/finishedAt so a future averageMatchMinutes calculation (Part L —
   // simple historical average, no ML) has real elapsed time to work from. Purely additive: nothing reads
   // these two fields anywhere in existing pairing/scoring/finance logic.
-  const startGame = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, status: "playing", startedAt: Date.now() } : m)));
+  const startGame = (mid) => {
+    const m = current.find((x) => x.id === mid);
+    if (!m) return;
+    // v1.11.27: guard against double-booking a court — this can only happen if the organizer manually
+    // forces "กำลังเล่น" on a court's queued-next companion while its primary match is still playing/
+    // paused (the dropdown doesn't disable this combination since "next" companions look like any other
+    // เกมต่อไป row). The companion is promoted automatically once the primary actually finishes.
+    if (current.some((c) => c.id !== mid && c.court === m.court && (c.status === "playing" || c.status === "paused"))) {
+      alert("สนามนี้กำลังเล่นอยู่ — คู่นี้จะขึ้นเล่นแทนอัตโนมัติเมื่อเกมปัจจุบันจบ");
+      return;
+    }
+    const updated = current.map((x) => (x.id === mid ? { ...x, status: "playing", startedAt: Date.now() } : x));
+    if (current.some((c) => c.id !== mid && c.court === m.court && c.status === "next")) { setCurrent(updated); return; }
+    const seq = roundNo + 1;
+    const fresh = buildFreshNextRecord(m.court, updated, seq);
+    if (fresh) { setCurrent([...updated, fresh]); setRoundNo(seq); } else setCurrent(updated);
+  };
   const endGame = (mid) => {
     const m = current.find((x) => x.id === mid);
     if (!m || m.status !== "playing") return;
@@ -3474,59 +3520,117 @@ export default function App() {
   };
 
   // v1.11.24: "จบแล้ว" (from the unified status dropdown) — finishes the match AND ALWAYS archives it to
-  // history immediately (court frees up right away), then tries to pair that same court's next match —
-  // a prepared "เกมถัดไป" queued match always wins (promoteQueued), otherwise auto-pairing tries to build
-  // one (or an empty hand-pick slot in manual mode). Callable from "playing", the new "paused" (organizer
-  // can end directly from a paused game without resuming first), and legacy "done" (a court left mid-
-  // advance by a pre-1.11.24 session — treated as already-finished, just needs archiving). Previously this
-  // fell back to a "stuck เพิ่งจบ" card in `current` when no next match could be built; that in-between
-  // state is retired now that สถานะ is a direct dropdown — if nothing can be built, the court simply goes
-  // empty (same "+ จัดเกม" affordance as any other empty court once players are ready).
+  // history immediately (court frees up right away). v1.11.27: this court's already-queued "next" row —
+  // created the moment THIS match started playing, see startGame/buildFreshNextRecord — always wins over
+  // building a brand-new match from scratch, and now takes over PLAYING that court IMMEDIATELY (no manual
+  // "เริ่มเกม" tap needed), per explicit request. `promoteQueued`'s old m.queued-based path (and the
+  // manual/auto-build fallbacks below it) only ever fire for a pre-1.11.27 saved session that doesn't have
+  // a real queued-next row yet, or if the queued row was left incomplete (still shows "เกมต่อไป", not
+  // started, exactly like any other unfilled next row). Callable from "playing", "paused", and legacy
+  // "done" (a court left mid-advance by a pre-1.11.24 session — treated as already-finished, just needs
+  // archiving). If nothing can be built at all, the court simply goes empty (same "+ จัดเกม" affordance as
+  // any other empty court once players are ready) — no "stuck เพิ่งจบ" in-between state.
   const finishAndAdvance = (mid) => {
     const m = current.find((x) => x.id === mid);
     if (!m || (m.status !== "playing" && m.status !== "paused" && m.status !== "done")) return;
     const finIds = [...m.teamA, ...m.teamB].filter(Boolean);
-    const court = m.court, t = Date.now(), seq = roundNo + 1;
+    const court = m.court, t = Date.now();
     const doneM = { ...m, status: "done", finishedAt: t }; // v1.11.7 (Part L)
-    let np = players.map((p) => (finIds.includes(p.id) ? { ...p, games: p.games + 1, waitingSince: t, lastPlayedRound: seq } : { ...p }));
-    // a prepared "เกมถัดไป" queued match always takes priority over fresh auto-pairing — see promoteQueued
-    let newMatch = promoteQueued(m, seq, court);
-    if (newMatch) {
-      const ids = new Set([...newMatch.teamA, ...newMatch.teamB].filter(Boolean));
-      np = np.map((p) => { if (!ids.has(p.id)) return p; const wms = Math.max(0, t - (p.waitingSince || t)); return { ...p, lastPlayedRound: seq, waitingSince: t, waitTotal: (p.waitTotal || 0) + wms, waitCount: (p.waitCount || 0) + 1, waitMax: Math.max(p.waitMax || 0, wms) }; });
-    } else if (settings.pairingMode === "manual") {
-      newMatch = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false };
+    let np = players.map((p) => (finIds.includes(p.id) ? { ...p, games: p.games + 1, waitingSince: t, lastPlayedRound: roundNo + 1 } : { ...p }));
+    const bumpWait = (arr, ids, seqForThem) => arr.map((p) => {
+      if (!ids.has(p.id)) return p;
+      const wms = Math.max(0, t - (p.waitingSince || t));
+      return { ...p, lastPlayedRound: seqForThem, waitingSince: t, waitTotal: (p.waitTotal || 0) + wms, waitCount: (p.waitCount || 0) + 1, waitMax: Math.max(p.waitMax || 0, wms) };
+    });
+
+    const queuedNext = current.find((c) => c.id !== mid && c.court === court && c.status === "next");
+    const survivors = current.filter((c) => c.id !== mid && (!queuedNext || c.id !== queuedNext.id));
+    let newMatch = null;
+    let usedFreshRound = false;
+
+    if (queuedNext) {
+      const ids = new Set([...queuedNext.teamA, ...queuedNext.teamB].filter(Boolean));
+      np = bumpWait(np, ids, roundNo + 1);
+      // an incomplete queued row just stays "next" as-is — organizer fills the rest, same as any other
+      // unfilled next row (see startReadyMatch/"เลือกผู้เล่นให้ครบก่อนเริ่มเกม").
+      newMatch = startReadyMatch(queuedNext) ? { ...queuedNext, status: "playing", startedAt: t } : queuedNext;
     } else {
-      const others = current.filter((c) => c.id !== mid);
-      const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
-      const base = np.map((p) => ({ ...p }));
-      const stats = counts([...history, doneM, ...others]);
-      const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
-      const nm = buildMatch(order, mode, lockPairs, base, stats);
-      if (nm) {
-        const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
-        np = np.map((p) => { if (!ids.has(p.id)) return p; const wms = Math.max(0, t - (p.waitingSince || t)); return { ...p, lastPlayedRound: seq, waitingSince: t, waitTotal: (p.waitTotal || 0) + wms, waitCount: (p.waitCount || 0) + 1, waitMax: Math.max(p.waitMax || 0, wms) }; });
-        newMatch = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false };
+      newMatch = promoteQueued(m, roundNo + 1, court); // legacy m.queued fallback (pre-1.11.27 sessions)
+      if (newMatch) {
+        const ids = new Set([...newMatch.teamA, ...newMatch.teamB].filter(Boolean));
+        np = bumpWait(np, ids, roundNo + 1);
+        usedFreshRound = true;
+      } else if (settings.pairingMode === "manual") {
+        newMatch = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: roundNo + 1, court, locked: false };
+        usedFreshRound = true;
+      } else {
+        const reserved = reservedIdsFromCurrent(survivors); // excludes players queued into OTHER courts' next match too
+        const base = np.map((p) => ({ ...p }));
+        const stats = counts([...history, doneM, ...survivors]);
+        const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
+        const nm = buildMatch(order, mode, lockPairs, base, stats);
+        if (nm) {
+          const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
+          np = bumpWait(np, ids, roundNo + 1);
+          newMatch = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
+          usedFreshRound = true;
+        }
       }
     }
-    // newMatch may still be null here (auto mode, nobody eligible right now) — .filter(Boolean) below just
-    // drops that court's entry entirely, leaving it empty, instead of the old "stuck done" fallback.
-    const newCurrent = current.map((c) => (c.id === mid ? newMatch : c)).filter(Boolean);
-    setPlayers(np); setHistory([...history, doneM]); setCurrent(newCurrent); setRoundNo(seq); setSel(null);
+
+    // newMatch may still be null here (auto mode, nobody eligible right now) — .filter(Boolean) drops that
+    // court's entry entirely, leaving it empty, instead of the old "stuck done" fallback.
+    let finalCurrent = [...survivors, newMatch].filter(Boolean);
+    let finalRound = usedFreshRound ? roundNo + 1 : roundNo;
+
+    // the freed court is playing again (promoted from its queued row, or freshly auto-paired) — spawn its
+    // NEXT companion immediately too, repeating the prep-ahead cycle (v1.11.27).
+    if (newMatch && newMatch.status === "playing") {
+      const freshSeq = finalRound + 1;
+      const fresh = buildFreshNextRecord(court, finalCurrent, freshSeq);
+      if (fresh) { finalCurrent = [...finalCurrent, fresh]; finalRound = freshSeq; }
+    }
+
+    setPlayers(np); setHistory([...history, doneM]); setCurrent(finalCurrent); setRoundNo(finalRound); setSel(null);
   };
   // v1.11.24: genuine mid-game pause (NOT a finish) — "พักเกม" in the status dropdown. Freezes the court
   // exactly as-is (teams/scores/round/court untouched) so it keeps occupying its court and its players stay
   // fully reserved (reservedIdsFromCurrent/inPlay/waitQueue all key off ANY current-array membership,
   // regardless of status, so nothing else needs to change for that). "กำลังเล่น" resumes it.
   const pauseMatch = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, status: "paused" } : m)));
-  const resumeMatch = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid && m.status === "paused" ? { ...m, status: "playing" } : m)));
+  // v1.11.27: resuming should almost never need to create a companion (one was already made when this
+  // court first started playing — see startGame) — the defensive check just protects an old saved session
+  // that got paused before this feature existed.
+  const resumeMatch = (mid) => {
+    const m = current.find((x) => x.id === mid && x.status === "paused");
+    if (!m) return;
+    const updated = current.map((x) => (x.id === mid ? { ...x, status: "playing" } : x));
+    if (current.some((c) => c.id !== mid && c.court === m.court && c.status === "next")) { setCurrent(updated); return; }
+    const seq = roundNo + 1;
+    const fresh = buildFreshNextRecord(m.court, updated, seq);
+    if (fresh) { setCurrent([...updated, fresh]); setRoundNo(seq); } else setCurrent(updated);
+  };
   // organizer picked "เกมต่อไป" on a court that had already started (playing/paused) — un-starts it back to
   // a paired-not-started match on the SAME court, no stats touched (games are only ever counted at finish).
-  const unstartMatch = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid && (m.status === "playing" || m.status === "paused") ? { ...m, status: "next", startedAt: null } : m)));
+  // v1.11.27: also drops that court's now-redundant "next" companion (if any) — once the match itself is
+  // back to "next", IT is the court's single next-in-line row again; keeping the companion too would leave
+  // two "เกมต่อไป" rows fighting over the same court. The companion's players simply fall back into the
+  // waiting pool (reservedIdsFromCurrent/waitQueue key off current[] membership, so removing the record is
+  // all that's needed).
+  const unstartMatch = (mid) => {
+    const m = current.find((x) => x.id === mid && (x.status === "playing" || x.status === "paused"));
+    if (!m) return;
+    const companion = current.find((c) => c.id !== mid && c.court === m.court && c.status === "next");
+    const updated = current
+      .filter((c) => !companion || c.id !== companion.id)
+      .map((x) => (x.id === mid ? { ...x, status: "next", startedAt: null } : x));
+    setCurrent(updated);
+  };
   // organizer picked a status on an ALREADY-ARCHIVED (history[]) match via the dropdown — pulls it back into
   // `current` on its original court. Blocked (with an explanation) if another live match already sits on
   // that court, since — unlike the สนาม dropdown's swap-on-conflict — there's no live match here yet to swap
-  // court numbers WITH; the organizer resolves it by moving the occupant first.
+  // court numbers WITH; the organizer resolves it by moving the occupant first. v1.11.27: reopening straight
+  // into "กำลังเล่น" also spawns that court's "next" companion, same as starting any other match.
   const reopenMatch = (mid, newStatus) => {
     const m = history.find((x) => x.id === mid);
     if (!m) return;
@@ -3535,8 +3639,17 @@ export default function App() {
       return;
     }
     const st = newStatus === "paused" ? "paused" : newStatus === "playing" ? "playing" : "next";
+    const revived = { ...m, status: st, finishedAt: null, startedAt: st === "playing" ? Date.now() : null };
+    let updated = [...current, revived].sort((a, b) => a.court - b.court);
+    let seq = roundNo;
+    if (st === "playing") {
+      seq = roundNo + 1;
+      const fresh = buildFreshNextRecord(m.court, updated, seq);
+      if (fresh) updated = [...updated, fresh]; else seq = roundNo;
+    }
     setHistory((prev) => prev.filter((x) => x.id !== mid));
-    setCurrent((prev) => [...prev, { ...m, status: st, finishedAt: null, startedAt: st === "playing" ? Date.now() : null }].sort((a, b) => a.court - b.court));
+    setCurrent(updated);
+    if (seq !== roundNo) setRoundNo(seq);
   };
   // v1.11.24: single dispatcher behind the unified สถานะ dropdown — maps (current status -> requested
   // status) onto whichever of the handlers above actually applies; a combination with no sensible meaning
@@ -5330,7 +5443,7 @@ function SessionTab(props) {
   }, [sessionHistory]);
   const [historyShowAll, setHistoryShowAll] = useState(false); // v1.9.9: cap the expanded match-history list so it never outweighs active courts/queue (Phase 2)
   const HISTORY_PAGE = 8;
-  const [scoreOpen, setScoreOpen] = useState(null); // match id whose score editor is open
+  const [scoreOpen, setScoreOpen] = useState(null); // v1.11.26: { mid, rect } | null — which match's score editor is open (rect anchors the portal-rendered popover, see PlayerPicker's same pattern)
   const [openSlot, setOpenSlot] = useState(null); // v1.11.24: { mid, team, idx } | null — which team-slot's swap picker is open, shared across the whole unified match table so only one is open at a time (mirrors the single scoreOpen id above)
   // inline "สนาม N" label editor — tap the label right on the court card (no need to open ตั้งค่าก๊วน).
   // `editingCourt` holds the court NUMBER (1-based) currently being edited, or null. The draft lives in
@@ -5423,7 +5536,7 @@ function SessionTab(props) {
     // avoids duplicating anyone onto two courts at once. Every other status (playing/paused/finished)
     // only offers the genuinely free/waiting pool.
     const bench = !done && st === "next" ? [...waitQueue, ...nextPoolFor(m.id)] : waitQueue;
-    const rowOpenSlot = openSlot && openSlot.mid === m.id ? { team: openSlot.team, idx: openSlot.idx } : null;
+    const rowOpenSlot = openSlot && openSlot.mid === m.id ? { team: openSlot.team, idx: openSlot.idx, rect: openSlot.rect } : null;
     const setRowOpenSlot = (v) => setOpenSlot(v ? { mid: m.id, ...v } : null);
     const allowed = allowedNextStatuses(st);
     const sc = matchScoreText(m);
@@ -5447,14 +5560,15 @@ function SessionTab(props) {
             <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} />
           </div>
           <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
-            <button onClick={() => setScoreOpen(scoreOpen === m.id ? null : m.id)} title="แตะเพื่อใส่ผลการแข่งขัน" style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text }}>{sc || "ใส่ผล"}</button>
-            {scoreOpen === m.id && (
+            <button onClick={(e) => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : { mid: m.id, rect: rectOf(e.currentTarget) })} title="แตะเพื่อใส่ผลการแข่งขัน" style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text }}>{sc || "ใส่ผล"}</button>
+            {scoreOpen && scoreOpen.mid === m.id && ReactDOM.createPortal(
               <>
-                <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 54, background: "transparent" }} />
-                <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: "100%", right: 0, marginTop: 4, zIndex: 55, width: 270, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.2)", padding: 10 }}>
+                <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
+                <div onClick={(e) => e.stopPropagation()} style={{ position: "fixed", top: scoreOpen.rect.bottom + 4, right: Math.max(6, window.innerWidth - scoreOpen.rect.right), zIndex: 200, width: 270, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.2)", padding: 10 }}>
                   <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} />
                 </div>
-              </>
+              </>,
+              document.body
             )}
           </div>
           <select
@@ -9641,7 +9755,9 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         const p = id ? getP(id) : null;
         const selected = isSel && isSel(id, m.id, team, idx);
         const isOpen = !!(openSlot && openSlot.team === team && openSlot.idx === idx);
-        const toggle = () => setOpenSlot(isOpen ? null : { team, idx });
+        // capture the trigger's on-screen rect at open time — PlayerPicker portals to document.body and
+        // positions itself from this, so it never gets clipped by the table's horizontal-scroll container.
+        const toggle = (e) => setOpenSlot(isOpen ? null : { team, idx, rect: rectOf(e.currentTarget) });
         const pick = (newId) => { replaceSlot && replaceSlot(m.id, team, idx, newId); setOpenSlot(null); };
         const nameLong = p && p.name.length > 7;
         const nameFs = nameLong ? (compact ? 12.5 : 13) : (compact ? 14 : 15);
@@ -9666,14 +9782,14 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
             {editable && (
               <button onClick={toggle} title="เปลี่ยนผู้เล่น" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }} />
             )}
-            {isOpen && <PlayerPicker bench={bench || []} allowClear align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} />}
+            {isOpen && <PlayerPicker bench={bench || []} allowClear align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
           </div>
         ) : (
           <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", padding: "7px 8px", borderRadius: 10, border: `1.5px dashed ${editable ? T.green : T.border}`, color: editable ? T.green : T.muted, fontSize: 13, minHeight: 46, display: "flex", alignItems: "center", justifyContent: "center" }}>
             {editable ? (
               <button onClick={toggle} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", color: T.green, fontSize: 13, fontWeight: 700, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{compact ? "+ เลือก" : "+ เลือกคน"}</button>
             ) : "ว่าง"}
-            {isOpen && <PlayerPicker bench={bench || []} align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} />}
+            {isOpen && <PlayerPicker bench={bench || []} align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
           </div>
         );
       })}
@@ -9685,12 +9801,24 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
 // `now` is OPTIONAL (Requirement 8) — when passed, each bench row also shows a small "รอ Xนาที ·
 // เล่น Yเกม" hint so the organizer understands WHY someone is fairness-prioritized. Callers that don't
 // pass `now` (e.g. existing Tournament-side reuse) simply don't render the hint — no crash, no layout change.
-function PlayerPicker({ bench, allowClear, align, onPick, onClose, now }) {
+// v1.11.26: portals to document.body and positions itself with position:fixed from `anchorRect` (the
+// trigger's on-screen rect at open time — see rectOf/TeamSide) instead of position:absolute relative to
+// its trigger. Fixes the picker getting silently cut off at the bottom of the unified match table (that
+// table scrolls horizontally, which forces the browser to also clip vertically) — same width/maxHeight/
+// look as before, it just can no longer be clipped by any ancestor.
+function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRect }) {
   const alignRight = align === "right";
-  return (
+  const panelStyle = {
+    position: "fixed",
+    top: anchorRect.bottom + 4,
+    ...(alignRight ? { right: Math.max(6, window.innerWidth - anchorRect.right) } : { left: Math.max(6, anchorRect.left) }),
+    width: Math.max(anchorRect.width, 210),
+    background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.2)", zIndex: 200, maxHeight: 250, overflowY: "auto",
+  };
+  return ReactDOM.createPortal(
     <>
-      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 55, background: "transparent" }} />
-      <div onClick={(e) => e.stopPropagation()} style={{ position: "absolute", top: "100%", ...(alignRight ? { right: 0, left: "auto" } : { left: 0, right: "auto" }), marginTop: 4, width: "max(100%, 210px)", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.2)", zIndex: 56, maxHeight: 250, overflowY: "auto" }}>
+      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
+      <div onClick={(e) => e.stopPropagation()} style={panelStyle}>
         {allowClear && (
           <button onClick={() => onPick(null)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", background: "none", border: "none", borderBottom: `1px solid ${T.border}`, textAlign: "left", color: T.accent, fontSize: 12.5, fontWeight: 700 }}>
             <X size={15} /> เอาออก (ว่าง)
@@ -9712,7 +9840,8 @@ function PlayerPicker({ bench, allowClear, align, onPick, onClose, now }) {
           </button>
         ))}
       </div>
-    </>
+    </>,
+    document.body
   );
 }
 
