@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.29";
+const APP_VERSION = "1.11.30";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -68,24 +68,31 @@ const STATUS = {
   paused: { label: "พักเกม", color: "#d97706", bg: "#fef3ec" }, // v1.11.24: genuine mid-game pause (not finished)
   done: { label: "จบแล้ว", color: "#6b7d74", bg: "#eef2f0" },
 };
-// v1.11.24: the unified สถานะ dropdown always shows all 4 choices (per explicit spec: "จบแล้ว/กำลังเล่น/
-// พักเกม/เกมต่อไป (สามารถกดเลือกได้)") — options that don't make sense from the row's CURRENT status are
-// disabled rather than hidden, so the list never reflows; setMatchStatus's own guards remain the real
-// source of truth (a disabled option is just a UI hint, not the only line of defense).
+// v1.11.24: the unified สถานะ dropdown originally always showed all 4 choices (จบแล้ว/กำลังเล่น/พักเกม/
+// เกมต่อไป). v1.11.29 pulled "next" out into its own dedicated "▶ เริ่มเกม" button (see MatchRow), and
+// v1.11.30 reframes the remaining 3 as ACTIONS rather than state nouns — matching the requested flow
+// "เกมถัดไป -> เริ่มเกม -> จบเกม" — so the dropdown reads as "things you can DO to this match" rather than
+// "its current state". The underlying status VALUE selecting "เริ่มเกม" writes is still "playing" (same
+// data model, same STATUS map/colors — only STATUS_OPTIONS' displayed label changed), and likewise "จบเกม"
+// still writes "done". Options that don't make sense from the row's CURRENT status are disabled rather
+// than hidden, so the list never reflows; setMatchStatus's own guards remain the real source of truth (a
+// disabled option is just a UI hint, not the only line of defense).
 const STATUS_OPTIONS = [
-  { key: "done", label: "จบแล้ว" },
-  { key: "playing", label: "กำลังเล่น" },
+  { key: "playing", label: "เริ่มเกม" },
   { key: "paused", label: "พักเกม" },
-  { key: "next", label: "เกมต่อไป" },
+  { key: "done", label: "จบเกม" },
 ];
 function allowedNextStatuses(status) {
   // v1.11.29: "next" can no longer reach "playing" via this dropdown at all — starting a queued match is
   // now a dedicated "▶ เริ่มเกม" button (see MatchRow) so it can be a clearer, deliberate, single tap
-  // instead of picking "กำลังเล่น" off a list of options that mostly don't apply yet.
+  // instead of picking a status off a list of options that mostly don't apply yet. v1.11.30: "next" is also
+  // no longer offered as a reachable target FROM a playing/paused/done row either — STATUS_OPTIONS itself
+  // no longer has a "next" entry at all, so this is mostly moot, but the sets are left listing it for
+  // documentation/history; STATUS_OPTIONS.map() simply never renders an option for it any more.
   if (status === "next") return new Set(["next"]);
-  if (status === "playing") return new Set(["playing", "paused", "done", "next"]);
-  if (status === "paused") return new Set(["paused", "playing", "done", "next"]);
-  return new Set(["done", "playing", "paused", "next"]); // a reopenable finished (history) row
+  if (status === "playing") return new Set(["playing", "paused", "done"]);
+  if (status === "paused") return new Set(["paused", "playing", "done"]);
+  return new Set(["done", "playing", "paused"]); // a reopenable finished (history) row
 }
 // player attendance status (playing = derived from active match, not stored)
 // v1.9.17: "registered" (ลงทะเบียน) sits between "absent" and "ready" — means "said they're coming, not
@@ -5586,14 +5593,24 @@ function SessionTab(props) {
               document.body
             )}
           </div>
-          {!done && st === "next" ? (
-            // v1.11.29: starting a queued match is now a dedicated "▶ เริ่มเกม" button instead of picking
-            // "กำลังเล่น" off the สถานะ dropdown — a queued row has nothing else it can validly become via
-            // the dropdown anyway (see allowedNextStatuses), so this replaces it in the same column/width.
+          {!done && st === "next" && busyCourt ? (
+            // v1.11.30: a prep-ahead companion whose court is still busy (primary match still playing/
+            // paused) shows a plain "เกมต่อไป" badge — same as before v1.11.29 — NOT the "เริ่มเกม" button.
+            // The button only appears once that court actually frees up (see the branch below), per explicit
+            // request: "ถ้าเป็นคิวที่สนามนั้นยังแข่งไม่เสร็จ ให้แสดงสถานะเป็นเกมถัดไปแบบเดิม ไม่สนามนั้นเล่น
+            // จบแล้วจะขึ้นเป็นเริ่มเกม".
+            <div style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS.next.color, background: STATUS.next.bg }}>
+              {STATUS.next.label}
+            </div>
+          ) : !done && st === "next" ? (
+            // v1.11.29: starting a queued match (once its court is actually free) is a dedicated "▶ เริ่ม
+            // เกม" button instead of picking a status off the สถานะ dropdown — a queued row has nothing
+            // else it can validly become via the dropdown anyway (see allowedNextStatuses), so this replaces
+            // it in the same column/width.
             <button
               onClick={() => setMatchStatus(m.id, "playing")}
               disabled={!canStart}
-              title={busyCourt ? "สนามนี้กำลังเล่นอยู่ — รอให้จบก่อน" : !startReady(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
+              title={!startReady(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
               style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, color: canStart ? STATUS.playing.color : T.muted, background: canStart ? STATUS.playing.bg : T.surface2, opacity: canStart ? 1 : 0.6 }}
             >
               <Play size={12} /> เริ่มเกม
