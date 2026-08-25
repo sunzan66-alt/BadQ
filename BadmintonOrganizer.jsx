@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.30";
+const APP_VERSION = "1.11.31";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5616,13 +5616,26 @@ function SessionTab(props) {
               <Play size={12} /> เริ่มเกม
             </button>
           ) : (
-            <select
-              value={st}
-              onChange={(e) => setMatchStatus(m.id, e.target.value)}
-              style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", color: STATUS[st].color, background: STATUS[st].bg }}
-            >
-              {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{o.label}</option>)}
-            </select>
+            // v1.11.31: the closed box must show the row's CURRENT STATUS as a noun ("กำลังเล่น"/"จบแล้ว"/
+            // "พักเกม" — STATUS[st].label), while the opened list must still offer the 3 ACTION-labeled
+            // choices from v1.11.30 ("เริ่มเกม"/"พักเกม"/"จบเกม" — STATUS_OPTIONS). A native <select> can't
+            // show different text in its closed box vs. its option list for the very same selected value, so
+            // this renders a purely visual badge (STATUS[st].label) and stacks the real <select> on top of it
+            // with opacity 0 — taps land on the invisible select (which still opens the OS's native picker
+            // showing the real <option> labels/checkmark), while what the user actually SEES before tapping
+            // is the visual badge underneath. onChange/value/disabled logic is unchanged from before.
+            <div style={{ position: "relative", width: COLW.status, flexShrink: 0 }}>
+              <div style={{ width: "100%", fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS[st].color, background: STATUS[st].bg, display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
+                {STATUS[st].label} <ChevronDown size={11} />
+              </div>
+              <select
+                value={st}
+                onChange={(e) => setMatchStatus(m.id, e.target.value)}
+                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, border: "none", padding: 0, margin: 0 }}
+              >
+                {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{o.label}</option>)}
+              </select>
+            </div>
           )}
           <div style={{ width: COLW.actions, flexShrink: 0, display: "flex", justifyContent: "center", gap: 2 }}>
             {/* lock + จัดใหม่ (existing pre-1.11.24 systems, explicitly preserved) only ever applied to a
