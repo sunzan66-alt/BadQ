@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
 
-const APP_VERSION = "1.11.31";
+const APP_VERSION = "1.11.32";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1782,7 +1782,11 @@ function ImageCropper({ src, circleGuide, title, onCancel, onConfirm }) {
 // (and mutates) the same wheelPrizes array reference.
 function getDefaultSettings() {
   return {
-    court: 65, shuttle: 25, other: 0, rounds: 1, winScore: 21, deuce: true, qr: null, bank: "", pairingMode: "auto",
+    // v1.11.32: default pairingMode changed auto -> manual (explicit request) — only affects BRAND NEW
+    // quans/settings built from scratch here; existing saved settings (which already have a stored
+    // pairingMode, "auto" or "manual") are untouched, and every `settings.pairingMode === "manual"` check
+    // elsewhere in the app is unchanged, so legacy data keeps behaving exactly as before.
+    court: 65, shuttle: 25, other: 0, rounds: 1, winScore: 21, deuce: true, qr: null, bank: "", pairingMode: "manual",
     levelPresetId: "isan",
     customLevels: [],
     // ===== FLEXIBLE COST MODEL (v1.9.4) — "รูปแบบคิดค่าใช้จ่าย" =====
@@ -3718,15 +3722,17 @@ export default function App() {
   };
 
   // regenerate a single not-started court (reserve other courts, don't touch playing/games)
-  // in manual pairing mode this just clears the court back to empty slots for re-picking
+  // v1.11.32: this used to just clear the court back to empty slots when pairingMode==="manual" (the
+  // shuffle icon meant "ล้างสนาม" there). Explicit request: with Manual now the default pairing mode, the
+  // organizer still wants a one-tap "let the system pick someone for me" shortcut on a manual court instead
+  // of always hand-picking every slot — so this now ALWAYS does genuine random auto-pairing (the same
+  // buildMatch-based logic as "auto" mode always used), regardless of settings.pairingMode. Hand-picking via
+  // "+ เลือก" per slot, and removing one player via that slot's own "เอาออก (ว่าง)" option, both still work
+  // exactly as before — only the bulk "clear this whole court to empty" shortcut that used to live on this
+  // icon in manual mode is gone (nothing else asked for it back; flag if it's missed).
   const regenCourt = (mid) => {
     const m = current.find((x) => x.id === mid);
     if (!m || m.status !== "next" || m.locked) return;
-    if (settings.pairingMode === "manual") {
-      setCurrent((prev) => prev.map((c) => (c.id === mid ? { ...c, teamA: emptyTeam(), teamB: emptyTeam() } : c)));
-      setSel(null);
-      return;
-    }
     const others = current.filter((c) => c.id !== mid);
     const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
     const base = players.map((p) => ({ ...p }));
@@ -3755,6 +3761,21 @@ export default function App() {
     const nc = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
     setCurrent((prev) => [...prev, nc].sort((a, b) => a.court - b.court));
     setSel(null);
+  };
+
+  // v1.11.32: "+ เพิ่มแมชใหม่" — explicit request for a button at the bottom of the table to add ONE more
+  // "เกมต่อไป" row for hand-picking, on demand, beyond whatever each court's own auto-spawned companion
+  // already covers (see buildFreshNextRecord/startGame — those cap at one companion per court). This just
+  // reuses fillCourt (already tolerant of a court that's non-empty — it appends unconditionally, sorted by
+  // court) so it respects pairingMode exactly like every other match-creation path in the app: manual mode
+  // gets 4 empty "+ เลือก" slots to fill by hand, auto mode gets an immediate auto-paired match. Picks
+  // whichever court doesn't already have a "next" row yet (so the new row is actually useful at a glance);
+  // falls back to court 1 if every court already has one queued — the row's own court <select> lets the
+  // organizer instantly retarget it either way.
+  const addExtraMatch = () => {
+    const coveredCourts = new Set(current.filter((c) => c.status === "next").map((c) => c.court));
+    const court = Array.from({ length: courtCount }, (_, i) => i + 1).find((c) => !coveredCourts.has(c)) || 1;
+    fillCourt(court);
   };
 
   // regenerate all not-started courts at once (reserve playing + locked)
@@ -4575,7 +4596,7 @@ export default function App() {
         )}
 
         {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }} />}
-        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
@@ -5442,7 +5463,7 @@ function Fairness({ sA, sB }) {
 
 /* ============ SESSION ============ */
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
@@ -5646,7 +5667,7 @@ function SessionTab(props) {
                 <button onClick={() => toggleCurrentLock(m.id)} title={m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)"} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.accent : T.muted }}>
                   {m.locked ? <Lock size={14} /> : <Unlock size={14} />}
                 </button>
-                <button onClick={() => regenCourt(m.id)} disabled={m.locked} title={settings.pairingMode === "manual" ? "ล้างสนาม" : "จัดใหม่ (สุ่มคู่นี้ใหม่)"} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.muted, opacity: m.locked ? 0.5 : 1 }}>
+                <button onClick={() => regenCourt(m.id)} disabled={m.locked} title="สุ่มผู้เล่นให้อัตโนมัติ (ใช้ได้ทั้งโหมดสุ่ม/เลือกเอง)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.muted, opacity: m.locked ? 0.5 : 1 }}>
                   <Shuffle size={14} />
                 </button>
               </>
@@ -5821,6 +5842,13 @@ function SessionTab(props) {
         {finishedShown.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
         {liveOrdered.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
         {empties.map(EmptyRow)}
+        {/* v1.11.32: "+ เพิ่มแมชใหม่" — explicit request for a way to add an extra "เกมต่อไป" row to
+            hand-pick beyond each court's own auto-spawned companion; see addExtraMatch above. */}
+        {started && (
+          <button onClick={addExtraMatch} style={{ width: "100%", minWidth: TABLE_MIN_WIDTH, padding: "10px 0", background: "none", border: "none", borderTop: `1px dashed ${T.border}`, color: T.accent, fontSize: 12.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
+            <Plus size={14} /> เพิ่มแมชใหม่
+          </button>
+        )}
       </div>
 
       {/* WAITING — คงรูปแบบเดิมทั้งหมดตามคำขอ (v1.11.18 ตำแหน่งเดิม: ใต้ตารางแมตช์) */}
