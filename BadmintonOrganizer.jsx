@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
-import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download } from "lucide-react";
+import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.32";
+const APP_VERSION = "1.11.34";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -129,9 +129,14 @@ const HAND_LABEL = { left: "ซ้าย", right: "ขวา" };
 // v1.11.5: Member/Guest badge — informational only (see spec: must never affect matchmaking/skill/
 // attendance/tournament logic). Gold for Member (visually distinct from every skill-level color, every
 // PSTATUS color, and HAND_BADGE's violet/magenta), neutral gray for Guest.
+// v1.11.34: added "owner" — a real 3rd memberType value (not a separate boolean), purple per spec. Unlike
+// Member/Guest, Owner DOES have one deliberate, narrow effect: lowest matchmaking selection priority (see
+// SORT/buildMatch's OWNER_PENALTY) — everything else about it (badge display, editing, archiving) is
+// exactly as informational as Member/Guest.
 const MEMBER_TYPE_META = {
   member: { label: "Member", color: "#92650a", bg: "#fdf1d9", border: "#e8c374" },
   guest: { label: "Guest", color: "#5b6672", bg: "#eceff2", border: "#c7cdd4" },
+  owner: { label: "Owner", color: "#7c3aed", bg: "#efe7fc", border: "#c4a9f7" },
 };
 const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
 // backward-compatible: old data used `present` boolean; old data also has no skillIndex yet — derive it
@@ -145,7 +150,12 @@ const LEVEL_HELP = "เรียงจากเริ่มต้น → เก�
 // players/backups have none of these fields, so default them here exactly like every other back-compat
 // field: memberType defaults to "member" (never silently "guest"), phone/lineId default to "" (never
 // null, so controlled <input> elements never warn about switching from uncontrolled).
-const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : "member", phone: p.phone || "", lineId: p.lineId || "", archived: p.archived === true, archivedAt: p.archivedAt || null,
+const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member", phone: p.phone || "", lineId: p.lineId || "", archived: p.archived === true, archivedAt: p.archivedAt || null,
+  // v1.11.34: "ล็อกสมาชิก" — permanent player data, same back-compat category as handedness/memberType
+  // above. Purely a guard against accidental Archive/Delete (see archivePlayer/delPlayer/bulkArchivePlayers
+  // in App()); never read by matchmaking, billing, or attendance. Missing on every pre-existing player ->
+  // false, so nobody is silently locked by the upgrade.
+  isLocked: p.isLocked === true,
   // v1.11.7 (Part D): per-session attendance window. null = "full session" (use session.sessionStartTime/
   // sessionEndTime as-is) — this is the correct default for both a brand-new registration AND every
   // pre-existing registered/ready player from a save made before this field existed, so nobody's
@@ -294,10 +304,19 @@ function counts(matches) {
   return { partner, opp };
 }
 
+// v1.11.34: flat score penalty added per Owner included in a candidate combination — large enough to
+// dominate every other scoring term below (balance/partner-repeat/opponent-repeat/wait/hand-pref, all
+// well under 100 in practice) so a combination with fewer Owners always wins when one exists, but it's
+// still a PREFERENCE, not a hard filter: when every possible combination is forced to include the same
+// number of Owners (not enough non-Owner players to fill the match), the penalty cancels out identically
+// across all of them and the existing criteria (balance, partner history, wait time, hand pref) decide
+// exactly as before — see spec section 4 ("final preference/penalty", "ไม่ได้ถูก Block จากการเล่น").
+const OWNER_PENALTY = 1000;
 function buildMatch(pool, mode, lockPairs, players, stats) {
   const need = mode === "doubles" ? 4 : 2;
   if (pool.length < need) return null;
   const w = (id) => players.find((p) => p.id === id)?.skillIndex || 0;
+  const isOwner = (id) => players.find((p) => p.id === id)?.memberType === "owner";
   const anchor = pool[0].id;
   const win = pool.slice(0, Math.min(pool.length, mode === "doubles" ? 8 : 6)).map((p) => p.id);
   const idxOf = (id) => win.indexOf(id);
@@ -310,7 +329,8 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
       if (o === anchor) continue;
       const r = ruleBetween(lockPairs, anchor, o);
       if (r && (r.type === "avoidOpponent" || r.type === "avoidBoth")) continue; // hard filter: never face / never meet
-      const score = Math.abs(w(anchor) - w(o)) * 2 + oc(anchor, o) * 3 + idxOf(o) * 0.6;
+      const ownerPenalty = OWNER_PENALTY * ((isOwner(anchor) ? 1 : 0) + (isOwner(o) ? 1 : 0));
+      const score = Math.abs(w(anchor) - w(o)) * 2 + oc(anchor, o) * 3 + idxOf(o) * 0.6 + ownerPenalty;
       if (!best || score < best.score) best = { score, teamA: [anchor], teamB: [o] };
     }
     return best;
@@ -348,6 +368,7 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
   for (const trio of kcomb(others, 3)) {
     const four = [anchor, ...trio];
     if (forced && !four.includes(forced)) continue;
+    const ownerPenalty = OWNER_PENALTY * four.filter((id) => isOwner(id)).length; // same for every split of THIS four — only affects which four/trio gets picked, never how a given four is split into teams
     const splits = [
       [[four[0], four[1]], [four[2], four[3]]],
       [[four[0], four[2]], [four[1], four[3]]],
@@ -361,7 +382,7 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
       const oRep = oc(A[0], B[0]) + oc(A[0], B[1]) + oc(A[1], B[0]) + oc(A[1], B[1]);
       const waitPen = idxOf(trio[0]) + idxOf(trio[1]) + idxOf(trio[2]);
       const handPen = handPrefNudge(A[0], A[1]) + handPrefNudge(B[0], B[1]);
-      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4 + handPen;
+      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4 + handPen + ownerPenalty;
       if (!best || score < best.score) best = { score, teamA: A, teamB: B };
     }
   }
@@ -863,6 +884,24 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr) {
     if (Number(se.other) > 0) out.push({ id: uid(), category: "ค่าใช้จ่ายอื่น", description: "ค่าอื่นๆ (หารค่าใช้จ่าย)", amount: Number(se.other), date: dateStr, auto: true });
   }
   return out; // "simple" | "perPerson" -> []
+}
+// v1.11.34 (spec 6.4/6.5): "ค่ารางวัล" Finance expense lines, computed ONLY at endSession() from rewards
+// ACTUALLY distributed this session — never at configuration time, and never for rewardType:"discount"
+// (that already reduced Revenue directly via computeBill/wheelDiscount — counting it here too would
+// double-count, same principle as the "now"/"next" note in the FINANCE comment block below). Grouped by
+// reward name so e.g. "Grip ×3" shows as one line totalling only the 3 actually given out, never the full
+// configured stock.
+function computeRewardExpenses(rewardHistory, sessionId, dateStr) {
+  const items = (rewardHistory || []).filter((r) => r.sessionId === sessionId && r.rewardType !== "discount");
+  if (items.length === 0) return [];
+  const byName = {};
+  items.forEach((r) => {
+    const key = r.rewardNameSnapshot || "รางวัล";
+    if (!byName[key]) byName[key] = { count: 0, amount: 0 };
+    byName[key].count += 1;
+    byName[key].amount += Number(r.rewardValue) || 0;
+  });
+  return Object.entries(byName).map(([name, v]) => ({ id: uid(), category: "ค่ารางวัล", description: `${name} ×${v.count}`, amount: v.amount, date: dateStr, auto: true, sourceType: "wheel" }));
 }
 // ===================== FINANCE (v1.8.4) =====================
 // Accounting model kept deliberately simple:
@@ -1639,8 +1678,16 @@ function fairnessScore(p, now) {
 // best-BALANCED valid combination from within it — fairness decides WHO is eligible/likely to play next,
 // balance decides HOW they're paired, exactly as requirement 1 asks ("prioritize fairness, but the final
 // 4-player combination should still be reasonably balanced").
+// v1.11.34: Owner matchmaking priority (spec: "Owner ควรถูกเลือกเป็นคนสุดท้าย"). Owners sort strictly after
+// every non-Owner ready player (fairness/lastPlayedRound/order still decide the order WITHIN each group,
+// completely unchanged) — this is what pushes them out of buildMatch's shortlist window while enough
+// non-Owner players remain, without touching a single other priority rule. See OWNER_PENALTY in
+// buildMatch below for the second half: even once an Owner IS in the shortlist, buildMatch still prefers
+// any combination that avoids them, for as long as a valid one exists.
 const SORT = (a, b) => {
   const now = Date.now();
+  const aOwner = a.memberType === "owner" ? 1 : 0, bOwner = b.memberType === "owner" ? 1 : 0;
+  if (aOwner !== bOwner) return aOwner - bOwner;
   return fairnessScore(b, now) - fairnessScore(a, now) || (a.lastPlayedRound ?? -1) - (b.lastPlayedRound ?? -1) || a.order - b.order;
 };
 function matchScoreText(m) {
@@ -1809,11 +1856,14 @@ function getDefaultSettings() {
     // visual, never actually landable — instead of disappearing. Default false = unchanged prior behavior
     // (sold-out prizes simply vanish from the wheel).
     wheelShowSoldOut: false,
+    // v1.11.34: REDESIGNED reward model (spec section 6) — probability/value/wheelOrder are now
+    // independent fields, never derived from qty or player count (see normWheelPrizes/pickWheelOutcome).
+    // No "none" (ไม่ได้รางวัล) entry any more — "no prize" is always the automatic remainder
+    // (100 - sum of active probabilities), never a real editable row.
     wheelPrizes: [
-      { id: uid(), label: "ส่วนลด 20฿ (ใช้ทันที)", type: "now", amount: 20, qty: 5, totalQty: 5 },
-      { id: uid(), label: "ส่วนลด 10฿ (ครั้งหน้า)", type: "next", amount: 10, qty: 5, totalQty: 5 },
-      { id: uid(), label: "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)", type: "now", amount: 65, qty: 2, totalQty: 2 },
-      { id: uid(), label: "เสียใจด้วย ไม่ได้รางวัล", type: "none", amount: 0, qty: 40 },
+      { id: uid(), label: "ส่วนลด 20฿ (ใช้ทันที)", type: "now", amount: 20, qty: 5, totalQty: 5, probability: 15, value: 0, wheelOrder: 0 },
+      { id: uid(), label: "ส่วนลด 10฿ (ครั้งหน้า)", type: "next", amount: 10, qty: 5, totalQty: 5, probability: 15, value: 0, wheelOrder: 1 },
+      { id: uid(), label: "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)", type: "now", amount: 65, qty: 2, totalQty: 2, probability: 5, value: 0, wheelOrder: 2 },
     ],
     lastBackupAt: null,
     // ===== COURT RECOMMENDATION ENGINE (v1.11.7, Part G; goal-based rewrite in v1.11.12) — configurable,
@@ -1829,6 +1879,9 @@ function getDefaultSettings() {
     // v1.11.17: จำนวนผู้เล่น — null/0 = ไม่จำกัด. Once registered/ready headcount reaches this cap, any
     // NEW check-in goes to the Waiting List instead (see setStatus) until the organizer promotes someone.
     maxPlayers: null,
+    // v1.11.34: "ไม่ได้มานานเกิน [N] เดือน" threshold used by the ผู้เล่น tab's "ไม่ได้มานาน" filter — never
+    // auto-deletes anyone, purely changes who shows up under that filter. Default 6 per spec.
+    inactiveMonths: 6,
   };
 }
 // v1.11.7 (Part M) / v1.11.12: backward-compatible settings defaults — old saved settings objects predate
@@ -1854,7 +1907,32 @@ function normSettings(s) {
     splitExpenses: { court: Number(se.court) || 0, shuttle: Number(se.shuttle) || 0, water: Number(se.water) || 0, other: Number(se.other) || 0 },
     roundingMode: ["none", "round5", "round10"].includes(base.roundingMode) ? base.roundingMode : "none",
     maxPlayers: Number(base.maxPlayers) > 0 ? Number(base.maxPlayers) : null,
+    inactiveMonths: Number(base.inactiveMonths) > 0 ? Number(base.inactiveMonths) : 6,
   };
+}
+// v1.11.34: migrates settings.wheelPrizes into the new reward model — decouples Probability from
+// Quantity/Player-count entirely (spec section 6: "จำนวน Player ≠ จำนวน Reward ≠ Probability"). Old saved
+// data only ever had {id,label,type,amount,qty,totalQty}; a missing `probability` is derived from the OLD
+// implicit odds (every unit of qty was 1 of 2 equal slices — 1 prize + 1 miss — among ALL real prizes'
+// units combined, i.e. a flat 50% total win chance split proportionally by qty) so a freshly-upgraded
+// wheel keeps behaving THE SAME on the very first spin after upgrading, just now expressed as an explicit
+// % instead of an implicit qty ratio. Also drops any old "none" (ไม่ได้รางวัล) row entirely — the new
+// architecture always computes "no prize" as the automatic remainder (100 - sum of active probabilities),
+// it is no longer a real editable prize (spec 6.2/6.3). Idempotent: already-migrated prizes (probability/
+// value/wheelOrder already present) pass through with just their numbers clamped/coerced, so it's safe to
+// call on every load, not just once.
+function normWheelPrizes(prizes) {
+  const real = (Array.isArray(prizes) ? prizes : []).filter((p) => p && p.type !== "none");
+  const totalQtyAll = real.reduce((s, p) => s + prizeQty(p), 0);
+  return real.map((p, i) => ({
+    ...p,
+    type: ["now", "next", "item", "cash"].includes(p.type) ? p.type : "item",
+    qty: prizeQty(p),
+    totalQty: p.totalQty != null ? Math.max(0, Number(p.totalQty) || 0) : prizeQty(p),
+    probability: p.probability != null ? Math.max(0, Math.min(100, Number(p.probability) || 0)) : (totalQtyAll > 0 ? Math.round((prizeQty(p) / (2 * totalQtyAll)) * 1000) / 10 : 10),
+    value: Number(p.value) || 0,
+    wheelOrder: p.wheelOrder != null ? Number(p.wheelOrder) : i,
+  }));
 }
 
 /* ============ BACKUP / RESTORE ============
@@ -1984,6 +2062,7 @@ function buildBackupPayload(state) {
       activeTournament: state.activeTournament || null, tournamentHistory: state.tournamentHistory || [],
       discountCredits: state.discountCredits || [],
       groupDefaults: state.groupDefaults || {},
+      rewardHistory: state.rewardHistory || [], // v1.11.34: global Reward History ledger, see App()'s rewardHistory state
     },
   };
 }
@@ -2000,6 +2079,7 @@ function backupStats(data) {
     hasActiveTournament: !!data.activeTournament,
     hasFinanceData: (data.generalExpenses || []).length > 0 || (data.otherIncome || []).length > 0 || (data.sessionHistory || []).some((s) => (s.expenses || []).length > 0),
     discountCreditCount: (data.discountCredits || []).length,
+    rewardHistoryCount: (data.rewardHistory || []).length,
   };
 }
 // cheap structural check — catches "this isn't even a BadQ backup" before we try to migrate/use it
@@ -2029,6 +2109,7 @@ function migrateBackupData(parsed) {
   if (!data.settings.levelPresetId) data.settings.levelPresetId = "isan"; // e.g. no levelPresetId -> isan
   if (!Array.isArray(data.settings.customLevels)) data.settings.customLevels = [];
   if (!Array.isArray(data.settings.wheelPrizes) || data.settings.wheelPrizes.length === 0) data.settings.wheelPrizes = getDefaultSettings().wheelPrizes;
+  else data.settings.wheelPrizes = normWheelPrizes(data.settings.wheelPrizes); // v1.11.34: old qty-only prizes -> new probability/value/wheelOrder model
   data.session = data.session && typeof data.session === "object" ? data.session : { name: "", date: new Date().toISOString().slice(0, 10) };
   if (!data.session.id) data.session.id = uid(); // backfill — pre-discount-credit sessions had no stable id
   data.lockPairs = migrateLockPairs(data.lockPairs);
@@ -2039,6 +2120,7 @@ function migrateBackupData(parsed) {
   data.tournamentHistory = (Array.isArray(data.tournamentHistory) ? data.tournamentHistory : []).map(normTournament);
   data.discountCredits = (Array.isArray(data.discountCredits) ? data.discountCredits : []).map(normDiscountCredit); // no field at all (old backup) -> []
   data.groupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {}; // no field at all (old backup) -> no saved group defaults
+  data.rewardHistory = Array.isArray(data.rewardHistory) ? data.rewardHistory : []; // v1.11.34: no field at all (old backup) -> []
   return { ...parsed, schemaVersion: SCHEMA_VERSION, data };
 }
 // deeper integrity check AFTER migration — corrupted core structure rejects the whole restore;
@@ -2084,6 +2166,13 @@ function validateBackupIntegrity(data) {
     if (!c || !c.id) continue;
     if (seenDC.has(c.id)) return { ok: false, reason: "พบรหัสส่วนลดซ้ำกัน" };
     seenDC.add(c.id);
+  }
+  // v1.11.34: same dedup-by-stable-id rule for Reward History entries.
+  const seenRH = new Set();
+  for (const r of data.rewardHistory || []) {
+    if (!r || !r.id) continue;
+    if (seenRH.has(r.id)) return { ok: false, reason: "พบรหัสประวัติรางวัลซ้ำกัน" };
+    seenRH.add(r.id);
   }
   return { ok: true, data };
 }
@@ -2776,6 +2865,10 @@ export default function App() {
   const [generalExpenses, setGeneralExpenses] = useState([]);
   const [otherIncome, setOtherIncome] = useState([]);
   const [discountCredits, setDiscountCredits] = useState([]); // "ส่วนลดครั้งหน้า" ledger (v1.9.1) — see DISCOUNT CREDITS block
+  // v1.11.34: global Reward History ledger (spec section 5) — one entry per ACTUAL win (never "no prize"),
+  // across every ก๊วน ever, never cleared/reset by endSession or anything else. Same persistence pattern
+  // as discountCredits (backup export/import, boot load, autosave) — see every discountCredits touchpoint.
+  const [rewardHistory, setRewardHistory] = useState([]);
   const [activeTournament, setActiveTournament] = useState(null); // the one Tournament being run right now (or null) — see TOURNAMENT ENGINE block
   const [tournamentHistory, setTournamentHistory] = useState([]); // archived/completed Tournaments — separate from sessionHistory
   // v1.11.17: GROUP DEFAULT SETTINGS — { [groupName]: bundle }, keyed by session.name (the same identity
@@ -2885,13 +2978,17 @@ export default function App() {
     s.courtCount && setCourtCount(s.courtCount);
     setCourtLabelsRaw(syncCourtLabels(s.courtLabels, s.courtCount || 2)); // absent on old saves -> sequential default, backward-compatible
     s.mode && setMode(s.mode);
-    s.settings && setSettings((d) => ({ ...d, ...s.settings }));
+    // v1.11.34: wheelPrizes always goes through normWheelPrizes here too (not just the file-import path)
+    // — this is the NORMAL app-boot path, so an existing device's saved old-shape prizes must migrate the
+    // very first time it opens the upgraded app, not only after an explicit backup restore.
+    s.settings && setSettings((d) => ({ ...d, ...s.settings, wheelPrizes: normWheelPrizes(s.settings.wheelPrizes && s.settings.wheelPrizes.length ? s.settings.wheelPrizes : d.wheelPrizes) }));
     s.session && setSession(normSession(s.session)); // old saves have no `mode`/`id`/session times — default them, backward-compatible
     s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
     setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
     setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
     setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
     setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
+    setRewardHistory(Array.isArray(s.rewardHistory) ? s.rewardHistory : []); // v1.11.34: new field, absent on old saves -> []
     setActiveTournament(normTournament(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
     setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(normTournament));
     setGroupDefaults(s.groupDefaults && typeof s.groupDefaults === "object" ? s.groupDefaults : {}); // new field: absent on old saves -> no saved group defaults yet
@@ -2928,7 +3025,7 @@ export default function App() {
   };
   const saveAutoBackup = async (reason) => {
     try {
-      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, groupDefaults });
+      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
@@ -3150,7 +3247,7 @@ export default function App() {
         // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
         if (await refreshFromStorageIfNewer(true)) return;
         const savedAt = Date.now();
-        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, groupDefaults, savedAt });
+        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, savedAt });
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         const result = await window.storage.set("bg-v11", json);
         lastKnownSavedAtRef.current = savedAt;
@@ -3163,7 +3260,7 @@ export default function App() {
         }
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, activeTournament, tournamentHistory, groupDefaults, loaded, loadCorrupted, bootStatus]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, loaded, loadCorrupted, bootStatus]);
   // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
   // most recently computed save payload when the app backgrounds — insurance for the narrow window
   // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
@@ -3237,7 +3334,7 @@ export default function App() {
       const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
       const comingCount = prev.filter((p) => p.status === "registered" || p.status === "ready").length;
       const initialStatus = cap > 0 && comingCount >= cap ? "waiting" : "ready";
-      return [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null }];
+      return [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null, isLocked: false }];
     });
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
@@ -3245,27 +3342,42 @@ export default function App() {
   // status, leaving games/stats/paid/discount untouched so it's safe to use mid-session too.
   const resetAllToAbsent = () => setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", arrivalTime: null, departureTime: null, waitlistedAt: null })));
   const setPDiscount = (id, v) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, discount: Math.max(0, Number(v) || 0) } : p)));
-  // apply a spin-wheel prize to a player: "now" discounts this session's bill immediately (locked, not manually editable),
-  // "next" (v1.9.1) creates an explicit discountCredit ledger entry INSTEAD of auto-queuing into pendingDiscount —
-  // the organizer applies/cancels it by hand later (see DISCOUNT CREDIT CRUD below). Pre-existing nonzero
-  // pendingDiscount balances earned BEFORE this update are left completely untouched for backward compatibility.
+  // v1.11.34: REDESIGNED reward architecture (spec section 6) — `prize` is now the pure-probability
+  // outcome from pickWheelOutcome (a real reward object with type "now"/"next"/"item"/"cash", or null for
+  // "no prize" — never a synthetic "none"-type array entry anymore, see SpinWheel/pickWheelOutcome). "now"
+  // still discounts the bill immediately, "next" still queues a discountCredit ledger entry (both
+  // unchanged from before). "item"/"cash" are real distributed rewards, logged to rewardHistory here AND
+  // turned into a "ค่ารางวัล" Finance expense line at endSession (never here at spin time — spec 6.4:
+  // "ห้ามบันทึก Expense ตอนแค่ตั้ง Reward... Expense เกิดเมื่อแจกจริง"). "no prize" is marked on the
+  // player exactly like a real result, but per spec 5 explicitly gets NO Reward History entry.
   const applyWheelPrize = (id, prize) => {
     const rewardId = uid();
+    const resultLabel = prize ? prize.label : "ไม่ได้รางวัล";
     setPlayers((prev) => prev.map((p) => {
       if (p.id !== id || p.spun) return p;
       let wheelDiscount = p.wheelDiscount || 0;
-      if (prize.type === "now") wheelDiscount += Number(prize.amount) || 0;
-      // "item" (non-discount prize, e.g. racket/shoes/water) and "next" (now a ledger credit, below) touch neither field here
-      return { ...p, spun: true, wheelResult: prize.label, wheelDiscount };
+      if (prize && prize.type === "now") wheelDiscount += Number(prize.amount) || 0;
+      return { ...p, spun: true, wheelResult: resultLabel, wheelDiscount };
     }));
+    if (!prize) return; // no prize -> nothing else to record or apply
     if (prize.type === "next") addDiscountCredit(id, Number(prize.amount) || 0, session.id, rewardId);
-    // consume one unit of stock for real prizes; "none" (no-prize slice) is unlimited and never decremented
-    if (prize.type !== "none") {
-      setSettings((s) => ({
-        ...s,
-        wheelPrizes: (s.wheelPrizes || []).map((wp) => (wp.id === prize.id ? { ...wp, qty: Math.max(0, prizeQty(wp) - 1) } : wp)),
-      }));
-    }
+    // consume one unit of stock — every reward in the new model is finite (see prizeQty)
+    setSettings((s) => ({
+      ...s,
+      wheelPrizes: (s.wheelPrizes || []).map((wp) => (wp.id === prize.id ? { ...wp, qty: Math.max(0, prizeQty(wp) - 1) } : wp)),
+    }));
+    // v1.11.34: Reward History (spec section 5) — snapshot names so history reads correctly even after a
+    // later rename. `rewardType` here is the broader Finance/History category (discount/physical/cash),
+    // distinct from the wheel's own now/next/item/cash `type` (which also encodes discount TIMING).
+    const pl = players.find((x) => x.id === id);
+    const rewardType = prize.type === "now" || prize.type === "next" ? "discount" : prize.type === "cash" ? "cash" : "physical";
+    const rewardValue = prize.type === "item" ? (Number(prize.value) || 0) : (Number(prize.amount) || 0);
+    setRewardHistory((prev) => [...prev, {
+      id: rewardId, playerId: id, playerNameSnapshot: pl?.name || "ผู้เล่น",
+      rewardId: prize.id, rewardNameSnapshot: prize.label, rewardType, rewardValue,
+      sessionId: session.id, groupNameSnapshot: session.name || "ก๊วนไม่มีชื่อ",
+      date: session.date, timestamp: Date.now(),
+    }]);
   };
   // ===================== DISCOUNT CREDIT CRUD (v1.9.1) =====================
   const addDiscountCredit = (playerId, amount, sourceSessionId, sourceRewardId) => {
@@ -3366,7 +3478,13 @@ export default function App() {
       setPlayers((prev) => prev.map((p) => ({ ...p, level: displayLevelFor(p.skillIndex, mergedSettings) })));
     }
   };
+  // v1.11.34: "ล็อกสมาชิก" hard-guards delete/archive at the SAME layer every caller (single delete/archive
+  // from EditPlayerModal, and bulkArchivePlayers below) ultimately goes through — so even a future caller
+  // that forgets to check p.isLocked itself still can't slip a locked player past this. No-op (not an
+  // error/alert) when locked, matching "ห้าม Archive / ห้าม Delete" — the UI already disables the buttons
+  // and shows why (see EditPlayerModal), this is the backstop.
   const delPlayer = (id) => {
+    if (players.find((p) => p.id === id)?.isLocked) return; // locked -> no-op, see comment above
     setPlayers((prev) => prev.filter((p) => p.id !== id));
     setLockPairs((prev) => prev.filter((r) => r.a !== id && r.b !== id));
     // a departing player must not linger in anyone's prepared "เกมถัดไป" queue
@@ -3382,11 +3500,28 @@ export default function App() {
   // queued "เกมถัดไป" slot for the same reason delPlayer already does above — an archived player must not
   // linger half-selected in a future match the moment they're archived.
   const archivePlayer = (id) => {
+    if (players.find((p) => p.id === id)?.isLocked) return; // v1.11.34: locked -> no-op, see delPlayer above
     setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, archived: true, archivedAt: Date.now() } : p)));
     setLockPairs((prev) => prev.filter((r) => r.a !== id && r.b !== id));
     setCurrent((prev) => prev.map((m) => (m.queued && [...m.queued.teamA, ...m.queued.teamB].includes(id)
       ? { ...m, queued: { teamA: m.queued.teamA.map((x) => (x === id ? null : x)), teamB: m.queued.teamB.map((x) => (x === id ? null : x)) } }
       : m)));
+  };
+  // v1.11.34: bulk "Archive ที่เลือก" (spec section 2) — same archivePlayer rules applied to a whole batch
+  // at once, including the SAME lockPairs/queued-slot scrub per player. Locked players are silently
+  // skipped (never partially archived, never an error) — the caller (MembersTab) reports back how many
+  // were actually archived vs skipped so the organizer sees why a locked player didn't move.
+  const bulkArchivePlayers = (ids) => {
+    const idSet = new Set(ids);
+    const archivable = players.filter((p) => idSet.has(p.id) && !p.isLocked).map((p) => p.id);
+    if (archivable.length === 0) return { archived: 0, skipped: idSet.size };
+    const archivableSet = new Set(archivable);
+    setPlayers((prev) => prev.map((p) => (archivableSet.has(p.id) ? { ...p, archived: true, archivedAt: Date.now() } : p)));
+    setLockPairs((prev) => prev.filter((r) => !archivableSet.has(r.a) && !archivableSet.has(r.b)));
+    setCurrent((prev) => prev.map((m) => (m.queued && [...m.queued.teamA, ...m.queued.teamB].some((x) => archivableSet.has(x))
+      ? { ...m, queued: { teamA: m.queued.teamA.map((x) => (archivableSet.has(x) ? null : x)), teamB: m.queued.teamB.map((x) => (archivableSet.has(x) ? null : x)) } }
+      : m)));
+    return { archived: archivable.length, skipped: idSet.size - archivable.length };
   };
   // "กู้คืนสมาชิก" (Restore) — flips archived back off on the SAME id/object. All history/stats were
   // already fully intact throughout (archiving never touched them), so the player simply becomes
@@ -4016,7 +4151,9 @@ export default function App() {
       // flexible cost model (v1.9.4) — auto-suggested real-cost expense line(s) for this session's active
       // costModel, filed straight into the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline via sessionExpenseList;
       // "simple"/"perPerson" sessions get [] here, identical to every session before this feature existed.
-      expenses: computeCostModelExpenses(settings, courtCount, courtLabels, session.date),
+      // v1.11.34 (spec 6.4/6.5): plus one "ค่ารางวัล" line per physical/cash reward actually distributed
+      // this session (discount-type rewards excluded — see computeRewardExpenses).
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
     };
     setSessionHistory((prev) => [snapshot, ...prev]);
     // จบก๊วน also clears everyone's attendance back to "ไม่ได้มา" — the next session starts from a
@@ -4378,7 +4515,7 @@ export default function App() {
   // Returns null if the user cancelled the native share sheet or every fallback failed; otherwise
   // { stats, sizeLabel } for the caller to show a success banner with.
   const exportBackup = async () => {
-    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, groupDefaults });
+    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults });
     const json = JSON.stringify(payload);
     // v1.9.19: "BadQ Back-up <date> <time>.json" per explicit naming request — colon-free time (HH-mm)
     // so the filename stays valid on every OS (Windows rejects ":" in filenames).
@@ -4434,7 +4571,7 @@ export default function App() {
     const data = backup.data;
     if (restoreMode === "replace") {
       try {
-        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, groupDefaults });
+        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults });
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
       } catch (e) {}
@@ -4455,6 +4592,7 @@ export default function App() {
       setGeneralExpenses(data.generalExpenses || []);
       setOtherIncome(data.otherIncome || []);
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
+      setRewardHistory(data.rewardHistory || []); // v1.11.34
       setGroupDefaults(data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {});
     } else if (restoreMode === "mergeHistory") {
       setSessionHistory((prev) => {
@@ -4472,6 +4610,13 @@ export default function App() {
         const toAdd = (data.discountCredits || []).filter((c) => !existing.has(c.id)); // stable-id dedup — never duplicate an existing credit
         return [...prev, ...toAdd.map(normDiscountCredit)];
       });
+      // v1.11.34: same stable-id dedup merge for Reward History — a "merge history" restore should bring
+      // in past reward wins too, never duplicate ones already present.
+      setRewardHistory((prev) => {
+        const existing = new Set(prev.map((r) => r.id));
+        const toAdd = (data.rewardHistory || []).filter((r) => !existing.has(r.id));
+        return [...prev, ...toAdd];
+      });
     }
   };
   // v1.11.5: "ล้างข้อมูลทั้งหมด" (Settings → ความเป็นส่วนตัวและข้อมูล) — full factory reset. Reuses the
@@ -4483,7 +4628,7 @@ export default function App() {
     mode: "doubles", settings: getDefaultSettings(),
     session: { id: uid(), name: "", date: new Date().toISOString().slice(0, 10), mode: "casual" },
     lockPairs: [], sessionHistory: [], generalExpenses: [], otherIncome: [], activeTournament: null,
-    tournamentHistory: [], discountCredits: [],
+    tournamentHistory: [], discountCredits: [], rewardHistory: [],
   } });
   // revert the most recent "replace all" restore using the safety snapshot taken right before it.
   const undoRestore = async () => {
@@ -4509,6 +4654,7 @@ export default function App() {
       setGeneralExpenses(data.generalExpenses || []);
       setOtherIncome(data.otherIncome || []);
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
+      setRewardHistory(data.rewardHistory || []); // v1.11.34
       await window.storage.delete("bg-v11-prerestore");
       setHasPreRestoreBackup(false);
       return true;
@@ -4595,9 +4741,9 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }} />}
         {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
-        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
       </div>
@@ -4624,7 +4770,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, restorePlayer, openPhoto, settings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
@@ -4634,17 +4780,78 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
   const [profilePlayerId, setProfilePlayerId] = useState(null); // v1.11.5: id of player shown in the new Player Profile sheet, or null
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false); // v1.11.5: the new ⚙️ ตั้งค่า (general settings, replaces the old skill-only sheet trigger)
+  // v1.11.34: "ไม่ได้มานาน" filter (spec section 2) — kept as its own toggle chip alongside "เฉพาะที่มา"
+  // rather than a new UI row, per spec. Bulk-select mode ("จัดการหลายคน") is likewise an extra state on
+  // the SAME list, not a separate screen — selectedIds only has any effect while bulkMode is on.
+  const [onlyInactive, setOnlyInactive] = useState(false);
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [bulkArchiveResult, setBulkArchiveResult] = useState(null); // { archived, skipped } | null — brief confirmation after "Archive ที่เลือก"
   const levelOptions = activeLevelOptions(settings);
   const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
   const [name, setName] = useState(""); const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
   const [confirmResetAll, setConfirmResetAll] = useState(false);
+  // v1.11.34: real participation, keyed by player id — reuses the EXACT SAME attendance definition as
+  // PlayerProfileSheet's "มาเล่น" stat (playerStats over each archived session's matches; win+loss+draw+
+  // noScore > 0 counts as "came and played", per spec: "อย่านับเพียงการเคยลงทะเบียน"). `count` drives
+  // "มาบ่อย", `lastDate` drives "มาล่าสุด" AND the "ไม่ได้มานาน" filter — both keyed off Player ID so old
+  // history (no memberType/isLocked/etc. on its frozen player snapshots) still matches correctly.
+  const participation = useMemo(() => {
+    const map = {};
+    const sh = sessionHistory || [];
+    players.forEach((p) => {
+      let count = 0, lastDate = null;
+      sh.forEach((s) => {
+        const st = playerStats(p.id, s.matches || []);
+        if (st.win + st.loss + st.draw + st.noScore > 0) {
+          count++;
+          if (s.date && (!lastDate || s.date > lastDate)) lastDate = s.date;
+        }
+      });
+      map[p.id] = { count, lastDate };
+    });
+    return map;
+  }, [players, sessionHistory]);
+  // v1.11.34: inactivity cutoff — "ไม่ได้มานานเกิน [N] เดือน" from ⚙️ ตั้งค่า → การจัดการสมาชิก
+  // (settings.inactiveMonths, default 6). A player with NO history at all also counts as inactive here
+  // (there's simply no evidence they ever came) — this only affects what shows under the filter, it never
+  // deletes or archives anyone by itself (spec: "ห้าม Auto Delete").
+  const inactiveCutoff = useMemo(() => {
+    const months = Number(settings.inactiveMonths) > 0 ? Number(settings.inactiveMonths) : 6;
+    const d = new Date();
+    d.setMonth(d.getMonth() - months);
+    return d.toISOString().slice(0, 10);
+  }, [settings.inactiveMonths]);
+  const isInactive = (p) => {
+    const info = participation[p.id];
+    return !info || !info.lastDate || info.lastDate < inactiveCutoff;
+  };
   const list = useMemo(() => {
     let l = players.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
     // v1.9.17: "registered" hasn't actually arrived yet, so it doesn't count as "ที่มา" here either —
     // same treatment as "absent" for this filter (everything else about "absent" logic is unchanged).
     if (onlyPresent) l = l.filter((p) => p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
-    return [...l].sort((a, b) => sort === "levelDesc" ? (b.skillIndex || 0) - (a.skillIndex || 0) || a.name.localeCompare(b.name) : sort === "levelAsc" ? (a.skillIndex || 0) - (b.skillIndex || 0) || a.name.localeCompare(b.name) : a.name.localeCompare(b.name));
-  }, [players, q, sort, onlyPresent]);
+    if (onlyInactive) l = l.filter((p) => isInactive(p));
+    return [...l].sort((a, b) => {
+      if (sort === "levelDesc") return (b.skillIndex || 0) - (a.skillIndex || 0) || a.name.localeCompare(b.name);
+      if (sort === "levelAsc") return (a.skillIndex || 0) - (b.skillIndex || 0) || a.name.localeCompare(b.name);
+      if (sort === "frequent") return (participation[b.id]?.count || 0) - (participation[a.id]?.count || 0) || a.name.localeCompare(b.name);
+      if (sort === "recent") {
+        const da = participation[a.id]?.lastDate, db = participation[b.id]?.lastDate;
+        if (!da && !db) return a.name.localeCompare(b.name);
+        if (!da) return 1; // no history -> sorts last, per spec
+        if (!db) return -1;
+        return db > da ? 1 : db < da ? -1 : a.name.localeCompare(b.name);
+      }
+      return a.name.localeCompare(b.name);
+    });
+  }, [players, q, sort, onlyPresent, onlyInactive, participation, inactiveCutoff]);
+  const toggleSelected = (id) => setSelectedIds((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
+  const runBulkArchive = () => {
+    const result = bulkArchivePlayers(Array.from(selectedIds));
+    setBulkArchiveResult(result);
+    setSelectedIds(new Set());
+  };
   const readyCount = players.filter((p) => p.status === "ready").length;
   // v1.9.17: "registeredCount" = registered OR ready (anyone who said they're coming, per spec — this is
   // the count a future court-count recommendation feature will build on; readyCount above stays the
@@ -4682,19 +4889,40 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           ⚙️ ตั้งค่า (now GENERAL settings, not skill-only) — kept on one row on iPhone via flex + minWidth:0. */}
       {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
 
-      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 12 }}>
-        <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      {/* v1.11.34: "มาบ่อย"/"มาล่าสุด" folded into this SAME dropdown (spec: "integrate กับตัวกรองเดิม ไม่
+          สร้าง UI row ใหม่"); "ไม่ได้มานาน" + "จัดการหลายคน" are additional toggle chips on the SAME row,
+          which now wraps on very narrow screens instead of overflowing — the row stays visually identical
+          to before on any screen wide enough to fit it on one line (unchanged today). */}
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 12 }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 132 }}>
           <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ width: "100%", appearance: "none", padding: "9px 26px 9px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 600, boxSizing: "border-box" }}>
-            <option value="levelDesc">ตัวกรอง: เก่ง → เริ่มต้น</option><option value="levelAsc">ตัวกรอง: เริ่มต้น → เก่ง</option><option value="name">ตัวกรอง: ชื่อ (ก-ฮ)</option>
+            <option value="levelDesc">ตัวกรอง: เก่ง → เริ่มต้น</option><option value="levelAsc">ตัวกรอง: เริ่มต้น → เก่ง</option><option value="name">ตัวกรอง: ชื่อ (ก-ฮ)</option><option value="frequent">ตัวกรอง: มาบ่อย</option><option value="recent">ตัวกรอง: มาล่าสุด</option>
           </select>
           <ChevronDown size={15} style={{ position: "absolute", right: 8, top: 11, color: T.muted, pointerEvents: "none" }} />
         </div>
         <button onClick={() => setOnlyPresent((v) => !v)} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${onlyPresent ? T.green : T.border}`, background: onlyPresent ? "#e2f5ec" : T.surface, color: onlyPresent ? T.green : T.muted, whiteSpace: "nowrap" }}>เฉพาะที่มา</button>
+        <button onClick={() => setOnlyInactive((v) => !v)} title={`ไม่มีประวัติมาร่วมก๊วนเกิน ${settings.inactiveMonths || 6} เดือน (ตั้งค่าได้ที่ ⚙️ ตั้งค่า)`} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${onlyInactive ? T.accent : T.border}`, background: onlyInactive ? "#fdecea" : T.surface, color: onlyInactive ? T.accent : T.muted, whiteSpace: "nowrap" }}>ไม่ได้มานาน</button>
+        <button onClick={() => { setBulkMode((v) => !v); setSelectedIds(new Set()); setBulkArchiveResult(null); }} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${bulkMode ? T.green : T.border}`, background: bulkMode ? "#e2f5ec" : T.surface, color: bulkMode ? T.green : T.muted, whiteSpace: "nowrap" }}>{bulkMode ? "เสร็จสิ้น" : "จัดการหลายคน"}</button>
         <button onClick={() => setGeneralSettingsOpen(true)} title="ตั้งค่า" style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text, whiteSpace: "nowrap" }}>⚙️ ตั้งค่า</button>
       </div>
+      {bulkMode && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 11px" }}>
+          <span style={{ flex: 1, fontSize: 12, fontWeight: 700, color: T.muted }}>เลือกแล้ว {selectedIds.size} คน</span>
+          <button
+            onClick={runBulkArchive}
+            disabled={selectedIds.size === 0}
+            style={{ padding: "7px 12px", borderRadius: 20, border: "none", fontSize: 12, fontWeight: 800, background: selectedIds.size === 0 ? T.surface : T.green, color: selectedIds.size === 0 ? T.muted : "#fff", opacity: selectedIds.size === 0 ? 0.6 : 1 }}
+          >📦 Archive ที่เลือก</button>
+        </div>
+      )}
+      {bulkArchiveResult && (
+        <div style={{ fontSize: 11.5, color: T.muted, marginTop: -6, marginBottom: 12, textAlign: "center" }}>
+          เก็บสมาชิกแล้ว {bulkArchiveResult.archived} คน{bulkArchiveResult.skipped > 0 ? ` · ข้าม ${bulkArchiveResult.skipped} คนเพราะถูกล็อกไว้` : ""}
+        </div>
+      )}
       {generalSettingsOpen && (
         <GeneralSettingsSheet
-          settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
+          settings={settings} setSettings={setSettings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
           exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore}
           lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
           deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
@@ -4764,7 +4992,16 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           const shownStart = p.arrivalTime || fullStart, shownEnd = p.departureTime || fullEnd;
           const customWindow = isComing && (shownStart !== fullStart || shownEnd !== fullEnd);
           return (
-          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 12px", borderRadius: 13, background: T.surface, border: `1px solid ${T.border}` }}>
+          <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 12px", borderRadius: 13, background: bulkMode && selectedIds.has(p.id) ? "#e2f5ec" : T.surface, border: `1px solid ${bulkMode && selectedIds.has(p.id) ? T.green : T.border}` }}>
+            {/* v1.11.34: bulk-select checkbox — only takes up space while "จัดการหลายคน" mode is on, so the
+                default (unchanged) card layout is untouched otherwise. Locked players stay selectable here
+                (so the organizer can SEE they were skipped) — bulkArchivePlayers is what actually excludes
+                them, reported back via bulkArchiveResult. */}
+            {bulkMode && (
+              <button onClick={() => toggleSelected(p.id)} style={{ flexShrink: 0, width: 22, height: 22, borderRadius: 6, border: `1.5px solid ${selectedIds.has(p.id) ? T.green : T.border}`, background: selectedIds.has(p.id) ? T.green : T.surface, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {selectedIds.has(p.id) && <Check size={14} color="#fff" strokeWidth={3} />}
+              </button>
+            )}
             <button onClick={() => openPhoto(p.id)} style={{ position: "relative", border: "none", background: "none", padding: 0, flexShrink: 0 }}>
               <Avatar p={p} size={44} />
               <span style={{ position: "absolute", right: -2, bottom: -2, width: 18, height: 18, borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={10} color={T.muted} /></span>
@@ -4783,7 +5020,10 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
                 <span style={{ background: HAND_BADGE[p.handedness === "left" ? "left" : "right"].bg, color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span>
                 {/* v1.11.5: Member/Guest badge — order is Skill → Hand → Type per spec, informational
                     only (never read by matchmaking/skill/attendance/tournament logic). */}
-                <span style={{ background: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].bg, color: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : "member"].label}</span>
+                <span style={{ background: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].bg, color: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].label}</span>
+                {/* v1.11.34: small lock indicator — purely visual, so a locked player is recognizable
+                    without opening แก้ไขสมาชิก; the actual guard lives in delPlayer/archivePlayer/bulkArchivePlayers. */}
+                {p.isLocked && <span title="ล็อกสมาชิกอยู่" style={{ display: "flex", alignItems: "center", color: "#7c3aed" }}><Lock size={12} /></span>}
                 {/* v1.11.7 (Part D): compact secondary attendance-time label — only rendered when it
                     differs from the full session window, tappable to open the (also compact) time editor. */}
                 {customWindow && (
@@ -4981,7 +5221,10 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
   const [handedness, setHandedness] = useState(player.handedness === "left" ? "left" : "right");
   // v1.11.5: memberType/phone/lineId — informational-only fields (never read by matchmaking, skill
   // calc, attendance, or tournament ranking; see MEMBER_TYPE_META for the badge shown on the main list).
-  const [memberType, setMemberType] = useState(player.memberType === "guest" ? "guest" : "member");
+  const [memberType, setMemberType] = useState(player.memberType === "guest" ? "guest" : player.memberType === "owner" ? "owner" : "member");
+  // v1.11.34: ล็อกสมาชิก — see App().archivePlayer/delPlayer/bulkArchivePlayers for the actual guard;
+  // this local toggle only decides what gets SAVED, exactly like every other field on this form.
+  const [isLocked, setIsLocked] = useState(player.isLocked === true);
   const [phone, setPhone] = useState(player.phone || "");
   const [lineId, setLineId] = useState(player.lineId || "");
   // v1.11.6: permanent-delete confirmation — never a single accidental tap (Archive needs none, it's
@@ -4990,7 +5233,7 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
   const save = () => {
     const n = name.trim();
     if (!n) return;
-    onSave({ name: n, skillIndex, handedness, memberType, phone: phone.trim(), lineId: lineId.trim() });
+    onSave({ name: n, skillIndex, handedness, memberType, phone: phone.trim(), lineId: lineId.trim(), isLocked });
     onClose();
   };
   const handBtn = (v, label) => (
@@ -5028,6 +5271,10 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
         <button onClick={() => setMemberType("member")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "member" ? MEMBER_TYPE_META.member.border : T.border}`, background: memberType === "member" ? MEMBER_TYPE_META.member.bg : T.surface, color: memberType === "member" ? MEMBER_TYPE_META.member.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Member</button>
         <button onClick={() => setMemberType("guest")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "guest" ? MEMBER_TYPE_META.guest.border : T.border}`, background: memberType === "guest" ? MEMBER_TYPE_META.guest.bg : T.surface, color: memberType === "guest" ? MEMBER_TYPE_META.guest.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Guest</button>
+        {/* v1.11.34: Owner — a real 3rd memberType value (see spec section 4). Informational badge here,
+            like Member/Guest; its one real effect (lowest auto-pairing priority) lives entirely in
+            SORT/buildMatch and never touches this form. */}
+        <button onClick={() => setMemberType("owner")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "owner" ? MEMBER_TYPE_META.owner.border : T.border}`, background: memberType === "owner" ? MEMBER_TYPE_META.owner.bg : T.surface, color: memberType === "owner" ? MEMBER_TYPE_META.owner.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Owner</button>
       </div>
 
       {/* v1.11.5: optional contact info — display/storage only, explicitly never read by any
@@ -5048,8 +5295,20 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
           permanent delete is styled destructive/red and always requires an explicit confirm (section 5). */}
       <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${T.border}` }}>
         <Label>การจัดการสมาชิก</Label>
-        <button onClick={onArchive} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>📦 เก็บสมาชิก</button>
-        <button onClick={() => setConfirmDelete(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: "none", border: `1px solid ${T.accent}`, color: T.accent, fontSize: 13, fontWeight: 700 }}>🗑️ ลบสมาชิกถาวร</button>
+        {/* v1.11.34: "🔒 ล็อกสมาชิก" — protects against accidental Archive/Delete only (spec section 2);
+            name/photo/skill/hand/phone/LINE ID/ประเภทสมาชิก above are all still freely editable regardless.
+            Uses the live local toggle (not just the saved player.isLocked) so Archive/Delete below react
+            immediately, same as every other field on this form before บันทึก is tapped. */}
+        <button onClick={() => setIsLocked((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: isLocked ? "#efe7fc" : T.surface, border: `1.5px solid ${isLocked ? "#7c3aed" : T.border}`, color: isLocked ? "#7c3aed" : T.text, fontSize: 13, fontWeight: 800, marginBottom: 10 }}>
+          {isLocked ? "🔒 ล็อกสมาชิกอยู่ (แตะเพื่อปลดล็อก)" : "🔓 ล็อกสมาชิก"}
+        </button>
+        {isLocked && (
+          <div style={{ fontSize: 11.5, color: "#7c3aed", background: "#efe7fc", borderRadius: 10, padding: "8px 10px", marginBottom: 10, lineHeight: 1.5 }}>
+            ผู้เล่นนี้ถูกล็อกไว้ — ป้องกันการเก็บ/ลบสมาชิกโดยไม่ตั้งใจ ต้องปลดล็อกก่อนจึงจะเก็บหรือลบได้ (แก้ไขข้อมูลอื่นได้ตามปกติ)
+          </div>
+        )}
+        <button onClick={onArchive} disabled={isLocked} title={isLocked ? "ผู้เล่นถูกล็อกไว้ — ปลดล็อกก่อนจึงจะเก็บสมาชิกได้" : undefined} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: isLocked ? T.muted : T.text, fontSize: 13, fontWeight: 700, marginBottom: 8, opacity: isLocked ? 0.55 : 1 }}>📦 เก็บสมาชิก</button>
+        <button onClick={() => setConfirmDelete(true)} disabled={isLocked} title={isLocked ? "ผู้เล่นถูกล็อกไว้ — ปลดล็อกก่อนจึงจะลบสมาชิกได้" : undefined} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: "none", border: `1px solid ${isLocked ? T.border : T.accent}`, color: isLocked ? T.muted : T.accent, fontSize: 13, fontWeight: 700, opacity: isLocked ? 0.55 : 1 }}>🗑️ ลบสมาชิกถาวร</button>
       </div>
 
       {confirmDelete && (
@@ -5120,7 +5379,7 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
     return (st.win + st.loss + st.draw + st.noScore) > 0;
   }).length, [sessionHistory, p.id]);
   const hand = p.handedness === "left" ? "left" : "right";
-  const mtype = p.memberType === "guest" ? "guest" : "member";
+  const mtype = p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member";
   return (
     <Overlay onClose={onClose}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
@@ -5286,7 +5545,7 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
 // BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
 // both reused in place rather than reimplemented, per "do not create duplicate implementations".
-function GeneralSettingsSheet({ settings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, onClose }) {
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
@@ -5321,7 +5580,23 @@ function GeneralSettingsSheet({ settings, changeLevelPreset, setCustomLevels, ex
       </NavRow>
       {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} onClose={() => setLevelSheetOpen(false)} />}
 
-      <div style={{ marginTop: 14 }}><Label>🔒 ความเป็นส่วนตัวและข้อมูล</Label></div>
+      {/* v1.11.34: "ไม่ได้มานานเกิน [N] เดือน" (spec section 2) — used ONLY by the ผู้เล่น tab's
+          "ไม่ได้มานาน" filter, never auto-deletes/auto-archives anyone. Default 6 (see getDefaultSettings). */}
+      <div style={{ marginTop: 14 }}><Label>👥 การจัดการสมาชิก</Label></div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8 }}>
+        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>ไม่ได้มานานเกิน</span>
+        <input
+          type="number"
+          min={1}
+          value={settings.inactiveMonths ?? 6}
+          onChange={(e) => setSettings((s) => ({ ...s, inactiveMonths: Math.max(1, Number(e.target.value) || 6) }))}
+          onFocus={(e) => e.target.select()}
+          style={{ width: 56, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }}
+        />
+        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>เดือน</span>
+      </div>
+
+      <div style={{ marginTop: 6 }}><Label>🔒 ความเป็นส่วนตัวและข้อมูล</Label></div>
 
       <ExpandRow title="นโยบายความเป็นส่วนตัว" id="policy">
         BadQ เก็บข้อมูลสมาชิกและประวัติการเล่นไว้ในเครื่องของคุณเท่านั้น (ไม่มีการส่งข้อมูลขึ้นเซิร์ฟเวอร์ภายนอก) ใช้เพื่อจัดก๊วน จับคู่ และสรุปผลภายในแอปนี้เท่านั้น
@@ -5410,7 +5685,7 @@ function ArchivedPlayersSheet({ archivedPlayers, restorePlayer, onClose }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
           {archivedPlayers.map((p) => {
             const hand = p.handedness === "left" ? "left" : "right";
-            const mtype = p.memberType === "guest" ? "guest" : "member";
+            const mtype = p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member";
             return (
               <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 11, padding: "9px 12px", borderRadius: 13, background: T.surface, border: `1px solid ${T.border}` }}>
                 <Avatar p={p} size={40} />
@@ -5674,7 +5949,11 @@ function SessionTab(props) {
             )}
           </div>
         </div>
-        {!done && st === "next" && !startReady(m) && <div style={{ fontSize: 11, color: T.accent, fontWeight: 700, padding: "0 11px 8px", textAlign: "center" }}>เลือกผู้เล่นให้ครบก่อนเริ่มเกม</div>}
+        {/* v1.11.33: explicit request to remove this repeated red hint line — with "+ เพิ่มแมชใหม่" (v1.11.32)
+            now able to add several empty "เกมต่อไป" rows at once, this text appeared under every one of them
+            and was noisy (see the screenshot: 3+ copies of the same line stacked down the table). The
+            disabled "▶ เริ่มเกม" button and its title="เลือกผู้เล่นให้ครบก่อนเริ่มเกม" tooltip already convey
+            the same thing on tap/hover, so nothing is lost — this was purely the extra always-visible line. */}
       </div>
     );
   };
@@ -7871,13 +8150,75 @@ function fmtThaiMonthLabel(ym) {
   if (!y || !m) return ym;
   return `${MO[m - 1]} ${y + 543}`;
 }
-function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint }) {
+// v1.11.34 (spec section 5A) — reward history combined across EVERY ก๊วน, default view grouped by player
+// (name, total win count, a compact "name ×count" breakdown, most-recent date+group), tapping a player opens
+// their own detail sheet sorted newest-first. Deliberately reads straight off the flat `rewardHistory` ledger
+// (never per-session `s.wheelPrizes`/bill state) so it survives sessions being deleted from sessionHistory —
+// exactly like discountCredits' own ledger already does elsewhere in this app.
+function GlobalRewardHistory({ rewardHistory }) {
+  const [openPlayerId, setOpenPlayerId] = useState(null);
+  const grouped = useMemo(() => {
+    const byPlayer = {};
+    (rewardHistory || []).forEach((r) => {
+      if (!byPlayer[r.playerId]) byPlayer[r.playerId] = { playerId: r.playerId, name: r.playerNameSnapshot || "ผู้เล่น", entries: [], latestTs: 0 };
+      byPlayer[r.playerId].entries.push(r);
+      if ((r.timestamp || 0) >= byPlayer[r.playerId].latestTs) { byPlayer[r.playerId].latestTs = r.timestamp || 0; byPlayer[r.playerId].name = r.playerNameSnapshot || byPlayer[r.playerId].name; }
+    });
+    return Object.values(byPlayer).sort((a, b) => b.latestTs - a.latestTs);
+  }, [rewardHistory]);
+  const openPlayer = grouped.find((g) => g.playerId === openPlayerId);
+  const rewardIcon = (rt) => (rt === "cash" ? "💵" : rt === "discount" ? "🎟️" : "🎁");
+  const summarize = (entries) => {
+    const byName = {};
+    entries.forEach((e) => { byName[e.rewardNameSnapshot] = (byName[e.rewardNameSnapshot] || 0) + 1; });
+    return Object.entries(byName).map(([n, c]) => `${n} ×${c}`).join(", ");
+  };
+  if (grouped.length === 0) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "10px 0" }}>ยังไม่มีใครได้รางวัลจากวงล้อ</div>;
+  return (
+    <>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {grouped.map((g) => {
+          const latest = [...g.entries].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))[0];
+          return (
+            <button key={g.playerId} onClick={() => setOpenPlayerId(g.playerId)} style={{ textAlign: "left", display: "flex", flexDirection: "column", gap: 3, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontWeight: 800, fontSize: 13.5 }}>{g.name}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>ได้รางวัล {g.entries.length} ครั้ง</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summarize(g.entries)}</div>
+              <div style={{ fontSize: 10.5, color: T.muted }}>ล่าสุด: {fmtThaiDate(latest.date)} · {latest.groupNameSnapshot}</div>
+            </button>
+          );
+        })}
+      </div>
+      {openPlayer && (
+        <Overlay onClose={() => setOpenPlayerId(null)}>
+          <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 2 }}>🎁 {openPlayer.name}</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>ได้รางวัลทั้งหมด {openPlayer.entries.length} ครั้ง</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {[...openPlayer.entries].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).map((r) => (
+              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+                <span style={{ fontSize: 16, flexShrink: 0 }}>{rewardIcon(r.rewardType)}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.rewardNameSnapshot}</div>
+                  <div style={{ fontSize: 11, color: T.muted }}>{fmtThaiDate(r.date)} · {r.groupNameSnapshot}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Overlay>
+      )}
+    </>
+  );
+}
+function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
   const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
   const [openTId, setOpenTId] = useState(null); // id of a tournamentHistory snapshot shown in read-only detail overlay
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [openBackupSettings, setOpenBackupSettings] = useState(false);
+  const [openRewardHistory, setOpenRewardHistory] = useState(false); // v1.11.34 (spec 5A) — collapsed by default so this page doesn't get longer for organizers who never used the wheel
   const th = tournamentHistory || [];
 
   const list = useMemo(() => {
@@ -7906,6 +8247,19 @@ function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHist
       {openBackupSettings && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
           <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} />
+        </div>
+      )}
+
+      {/* v1.11.34 (spec 5A): reward history combined across every ก๊วน — collapsed behind its own toggle,
+          same pattern as "ข้อมูลและการสำรอง" above, so the main History page never gets longer for organizers
+          who don't use the wheel. */}
+      <button onClick={() => setOpenRewardHistory((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: openRewardHistory ? 0 : 12 }}>
+        🎁 ประวัติผู้ที่ได้รางวัล
+        <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: openRewardHistory ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {openRewardHistory && (
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
+          <GlobalRewardHistory rewardHistory={rewardHistory} />
         </div>
       )}
 
@@ -7982,7 +8336,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHist
 
       {open && (
         <Overlay onClose={() => setOpenId(null)}>
-          <HistoricalDetail s={open} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} />
+          <HistoricalDetail s={open} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} />
         </Overlay>
       )}
 
@@ -8008,7 +8362,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, playersById, toggleHist
   );
 }
 
-function HistoricalDetail({ s, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
+function HistoricalDetail({ s, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
   const stats = s.stats || {};
   const bill = s.bill || [];
   const grandTotal = bill.reduce((sum, b) => sum + (b.total || 0), 0);
@@ -8020,6 +8374,9 @@ function HistoricalDetail({ s, toggleHistoricalPaid, onDelete, openHistPhoto, cl
   const profit = sessionProfit(s);
   const getSP = (id) => (s.players || []).find((p) => p.id === id);
   const ranking = [...(s.players || [])].sort((a, b) => (b.games || 0) - (a.games || 0) || a.name.localeCompare(b.name));
+  // v1.11.34 (spec section 5B): only rewards ACTUALLY distributed in THIS session — read from the flat
+  // rewardHistory ledger by sessionId, never from s.wheelPrizes (which is just the session's wheel config).
+  const sessionRewards = (rewardHistory || []).filter((r) => r.sessionId === s.id);
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
@@ -8090,6 +8447,20 @@ function HistoricalDetail({ s, toggleHistoricalPaid, onDelete, openHistPhoto, cl
           </div>
         ))}
       </div>
+
+      {sessionRewards.length > 0 && (
+        <>
+          <SectionHead icon={<span style={{ fontSize: 15 }}>🎁</span>} title="รางวัลที่แจก" sub={`${sessionRewards.length} รางวัล`} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
+            {sessionRewards.map((r) => (
+              <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
+                <span style={{ flex: 1, fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.playerNameSnapshot}</span>
+                <span style={{ fontSize: 12.5, color: T.muted, fontWeight: 700 }}>{r.rewardNameSnapshot}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <SectionHead icon={<Wallet size={16} color={T.green} />} title="ค่าใช้จ่าย" sub="แก้ไขได้ — เพิ่มยอดจริงที่มาทีหลังได้" />
       <div style={{ marginBottom: 10 }}>
@@ -9830,13 +10201,55 @@ function MatchTeams({ m, getP, editable, tapSlot, isSel, replaceSlot, bench, big
   );
 }
 
+// v1.11.34: see the "subtle, ONE-TIME-EVER hint" comment inside TeamSide below.
+let _avatarHintClaimed = false;
 function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now }) {
   const isWide = useIsWide(); // iPad / landscape phone (≥700px) — only the photo scales up further here; text stays the same size on every screen
   const compact = arr.length > 1; // doubles: tighten padding so both teams fit on one line
   const avatarSize = isWide
     ? (big ? (compact ? 46 : 54) : (compact ? 38 : 44))
     : (big ? (compact ? 34 : 40) : (compact ? 26 : 30)); // bigger photos on courts that are actively playing — easier to spot/call the right person
+  // v1.11.34: LONG PRESS avatar -> photo preview (spec section 3). Single tap anywhere in the slot
+  // (avatar OR name) must keep opening the existing change-player dropdown exactly as before — so this
+  // adds a SECOND, smaller transparent layer sized to just the avatar circle, stacked (via zIndex) above
+  // the pre-existing full-slot invisible button. A plain tap on that layer still calls the SAME `toggle`
+  // used everywhere else; only a ~500ms press-and-hold on the avatar switches it to opening the preview
+  // instead, and swallows the click that follows so the dropdown never also opens for that same gesture.
+  // pressState is keyed by slot idx (not a hook) since this lives inside .map() below.
+  const pressState = useRef({});
+  const [previewPlayer, setPreviewPlayer] = useState(null); // player object shown in the fullscreen preview, or null
+  const startPress = (idx, pl, toggle) => {
+    pressState.current[idx] = { longPressed: false, toggle };
+    clearTimeout(pressState.current[idx].timer);
+    pressState.current[idx].timer = setTimeout(() => {
+      if (pressState.current[idx]) pressState.current[idx].longPressed = true;
+      setPreviewPlayer(pl);
+    }, 500);
+  };
+  const cancelPress = (idx) => { if (pressState.current[idx]) clearTimeout(pressState.current[idx].timer); };
+  const avatarClick = (idx, e) => {
+    const st = pressState.current[idx];
+    if (st && st.longPressed) { st.longPressed = false; e.preventDefault(); e.stopPropagation(); return; }
+    st && st.toggle && st.toggle(e);
+  };
+  // v1.11.34: subtle, ONE-TIME-EVER hint ("กดรูปค้างเพื่อดูรูปใหญ่") — spec explicitly warns it must never
+  // repeat/annoy on every use. Many TeamSide instances can mount at once (one per team per match row), so
+  // a module-level flag (checked+claimed synchronously in the same commit) plus a localStorage flag (this
+  // is a real device-persisted PWA setting, not a Claude artifact — plain localStorage is the right tool)
+  // together guarantee only the very FIRST one to mount, on the very first time this device ever sees the
+  // match table, shows it — every other instance, and every later visit, sees it already claimed and skips.
+  const [showHint, setShowHint] = useState(false);
+  useEffect(() => {
+    if (_avatarHintClaimed) return;
+    _avatarHintClaimed = true;
+    try {
+      if (localStorage.getItem("badq_avatarLongPressHintSeen")) return;
+      localStorage.setItem("badq_avatarLongPressHintSeen", "1");
+    } catch (e) { /* private mode / storage unavailable -> just skip the hint, never crash */ return; }
+    setShowHint(true);
+  }, []);
   return (
+    <>
     <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 4 }}>
       {arr.map((id, idx) => {
         const p = id ? getP(id) : null;
@@ -9851,7 +10264,23 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         const lvlFs = nameLong ? 11 : (compact ? 12 : 13);
         return p ? (
           <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: compact ? 6 : 7, padding: compact ? "6px 7px" : "7px 8px", borderRadius: 10, background: selected ? "#e2f5ec" : T.surface2, border: `1.5px solid ${selected ? T.green : "transparent"}`, minHeight: 46 }}>
-            <Avatar p={p} size={avatarSize} />
+            <span style={{ position: "relative", display: "inline-flex", flexShrink: 0, width: avatarSize, height: avatarSize }}>
+              <Avatar p={p} size={avatarSize} />
+              {editable && p.photo && (
+                <div
+                  onContextMenu={(e) => e.preventDefault()}
+                  onTouchStart={() => startPress(idx, p, toggle)}
+                  onTouchEnd={() => cancelPress(idx)}
+                  onTouchMove={() => cancelPress(idx)}
+                  onTouchCancel={() => cancelPress(idx)}
+                  onMouseDown={() => startPress(idx, p, toggle)}
+                  onMouseUp={() => cancelPress(idx)}
+                  onMouseLeave={() => cancelPress(idx)}
+                  onClick={(e) => avatarClick(idx, e)}
+                  style={{ position: "absolute", inset: 0, zIndex: 2, borderRadius: "50%", cursor: "pointer", WebkitTouchCallout: "none", WebkitUserSelect: "none", userSelect: "none" }}
+                />
+              )}
+            </span>
             {isWide ? (
               // wide screens have room to spare — name + level + มือ stay on one line, ellipsis only as a rare safety net
               <span style={{ minWidth: 0, lineHeight: 1.2, display: "block", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
@@ -9881,6 +10310,29 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         );
       })}
     </div>
+    {/* v1.11.34: fullscreen photo preview (spec section 3) — dark backdrop, aspect-ratio preserved,
+        player name shown, tap X or anywhere outside (here: anywhere at all, matching the existing
+        QR-fullscreen/PlayerProfileSheet showPhoto convention already used elsewhere in this file) to
+        close. Portaled to document.body like PlayerPicker so it's never clipped by the table's
+        horizontal-scroll container. */}
+    {previewPlayer && previewPlayer.photo && ReactDOM.createPortal(
+      <div onClick={() => setPreviewPlayer(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 210, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
+        <img src={previewPlayer.photo} alt="" style={{ maxWidth: "100%", maxHeight: "72vh", borderRadius: 14, objectFit: "contain" }} />
+        <div style={{ color: "#fff", fontSize: 16, fontWeight: 800, marginTop: 16 }}>{previewPlayer.name}</div>
+        <button onClick={() => setPreviewPlayer(null)} style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 7, padding: "11px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}><X size={18} /> ปิด</button>
+      </div>,
+      document.body
+    )}
+    {showHint && ReactDOM.createPortal(
+      <div style={{ position: "fixed", left: 12, right: 12, bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 150, display: "flex", justifyContent: "center" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(20,20,20,0.92)", color: "#fff", borderRadius: 20, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, boxShadow: "0 6px 20px rgba(0,0,0,0.3)", maxWidth: 320 }}>
+          <span>💡 กดรูปค้างเพื่อดูรูปใหญ่</span>
+          <button onClick={() => setShowHint(false)} style={{ background: "none", border: "none", color: "#fff", opacity: 0.8, display: "flex", flexShrink: 0 }}><X size={14} /></button>
+        </div>
+      </div>,
+      document.body
+    )}
+    </>
   );
 }
 
@@ -10092,7 +10544,7 @@ function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, setHa
   );
 }
 
-const WHEEL_TYPE_LABEL = { now: "ใช้ทันที", next: "ครั้งถัดไป", item: "ของรางวัล", none: "ไม่ได้รางวัล" };
+const WHEEL_TYPE_LABEL = { now: "ใช้ทันที", next: "ครั้งถัดไป", item: "ของรางวัล", cash: "เงินสด", none: "ไม่ได้รางวัล" };
 // how many of this prize are left on the wheel. New prizes store this directly as `qty`; prizes saved
 // by an older version only have `weight` (a relative-odds number) — reused as-is for the initial stock
 // so upgrading never silently empties/changes anyone's existing wheel.
@@ -10107,62 +10559,110 @@ function prizeQty(p) {
 // been claimed, so it can render that many individual "sold out" cosmetic slices. Missing on prizes saved
 // before this existed (or never restocked since) — callers should fall back to treating it as == qty
 // (i.e. nothing claimed yet) rather than crash, exactly like prizeQty() does for the older `weight` field.
+// v1.11.34: REDESIGNED per spec section 6 — Player count ≠ Reward count ≠ Probability, all three fully
+// decoupled (see pickWheelOutcome/buildWheelSegments below for the RNG/visual side of this). Organizer only
+// ever enters probability for REAL rewards; "ไม่ได้รางวัล" is always the computed remainder (100 - sum), never
+// entered directly, and the "none" prize type itself is retired from the creation form (normWheelPrizes
+// strips any leftover "none" rows from old saves on load). `value` (มูลค่าต่อชิ้น) is new: internal-only,
+// never rendered on the wheel, used solely to cost a "ค่ารางวัล" Finance expense at endSession — see spec 6.4/6.5.
 function WheelPrizeEditor({ prizes, setPrizes }) {
   const [label, setLabel] = useState("");
   const [qty, setQty] = useState(5);
   const [type, setType] = useState("now");
   const [amount, setAmount] = useState(10);
-  const needsAmount = type === "now" || type === "next";
+  const [value, setValue] = useState(0);
+  const [probability, setProbability] = useState(10);
+  const needsAmount = type === "now" || type === "next" || type === "cash"; // discount/cash rewards carry a ฿ amount; "item" instead uses มูลค่าต่อชิ้น (value) below
+  const needsValue = type === "item"; // cash's Finance cost reuses `amount` itself (see applyWheelPrize/endSession) — no separate value field needed
+  const list = prizes || [];
+  const probTotal = Math.round(list.reduce((s, p) => s + (Math.max(0, Number(p.probability) || 0)), 0) * 10) / 10;
+  const overLimit = probTotal > 100;
+  const noPrizePct = Math.max(0, Math.round((100 - probTotal) * 10) / 10);
   const add = () => {
     const n = label.trim();
     if (!n) return;
     const q = Math.max(0, Number(qty) || 0);
-    setPrizes((prev) => [...(prev || []), { id: uid(), label: n, type, amount: needsAmount ? Number(amount) || 0 : 0, qty: q, totalQty: q }]);
-    setLabel(""); setQty(5); setAmount(10); setType("now");
+    setPrizes((prev) => [...(prev || []), {
+      id: uid(), label: n, type, amount: needsAmount ? Number(amount) || 0 : 0, qty: q, totalQty: q,
+      probability: Math.max(0, Math.min(100, Number(probability) || 0)), value: needsValue ? Math.max(0, Number(value) || 0) : 0,
+      wheelOrder: list.length,
+    }]);
+    setLabel(""); setQty(5); setAmount(10); setValue(0); setProbability(10); setType("now");
   };
   const remove = (id) => setPrizes((prev) => (prev || []).filter((p) => p.id !== id));
   // editing the "remaining" number is how organizers restock — treat it as resetting the baseline too,
   // so a fresh top-up doesn't retroactively show a pile of "sold out" slices from before the restock.
   const editQty = (id, v) => setPrizes((prev) => (prev || []).map((p) => (p.id === id ? { ...p, qty: Math.max(0, Number(v) || 0), totalQty: Math.max(0, Number(v) || 0) } : p)));
+  const editProb = (id, v) => setPrizes((prev) => (prev || []).map((p) => (p.id === id ? { ...p, probability: Math.max(0, Math.min(100, Number(v) || 0)) } : p)));
+  const editValue = (id, v) => setPrizes((prev) => (prev || []).map((p) => (p.id === id ? { ...p, value: Math.max(0, Number(v) || 0) } : p)));
+  // ↑/↓ reorder (spec 6.6 fallback — simpler & more reliable on iOS PWA than drag & drop, which the spec
+  // explicitly allows falling back to). wheelOrder only affects visual position on the wheel, never RNG.
+  const move = (id, dir) => setPrizes((prev) => {
+    const arr = [...(prev || [])].sort((a, b) => (a.wheelOrder ?? 0) - (b.wheelOrder ?? 0));
+    const i = arr.findIndex((p) => p.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= arr.length) return prev;
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+    return arr.map((p, idx) => ({ ...p, wheelOrder: idx }));
+  });
   const sty = { padding: "9px 8px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5 };
+  const sorted = [...list].sort((a, b) => (a.wheelOrder ?? 0) - (b.wheelOrder ?? 0));
   return (
     <div>
-      {(prizes || []).length > 0 && (
+      {sorted.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
-          {prizes.map((p) => {
+          {sorted.map((p, i) => {
             const remaining = prizeQty(p);
-            const unlimited = p.type === "none"; // "no prize" slice never runs out
             return (
-              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 10, background: T.surface2, opacity: !unlimited && remaining === 0 ? 0.55 : 1 }}>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label}</span>
-                <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>{WHEEL_TYPE_LABEL[p.type] || p.type}</span>
-                {unlimited ? (
-                  <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>ไม่จำกัด</span>
-                ) : (
+              <div key={p.id} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 11px", borderRadius: 10, background: T.surface2, opacity: remaining === 0 ? 0.55 : 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label}</span>
+                  <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>{WHEEL_TYPE_LABEL[p.type] || p.type}</span>
+                  <span style={{ display: "flex", flexDirection: "column", flexShrink: 0 }}>
+                    <button onClick={() => move(p.id, -1)} disabled={i === 0} style={{ background: "none", border: "none", color: i === 0 ? T.border : T.muted, padding: 0, lineHeight: 1 }}><ChevronUp size={13} /></button>
+                    <button onClick={() => move(p.id, 1)} disabled={i === sorted.length - 1} style={{ background: "none", border: "none", color: i === sorted.length - 1 ? T.border : T.muted, padding: 0, lineHeight: 1 }}><ChevronDown size={13} /></button>
+                  </span>
+                  <button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: T.muted, display: "flex", flexShrink: 0 }}><X size={15} /></button>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
                     <input type="number" value={remaining} onChange={(e) => editQty(p.id, e.target.value)} onFocus={(e) => e.target.select()} title="จำนวนคงเหลือ — แก้เพื่อเติมสต็อก" style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", color: remaining === 0 ? T.accent : T.text, fontWeight: 800 }} />
-                    <span style={{ fontSize: 10.5, color: T.muted }}>{remaining === 0 ? "หมด" : "เหลือ"}</span>
+                    <span style={{ fontSize: 10.5, color: T.muted }}>{remaining === 0 ? "หมด" : "จำนวน"}</span>
                   </span>
-                )}
-                <button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: T.muted, display: "flex", flexShrink: 0 }}><X size={15} /></button>
+                  <span style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                    <input type="number" value={p.probability ?? 0} onChange={(e) => editProb(p.id, e.target.value)} onFocus={(e) => e.target.select()} title="โอกาสออก (%)" style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", fontWeight: 800 }} />
+                    <span style={{ fontSize: 10.5, color: T.muted }}>% โอกาส</span>
+                  </span>
+                  {p.type !== "cash" && p.type !== "now" && p.type !== "next" && (
+                    <span style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+                      <input type="number" value={p.value ?? 0} onChange={(e) => editValue(p.id, e.target.value)} onFocus={(e) => e.target.select()} title="มูลค่าต่อชิ้น (บาท) — ใช้บันทึกรายจ่ายเท่านั้น ไม่แสดงบนวงล้อ" style={{ ...sty, width: 52, padding: "5px 6px", textAlign: "right" }} />
+                      <span style={{ fontSize: 10.5, color: T.muted }}>฿/ชิ้น</span>
+                    </span>
+                  )}
+                </div>
               </div>
             );
           })}
         </div>
       )}
       <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="ชื่อรางวัล เช่น ส่วนลด 10฿ / แจกไม้แบต" style={{ ...sty, width: "100%", marginBottom: 6, boxSizing: "border-box" }} />
-      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
         <select value={type} onChange={(e) => setType(e.target.value)} style={{ ...sty, flexShrink: 0 }}>
           <option value="now">ส่วนลด ใช้ทันที</option>
           <option value="next">ส่วนลด ครั้งถัดไป</option>
           <option value="item">ของรางวัล (ไม่ใช่ส่วนลด)</option>
-          <option value="none">ไม่ได้รางวัล</option>
+          <option value="cash">เงินสด</option>
         </select>
-        {needsAmount && <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} onFocus={(e) => e.target.select()} placeholder="฿" style={{ ...sty, width: 58, flexShrink: 0 }} />}
-        {type !== "none" && <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} onFocus={(e) => e.target.select()} placeholder="จำนวน" title="จำนวนรางวัลทั้งหมด" style={{ ...sty, width: 62, flexShrink: 0 }} />}
+        {needsAmount && <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} onFocus={(e) => e.target.select()} placeholder="฿" title="มูลค่า (บาท)" style={{ ...sty, width: 58, flexShrink: 0 }} />}
+        {needsValue && <input type="number" value={value} onChange={(e) => setValue(e.target.value)} onFocus={(e) => e.target.select()} placeholder="฿/ชิ้น" title="มูลค่าต่อชิ้น (บาท) — สำหรับบันทึกรายจ่าย" style={{ ...sty, width: 58, flexShrink: 0 }} />}
+        <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} onFocus={(e) => e.target.select()} placeholder="จำนวน" title="จำนวนรางวัลทั้งหมด" style={{ ...sty, width: 58, flexShrink: 0 }} />
+        <input type="number" value={probability} onChange={(e) => setProbability(e.target.value)} onFocus={(e) => e.target.select()} placeholder="% โอกาส" title="โอกาสออก (%)" style={{ ...sty, width: 58, flexShrink: 0 }} />
         <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center", flexShrink: 0 }}><Plus size={17} /></button>
       </div>
-      <div style={{ fontSize: 10.5, color: T.muted, marginTop: 6 }}>ตัวเลข "จำนวน" คือจำนวนรางวัลที่มีจริง — หมุนถูกแล้วจะลดลง 1 ทุกครั้ง จนกว่าจะหมด (ยกเว้น "ไม่ได้รางวัล" ที่ไม่จำกัด) — เลือก "ของรางวัล" สำหรับของที่ไม่ใช่ส่วนลด เช่น ไม้แบต รองเท้า น้ำดื่ม</div>
+      <div style={{ fontSize: 10.5, color: T.muted, marginTop: 6 }}>"จำนวน" คือของจริงที่มี หมุนถูกแล้วลดลง 1 จนกว่าจะหมด — "% โอกาส" คือโอกาสออกต่อการหมุน 1 ครั้ง แยกจากจำนวนโดยสิ้นเชิง — "฿/ชิ้น" ใช้บันทึกรายจ่ายของรางวัลใน Finance เท่านั้น ไม่แสดงบนวงล้อ</div>
+      <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 10, background: overLimit ? "#fdecec" : T.surface2, border: `1px solid ${overLimit ? T.accent : T.border}`, fontSize: 12, fontWeight: 700, color: overLimit ? T.accent : T.text }}>
+        {overLimit ? `⚠️ โอกาสรวมเกิน 100% (${probTotal}%) — กรุณาลดโอกาสของบางรางวัลก่อนใช้งานวงล้อ` : `โอกาสได้รางวัลรวม ${probTotal}% / ไม่ได้รางวัล ${noPrizePct}% / รวม 100% ✓`}
+      </div>
     </div>
   );
 }
@@ -10498,92 +10998,86 @@ function describeSlicePath(cx, cy, r, startDeg, endDeg) {
 }
 function truncateLabel(s, n) { return !s ? "" : (s.length > n ? s.slice(0, n) : s); } // hard cap only as a defensive backstop against a pathologically long label — no "…" appended
 
-// custom spin wheel — v1.9.21: every remaining UNIT of every real prize gets its own equal-size slice
-// (a prize with qty 3 draws 3 separate slices, not one slice 3x the size) — shuffled together ("คละกัน")
-// so same-prize slices never cluster, then a "miss" slice is inserted after each one so the wheel
-// alternates prize/miss all the way around, same red every time so a miss always reads the same at a
-// glance. Sold-out units (already won — materialized only when the organizer turns settings.wheelShowSoldOut
-// on) are individual unwinnable slices mixed in right alongside the still-live ones, deliberately drawn to
-// look IDENTICAL to a live slice of the same prize (same color, same label — no "(หมด)" marker, no gray):
-// the point of "แสดงทั้งหมด" is to keep the wheel looking fully stocked so a spinning player can't tell some
-// slices are already gone, keeping the suspense up, even though those slices can structurally never win
-// (see `selectable` in spin()). How many of each prize are "used" comes from totalQty (the stocked amount,
-// set once per restock in WheelPrizeEditor and never decremented) minus qty (the live remaining count,
-// decremented on every win — see prizeQty()).
+// bright/light tones for prize slices, cycling yellow → green → orange → blue → ...; red is deliberately
+// never used here — it's reserved for the "no prize" slices (NONE_SLICE_COLOR) so a glance at the wheel
+// tells red = miss, every other color = a real prize.
+const WHEEL_COLORS = ["#fbbf24", "#4ade80", "#fb923c", "#38bdf8", "#c084fc", "#2dd4bf", "#f9a8d4", "#a3e635", "#fcd34d", "#7dd3fc"];
+// v1.11.34: REDESIGNED per spec 6.8 — random OUTCOME and wheel ANIMATION are now fully separate concerns.
+// pickWheelOutcome is the ONLY function that decides what a spin actually wins; it is called BEFORE any
+// segment/animation math runs, and never reads segment size/position/count. A prize that's run out
+// (prizeQty(p) === 0) is simply excluded here — its probability share is NOT redistributed to other real
+// prizes (spec 6.3), it silently falls through to "no prize" along with whatever the organizer left
+// unassigned. Returns a real prize object, or null for "ไม่ได้รางวัล".
+function pickWheelOutcome(prizes) {
+  const real = (prizes || []).filter((p) => p.type !== "none" && prizeQty(p) > 0);
+  const r = Math.random() * 100;
+  let cum = 0;
+  for (const p of real) {
+    cum += Math.max(0, Number(p.probability) || 0);
+    if (r < cum) return p;
+  }
+  return null;
+}
+// Purely cosmetic wheel layout — segment size reflects `probability` (spec 6.6), never `qty`/stock count.
+// "ไม่ได้รางวัล" is deliberately split into one sliver interleaved after every real segment rather than one
+// giant arc (spec 6.7), but the segments here are NEVER consulted by pickWheelOutcome — they only decide
+// where the pointer visually lands once the outcome is already known (see spin() below).
+function buildWheelSegments(prizes, showSoldOut) {
+  const real = (prizes || []).filter((p) => p.type !== "none").sort((a, b) => (a.wheelOrder ?? 0) - (b.wheelOrder ?? 0));
+  // showSoldOut ("แสดงทั้งหมด"): keep depleted prizes visible (unwinnable, but not visibly gone) so a
+  // spinning player can't tell stock ran out. Off ("แค่ที่เหลือ"): depleted prizes vanish from the wheel
+  // entirely and their probability share visually folds into "ไม่ได้รางวัล" (matches what pickWheelOutcome
+  // actually does under the hood either way — this toggle is cosmetic only).
+  const shown = showSoldOut ? real : real.filter((p) => prizeQty(p) > 0);
+  const colorById = {};
+  real.forEach((p, i) => { colorById[p.id] = WHEEL_COLORS[i % WHEEL_COLORS.length]; });
+  const shownProbTotal = shown.reduce((s, p) => s + Math.max(0, Number(p.probability) || 0), 0);
+  const noPrizeTotal = Math.max(0, 100 - shownProbTotal);
+  if (shown.length === 0) {
+    return noPrizeTotal > 0 ? [{ id: "__none__", label: "ไม่ได้รางวัล", isNone: true, isSoldOut: false, span: 360, start: 0, color: NONE_SLICE_COLOR }] : [];
+  }
+  const noPrizeEach = noPrizeTotal / shown.length; // even split across every gap — purely visual balance
+  const units = [];
+  shown.forEach((p) => {
+    const span = (Math.max(0, Number(p.probability) || 0) / 100) * 360;
+    units.push({ ...p, span, isNone: false, isSoldOut: prizeQty(p) === 0, color: colorById[p.id] });
+    // a near-zero sliver so there is always at least one "ไม่ได้รางวัล" target to animate to as a fallback,
+    // even when configured probabilities sum to exactly 100% (see spin()'s defensive fallback below)
+    units.push({ id: "__none__", label: "ไม่ได้รางวัล", isNone: true, isSoldOut: false, span: Math.max(noPrizeEach, 0.001), color: NONE_SLICE_COLOR });
+  });
+  let acc = 0;
+  return units.map((u) => { const seg = { ...u, start: acc }; acc += u.span; return seg; });
+}
 function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose }) {
   const [rotation, setRotation] = useState(0);
   const [spinning, setSpinning] = useState(false);
-  const [resultPrize, setResultPrize] = useState(null);
-  // bright/light tones for prize slices, cycling yellow → green → orange → blue → ...; red is deliberately
-  // never used here — it's reserved for the "no prize" slices (NONE_SLICE_COLOR below) so a glance at the
-  // wheel tells red = miss, every other color = a real prize (all units of the same prize share one color
-  // even after shuffling, so it's still easy to spot "how many slices of THIS prize are left").
-  const colors = ["#fbbf24", "#4ade80", "#fb923c", "#38bdf8", "#c084fc", "#2dd4bf", "#f9a8d4", "#a3e635", "#fcd34d", "#7dd3fc"];
-  const noneProto = (prizes || []).find((p) => p.type === "none") || { id: "__none__", label: "ไม่ได้รางวัล", type: "none", amount: 0 };
+  const [resultPrize, setResultPrize] = useState(undefined); // undefined = not spun yet; null = spun, no prize; object = spun, won a prize
   const totalPrizeQty = (prizes || []).filter((p) => p.type !== "none").reduce((s, p) => s + prizeQty(p), 0);
   // never let the math imply >100% win odds — total players due to spin is always at least the prize count
   const totalPlayers = Math.max(totalPrizeQty, Number(remainingPlayers) || 0);
 
-  // Built once via useState's lazy initializer so the shuffled layout stays put for as long as this wheel
-  // instance is open (the parent unmounts/remounts SpinWheel — see wheelFor in PaymentTab — between spins,
-  // so each new spin naturally gets a fresh shuffle).
-  const [segs] = useState(() => {
-    const realPrizes = (prizes || []).filter((p) => p.type !== "none");
-    const colorById = {};
-    realPrizes.forEach((p, i) => { colorById[p.id] = colors[i % colors.length]; });
-    let units = [];
-    realPrizes.forEach((p) => {
-      const remaining = prizeQty(p);
-      for (let i = 0; i < remaining; i++) units.push({ ...p, isSoldOut: false, isNone: false, color: colorById[p.id] });
-      if (showSoldOut) {
-        // totalQty missing (prize saved before v1.9.21, or never restocked since): if it still has stock
-        // left, assume nothing's been claimed (we simply don't know, and nothing looked "sold out" about
-        // it before). If it's already at 0 though, show it as exactly ONE sold-out slice rather than
-        // vanishing it entirely — matches how v1.9.19/1.9.20 always rendered one cosmetic slice per
-        // depleted prize TYPE, so upgrading never silently drops a prize the organizer could already see.
-        const total = p.totalQty != null ? Math.max(Number(p.totalQty) || 0, remaining) : (remaining > 0 ? remaining : 1);
-        const used = Math.max(0, total - remaining);
-        // deliberately made to look IDENTICAL to a live slice of the same prize (same color, same label,
-        // no "(หมด)" marker) — the whole point is that a spinning player can't tell it's already gone, so
-        // the wheel still looks fully stocked and keeps the suspense up. isSoldOut is what actually keeps
-        // it unwinnable (see the `selectable` filter in spin() below); nothing about how it LOOKS gives it away.
-        for (let i = 0; i < used; i++) units.push({ ...p, isSoldOut: true, isNone: false, color: colorById[p.id] });
-      }
-    });
-    for (let i = units.length - 1; i > 0; i--) { // Fisher–Yates shuffle ("คละกัน")
-      const j = Math.floor(Math.random() * (i + 1));
-      [units[i], units[j]] = [units[j], units[i]];
-    }
-    let built;
-    if (units.length === 0) {
-      built = totalPlayers > 0 ? [{ ...noneProto, span: 360, isNone: true, isSoldOut: false, color: NONE_SLICE_COLOR }] : [];
-    } else {
-      const span = 360 / (units.length * 2); // one prize slice + one miss slice per unit, all equal size
-      built = [];
-      units.forEach((u) => {
-        built.push({ ...u, span });
-        built.push({ ...noneProto, span, isNone: true, isSoldOut: false, color: NONE_SLICE_COLOR });
-      });
-    }
-    let acc = 0;
-    return built.map((s) => { const seg = { ...s, start: acc }; acc += s.span; return seg; });
-  });
+  // Built once via useState's lazy initializer so the layout stays put for as long as this wheel instance
+  // is open (the parent unmounts/remounts SpinWheel — see wheelFor in PaymentTab — between spins).
+  const [segs] = useState(() => buildWheelSegments(prizes, showSoldOut));
 
   const spin = () => {
-    if (spinning || resultPrize || segs.length === 0) return;
-    // cosmetic sold-out slices are excluded here — they occupy real visual space on the wheel above but
-    // can NEVER be the one actually chosen, whatever `showSoldOut` is set to.
-    const selectable = segs.filter((s) => !s.isSoldOut);
-    if (selectable.length === 0) return;
-    const totalSelectable = selectable.reduce((s, x) => s + x.span, 0);
-    const r = Math.random() * totalSelectable;
-    let cum = 0, chosen = selectable[selectable.length - 1];
-    for (const s of selectable) { cum += s.span; if (r <= cum) { chosen = s; break; } }
+    if (spinning || resultPrize !== undefined || segs.length === 0) return;
+    // Step 1-2 (spec 6.8): decide the real outcome FIRST, from probability alone — segs/animation haven't
+    // been touched yet and never factor into this.
+    const outcome = pickWheelOutcome(prizes);
+    // Step 3: only now find where that outcome lives on the wheel, purely to know where to animate the
+    // pointer to. A won prize always has a matching non-sold-out visible segment (pickWheelOutcome only
+    // ever returns prizes with qty > 0, and those are always included in `shown`). "No prize" may match
+    // several interleaved slivers — any of them is an equally valid target, so pick one at random.
+    const candidates = outcome ? segs.filter((s) => !s.isNone && s.id === outcome.id && !s.isSoldOut) : segs.filter((s) => s.isNone);
+    const chosen = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : segs[segs.length - 1]; // defensive fallback, should not normally happen
     const center = chosen.start + chosen.span / 2;
     const target = 5 * 360 + (360 - center);
     setSpinning(true);
     setRotation(target);
-    setTimeout(() => { setSpinning(false); setResultPrize(chosen); onFinish(chosen); }, 4200);
+    // Step 4-5: animate to the pre-determined outcome, then reveal it — remainingQuantity/discount/expense/
+    // history (steps 6-8) all happen in the parent's onFinish (applyWheelPrize), never here.
+    setTimeout(() => { setSpinning(false); setResultPrize(outcome); onFinish(outcome); }, 4200);
   };
 
   const R = 125, CX = 125, CY = 125, LABEL_R = R * 0.58; // centered between the hub (~22) and the rim (125), not hugging the center — SVG drawing math stays in this fixed 250-unit space; only the on-screen CSS size below scales
@@ -10621,7 +11115,7 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
         </div>
         <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: "17.6%", height: "17.6%", borderRadius: "50%", background: "#fff", boxShadow: "0 2px 8px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "min(7vw, 32px)" }}>🏸</div>
       </div>
-      {!resultPrize ? (
+      {resultPrize === undefined ? (
         <>
           <button onClick={spin} disabled={spinning || segs.length === 0} style={{ marginTop: 26, padding: "13px 34px", borderRadius: 30, background: spinning ? T.muted : T.green, border: "none", color: "#fff", fontSize: 15, fontWeight: 800 }}>{spinning ? "กำลังหมุน..." : "หมุนเลย!"}</button>
           {segs.length === 0 && <div style={{ color: "#e5b3b3", fontSize: 12.5, marginTop: 10 }}>ยังไม่ได้ตั้งค่ารางวัลในวงล้อ</div>}
@@ -10631,7 +11125,7 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
         <>
           <div style={{ marginTop: 22, background: "#fff", borderRadius: 16, padding: "16px 24px", textAlign: "center", maxWidth: 290, boxSizing: "border-box" }}>
             <div style={{ fontSize: 13, color: T.muted, marginBottom: 4 }}>ผลการหมุน</div>
-            <div style={{ fontSize: 16.5, fontWeight: 800, color: T.green }}>🎉 {resultPrize.label}</div>
+            <div style={{ fontSize: 16.5, fontWeight: 800, color: resultPrize ? T.green : T.muted }}>{resultPrize ? `🎉 ${resultPrize.label}` : "😅 ไม่ได้รางวัล"}</div>
           </div>
           <button onClick={onClose} style={{ marginTop: 18, padding: "11px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}>ปิด</button>
         </>
