@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.43";
+const APP_VERSION = "1.11.44";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -3169,6 +3169,23 @@ export default function App() {
   // before the user can even touch anything.
   const lastKnownSavedAtRef = useRef(0);
   const latestStateJsonRef = useRef(null); // most recently computed save payload — read synchronously by the pagehide/visibility flush below (section 14)
+  // v1.11.44 (critical fix — "ended session missing from History"): monotonic generation counter for the
+  // save effect below. ROOT CAUSE this guards against: the save effect fires on every state change as an
+  // independent async IIFE with no cancellation of a still-in-flight PREVIOUS run. Two overlapping runs
+  // (e.g. one from "mark last player paid", immediately followed by one from "จบก๊วน" — a near-guaranteed
+  // real sequence, since "จบก๊วนวันนี้" only becomes enabled once everyone is paid) race to write the same
+  // "bg-v11" key. `savedAt = Date.now()` is stamped AFTER each run's own `await refreshFromStorageIfNewer`
+  // — so if the OLDER run's refresh/write happens to take longer (IndexedDB latency is never guaranteed to
+  // be fast or ordered), its `savedAt` can end up NUMERICALLY LARGER than the NEWER run's, even though its
+  // captured `json` is objectively staler. That defeats every "highest savedAt wins" comparison (including
+  // the v1.11.41 boot-time comparator), because savedAt reflects write-completion time, not the true
+  // ordering of the underlying state changes. `saveGenerationRef` fixes this at the source: it is bumped
+  // SYNCHRONOUSLY inside the effect body at React commit time (never inside the async IIFE), so a later
+  // effect run is *always* assigned a strictly higher generation than an earlier one, independent of how
+  // long either run's async storage work takes. Each run re-checks its own generation immediately before
+  // every actual write and silently no-ops if a newer run has since started — closing the exact
+  // check-then-act window that let a slow, stale run clobber a fast, correct one.
+  const saveGenerationRef = useRef(0);
   const [staleSyncNotice, setStaleSyncNotice] = useState(null); // brief banner text, or null when hidden
   // v1.9.23: mobile browsers (iOS Safari standalone "Add to Home Screen" apps especially) can and do
   // clear a site's localStorage under storage pressure or after enough time unvisited — there is no way
@@ -3563,15 +3580,28 @@ export default function App() {
     // in-memory state is trustworthy, however it got here." (loadCorrupted is kept as a legacy alias of
     // "recovery-required" for the existing banner/tests — both are checked as belt-and-suspenders.)
     if (!loaded || loadCorrupted || (bootStatus !== "restored" && bootStatus !== "new-install")) return;
+    // v1.11.44: bumped SYNCHRONOUSLY here (React commit time, not inside the async IIFE below) — see
+    // saveGenerationRef's declaration above for why this must happen here to be a reliable ordering signal.
+    const mySaveGeneration = ++saveGenerationRef.current;
     (async () => {
       try {
         // Guard: never write this instance's in-memory state over a newer save made elsewhere — pull
         // that newer data in instead (see refreshFromStorageIfNewer above) and skip this write. The
         // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
         if (await refreshFromStorageIfNewer(true)) return;
+        // v1.11.44: a newer run of THIS SAME effect (triggered by a later state change, e.g. "จบก๊วน"
+        // fired right after this run started from "mark player paid") may have already started while the
+        // refresh above was in flight. If so, this run's captured state is superseded — abort rather than
+        // risk writing stale data over the newer run's write later (see saveGenerationRef comment).
+        if (saveGenerationRef.current !== mySaveGeneration) return;
         const savedAt = Date.now();
         const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, savedAt });
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
+        // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
+        // newer run to have started in the meantime (this is the exact check that closes the race that
+        // caused "ended session missing from History": without it, an older run delayed by IndexedDB
+        // latency could still complete its write after a newer, correct run's write).
+        if (saveGenerationRef.current !== mySaveGeneration) return;
         const result = await window.storage.set("bg-v11", json);
         lastKnownSavedAtRef.current = savedAt;
         // Last Known Good: only ever updated from HERE, i.e. only once bootStatus has already resolved
@@ -3579,7 +3609,11 @@ export default function App() {
         // empty or corrupted one (section 9's explicit warning). A normal save landing safely on the
         // primary is exactly the "existing valid current state" this snapshot is meant to capture.
         if (result?.primaryOk !== false) {
-          try { await window.storage.set(LKG_KEY, json); } catch (e) {}
+          // v1.11.44: same generation re-check before the LKG write — LKG is a fallback layer and must
+          // never be allowed to regress to stale content either.
+          if (saveGenerationRef.current === mySaveGeneration) {
+            try { await window.storage.set(LKG_KEY, json); } catch (e) {}
+          }
         }
       } catch (e) {}
     })();
