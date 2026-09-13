@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.41";
+const APP_VERSION = "1.11.42";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -942,8 +942,18 @@ function computeBill(players, settings) {
     const discount = p.discount || 0; // per-person discount, entered manually in the player's summary detail
     const wheelDiscount = p.wheelDiscount || 0; // locked discount won from the spin wheel (not manually editable)
     const carriedInDiscount = Math.min(p.carriedInDiscount || 0, wheelDiscount); // portion of wheelDiscount carried over from last session's "ครั้งหน้า" prize
-    const total = Math.max(0, Math.round(court + shuttle + other - discount - wheelDiscount));
-    return { ...p, eCourt: court, eShuttle: shuttle, eOther: other, eDiscount: discount, eWheelDiscount: wheelDiscount, eCarriedInDiscount: carriedInDiscount, total };
+    const rawTotal = Math.max(0, Math.round(court + shuttle + other - discount - wheelDiscount));
+    // v1.11.42 (Owner Payment Exemption): the Club Owner (identified by the existing, already-established
+    // player.memberType === "owner" attribute — NOT by name, NOT hardcoded, and NOT the separate Firebase
+    // cloudClub.ownerUid, which stays untouched/paused) never pays their own club fee. This is applied HERE,
+    // inside the core billing calculation, so every downstream consumer (sessionRevenue/sessionCollected/
+    // sessionReceivable, the live payment panel, the frozen session snapshot written at endSession()) is
+    // automatically and permanently correct — not just a UI-layer hide. It is computed AFTER all the normal
+    // per-person math above so every OTHER player's own charge/split-divisor is completely unaffected: the
+    // Owner is exempted from what THEY owe, never removed from the pool real costs are shared across.
+    const isOwnerExempt = p.memberType === "owner";
+    const total = isOwnerExempt ? 0 : rawTotal;
+    return { ...p, eCourt: isOwnerExempt ? 0 : court, eShuttle: isOwnerExempt ? 0 : shuttle, eOther: isOwnerExempt ? 0 : other, eDiscount: discount, eWheelDiscount: wheelDiscount, eCarriedInDiscount: carriedInDiscount, total, isOwnerExempt };
   });
 }
 // v1.11.38: true if this player is still mid-match (playing or paused, i.e. NOT finished yet) right now —
@@ -4489,7 +4499,11 @@ export default function App() {
         avgWaitMin: wc > 0 ? Math.round(wt / wc / 60000) : null,
         maxWaitMin: wc > 0 ? Math.round(wmax / 60000) : null,
       },
-      bill: bill.map((b) => ({ id: b.id, name: b.name, level: b.level, skillIndex: b.skillIndex, games: b.games || 0, total: b.total, paid: !!b.paid })),
+      // v1.11.42: `isOwnerExempt` (set by computeBill) is carried into the frozen snapshot so History's
+      // "👑 เจ้าของก๊วน" rendering and payable-count exclusion keep working for this session forever,
+      // even after settings/memberType change later — same freeze-at-finalization pattern as everything
+      // else in this snapshot (spec section E / persistence requirement).
+      bill: bill.map((b) => ({ id: b.id, name: b.name, level: b.level, skillIndex: b.skillIndex, games: b.games || 0, total: b.total, paid: !!b.paid, isOwnerExempt: !!b.isOwnerExempt })),
       // flexible cost model (v1.9.4) — auto-suggested real-cost expense line(s) for this session's active
       // costModel, filed straight into the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline via sessionExpenseList;
       // "simple"/"perPerson" sessions get [] here, identical to every session before this feature existed.
@@ -8904,7 +8918,10 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
               );
             }
             const s = row.s;
-            const paidCount = (s.bill || []).filter((b) => b.paid).length;
+            // v1.11.42: exclude any Owner-exempt bill entry from this row's payable count, same reasoning
+            // as HistoricalDetail above — a no-op for older sessions that predate the isOwnerExempt flag.
+            const payableSBill = (s.bill || []).filter((b) => !b.isOwnerExempt);
+            const paidCount = payableSBill.filter((b) => b.paid).length;
             return (
               <button key={s.id} onClick={() => setOpenId(s.id)} style={{ textAlign: "left", display: "flex", alignItems: "flex-start", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 14px" }}>
                 {s.photo ? (
@@ -8921,7 +8938,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
                     <span>{(s.players || []).length} คน · {(s.stats?.totalMatches ?? 0)} แมตช์ · {s.courtCount || 1} สนาม</span>
                     <span style={{ marginLeft: "auto", fontWeight: 800, color: T.green }}>{formatCurrency((s.bill || []).reduce((sum, b) => sum + (b.total || 0), 0))}</span>
                   </div>
-                  {(s.bill || []).length > 0 && <div style={{ marginTop: 4, fontSize: 11, color: T.muted }}>จ่ายแล้ว {paidCount}/{(s.bill || []).length} คน</div>}
+                  {payableSBill.length > 0 && <div style={{ marginTop: 4, fontSize: 11, color: T.muted }}>จ่ายแล้ว {paidCount}/{payableSBill.length} คน</div>}
                 </div>
               </button>
             );
@@ -8960,9 +8977,14 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 function HistoricalDetail({ s, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
   const stats = s.stats || {};
   const bill = s.bill || [];
-  const grandTotal = bill.reduce((sum, b) => sum + (b.total || 0), 0);
-  const collected = bill.filter((b) => b.paid).reduce((sum, b) => sum + (b.total || 0), 0);
-  const paidCount = bill.filter((b) => b.paid).length;
+  // v1.11.42 (Owner Payment Exemption): sessions archived from now on freeze bill entries with
+  // isOwnerExempt (set inside computeBill at endSession time) — exclude them from the payable
+  // denominator/receivable here too, same as the live QuanPaymentPanel. Older archived sessions simply
+  // have no such flag on any entry, so this is a no-op for them (unchanged historical numbers).
+  const payableBill = bill.filter((b) => !b.isOwnerExempt);
+  const grandTotal = payableBill.reduce((sum, b) => sum + (b.total || 0), 0);
+  const collected = payableBill.filter((b) => b.paid).reduce((sum, b) => sum + (b.total || 0), 0);
+  const paidCount = payableBill.filter((b) => b.paid).length;
   const receivable = sessionReceivable(s);
   const expenseList = sessionExpenseList(s);
   const expenseTotal = sessionExpenseTotal(s);
@@ -9027,7 +9049,7 @@ function HistoricalDetail({ s, rewardHistory, toggleHistoricalPaid, onDelete, op
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
           <div style={{ fontSize: 11, color: T.muted }}>จ่ายแล้ว</div>
-          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{paidCount}/{bill.length} คน</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{paidCount}/{payableBill.length} คน</div>
         </div>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
           <div style={{ fontSize: 11, color: T.muted }}>รับแล้ว</div>
@@ -9037,8 +9059,12 @@ function HistoricalDetail({ s, rewardHistory, toggleHistoricalPaid, onDelete, op
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
         {bill.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีข้อมูลการชำระเงิน</div> : bill.map((b) => (
           <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
-            <span style={{ flex: 1, fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span> <span style={{ color: T.muted, fontWeight: 600, fontSize: 11.5 }}>· {formatCurrency(b.total)}</span></span>
-            <button onClick={() => toggleHistoricalPaid(s.id, b.id)} style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: b.paid ? "#e2f5ec" : "#fdecea", color: b.paid ? T.green : T.accent }}>{b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+            <span style={{ flex: 1, fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span> <span style={{ color: T.muted, fontWeight: 600, fontSize: 11.5 }}>· {b.isOwnerExempt ? "ฟรี (เจ้าของก๊วน)" : formatCurrency(b.total)}</span></span>
+            {b.isOwnerExempt ? (
+              <span style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, background: "#efe7fc", color: "#7c3aed" }}>👑 เจ้าของก๊วน</span>
+            ) : (
+              <button onClick={() => toggleHistoricalPaid(s.id, b.id)} style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: b.paid ? "#e2f5ec" : "#fdecea", color: b.paid ? T.green : T.accent }}>{b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+            )}
           </div>
         ))}
       </div>
@@ -10457,11 +10483,18 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered" && p.status !== "waiting"));
   const bill = computeBill(players, settings);
   const billBy = (id) => bill.find((b) => b.id === id);
-  const grandTotal = bill.reduce((s, b) => s + b.total, 0);
-  const collected = bill.filter((b) => b.paid).reduce((s, b) => s + b.total, 0);
+  // v1.11.42 (Owner Payment Exemption): the Owner is kept IN `bill` (so they still show up in the finance
+  // player list — spec requirement) but is never counted toward the payable denominator/receivable/"all
+  // paid" gate. Owner's own `total` is already forced to ฿0 by computeBill, so summing over the full `bill`
+  // for grandTotal/collected would be numerically harmless either way — but `payableBill` is what must
+  // drive paidCount/bill.length ("21 คน" not "22 คน") and the "จบก๊วนวันนี้" gate, since Owner never has a
+  // paid toggle and must never block ending the ก๊วน.
+  const payableBill = bill.filter((b) => !b.isOwnerExempt);
+  const grandTotal = payableBill.reduce((s, b) => s + b.total, 0);
+  const collected = payableBill.filter((b) => b.paid).reduce((s, b) => s + b.total, 0);
   const receivable = grandTotal - collected;
-  const paidCount = bill.filter((b) => b.paid).length;
-  const allPaid = bill.length > 0 && paidCount === bill.length;
+  const paidCount = payableBill.filter((b) => b.paid).length;
+  const allPaid = payableBill.length > 0 && paidCount === payableBill.length;
   const detailP = detail ? players.find((p) => p.id === detail) : null;
   const detailBill = detailP ? billBy(detailP.id) : null;
   // "available" discount credits for the player currently open in the payment detail overlay (v1.9.1) —
@@ -10494,7 +10527,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
           <div style={{ fontSize: 11, color: T.muted }}>จ่ายแล้ว</div>
-          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{paidCount}/{bill.length} คน</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{paidCount}/{payableBill.length} คน</div>
         </div>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
           <div style={{ fontSize: 11, color: T.muted }}>รับแล้ว</div>
@@ -10514,7 +10547,10 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       </div>
       {(() => {
         const q = search.trim().toLowerCase();
-        const visibleBill = bill.filter((b) => (payFilter === "all" ? true : payFilter === "paid" ? b.paid : !b.paid)).filter((b) => !q || (b.name || "").toLowerCase().includes(q));
+        // v1.11.42: Owner rows always pass the payFilter (unpaid/all/paid don't apply to them — they have
+        // no payment status at all) so the Owner stays visible in the Finance player list per spec, while
+        // still being fully searchable/hideable by name like everyone else.
+        const visibleBill = bill.filter((b) => (b.isOwnerExempt ? true : (payFilter === "all" ? true : payFilter === "paid" ? b.paid : !b.paid))).filter((b) => !q || (b.name || "").toLowerCase().includes(q));
         return (
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
         {visibleBill.length === 0 ? (
@@ -10530,15 +10566,22 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               <Avatar p={b} size={30} />
               <span style={{ minWidth: 0 }}>
                 <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>
-                <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{b.games || 0} เกม · {formatCurrency(b.total)}</span>
+                <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{b.games || 0} เกม{b.isOwnerExempt ? " · เจ้าของก๊วน ไม่เก็บเงิน" : ` · ${formatCurrency(b.total)}`}</span>
               </span>
             </button>
+            {/* v1.11.42 (Owner Payment Exemption): Owner gets NO payment action/button — a static free-of-
+                charge badge instead of ยังไม่จ่าย/จ่ายแล้ว, since they were never charged (total is forced
+                to ฿0 in computeBill itself, not just hidden here). */}
+            {b.isOwnerExempt ? (
+              <span style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, background: "#efe7fc", color: "#7c3aed" }}>👑 เจ้าของก๊วน · ฟรี</span>
+            ) : (
             <button
               onClick={() => { if (isLive) return; togglePaid(b.id); }}
               disabled={isLive}
               title={isLive ? "กำลังเล่นอยู่ — กดจบเกมก่อนถึงจะคิดตังค์ได้" : undefined}
               style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: isLive ? T.surface2 : b.paid ? "#e2f5ec" : "#fdecea", color: isLive ? T.muted : b.paid ? T.green : T.accent, opacity: isLive ? 0.75 : 1, cursor: isLive ? "not-allowed" : "pointer" }}
             >{isLive ? "⏳ กำลังเล่นอยู่" : b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+            )}
           </div>
           );
         })}
@@ -10551,7 +10594,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         disabled={!allPaid}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 0", borderRadius: 13, background: allPaid ? "none" : T.surface2, border: `1.5px solid ${allPaid ? T.accent : T.border}`, color: allPaid ? T.accent : T.muted, fontSize: 13.5, fontWeight: 800, marginBottom: 18, opacity: allPaid ? 1 : 0.6 }}
       >
-        <LogOut size={15} /> {bill.length === 0 ? "ยังไม่มีผู้เล่นที่ต้องจ่าย" : allPaid ? "จบก๊วนวันนี้" : `จบก๊วนวันนี้ (รอจ่ายอีก ${bill.length - paidCount} คน)`}
+        <LogOut size={15} /> {payableBill.length === 0 ? "ยังไม่มีผู้เล่นที่ต้องจ่าย" : allPaid ? "จบก๊วนวันนี้" : `จบก๊วนวันนี้ (รอจ่ายอีก ${payableBill.length - paidCount} คน)`}
       </button>
 
       {/* PLAYER PAYMENT DETAIL */}
@@ -10597,6 +10640,10 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
                 <button onClick={() => setOpenCreditFor(detailP.id)} style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 20, border: "none", background: T.green, color: "#fff", fontSize: 12, fontWeight: 800 }}>ใช้กับก๊วนนี้</button>
               </div>
             )}
+            {/* v1.11.42 (Owner Payment Exemption): no payment action for Owner — they were never charged. */}
+            {detailBill.isOwnerExempt ? (
+              <div style={{ marginTop: 12, textAlign: "center", padding: "11px 0", borderRadius: 11, background: "#efe7fc", color: "#7c3aed", fontSize: 13.5, fontWeight: 800 }}>👑 เจ้าของก๊วน · ไม่มีค่าใช้จ่าย</div>
+            ) : (
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button
                 onClick={() => { if (detailIsLive) return; togglePaid(detailP.id); }}
@@ -10604,6 +10651,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
                 style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", fontSize: 13.5, fontWeight: 800, background: detailIsLive ? T.surface2 : detailBill.paid ? "#e2f5ec" : T.green, color: detailIsLive ? T.muted : detailBill.paid ? T.green : "#fff", opacity: detailIsLive ? 0.75 : 1, cursor: detailIsLive ? "not-allowed" : "pointer" }}
               >{detailIsLive ? "⏳ กำลังเล่นอยู่ — จบเกมก่อนถึงจะคิดตังค์ได้" : detailBill.paid ? "🟢 จ่ายแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าจ่ายแล้ว"}</button>
             </div>
+            )}
 
             {detailP.spun ? (
               <div style={{ marginTop: 10, background: "#fff", border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.text }}>
@@ -10615,18 +10663,18 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               </button>
             ) : null}
 
-            {settings.qr && (
+            {settings.qr && !detailBill.isOwnerExempt && (
               <button onClick={() => setQrFull({ name: detailP.name, amount: detailBill.total })} style={{ marginTop: 12, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", borderRadius: 13, background: T.green, border: "none", color: "#fff", fontSize: 14, fontWeight: 800 }}>
                 <QrCode size={17} /> เปิด QR เพื่อชำระเงิน {formatCurrency(detailBill.total)}
               </button>
             )}
-            {settings.bank && (
+            {settings.bank && !detailBill.isOwnerExempt && (
               <div style={{ marginTop: 12, background: "#fff", border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px" }}>
                 <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 3 }}>หรือโอนเข้าบัญชี</div>
                 <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: "pre-wrap" }}>{settings.bank}</div>
               </div>
             )}
-            {!settings.qr && !settings.bank && <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted, textAlign: "center" }}>เพิ่ม QR / เลขบัญชีได้ที่ ⚙️ ตั้งค่าค่าก๊วนและรางวัล ด้านบน</div>}
+            {!detailBill.isOwnerExempt && !settings.qr && !settings.bank && <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted, textAlign: "center" }}>เพิ่ม QR / เลขบัญชีได้ที่ ⚙️ ตั้งค่าค่าก๊วนและรางวัล ด้านบน</div>}
           </div>
         </Overlay>
       )}
