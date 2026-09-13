@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.40";
+const APP_VERSION = "1.11.41";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -954,19 +954,67 @@ function computeBill(players, settings) {
 function playerHasLiveMatch(playerId, current) {
   return (current || []).some((m) => (m.status === "playing" || m.status === "paused") && [...(m.teamA || []), ...(m.teamB || [])].includes(playerId));
 }
+// v1.11.41: ต้นทุนต่อลูก = ต้นทุน/กระบอก ÷ จำนวนลูก/กระบอก — guards shuttlesPerTube<=0 (would otherwise
+// divide by zero / produce Infinity) and negative/garbage input, per the required edge-case handling.
+function shuttleCostPerUnit(shuttleEco) {
+  const eco = shuttleEco || {};
+  const perTube = Math.max(0, Number(eco.costPerTube) || 0);
+  const perTubeQty = Math.max(0, Number(eco.shuttlesPerTube) || 0);
+  return perTubeQty > 0 ? perTube / perTubeQty : 0;
+}
+// true only when a per-shuttle cost is actually derivable — used to decide whether the new cost/tube
+// feature supersedes the legacy manual shuttleCalc auto-expense-line (see shuttleLine() below) so the two
+// can never both file a "ค่าลูกแบต" expense line for the same session.
+function shuttleEcoConfigured(shuttleEco) { return shuttleCostPerUnit(shuttleEco) > 0; }
+// v1.11.41 (spec D2): Expense/Revenue/Profit from shuttlecocks actually used this session — `used` MUST be
+// the EXISTING authoritative usage count (session.stats.totalMatches, computed at endSession() from
+// history.length+doneCurrent.length — never a new manual "used" field). Guards every input so this can
+// never produce NaN/Infinity even with 0/empty/negative/decimal settings.
+function computeShuttleEcoFinance(shuttleEco, used) {
+  const eco = shuttleEco || {};
+  const costPerUnit = shuttleCostPerUnit(eco);
+  const sellingPrice = Math.max(0, Number(eco.sellingPricePerShuttle) || 0);
+  const usedQty = Math.max(0, Number(used) || 0);
+  const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+  const expense = round2(usedQty * costPerUnit);
+  const revenue = round2(usedQty * sellingPrice);
+  return {
+    used: usedQty,
+    costPerTube: Math.max(0, Number(eco.costPerTube) || 0),
+    shuttlesPerTube: Math.max(0, Number(eco.shuttlesPerTube) || 0),
+    sellingPricePerShuttle: sellingPrice,
+    costPerUnit, expense, revenue, profit: round2(revenue - expense),
+  };
+}
 // ===================== FLEXIBLE COST MODEL — AUTO EXPENSE LINES (v1.9.4) =====================
 // Returns ready-to-file session expense items ({id, category, description, amount, date, auto:true}) for
 // the organizer's REAL out-of-pocket cost, per active costModel — feeds the EXISTING session.expenses list
 // (same pipeline sessionExpenseTotal/sessionProfit/P&L already read), never a parallel accounting system.
 // "simple"/"perPerson" return [] (unchanged — simple stays revenue-only as today; perPerson is a revenue
-// override handled entirely inside computeBill above, no expense line needed).
-function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr) {
+// override handled entirely inside computeBill above, no expense line needed) EXCEPT for the shuttle line,
+// which (v1.11.41) is independent of costModel — see shuttleLine() below.
+function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks) {
   const model = settings.costModel || "simple";
   const out = [];
+  // v1.11.41: prefers the new cost/tube-derived per-shuttle cost (auto — reuses the existing `used` match
+  // count, no manual entry) whenever it's configured; falls back to the legacy manual qty×pricePerUnit
+  // entry otherwise (pre-v1.11.41 behavior, fully backward compatible). NEVER both — that would double-file
+  // "ค่าลูกแบต" for the same session.
   const shuttleLine = () => {
+    if (shuttleEcoConfigured(settings.shuttleEco)) {
+      const unit = shuttleCostPerUnit(settings.shuttleEco);
+      const used = Math.max(0, Number(usedShuttlecocks) || 0);
+      if (used > 0 && unit > 0) {
+        out.push({ id: uid(), category: "ค่าลูกแบต", description: `ค่าลูกแบด ${used} ลูก × ฿${unit.toFixed(2)} (ต้นทุนต่อลูก)`, amount: Math.round((used * unit + Number.EPSILON) * 100) / 100, date: dateStr, auto: true });
+      }
+      return;
+    }
     const { qty, pricePerUnit } = settings.shuttleCalc || {};
     if (qty > 0 && pricePerUnit > 0) out.push({ id: uid(), category: "ค่าลูกแบต", description: `ค่าลูก ${qty} ลูก × ฿${pricePerUnit}`, amount: qty * pricePerUnit, date: dateStr, auto: true });
   };
+  // v1.11.41: filed for EVERY cost model (previously only perCourt/hourly) — the shuttlecock cost/selling
+  // feature is orthogonal to how court/other costs are billed to players.
+  shuttleLine();
   if (model === "perCourt") {
     const rates = settings.perCourtRates || [];
     let sum = 0;
@@ -975,11 +1023,9 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr) {
       if (r && r.amount > 0) sum += Number(r.amount) || 0;
     }
     if (sum > 0) out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: `ค่าคอร์ท ${courtCount} สนาม (แยกราคา)`, amount: sum, date: dateStr, auto: true });
-    shuttleLine();
   } else if (model === "hourly") {
     const { courts, rate, hours } = settings.hourly || {};
     if (courts > 0 && rate > 0 && hours > 0) out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: `ค่าคอร์ท ${courts} สนาม × ${hours} ชม. × ฿${rate}`, amount: courts * rate * hours, date: dateStr, auto: true });
-    shuttleLine();
   } else if (model === "custom") {
     (settings.customCostRows || []).forEach((r) => { if ((Number(r.amount) || 0) > 0) out.push({ id: uid(), category: r.category || "ค่าใช้จ่ายอื่น", description: r.description || r.category || "รายการ", amount: Number(r.amount) || 0, date: dateStr, auto: true }); });
   } else if (model === "splitExpenses") {
@@ -1058,7 +1104,12 @@ function sessionRevenue(s) { return (s.bill || []).reduce((sum, b) => sum + (b.t
 function sessionCollected(s) { return (s.bill || []).filter((b) => b.paid).reduce((sum, b) => sum + (b.total || 0), 0); }
 function sessionReceivable(s) { return sessionRevenue(s) - sessionCollected(s); }
 function sessionExpenseTotal(s) { return sessionExpenseList(s).reduce((sum, e) => sum + (Number(e.amount) || 0), 0); }
-function sessionProfit(s) { return sessionRevenue(s) - sessionExpenseTotal(s); }
+// v1.11.41: ลูกแบด selling-price revenue, frozen at endSession() (see snapshot.shuttlecockRevenue) — kept
+// SEPARATE from sessionRevenue/bill (per-player billing, unaffected/untouched) so payment-tracking fields
+// (sessionCollected/sessionReceivable, and the ก๊วน payment UI they power) are never touched by this new
+// feature; only profit-facing views add it in, via this function, to stay reconciled with the Finance page.
+function sessionShuttlecockRevenue(s) { return Number(s.shuttlecockRevenue) || 0; }
+function sessionProfit(s) { return sessionRevenue(s) + sessionShuttlecockRevenue(s) - sessionExpenseTotal(s); }
 // period filter — dates are plain "YYYY-MM-DD" strings throughout the app, so string range comparison is safe
 function periodRange(period, custom) {
   const now = new Date();
@@ -1098,6 +1149,10 @@ function computeFinanceForRange(range, sessionHistory, generalExpenses, otherInc
   const sessionRevenueTotal = sessionsInRange.reduce((sum, s) => sum + sessionRevenue(s), 0);
   const sessionCollectedTotal = sessionsInRange.reduce((sum, s) => sum + sessionCollected(s), 0);
   const sessionExpenseSum = sessionsInRange.reduce((sum, s) => sum + sessionExpenseTotal(s), 0);
+  // v1.11.41: ลูกแบด selling-price revenue — frozen per-session at endSession() (sessionShuttlecockRevenue),
+  // kept as its own total (never folded into sessionRevenueTotal/sessionCollectedTotal above) so payment
+  // collected/receivable reporting stays exactly as before; only overall revenue/profit include it.
+  const shuttlecockRevenueTotal = sessionsInRange.reduce((sum, s) => sum + sessionShuttlecockRevenue(s), 0);
   const otherIncomeTotal = otherIncInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   const genExpenseTotal = genExpInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   // entryFee only ever counts PAID teams and manual finance.income is logged when actually received (no
@@ -1106,7 +1161,7 @@ function computeFinanceForRange(range, sessionHistory, generalExpenses, otherInc
   const tournamentFinances = tournamentsInRange.map((t) => tournamentFinanceTotals(t));
   const tournamentIncomeTotal = tournamentFinances.reduce((s, f) => s + f.income, 0);
   const tournamentExpenseTotal = tournamentFinances.reduce((s, f) => s + f.expense, 0);
-  const revenue = sessionRevenueTotal + otherIncomeTotal + tournamentIncomeTotal; // รายได้ = ยอดเรียกเก็บ + รายได้อื่น + รายได้ Tournament
+  const revenue = sessionRevenueTotal + shuttlecockRevenueTotal + otherIncomeTotal + tournamentIncomeTotal; // รายได้ = ยอดเรียกเก็บ + รายได้ค่าลูกแบด + รายได้อื่น + รายได้ Tournament
   const collected = sessionCollectedTotal + otherIncomeTotal + tournamentIncomeTotal;
   const expense = sessionExpenseSum + genExpenseTotal + tournamentExpenseTotal;
   const profit = revenue - expense; // กำไร/ขาดทุน = รายได้ - ค่าใช้จ่าย เสมอ (ไม่ใช่ รับแล้ว - ค่าใช้จ่าย)
@@ -1124,7 +1179,7 @@ function computeFinanceForRange(range, sessionHistory, generalExpenses, otherInc
   const catTotals = {};
   EXPENSE_CATEGORY_ORDER.forEach((k) => { if (rawCatTotals[k] != null) catTotals[k] = rawCatTotals[k]; });
   Object.keys(rawCatTotals).forEach((k) => { if (!(k in catTotals)) catTotals[k] = rawCatTotals[k]; });
-  return { range, sessionsInRange, genExpInRange, otherIncInRange, tournamentsInRange, sessionRevenueTotal, sessionCollectedTotal, otherIncomeTotal, genExpenseTotal, tournamentIncomeTotal, tournamentExpenseTotal, revenue, collected, expense, profit, catTotals };
+  return { range, sessionsInRange, genExpInRange, otherIncInRange, tournamentsInRange, sessionRevenueTotal, sessionCollectedTotal, shuttlecockRevenueTotal, otherIncomeTotal, genExpenseTotal, tournamentIncomeTotal, tournamentExpenseTotal, revenue, collected, expense, profit, catTotals };
 }
 function getFinanceForDate(dateStr, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
   return computeFinanceForRange({ from: dateStr, to: dateStr }, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
@@ -1291,6 +1346,10 @@ function buildTransactionDetail(f) {
   f.sessionsInRange.forEach((s) => {
     const rev = sessionRevenue(s);
     if (rev > 0) rows.push({ date: s.date, type: "revenue", category: "ค่าก๊วน", description: s.name || "ก๊วนไม่มีชื่อ", session: s.name || "-", amount: rev });
+    // v1.11.41: ลูกแบด selling-price revenue, frozen at endSession() — its own transaction row/category so
+    // it's never confused with (or silently merged into) the "ค่าก๊วน" player-billing row above.
+    const shuttleRev = sessionShuttlecockRevenue(s);
+    if (shuttleRev > 0) rows.push({ date: s.date, type: "revenue", category: "รายได้ค่าลูกแบด", description: s.name || "ก๊วนไม่มีชื่อ", session: s.name || "-", amount: shuttleRev });
     sessionExpenseList(s).forEach((e) => rows.push({ date: e.date || s.date, type: "expense", category: e.category || "อื่น ๆ", description: e.description || e.category || "รายการ", session: s.name || "-", amount: Number(e.amount) || 0 }));
   });
   f.otherIncInRange.forEach((e) => rows.push({ date: e.date, type: "revenue", category: "รายได้อื่น", description: e.description || "รายได้อื่น", session: "-", amount: Number(e.amount) || 0 }));
@@ -1336,7 +1395,7 @@ function buildFinancialReport(period, ctx) {
     period,
     generatedAt: Date.now(),
     summary: { revenue: f.revenue, collected: f.collected, receivable: f.revenue - f.collected, expense: f.expense, profit: f.profit },
-    pnl: { groupRevenue: f.sessionRevenueTotal, otherIncome: f.otherIncomeTotal, tournamentIncome: f.tournamentIncomeTotal, tournamentExpense: f.tournamentExpenseTotal, totalRevenue: f.revenue, expenseByCategory: f.catTotals, totalExpense: f.expense, netProfit: f.profit },
+    pnl: { groupRevenue: f.sessionRevenueTotal, shuttlecockRevenue: f.shuttlecockRevenueTotal, otherIncome: f.otherIncomeTotal, tournamentIncome: f.tournamentIncomeTotal, tournamentExpense: f.tournamentExpenseTotal, totalRevenue: f.revenue, expenseByCategory: f.catTotals, totalExpense: f.expense, netProfit: f.profit },
     sessions,
     transactions: buildTransactionDetail(f),
     outstandingPayments: outstandingPaymentsForSessions(f.sessionsInRange),
@@ -1952,6 +2011,14 @@ function getDefaultSettings() {
     perCourtRates: [], // [{ court: 1, amount: 500 }, ...] — model B: แยกรายสนาม
     hourly: { courts: 0, rate: 0, hours: 0 }, // model C: รายชั่วโมง (จำนวนสนาม × ราคา/ชั่วโมง × ชั่วโมง)
     shuttleCalc: { qty: 0, pricePerUnit: 0 }, // optional shared ค่าลูกแบด line, usable alongside perCourt/hourly
+    // v1.11.41: ต้นทุน/ราคาขายลูกแบดต่อลูก — derives costPerShuttlecock = costPerTube / shuttlesPerTube and
+    // auto-computes expense/revenue/profit from the EXISTING authoritative "used" count (session.stats.totalMatches
+    // at endSession(), never a new manual field). Independent of costModel (unlike shuttleCalc above, which only
+    // applies to perCourt/hourly) — when configured (costPerTube>0 && shuttlesPerTube>0) it SUPERSEDES the legacy
+    // shuttleCalc auto-expense-line so the two can never both file a "ค่าลูกแบต" expense for the same session (see
+    // computeCostModelExpenses). Kept fully separate from `shuttle` (the flat ฿/game charge billed to players,
+    // frozen into each session's bill/sessionRevenue) by explicit organizer decision — no automatic interaction.
+    shuttleEco: { costPerTube: 0, shuttlesPerTube: 0, sellingPricePerShuttle: 0 },
     perPersonRate: 0, // model D: รายคน — overrides computeBill's per-person court charge directly (revenue-side)
     customCostRows: [], // model E: กำหนดเอง — [{ id, category, description, amount }, ...], reuses ExpenseListEditor
     // v1.11.12: model F (first in the picker) — หารค่าใช้จ่าย: organizer enters the 4 real cost lines below,
@@ -2002,9 +2069,19 @@ function normSettings(s) {
   const mwm = Number(base.maxWaitMinutes);
   const mgp = Number(base.minGamesPerPerson);
   const se = base.splitExpenses && typeof base.splitExpenses === "object" ? base.splitExpenses : {};
+  // v1.11.41: old (pre-v1.11.41) saved settings have no `shuttleEco` at all — backfill field-by-field
+  // (not just via the top-level {...getDefaultSettings(), ...base} spread above, which would keep a
+  // partially-shaped object as-is instead of coercing/clamping each sub-field) so a corrupt/partial value
+  // can never produce NaN/negative pricing downstream.
+  const sEco = base.shuttleEco && typeof base.shuttleEco === "object" ? base.shuttleEco : {};
   return {
     ...getDefaultSettings(),
     ...base,
+    shuttleEco: {
+      costPerTube: Math.max(0, Number(sEco.costPerTube) || 0),
+      shuttlesPerTube: Math.max(0, Number(sEco.shuttlesPerTube) || 0),
+      sellingPricePerShuttle: Math.max(0, Number(sEco.sellingPricePerShuttle) || 0),
+    },
     averageMatchMinutes: amm > 0 ? amm : 15,
     courtUtilization: util > 0 && util <= 1 ? util : 0.9,
     courtRecommendationMode: ["busy", "balanced", "saving"].includes(base.courtRecommendationMode) ? base.courtRecommendationMode : "balanced",
@@ -2285,6 +2362,57 @@ function validateBackupIntegrity(data) {
     seenRH.add(r.id);
   }
   return { ok: true, data };
+}
+// v1.11.41 (Section A2): "meaningful" = this state actually has something in it worth protecting — a
+// STRUCTURAL check only (never an "is this empty?" heuristic beyond literal emptiness), so a freshly
+// generated empty/default state can be told apart from real prior data when deciding which of two
+// differently-timestamped stores should win. Deliberately mirrors validateBackupIntegrity's philosophy:
+// checks presence of actual content, not "looks complete."
+function stateIsMeaningful(s) {
+  if (!s) return false;
+  return (Array.isArray(s.players) && s.players.length > 0)
+    || (Array.isArray(s.sessionHistory) && s.sessionHistory.length > 0)
+    || (Array.isArray(s.history) && s.history.length > 0)
+    || (Array.isArray(s.current) && s.current.length > 0)
+    || (Array.isArray(s.future) && s.future.length > 0)
+    || (Array.isArray(s.tournamentHistory) && s.tournamentHistory.length > 0)
+    || !!s.activeTournament
+    || (Array.isArray(s.generalExpenses) && s.generalExpenses.length > 0)
+    || (Array.isArray(s.otherIncome) && s.otherIncome.length > 0)
+    || (Array.isArray(s.discountCredits) && s.discountCredits.length > 0)
+    || (Array.isArray(s.rewardHistory) && s.rewardHistory.length > 0);
+}
+// v1.11.41 (Section A1/A2): pure decision function for "given two already-validated flat states (either
+// may be null/missing), which one should boot win, and why" — pulled out of the boot effect below as its
+// own standalone function so it can be unit-tested directly (see test_v11141_persistence_unit.js) without
+// needing a real browser/IndexedDB round-trip. Returns { finalState, recoverySource, chosenReason } or
+// { finalState: null } if neither candidate is usable (caller falls through to LKG/Auto-Backup/new-install).
+function chooseBootCandidate(primaryCandidate, mirrorCandidate) {
+  if (primaryCandidate && mirrorCandidate) {
+    const pAt = typeof primaryCandidate.savedAt === "number" ? primaryCandidate.savedAt : null;
+    const mAt = typeof mirrorCandidate.savedAt === "number" ? mirrorCandidate.savedAt : null;
+    const pMeaningful = stateIsMeaningful(primaryCandidate), mMeaningful = stateIsMeaningful(mirrorCandidate);
+    if (pAt != null && mAt != null && pAt !== mAt) {
+      const primaryIsNewer = pAt > mAt;
+      const newer = primaryIsNewer ? primaryCandidate : mirrorCandidate;
+      const older = primaryIsNewer ? mirrorCandidate : primaryCandidate;
+      const newerMeaningful = primaryIsNewer ? pMeaningful : mMeaningful;
+      const olderMeaningful = primaryIsNewer ? mMeaningful : pMeaningful;
+      if (!newerMeaningful && olderMeaningful) {
+        // A2: the newer save is an empty/default state while the older one is real — never let a freshly
+        // created empty state beat meaningful existing data just by winning the clock.
+        return { finalState: older, recoverySource: primaryIsNewer ? "mirror" : "primary", chosenReason: "meaningful-state-protection" };
+      }
+      return { finalState: newer, recoverySource: primaryIsNewer ? "primary" : "mirror", chosenReason: "newer-valid-state" };
+    }
+    // Equal or unreliable (missing) timestamps on both sides — prefer whichever is meaningful; if
+    // both/neither are, primary is as good a tie-break as any (they're equally "current").
+    if (mMeaningful && !pMeaningful) return { finalState: mirrorCandidate, recoverySource: "mirror", chosenReason: "meaningful-state-protection" };
+    return { finalState: primaryCandidate, recoverySource: "primary", chosenReason: "newer-valid-state" };
+  }
+  if (primaryCandidate) return { finalState: primaryCandidate, recoverySource: "primary", chosenReason: "primary-only-valid" };
+  if (mirrorCandidate) return { finalState: mirrorCandidate, recoverySource: "mirror", chosenReason: "mirror-only-valid" };
+  return { finalState: null, recoverySource: "new-install", chosenReason: null };
 }
 // v1.11.0 PERSISTENCE REWRITE — recovery helpers shared by the boot-sequence waterfall (primary /
 // mirror / Last-Known-Good / Auto-Backup). Both funnel through the EXACT SAME migrate+validate pipeline
@@ -3077,8 +3205,50 @@ export default function App() {
     window.addEventListener("badq:update-available", onUpdate);
     return () => window.removeEventListener("badq:update-available", onUpdate);
   }, []);
-  const applyUpdateNow = () => {
-    try { location.replace(location.pathname + "?_v=" + Date.now()); } catch (e) {}
+  // v1.11.41 (Section B2): explicit, user-confirmed update handoff — the ONLY place that ever tells a
+  // waiting Service Worker to take over. Runs the exact 8-step sequence from the spec:
+  // (1) force-save latest state to the localStorage Mirror synchronously, (2) attempt the IndexedDB
+  // Primary write, (3) update the LKG checkpoint, (4) postMessage SKIP_WAITING to the waiting worker,
+  // (5) the worker calls self.skipWaiting() only on receiving that message (see sw.js — no more automatic
+  // skipWaiting() during install), (6) wait for controllerchange, (7) reload EXACTLY ONCE, (8) the normal
+  // boot sequence above (Section A) picks the newest valid state on the reload. No long blocking UI: the
+  // saves below are fire-and-attempt (best-effort, never block the button past a short safety timeout).
+  const applyUpdateNow = async () => {
+    try {
+      const savedAt = Date.now();
+      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, savedAt });
+      latestStateJsonRef.current = json;
+      try { localStorage.setItem("bg:bg-v11", json); } catch (e) {} // (1) Mirror — synchronous, best-effort
+      try { await window.storage.set("bg-v11", json); } catch (e) {} // (2) Primary
+      try { await window.storage.set(LKG_KEY, json); } catch (e) {} // (3) LKG checkpoint
+      lastKnownSavedAtRef.current = savedAt;
+    } catch (e) {}
+
+    const reloadOnce = (() => {
+      let done = false;
+      return () => {
+        if (done) return;
+        done = true;
+        try { location.replace(location.pathname + "?_v=" + Date.now()); } catch (e) {}
+      };
+    })();
+
+    try {
+      const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : null;
+      const waiting = reg && reg.waiting;
+      if (waiting) {
+        // (6) wait for the new SW to actually take control before reloading — but never wait forever
+        // (older/edge-case browsers that don't fire controllerchange reliably still get a bounded fallback).
+        navigator.serviceWorker.addEventListener("controllerchange", reloadOnce, { once: true });
+        waiting.postMessage({ type: "SKIP_WAITING" }); // (4) -> (5)
+        setTimeout(reloadOnce, 4000);
+        return;
+      }
+    } catch (e) {}
+    // No waiting worker found (e.g. this device hasn't finished installing the new SW yet, or the update
+    // was only detected via the plain version-string check) — fall back to the original cache-busted
+    // reload so the button still always does *something* rather than silently no-op.
+    reloadOnce();
   };
   // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
   // below so the two can never silently drift apart on which fields they read/default.
@@ -3184,25 +3354,39 @@ export default function App() {
       let finalState = null, recoverySource = "new-install", recoveryAction = "none";
       let corrupted = false; // legacy flag — kept in sync so the existing recovery banner/tests (which key off `loadCorrupted`) keep working unchanged; true exactly when bootStatus lands on "recovery-required"
 
+      let mirrorValid = false, chosenReason = null, primarySavedAtDiag = null, mirrorSavedAtDiag = null;
       try {
-        // Steps 1-2: primary then mirror. getBothRaw (unlike the self-healing get()) reports each
-        // backend independently, so a corrupted PRIMARY doesn't stop us from checking whether the
-        // MIRROR independently still holds something valid (and vice versa) — see TEST F.
+        // Steps 1-2 (v1.11.41 rewrite — Section A): primary then mirror, read independently via
+        // getBothRaw (unlike the self-healing get()), so a corrupted PRIMARY doesn't stop us from
+        // checking whether the MIRROR independently still holds something valid (and vice versa).
+        //
+        // ROOT CAUSE of the reported "latest data disappeared after updating" bug, confirmed by reading
+        // this exact loop before this fix: the OLD code did
+        //   for (const candidate of [bothRaw.primary, bothRaw.mirror]) { ...; if (recovered) { ...; break; } }
+        // i.e. it validated primary, and if primary merely PARSED AND VALIDATED (regardless of freshness)
+        // it won and the loop broke — mirror's savedAt was never even looked at. A stale-but-structurally-
+        // valid primary (e.g. an IndexedDB write that lagged behind a newer localStorage mirror write,
+        // such as the iOS synchronous-flush safeguard below landing a newer save into the mirror the
+        // instant an update reload raced an in-flight IndexedDB commit) would silently win over a newer,
+        // equally-valid mirror. Fixed by validating BOTH independently first, then explicitly choosing by
+        // savedAt (A1) with meaningful-state protection so a freshly-created empty/default state can never
+        // beat a real one just because its savedAt happens to be newer (A2).
         let bothRaw = { primary: null, mirror: null };
         try { bothRaw = await window.storage.getBothRaw("bg-v11"); } catch (e) { storageErrors.push("bg-v11 read: " + (e?.message || e)); }
         primaryFound = !!bothRaw.primary;
         mirrorFound = !!bothRaw.mirror;
-        for (const candidate of [bothRaw.primary, bothRaw.mirror]) {
-          if (!candidate) continue;
-          const recovered = tryRecoverFlatState(candidate);
-          if (recovered) {
-            finalState = recovered;
-            recoverySource = candidate === bothRaw.primary ? "primary" : "mirror";
-            primaryValid = recoverySource === "primary";
-            break;
-          }
-          storageErrors.push((candidate === bothRaw.primary ? "primary" : "mirror") + " present but failed validation/parse");
-        }
+        const primaryCandidate = bothRaw.primary ? tryRecoverFlatState(bothRaw.primary) : null;
+        if (bothRaw.primary && !primaryCandidate) storageErrors.push("primary present but failed validation/parse");
+        const mirrorCandidate = bothRaw.mirror ? tryRecoverFlatState(bothRaw.mirror) : null;
+        if (bothRaw.mirror && !mirrorCandidate) storageErrors.push("mirror present but failed validation/parse");
+        primaryValid = !!primaryCandidate;
+        mirrorValid = !!mirrorCandidate;
+        primarySavedAtDiag = primaryCandidate && typeof primaryCandidate.savedAt === "number" ? primaryCandidate.savedAt : null;
+        mirrorSavedAtDiag = mirrorCandidate && typeof mirrorCandidate.savedAt === "number" ? mirrorCandidate.savedAt : null;
+
+        const choice = chooseBootCandidate(primaryCandidate, mirrorCandidate);
+        finalState = choice.finalState;
+        if (finalState) { recoverySource = choice.recoverySource; chosenReason = choice.chosenReason; }
 
         // Step 3: Last Known Good
         if (!finalState) {
@@ -3211,7 +3395,7 @@ export default function App() {
             if (lkgR?.value) {
               lastKnownGoodFound = true;
               const recovered = tryRecoverFlatState(lkgR.value);
-              if (recovered) { finalState = recovered; recoverySource = "last-known-good"; recoveryAction = "restored-from-last-known-good"; }
+              if (recovered) { finalState = recovered; recoverySource = "last-known-good"; recoveryAction = "restored-from-last-known-good"; chosenReason = "fallback-lkg"; }
               else storageErrors.push("last-known-good present but failed validation/parse");
             }
           } catch (e) { storageErrors.push("last-known-good read: " + (e?.message || e)); }
@@ -3226,7 +3410,7 @@ export default function App() {
               autoBackupFound = true;
               for (const entry of list) {
                 const recovered = tryRecoverFromAutoBackupEntry(entry);
-                if (recovered) { finalState = recovered; recoverySource = "auto-backup"; recoveryAction = "restored-from-auto-backup"; break; }
+                if (recovered) { finalState = recovered; recoverySource = "auto-backup"; recoveryAction = "restored-from-auto-backup"; chosenReason = "fallback-auto-backup"; break; }
               }
               if (!finalState) storageErrors.push("auto-backup list present but no entry validated");
             }
@@ -3242,23 +3426,23 @@ export default function App() {
         recoveredHistoryCount = Array.isArray(finalState.sessionHistory) ? finalState.sessionHistory.length : 0;
         loadedSavedAt = typeof finalState.savedAt === "number" ? finalState.savedAt : null;
         bootStatusResult = "restored";
-        if (recoverySource !== "primary") {
-          // Close the gap immediately: rebuild primary + mirror + Last-Known-Good from whatever layer
-          // actually had the good data, so the NEXT boot reads a clean primary instead of limping along.
-          recoveryAction = recoveryAction === "none" ? ("rebuilt-from-" + recoverySource) : recoveryAction;
-          try {
-            const rebuiltAt = Date.now();
-            const rebuiltJson = JSON.stringify({ ...finalState, savedAt: rebuiltAt });
-            await window.storage.set("bg-v11", rebuiltJson);
-            await window.storage.set(LKG_KEY, rebuiltJson);
-            lastKnownSavedAtRef.current = rebuiltAt;
-          } catch (e) { storageErrors.push("rebuild-after-recovery: " + (e?.message || e)); }
-          if (recoverySource === "last-known-good" || recoverySource === "auto-backup") {
-            // A genuine "this would have been gone" automatic recovery — a small non-blocking heads-up,
-            // never a forced trip to the manual restore screen (spec: automatic recovery, no modal spam).
-            setAutoRecoveryToast("♻️ กู้คืนข้อมูลล่าสุดให้อัตโนมัติแล้ว");
-            setTimeout(() => setAutoRecoveryToast(null), 5000);
-          }
+        // v1.11.41 (Section A1: "after loading the winner, synchronize/repair the other store from it") —
+        // always resync both bg-v11 (primary+mirror) and LKG to the winning state's savedAt, not just when
+        // recoverySource came from LKG/Auto-Backup as before — closes the gap even in the primary-vs-mirror
+        // case (e.g. primary won but mirror was stale) instead of leaving it to the next normal save.
+        recoveryAction = recoverySource !== "primary" ? (recoveryAction === "none" ? ("rebuilt-from-" + recoverySource) : recoveryAction) : "resynced-mirror";
+        try {
+          const rebuiltAt = Date.now();
+          const rebuiltJson = JSON.stringify({ ...finalState, savedAt: rebuiltAt });
+          await window.storage.set("bg-v11", rebuiltJson);
+          await window.storage.set(LKG_KEY, rebuiltJson);
+          lastKnownSavedAtRef.current = rebuiltAt;
+        } catch (e) { storageErrors.push("rebuild-after-recovery: " + (e?.message || e)); }
+        if (recoverySource === "last-known-good" || recoverySource === "auto-backup") {
+          // A genuine "this would have been gone" automatic recovery — a small non-blocking heads-up,
+          // never a forced trip to the manual restore screen (spec: automatic recovery, no modal spam).
+          setAutoRecoveryToast("♻️ กู้คืนข้อมูลล่าสุดให้อัตโนมัติแล้ว");
+          setTimeout(() => setAutoRecoveryToast(null), 5000);
         }
       } else {
         // Nothing recoverable anywhere. Do NOT assume "new install" just because bg-v11 is missing —
@@ -3296,9 +3480,23 @@ export default function App() {
         const list = bl?.value ? JSON.parse(bl.value) : [];
         setBootLog(Array.isArray(list) ? list : []);
       } catch (e) {}
+      // v1.11.41 (Section C): lightweight, non-PII boot diagnostics — reason codes match the spec exactly
+      // (newer-valid-state / primary-only-valid / mirror-only-valid / meaningful-state-protection /
+      // fallback-lkg / fallback-auto-backup), plus "new-install"/"recovery-required" when nothing validated.
+      const diagReason = chosenReason || (bootStatusResult === "new-install" ? "new-install" : bootStatusResult === "recovery-required" ? "recovery-required" : "unknown");
+      try {
+        console.log(
+          "[BADQ STORAGE]",
+          "Primary valid:", primaryValid, "Primary savedAt:", primarySavedAtDiag,
+          "Mirror valid:", mirrorValid, "Mirror savedAt:", mirrorSavedAtDiag,
+          "Chosen source:", recoverySource, "Chosen savedAt:", loadedSavedAt,
+          "Reason:", diagReason
+        );
+      } catch (e) {}
       pushBootLog({
-        event: "boot", appVersion: APP_VERSION, bootStatus: bootStatusResult, recoverySource, recoveryAction,
-        primaryFound, primaryValid, mirrorFound, lastKnownGoodFound, autoBackupFound,
+        event: "boot", appVersion: APP_VERSION, bootStatus: bootStatusResult, recoverySource, recoveryAction, reason: diagReason,
+        primaryFound, primaryValid, primarySavedAt: primarySavedAtDiag, mirrorFound, mirrorValid, mirrorSavedAt: mirrorSavedAtDiag,
+        lastKnownGoodFound, autoBackupFound,
         recoveredPlayerCount, recoveredHistoryCount, loadedSavedAt,
         playerCount: recoveredPlayerCount, sessionHistoryCount: recoveredHistoryCount, corrupted, // legacy field names, kept so older boot-log entries/consumers read consistently
         saveBlockedDuringBoot: bootStatusResult === "recovery-required",
@@ -4297,7 +4495,18 @@ export default function App() {
       // "simple"/"perPerson" sessions get [] here, identical to every session before this feature existed.
       // v1.11.34 (spec 6.4/6.5): plus one "ค่ารางวัล" line per physical/cash reward actually distributed
       // this session (discount-type rewards excluded — see computeRewardExpenses).
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      // v1.11.41: `totalMatches` (computed above, the SAME authoritative match count used for stats) is
+      // threaded in as the "shuttlecocks used" count for the new cost/tube auto-expense line (see
+      // computeCostModelExpenses/shuttleLine) — no new manual field.
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      // v1.11.41 (spec D/E): ลูกแบด revenue (used × ราคาขาย/ลูก) is computed ONCE here, at finalization, and
+      // frozen — later Settings changes must never retroactively change an already-archived session's
+      // numbers (spec section E). `shuttleEcoSnapshot` freezes the pricing that was actually in effect, for
+      // transparency/audit; `shuttlecockRevenue` is the frozen number every P&L view reads (sessionProfit/
+      // computeFinanceForRange) — kept OUT of `bill`/sessionRevenue so per-player payment tracking
+      // (collected/receivable) is completely untouched by this feature, per explicit organizer decision.
+      shuttleEcoSnapshot: { ...(settings.shuttleEco || {}) },
+      shuttlecockRevenue: computeShuttleEcoFinance(settings.shuttleEco, totalMatches).revenue,
     };
     setSessionHistory((prev) => [snapshot, ...prev]);
     // จบก๊วน also clears everyone's attendance back to "ไม่ได้มา" — the next session starts from a
@@ -4871,7 +5080,7 @@ export default function App() {
           <div style={{ background: "#eaf3ff", border: "1px solid #a9cdf0", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "center", gap: 9 }}>
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>🔄</span>
             <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700 }}>มีเวอร์ชั่นใหม่ (v{updateAvailable}) พร้อมใช้งาน</div>
-            <button onClick={applyUpdateNow} style={{ flexShrink: 0, padding: "7px 13px", borderRadius: 9, background: T.blue, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>อัปเดตเลย</button>
+            <button onClick={applyUpdateNow} style={{ flexShrink: 0, padding: "7px 13px", borderRadius: 9, background: T.blue, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>อัปเดตตอนนี้</button>
           </div>
         )}
 
@@ -8274,6 +8483,22 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
             </div>
           )}
 
+          {/* v1.11.41: ต้นทุน/ราคาขายลูกแบดต่อลูก — independent of costModel (always shown here, not gated
+              behind a specific model like the legacy "จำนวนลูก/ราคา-ลูก" block above). Configuring this
+              supersedes that legacy manual line for the auto-expense calculation (see computeCostModelExpenses)
+              so the two never double-file "ค่าลูกแบต"; it stays fully separate from "ค่าลูก/เกม" above (the
+              flat per-game charge billed to players) by explicit design — no automatic interaction between them. */}
+          <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+            <Label>ต้นทุน/ราคาขายลูกแบด (คำนวณอัตโนมัติจากจำนวนเกมที่เล่นจริง)</Label>
+            <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+              <NumField label="ต้นทุนลูกแบดต่อกระบอก (฿)" value={settings.shuttleEco?.costPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), costPerTube: v } }))} />
+              <NumField label="จำนวนลูกต่อกระบอก" value={settings.shuttleEco?.shuttlesPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), shuttlesPerTube: v } }))} />
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <NumField label="ราคาขายต่อลูก (฿)" value={settings.shuttleEco?.sellingPricePerShuttle || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), sellingPricePerShuttle: v } }))} />
+            </div>
+            <div style={{ fontSize: 11.5, color: T.muted }}>ต้นทุนต่อลูก: {shuttleCostPerUnit(settings.shuttleEco).toFixed(2)} บาท — คำนวณจากจำนวนแมตช์ที่จบจริงในก๊วน (ไม่ต้องกรอกจำนวนลูกที่ใช้เอง)</div>
+          </div>
           <div style={{ marginBottom: 16 }}><NumField label="อื่น ๆ ที่เรียกเก็บรวม (หารเท่ากัน) (฿)" value={settings.other || 0} onChange={(v) => setSettings((s) => ({ ...s, other: v }))} /></div>
           <Label>QR รับเงิน</Label>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
@@ -8847,6 +9072,7 @@ function HistoricalDetail({ s, rewardHistory, toggleHistoricalPaid, onDelete, op
         <BillRow label="รายได้ (ยอดเรียกเก็บ)" v={grandTotal} kind="revenue" />
         <BillRow label="รับแล้วจริง" v={collected} kind="revenue" />
         <BillRow label="ค้างรับ" v={receivable} kind="revenue" />
+        {sessionShuttlecockRevenue(s) > 0 && <BillRow label="รายได้ค่าลูกแบด" v={sessionShuttlecockRevenue(s)} kind="revenue" />}
         <BillRow label="ค่าใช้จ่ายรวม" v={expenseTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
           <span>{profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"}</span>
@@ -8886,6 +9112,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
         <BillRow label="ยอดเรียกเก็บ" v={revenue} kind="revenue" />
         <BillRow label="รับจริง" v={collected} kind="revenue" />
         <BillRow label="ค้างรับ" v={receivable} kind="revenue" />
+        {sessionShuttlecockRevenue(s) > 0 && <BillRow label="รายได้ค่าลูกแบด" v={sessionShuttlecockRevenue(s)} kind="revenue" />}
       </div>
 
       <SectionHead icon={<Wallet size={16} color={T.accent} />} title="ค่าใช้จ่าย" sub="แก้ไขได้" />
@@ -8998,7 +9225,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
                 <DayChipRow dates={datesInDayYm} selected={effectiveDate} onSelect={setSelectedDate} />
                 <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>{fmtThaiDateFull(effectiveDate)}</div>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinanceGroupsList title="ก๊วนในวันนี้" sessions={f.sessionsInRange} onOpen={setOpenId} />
                 {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในวันนี้" tournaments={f.tournamentsInRange} />}
@@ -9023,7 +9250,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
             return (
               <>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinancePerformanceList title="ผลประกอบการรายวัน" rows={days.map((d) => ({ key: d.date, label: fmtThaiMonthDay(d.date), count: d.sessionCount, profit: d.profit }))} onPick={goDay} />
                 {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในเดือนนี้" tournaments={f.tournamentsInRange} />}
@@ -9050,7 +9277,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
             return (
               <>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinancePerformanceList title="ผลประกอบการรายเดือน" rows={months.map((m) => ({ key: m.ym, label: fmtThaiMonthLabel(m.ym), count: null, profit: m.profit }))} onPick={goMonth} />
                 {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในช่วงนี้" tournaments={f.tournamentsInRange} />}
@@ -9588,7 +9815,13 @@ function FinanceSummaryCard({ revenue, expense, profit }) {
 }
 
 // สรุปกำไรขาดทุน — same P&L shape at every period level (Requirement 5/7/10), one shared renderer
-function FinancePL({ sessionRevenueTotal, otherIncomeTotal, tournamentIncomeTotal, catTotals, expense, profit }) {
+function FinancePL({ sessionRevenueTotal, otherIncomeTotal, tournamentIncomeTotal, shuttlecockRevenueTotal, catTotals, expense, profit }) {
+  // v1.11.41: the "ค่าลูกแบต" expense category already flows through catTotals below (same category string
+  // the legacy shuttleCalc line always used — see computeCostModelExpenses) — reused here (not re-summed
+  // separately) so this ONE number always matches what's shown/exported in the expense breakdown too.
+  const shuttleExpenseTotal = catTotals["ค่าลูกแบต - ก๊วนแบต"] || 0;
+  const shuttleRevOrExp = (shuttlecockRevenueTotal || 0) > 0 || shuttleExpenseTotal > 0;
+  const shuttleProfit = (shuttlecockRevenueTotal || 0) - shuttleExpenseTotal;
   return (
     <>
       <SectionHead title="สรุปกำไรขาดทุน" />
@@ -9599,11 +9832,20 @@ function FinancePL({ sessionRevenueTotal, otherIncomeTotal, tournamentIncomeTota
             computeFinanceForRange, so this component only renders — it never re-sorts or re-labels. */}
         <BillRow label="รายได้จากการจัดก๊วน" v={sessionRevenueTotal} kind="revenue" />
         {tournamentIncomeTotal > 0 && <BillRow label="รายได้จากการจัด Tournament" v={tournamentIncomeTotal} kind="revenue" />}
+        {/* v1.11.41: ต้นทุน/ราคาขายลูกแบดต่อลูก — a NEW, separate revenue line (never folded into "ค่าก๊วน"
+            or the flat ค่าลูก/เกม player charge above it) per explicit organizer decision. */}
+        {shuttlecockRevenueTotal > 0 && <BillRow label="รายได้ค่าลูกแบด" v={shuttlecockRevenueTotal} kind="revenue" />}
         <BillRow label="รายได้อื่น" v={otherIncomeTotal} kind="revenue" />
         <div style={{ height: 4 }} />
         {Object.keys(catTotals).length === 0
           ? <div style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>ไม่มีค่าใช้จ่ายในช่วงนี้</div>
           : Object.entries(catTotals).map(([cat, amt]) => <BillRow key={cat} label={`หัก ${cat}`} v={-amt} kind="expense" />)}
+        {shuttleRevOrExp && (
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, fontWeight: 700, padding: "3px 0" }}>
+            <span>{shuttleProfit >= 0 ? "กำไรจากลูกแบด" : "ขาดทุนจากลูกแบด"}</span>
+            <span style={{ color: shuttleProfit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(shuttleProfit))}</span>
+          </div>
+        )}
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700, padding: "3px 0", borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 6 }}>
           <span>ค่าใช้จ่ายรวม</span><span style={{ color: T.accent }}>{formatCurrency(-expense)}</span>
         </div>
@@ -9624,7 +9866,7 @@ function FinanceGroupsList({ title, sessions, onOpen }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
         {sessions.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีก๊วนในวันนี้</div> :
           sessions.map((s) => {
-            const rev = sessionRevenue(s), exp = sessionExpenseTotal(s), prof = sessionProfit(s);
+            const rev = sessionRevenue(s) + sessionShuttlecockRevenue(s), exp = sessionExpenseTotal(s), prof = sessionProfit(s);
             return (
               <button key={s.id} onClick={() => onOpen(s.id)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
                 <span style={{ flex: 1, minWidth: 0 }}>

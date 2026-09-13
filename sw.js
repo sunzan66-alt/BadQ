@@ -1,7 +1,7 @@
 // BadQ service worker — enables offline use.
 // Bump CACHE_NAME (kept in lockstep with APP_VERSION) on every deploy so old shells are dropped
 // automatically; the app itself already handles cache-busted reloads when a new version is live.
-const CACHE_NAME = "badq-cache-v1.11.40";
+const CACHE_NAME = "badq-cache-v1.11.41";
 const SHELL_URL = self.registration.scope; // e.g. https://<user>.github.io/BadQ/ — the app's own index.html
 const ASSETS = [
   SHELL_URL,
@@ -13,6 +13,12 @@ const ASSETS = [
 ];
 
 self.addEventListener("install", (event) => {
+  // v1.11.41 (Section B): the new worker now INSTALLS AND WAITS — it no longer calls self.skipWaiting()
+  // automatically here. Auto-skipWaiting() meant a new deploy could silently take over every open tab's
+  // network layer the moment the browser finished a background update check, with no user consent and no
+  // relation to the app's own "tap to update" banner — exactly the "unintended automatic takeover" the
+  // spec calls out. It now activates ONLY in response to an explicit SKIP_WAITING message (see the
+  // "message" listener below), sent ONLY from applyUpdateNow() after the user taps "อัปเดตตอนนี้".
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) =>
       Promise.all(
@@ -22,11 +28,26 @@ self.addEventListener("install", (event) => {
             .catch(() => {}) // missing/unreachable asset must never block install — offline still works for what did cache
         )
       )
-    ).then(() => self.skipWaiting())
+    )
   );
 });
 
+// v1.11.41 (Section B2/B4): the ONLY trigger for self.skipWaiting() — fired exclusively by
+// applyUpdateNow() in BadmintonOrganizer.jsx after the user explicitly taps "อัปเดตตอนนี้" (and only after
+// that flow has already safe-saved the latest state to Mirror/Primary/LKG). No other code path in this
+// file calls skipWaiting(), so a new deploy can never activate itself without that explicit user action.
+self.addEventListener("message", (event) => {
+  if (event.data && event.data.type === "SKIP_WAITING") self.skipWaiting();
+});
+
 self.addEventListener("activate", (event) => {
+  // clients.claim() here is safe/appropriate under this controlled-update design: by the time "activate"
+  // fires, skipWaiting() has already only ever been called in direct response to the user's explicit
+  // update tap (see above), so claiming clients now is part of that SAME already-consented handoff, not a
+  // surprise takeover — and the app is about to reload anyway once controllerchange fires. Cache cleanup
+  // below only ever touches this Cache Storage entry (STATIC ASSETS ONLY, by CACHE_NAME) — it must never
+  // and does never touch IndexedDB/localStorage/any application data; Service Worker cache and app data
+  // are two completely separate storage systems.
   event.waitUntil(
     caches.keys()
       .then((names) => Promise.all(names.filter((n) => n !== CACHE_NAME).map((n) => caches.delete(n))))
