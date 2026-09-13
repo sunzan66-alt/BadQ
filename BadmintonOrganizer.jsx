@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.36";
+const APP_VERSION = "1.11.37";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -3683,11 +3683,12 @@ export default function App() {
     const nm = buildMatch(order, mode, lockPairs, base, stats);
     return nm ? { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false } : emptyRecord();
   };
-  // v1.11.27: explicit request — "เมื่อสถานะเป็นกำลังเล่น ให้เพิ่มเกมถัดไปของสนามนั้น" (the moment a court
-  // starts playing, add a "เกมต่อไป" row for that SAME court right away) — lets the organizer prep who
-  // plays next on a court WHILE its current match is still going, as an ordinary table row (no separate
-  // widget). At most one "next" companion ever exists per court (see unstartMatch/finishAndAdvance for how
-  // it's removed/consumed) so this only creates one if that court doesn't already have one.
+  // v1.11.27 introduced auto-spawning a "เกมต่อไป" companion for a court the moment it started playing.
+  // v1.11.37 REMOVES that auto-spawn per explicit request — after real-world use, having a new upcoming-game
+  // row appear on its own (on top of whatever the organizer already added via "+ เพิ่มแมชใหม่") made the
+  // table noisier than intended. Starting a game now ONLY flips its own status; every upcoming game from
+  // here on is created solely by the organizer's own "+ เพิ่มแมชใหม่" tap (see addExtraMatch/fillCourt).
+  // buildFreshNextRecord is kept (unused for now) rather than deleted, in case this is wanted back.
   // v1.11.7 (Part L): stamp startedAt/finishedAt so a future averageMatchMinutes calculation (Part L —
   // simple historical average, no ML) has real elapsed time to work from. Purely additive: nothing reads
   // these two fields anywhere in existing pairing/scoring/finance logic.
@@ -3701,11 +3702,7 @@ export default function App() {
       alert("สนามนี้กำลังเล่นอยู่ — รอให้เกมปัจจุบันจบก่อน แล้วค่อยกดเริ่มเกมคู่นี้");
       return;
     }
-    const updated = current.map((x) => (x.id === mid ? { ...x, status: "playing", startedAt: Date.now() } : x));
-    if (current.some((c) => c.id !== mid && c.court === m.court && c.status === "next")) { setCurrent(updated); return; }
-    const seq = roundNo + 1;
-    const fresh = buildFreshNextRecord(m.court, updated, seq);
-    if (fresh) { setCurrent([...updated, fresh]); setRoundNo(seq); } else setCurrent(updated);
+    setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "playing", startedAt: Date.now() } : x)));
   };
   const endGame = (mid) => {
     const m = current.find((x) => x.id === mid);
@@ -3827,17 +3824,11 @@ export default function App() {
   // fully reserved (reservedIdsFromCurrent/inPlay/waitQueue all key off ANY current-array membership,
   // regardless of status, so nothing else needs to change for that). "กำลังเล่น" resumes it.
   const pauseMatch = (mid) => setCurrent((prev) => prev.map((m) => (m.id === mid ? { ...m, status: "paused" } : m)));
-  // v1.11.27: resuming should almost never need to create a companion (one was already made when this
-  // court first started playing — see startGame) — the defensive check just protects an old saved session
-  // that got paused before this feature existed.
+  // v1.11.37: no longer spawns a companion on resume either — see startGame's note above, same removal.
   const resumeMatch = (mid) => {
     const m = current.find((x) => x.id === mid && x.status === "paused");
     if (!m) return;
-    const updated = current.map((x) => (x.id === mid ? { ...x, status: "playing" } : x));
-    if (current.some((c) => c.id !== mid && c.court === m.court && c.status === "next")) { setCurrent(updated); return; }
-    const seq = roundNo + 1;
-    const fresh = buildFreshNextRecord(m.court, updated, seq);
-    if (fresh) { setCurrent([...updated, fresh]); setRoundNo(seq); } else setCurrent(updated);
+    setCurrent((prev) => prev.map((x) => (x.id === mid ? { ...x, status: "playing" } : x)));
   };
   // organizer picked "เกมต่อไป" on a court that had already started (playing/paused) — un-starts it back to
   // a paired-not-started match on the SAME court, no stats touched (games are only ever counted at finish).
@@ -3858,8 +3849,8 @@ export default function App() {
   // organizer picked a status on an ALREADY-ARCHIVED (history[]) match via the dropdown — pulls it back into
   // `current` on its original court. Blocked (with an explanation) if another live match already sits on
   // that court, since — unlike the สนาม dropdown's swap-on-conflict — there's no live match here yet to swap
-  // court numbers WITH; the organizer resolves it by moving the occupant first. v1.11.27: reopening straight
-  // into "กำลังเล่น" also spawns that court's "next" companion, same as starting any other match.
+  // court numbers WITH; the organizer resolves it by moving the occupant first. v1.11.37: reopening straight
+  // into "กำลังเล่น" no longer spawns a companion either — see startGame's note, same removal.
   const reopenMatch = (mid, newStatus) => {
     const m = history.find((x) => x.id === mid);
     if (!m) return;
@@ -3869,16 +3860,9 @@ export default function App() {
     }
     const st = newStatus === "paused" ? "paused" : newStatus === "playing" ? "playing" : "next";
     const revived = { ...m, status: st, finishedAt: null, startedAt: st === "playing" ? Date.now() : null };
-    let updated = [...current, revived].sort((a, b) => a.court - b.court);
-    let seq = roundNo;
-    if (st === "playing") {
-      seq = roundNo + 1;
-      const fresh = buildFreshNextRecord(m.court, updated, seq);
-      if (fresh) updated = [...updated, fresh]; else seq = roundNo;
-    }
+    const updated = [...current, revived].sort((a, b) => (a.court ?? Infinity) - (b.court ?? Infinity));
     setHistory((prev) => prev.filter((x) => x.id !== mid));
     setCurrent(updated);
-    if (seq !== roundNo) setRoundNo(seq);
   };
   // v1.11.24: single dispatcher behind the unified สถานะ dropdown — maps (current status -> requested
   // status) onto whichever of the handlers above actually applies; a combination with no sensible meaning
@@ -3986,9 +3970,12 @@ export default function App() {
     setSel(null);
   };
 
-  // v1.11.32: "+ เพิ่มแมชใหม่" — explicit request for a button at the bottom of the table to add ONE more
-  // "เกมต่อไป" row for hand-picking, on demand, beyond whatever each court's own auto-spawned companion
-  // already covers (see buildFreshNextRecord/startGame — those cap at one companion per court).
+  // v1.11.32: "+ เพิ่มแมชใหม่" — explicit request for a button at the bottom of the table to add a new
+  // "เกมต่อไป" row for hand-picking, on demand.
+  // v1.11.37: this is now the ONLY way an upcoming ("next") row gets created. startGame/resumeMatch/
+  // reopenMatch no longer auto-spawn a companion row for the court being started — the organizer must
+  // press this button explicitly whenever another upcoming game is wanted (buildFreshNextRecord is kept,
+  // unused by those three functions now, as the shared row-builder this button still calls via fillCourt).
   // v1.11.36 REDESIGN (real-world testing feedback): this used to immediately claim whichever court didn't
   // have a "next" row yet (or fell back to court 1) — i.e. a court was picked before any player was even
   // selected, and one fixed row got generated per court. Player matchmaking and court assignment must be
@@ -6415,8 +6402,8 @@ function SessionTab(props) {
         {finishedShown.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
         {liveOrdered.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
         {empties.map(EmptyRow)}
-        {/* v1.11.32: "+ เพิ่มแมชใหม่" — explicit request for a way to add an extra "เกมต่อไป" row to
-            hand-pick beyond each court's own auto-spawned companion; see addExtraMatch above. */}
+        {/* v1.11.32: "+ เพิ่มแมชใหม่" — a way to add an extra "เกมต่อไป" row to hand-pick, on demand.
+            v1.11.37: this button is now the ONLY way a new upcoming row gets created; see addExtraMatch above. */}
         {started && (
           <button onClick={addExtraMatch} style={{ width: "100%", minWidth: TABLE_MIN_WIDTH, padding: "10px 0", background: "none", border: "none", borderTop: `1px dashed ${T.border}`, color: T.accent, fontSize: 12.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
             <Plus size={14} /> เพิ่มแมชใหม่
