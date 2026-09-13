@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.38";
+const APP_VERSION = "1.11.39";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -3903,14 +3903,23 @@ export default function App() {
   // court-name dropdown on a LIVE row: swap-on-conflict (per explicit request) — if the chosen court
   // already has another live match, the two simply trade courts; otherwise this match just moves there,
   // freeing its old court.
+  // v1.11.39 (real-world testing feedback): that swap must never touch an occupant that's actually
+  // PLAYING/PAUSED right now — those players are physically on that real court already, so relabeling
+  // their row's court out from under them (e.g. to whatever court-less/"เลือกสนาม" value the OTHER row
+  // happened to have) is never correct, only ever an accidental side effect of picking a court for some
+  // unrelated upcoming game. Only two not-yet-started "next" rows (a label, not a physical occupancy) ever
+  // trade court numbers here now. Against a live occupant, the row being assigned simply takes the same
+  // court number too — it just queues behind that match (status is untouched here, so it stays "next"/
+  // เกมต่อไป — see busyCourt/canStart above, which already keep it from starting until that court frees up).
   const reassignCourt = (mid, newCourt) => {
     setCurrent((prev) => {
       const target = prev.find((m) => m.id === mid);
       if (!target || target.court === newCourt) return prev;
       const occupant = prev.find((m) => m.court === newCourt && m.id !== mid);
+      const canSwap = occupant && occupant.status !== "playing" && occupant.status !== "paused";
       return prev.map((m) => {
         if (m.id === mid) return { ...m, court: newCourt };
-        if (occupant && m.id === occupant.id) return { ...m, court: target.court };
+        if (canSwap && m.id === occupant.id) return { ...m, court: target.court };
         return m;
       });
     });
