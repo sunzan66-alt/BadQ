@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.39";
+const APP_VERSION = "1.11.40";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -62,6 +62,12 @@ const T = {
   bg: "#f3f6f4", surface: "#ffffff", surface2: "#eef2f0", border: "#dde5e1",
   text: "#16241d", muted: "#6b7d74", accent: "#ef5a44", green: "#12986a", blue: "#2563eb", amber: "#d97706",
 };
+// v1.11.40: subtle Team A/B background tint for player cards (see TeamSide) — explicit request so
+// teammates stay visually identifiable even after scrolling past the ทีม A/ทีม B table header on mobile.
+// Deliberately faint (~5-10% tint over T.surface2, the flat color these replace) so it never competes with
+// the existing skill-level colors, handedness colors, or the "selected" highlight (#e2f5ec) — those are
+// left completely untouched; only the neutral card background itself changes.
+const TEAM_BG = { A: "#eaf2fb", B: "#eaf8f0" };
 const STATUS = {
   next: { label: "เกมต่อไป", color: "#2563eb", bg: "#e7effd" },
   playing: { label: "กำลังเล่น", color: "#12986a", bg: "#e2f5ec" },
@@ -355,7 +361,12 @@ const OWNER_PENALTY = 1000;
 // well under pRep's weight so it only breaks ties among otherwise-similar combinations — never overrides
 // balance/partner-repeat/opponent-repeat/wait/hand-pref/owner, per explicit "soft preference only" spec.
 const LATEST_TEAMMATE_PENALTY = 1.5;
-function buildMatch(pool, mode, lockPairs, players, stats, latestPartnerMap) {
+// v1.11.40: "อย่าเจอคู่แข่งคนเดิมจากเกมล่าสุด" — same idea as LATEST_TEAMMATE_PENALTY but for OPPONENTS
+// instead of teammates, and deliberately weighted lighter: facing the same person again right away reads
+// as much less repetitive than partnering with them again right away, and this must still never outweigh
+// the existing aggregate oRep*1.2 term or any of balance/lock/hand-pref/owner — soft tie-breaker only.
+const LATEST_OPPONENT_PENALTY = 0.75;
+function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
   const need = mode === "doubles" ? 4 : 2;
   if (pool.length < need) return null;
   const w = (id) => players.find((p) => p.id === id)?.skillIndex || 0;
@@ -365,9 +376,14 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestPartnerMap) {
   const idxOf = (id) => win.indexOf(id);
   const pc = (a, b) => stats.partner[keyOf(a, b)] || 0;
   const oc = (a, b) => stats.opp[keyOf(a, b)] || 0;
-  // v1.11.36: true only when a/b were EACH OTHER's own most recent teammate (see buildLatestPartnerMap) —
-  // optional param, so every existing caller that doesn't pass it keeps behaving exactly as before.
-  const latestRep = (a, b) => (latestPartnerMap && (latestPartnerMap[a] === b || latestPartnerMap[b] === a)) ? LATEST_TEAMMATE_PENALTY : 0;
+  // v1.11.36/v1.11.40: true only when a/b were EACH OTHER's own most recent teammate/opponent (see
+  // buildLatestPartnerMap) — `latestMap` is an optional {partnerOf, opponentsOf} param, so every existing
+  // caller that doesn't pass it keeps behaving exactly as before (both default to {}, so both lookups
+  // just miss and contribute 0 penalty).
+  const partnerOf = (latestMap && latestMap.partnerOf) || {};
+  const opponentsOf = (latestMap && latestMap.opponentsOf) || {};
+  const latestTeammatePen = (a, b) => (partnerOf[a] === b || partnerOf[b] === a) ? LATEST_TEAMMATE_PENALTY : 0;
+  const latestOpponentPen = (a, b) => ((opponentsOf[a] || []).includes(b) || (opponentsOf[b] || []).includes(a)) ? LATEST_OPPONENT_PENALTY : 0;
 
   if (mode === "singles") {
     let best = null;
@@ -376,7 +392,7 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestPartnerMap) {
       const r = ruleBetween(lockPairs, anchor, o);
       if (r && (r.type === "avoidOpponent" || r.type === "avoidBoth")) continue; // hard filter: never face / never meet
       const ownerPenalty = OWNER_PENALTY * ((isOwner(anchor) ? 1 : 0) + (isOwner(o) ? 1 : 0));
-      const score = Math.abs(w(anchor) - w(o)) * 2 + oc(anchor, o) * 3 + idxOf(o) * 0.6 + ownerPenalty;
+      const score = Math.abs(w(anchor) - w(o)) * 2 + oc(anchor, o) * 3 + idxOf(o) * 0.6 + ownerPenalty + latestOpponentPen(anchor, o);
       if (!best || score < best.score) best = { score, teamA: [anchor], teamB: [o] };
     }
     return best;
@@ -428,7 +444,10 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestPartnerMap) {
       const oRep = oc(A[0], B[0]) + oc(A[0], B[1]) + oc(A[1], B[0]) + oc(A[1], B[1]);
       const waitPen = idxOf(trio[0]) + idxOf(trio[1]) + idxOf(trio[2]);
       const handPen = handPrefNudge(A[0], A[1]) + handPrefNudge(B[0], B[1]);
-      const latestPen = latestRep(A[0], A[1]) + latestRep(B[0], B[1]);
+      // v1.11.40: teammate-repeat penalty (intra-team pairs) unchanged from v1.11.36; opponent-repeat is the
+      // NEW part — checked across all 4 cross-team pairs, same as how oRep above sums the aggregate version.
+      const latestPen = latestTeammatePen(A[0], A[1]) + latestTeammatePen(B[0], B[1])
+        + latestOpponentPen(A[0], B[0]) + latestOpponentPen(A[0], B[1]) + latestOpponentPen(A[1], B[0]) + latestOpponentPen(A[1], B[1]);
       const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4 + handPen + ownerPenalty + latestPen;
       if (!best || score < best.score) best = { score, teamA: A, teamB: B };
     }
@@ -479,24 +498,34 @@ function reservedIdsFromCurrent(matches) {
 // completed/in-progress match matters, per explicit "LATEST relevant match only" requirement). Scans
 // newest-first: any match currently "playing"/"paused" right now is more recent than anything in history
 // (history[] is itself oldest-first — appended to on every finish — so it's walked from the end backward).
-// The FIRST time a player is seen fixes their latest match's partner for good in this pass; everything
-// scanned after that for the same player is strictly older and ignored. A "next" (not-yet-started) row is
-// never considered here — it hasn't actually been played yet, so it can't be anyone's "latest game".
-// Singles teams are single-player arrays, so a singles match naturally yields partner: null for everyone.
+// The FIRST time a player is seen fixes their latest match's partner/opponents for good in this pass;
+// everything scanned after that for the same player is strictly older and ignored. A "next" (not-yet-
+// started) row is never considered here — it hasn't actually been played yet, so it can't be anyone's
+// "latest game". Singles teams are single-player arrays, so a singles match naturally yields partner: null
+// (no teammate) and a single opponent for everyone.
+// v1.11.40: now returns BOTH `partnerOf` (unchanged from v1.11.36) and `opponentsOf` (new — the other
+// team's player ids from that same latest match) so callers can detect "recent opponent" too, not just
+// "recent teammate". Both are filled in the SAME pass per player so they always describe the same match.
 function buildLatestPartnerMap(history, current) {
-  const map = {};
+  const partnerOf = {};
+  const opponentsOf = {};
   const consider = (m) => {
-    for (const team of [m.teamA, m.teamB]) {
+    const teams = [
+      [m.teamA, m.teamB],
+      [m.teamB, m.teamA],
+    ];
+    for (const [team, oppTeam] of teams) {
       if (!team) continue;
       for (const pid of team) {
-        if (!pid || Object.prototype.hasOwnProperty.call(map, pid)) continue;
-        map[pid] = team.find((x) => x && x !== pid) || null;
+        if (!pid || Object.prototype.hasOwnProperty.call(partnerOf, pid)) continue;
+        partnerOf[pid] = team.find((x) => x && x !== pid) || null;
+        opponentsOf[pid] = (oppTeam || []).filter(Boolean);
       }
     }
   };
   (current || []).filter((m) => m.status === "playing" || m.status === "paused").forEach(consider);
   for (let i = (history || []).length - 1; i >= 0; i--) consider(history[i]);
-  return map;
+  return { partnerOf, opponentsOf };
 }
 // promotes a court's prepared queued match into the live "next" slot (paired, awaiting manual เริ่มเกม —
 // same status/flow as an auto-paired match) instead of running fresh auto-pairing — used by both
@@ -3956,9 +3985,9 @@ export default function App() {
     const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...others]);
-    const latestPartnerMap = buildLatestPartnerMap(history, others); // v1.11.36: soft "don't repeat latest teammate" nudge
+    const latestMap = buildLatestPartnerMap(history, others); // v1.11.36/v1.11.40: soft "don't repeat latest teammate/opponent" nudge
     const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
-    const nm = buildMatch(order, mode, lockPairs, base, stats, latestPartnerMap);
+    const nm = buildMatch(order, mode, lockPairs, base, stats, latestMap);
     if (!nm) return;
     setCurrent((prev) => prev.map((c) => (c.id === mid ? { ...c, teamA: nm.teamA, teamB: nm.teamB } : c)));
     setSel(null);
@@ -3978,9 +4007,9 @@ export default function App() {
     const reserved = reservedIdsFromCurrent(current); // excludes players queued into any court's next match too
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...current]);
-    const latestPartnerMap = buildLatestPartnerMap(history, current); // v1.11.36: soft "don't repeat latest teammate" nudge
+    const latestMap = buildLatestPartnerMap(history, current); // v1.11.36/v1.11.40: soft "don't repeat latest teammate/opponent" nudge
     const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
-    const nm = buildMatch(order, mode, lockPairs, base, stats, latestPartnerMap);
+    const nm = buildMatch(order, mode, lockPairs, base, stats, latestMap);
     if (!nm) return;
     const nc = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
     setCurrent((prev) => [...prev, nc].sort(byCourt));
@@ -4031,11 +4060,11 @@ export default function App() {
     const used = new Set(fixed.flatMap((c) => [...c.teamA, ...c.teamB].filter(Boolean)));
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...fixed]);
-    const latestPartnerMap = buildLatestPartnerMap(history, fixed); // v1.11.36: soft "don't repeat latest teammate" nudge
+    const latestMap = buildLatestPartnerMap(history, fixed); // v1.11.36/v1.11.40: soft "don't repeat latest teammate/opponent" nudge
     const out = current.map((c) => {
       if (c.status !== "next" || c.locked) return c;
       const order = base.filter((p) => p.status === "ready" && !p.archived && !used.has(p.id)).sort(SORT);
-      const nm = buildMatch(order, mode, lockPairs, base, stats, latestPartnerMap);
+      const nm = buildMatch(order, mode, lockPairs, base, stats, latestMap);
       if (!nm) return c;
       [...nm.teamA, ...nm.teamB].filter(Boolean).forEach((id) => used.add(id));
       return { ...c, teamA: nm.teamA, teamB: nm.teamB };
@@ -6085,9 +6114,10 @@ function SessionTab(props) {
     merged.sort((a, b) => rank(a) - rank(b) || (a.round ?? 0) - (b.round ?? 0) || (a.court ?? Infinity) - (b.court ?? Infinity));
     return merged.map((m, i) => ({ m, no: i + 1, done: historySet.has(m) }));
   }, [history, current]);
-  // v1.11.36: "same teammate as the latest game" — see buildLatestPartnerMap; used only to render the
-  // non-blocking ⚠️ warning badge below (MatchRow), the actual soft-pairing nudge lives in buildMatch itself.
-  const latestPartnerMap = useMemo(() => buildLatestPartnerMap(history, current), [history, current]);
+  // v1.11.36/v1.11.40: "same teammate/opponent as the latest game" — see buildLatestPartnerMap; used only
+  // to render the non-blocking ⚠️ warning badge below (MatchRow), the actual soft-pairing nudge lives in
+  // buildMatch itself.
+  const latestMap = useMemo(() => buildLatestPartnerMap(history, current), [history, current]);
   const finishedOrdered = orderedMatches.filter((x) => x.done);
   const liveOrdered = orderedMatches.filter((x) => !x.done);
   // same cap the old ประวัติแมตช์ accordion used (HISTORY_PAGE) — keeps a long day's match log from
@@ -6136,12 +6166,29 @@ function SessionTab(props) {
     // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
     const noCourt = !done && st === "next" && m.court == null;
     const canStart = !done && st === "next" && startReady(m) && !busyCourt && !noCourt;
-    // v1.11.36: non-blocking "same teammate as the latest game" warning — pure display, computed fresh from
-    // this row's current team composition; covers manual AND automatic selection alike since it doesn't
-    // care how the teams got filled. Doubles only (a singles team has no "teammate").
-    const repeatsLatest = (team) => mode === "doubles" && team && team.length === 2 && team[0] && team[1] && (latestPartnerMap[team[0]] === team[1] || latestPartnerMap[team[1]] === team[0]);
+    // v1.11.36/v1.11.40: non-blocking "same teammate/opponent as the latest game" warning — pure display,
+    // computed fresh from this row's current team composition; covers manual AND automatic selection alike
+    // since it doesn't care how the teams got filled. Teammate check is doubles-only (a singles team has no
+    // "teammate"); opponent check applies to both (a singles match's two 1-player "teams" can still have
+    // faced each other last time).
+    const repeatsLatest = (team) => mode === "doubles" && team && team.length === 2 && team[0] && team[1] && (latestMap.partnerOf[team[0]] === team[1] || latestMap.partnerOf[team[1]] === team[0]);
     const latestWarnA = !done && st === "next" && repeatsLatest(m.teamA);
     const latestWarnB = !done && st === "next" && repeatsLatest(m.teamB);
+    // v1.11.40: "faced each other in the latest relevant match" — checked across every cross-team pair
+    // (both players of A vs both of B in doubles; the single pair in singles), independent of the
+    // teammate check above (a foursome can trigger both at once, e.g. a straight rematch of the exact same
+    // two pairs — see the render block below for how both are shown together, compactly).
+    const latestFacedOpp = (teamA, teamB) => {
+      for (const a of teamA || []) {
+        if (!a) continue;
+        for (const b of teamB || []) {
+          if (!b) continue;
+          if ((latestMap.opponentsOf[a] || []).includes(b) || (latestMap.opponentsOf[b] || []).includes(a)) return true;
+        }
+      }
+      return false;
+    };
+    const latestWarnOpp = !done && st === "next" && latestFacedOpp(m.teamA, m.teamB);
     // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
     // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
     // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
@@ -6252,12 +6299,24 @@ function SessionTab(props) {
             and was noisy (see the screenshot: 3+ copies of the same line stacked down the table). The
             disabled "▶ เริ่มเกม" button and its title="เลือกผู้เล่นให้ครบก่อนเริ่มเกม" tooltip already convey
             the same thing on tap/hover, so nothing is lost — this was purely the extra always-visible line. */}
-        {(latestWarnA || latestWarnB) && (
-          // v1.11.36: "⚠️ คู่เกมล่าสุด" — WARNING ONLY, never blocks selection (see canStart/startReady —
-          // this has no effect on either). Purely informational, same tinted-row visual language as the
-          // status backgrounds above rather than a modal or alert.
-          <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, fontSize: 11, fontWeight: 700, color: "#c2650a" }}>
-            ⚠️ คู่เกมล่าสุด — {[latestWarnA && "ทีม A", latestWarnB && "ทีม B"].filter(Boolean).join(" และ ")} เพิ่งเป็นคู่กันในเกมล่าสุด (ยังเลือกคู่นี้ได้ตามปกติ)
+        {(latestWarnA || latestWarnB || latestWarnOpp) && (
+          // v1.11.36/v1.11.40: "⚠️ คู่เกมล่าสุด" (recent teammate) and/or "⚠️ เจอกันเกมล่าสุด" (recent
+          // opponent) — WARNING ONLY, never blocks selection (see canStart/startReady — this has no effect
+          // on either). Purely informational, same tinted-row visual language as the status backgrounds
+          // above rather than a modal or alert. Kept to at most 2 short lines even if a foursome somehow
+          // triggers both relationships at once (e.g. an exact rematch of the same two pairs) — no
+          // per-pairing spam.
+          <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, display: "flex", flexDirection: "column", gap: 2 }}>
+            {(latestWarnA || latestWarnB) && (
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#c2650a" }}>
+                ⚠️ คู่เกมล่าสุด — {[latestWarnA && "ทีม A", latestWarnB && "ทีม B"].filter(Boolean).join(" และ ")} เพิ่งเป็นคู่กันในเกมล่าสุด (ยังเลือกคู่นี้ได้ตามปกติ)
+              </div>
+            )}
+            {latestWarnOpp && (
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#c2650a" }}>
+                ⚠️ เจอกันเกมล่าสุด — มีคู่ที่เพิ่งเจอกันเป็นคู่แข่งในเกมล่าสุด (ยังเลือกคู่นี้ได้ตามปกติ)
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -10591,7 +10650,10 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         const nameFs = nameLong ? (compact ? 12.5 : 13) : (compact ? 14 : 15);
         const lvlFs = nameLong ? 11 : (compact ? 12 : 13);
         return p ? (
-          <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: compact ? 6 : 7, padding: compact ? "6px 7px" : "7px 8px", borderRadius: 10, background: selected ? "#e2f5ec" : T.surface2, border: `1.5px solid ${selected ? T.green : "transparent"}`, minHeight: 46 }}>
+          // v1.11.40: unselected cards now tint by team (TEAM_BG.A/B) instead of a flat T.surface2 — the
+          // "selected" highlight (#e2f5ec, an existing unrelated state) still fully overrides it, and every
+          // other bit of card styling (avatar, skill-level color, handedness color, border) is untouched.
+          <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: compact ? 6 : 7, padding: compact ? "6px 7px" : "7px 8px", borderRadius: 10, background: selected ? "#e2f5ec" : TEAM_BG[team], border: `1.5px solid ${selected ? T.green : "transparent"}`, minHeight: 46 }}>
             <span style={{ position: "relative", display: "inline-flex", flexShrink: 0, width: avatarSize, height: avatarSize }}>
               <Avatar p={p} size={avatarSize} />
               {editable && p.photo && (
