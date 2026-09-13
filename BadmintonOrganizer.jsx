@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.42";
+const APP_VERSION = "1.11.43";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -11667,7 +11667,8 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
   );
 }
 
-const NONE_SLICE_COLOR = "#ef4444"; // every "no prize" arc shares this one red, whatever prize it's interspersed between — clearly reads as "miss" against the bright prize colors
+const NONE_SLICE_COLOR = "#ef5a44"; // v1.11.43: aligned to T.accent (was a slightly-off generic red) so the
+// wheel's "miss" color reads as the same brand red used everywhere else in the app, not a separate hue.
 // angleFromTop is degrees clockwise from 12 o'clock (matches the old CSS conic-gradient convention,
 // which the spin/rotation math below is built around) — converts to an SVG (x,y) point on that circle.
 function polarToCartesian(cx, cy, r, angleFromTop) {
@@ -11681,17 +11682,34 @@ function describeSlicePath(cx, cy, r, startDeg, endDeg) {
   return `M ${cx} ${cy} L ${p1.x} ${p1.y} A ${r} ${r} 0 ${largeArc} 1 ${p2.x} ${p2.y} Z`;
 }
 function truncateLabel(s, n) { return !s ? "" : (s.length > n ? s.slice(0, n) : s); } // hard cap only as a defensive backstop against a pathologically long label — no "…" appended
-
-// bright/light tones for prize slices, cycling yellow → green → orange → blue → ...; red is deliberately
-// never used here — it's reserved for the "no prize" slices (NONE_SLICE_COLOR) so a glance at the wheel
-// tells red = miss, every other color = a real prize.
-const WHEEL_COLORS = ["#fbbf24", "#4ade80", "#fb923c", "#38bdf8", "#c084fc", "#2dd4bf", "#f9a8d4", "#a3e635", "#fcd34d", "#7dd3fc"];
+// v1.11.43 (spec section 3): a SHORT, wheel-only display label — purely presentational, never stored and
+// never used anywhere else (Settings' prize editor, Finance, Reward History, the result card below, and
+// applyWheelPrize's resultLabel/rewardNameSnapshot all keep showing the organizer's full original p.label
+// exactly as before). Strips a trailing "(ใช้ทันที)"/"(ครั้งหน้า)"/"(ทันที)"-style timing annotation — that
+// detail now lives on the post-spin result card instead — then prefers a short headline phrase already
+// present in the label (e.g. "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)" → "ฟรีค่าสนาม") over a generic "ส่วนลด NN฿"
+// clause (e.g. "ส่วนลด 20฿ (ใช้ทันที)" → "ลด ฿20"). Falls back to the parenthetical-stripped label untouched
+// (e.g. "item"/"cash" free-text prize names) if neither pattern applies.
+function wheelShortLabel(label) {
+  const raw = (label || "").trim();
+  if (!raw) return raw;
+  const noParens = raw.replace(/\s*\([^)]*\)\s*$/, "").trim();
+  const idx = noParens.indexOf("ส่วนลด");
+  if (idx >= 0) {
+    const before = noParens.slice(0, idx).replace(/[!！\s]+$/, "").trim();
+    if (before) return truncateLabel(before, 16);
+    const amountMatch = noParens.slice(idx).match(/[\d,]+/);
+    if (amountMatch) return `ลด ฿${amountMatch[0]}`;
+  }
+  return truncateLabel(noParens, 16);
+}
 // v1.11.34: REDESIGNED per spec 6.8 — random OUTCOME and wheel ANIMATION are now fully separate concerns.
 // pickWheelOutcome is the ONLY function that decides what a spin actually wins; it is called BEFORE any
 // segment/animation math runs, and never reads segment size/position/count. A prize that's run out
 // (prizeQty(p) === 0) is simply excluded here — its probability share is NOT redistributed to other real
 // prizes (spec 6.3), it silently falls through to "no prize" along with whatever the organizer left
-// unassigned. Returns a real prize object, or null for "ไม่ได้รางวัล".
+// unassigned. Returns a real prize object, or null for "ไม่ได้รางวัล". UNCHANGED by the v1.11.43 visual
+// redesign below — this remains the single source of truth for what a spin actually wins.
 function pickWheelOutcome(prizes) {
   const real = (prizes || []).filter((p) => p.type !== "none" && prizeQty(p) > 0);
   const r = Math.random() * 100;
@@ -11702,10 +11720,46 @@ function pickWheelOutcome(prizes) {
   }
   return null;
 }
+// bright/light tones for prize slices, cycling yellow → green → orange → blue → ...; red is deliberately
+// never used here — it's reserved for the "no prize" slices (NONE_SLICE_COLOR) so a glance at the wheel
+// tells red = miss, every other color = a real prize. v1.11.43: retuned slightly for a touch more contrast
+// against the dark-fill/white-outline label text while staying in the same clean pastel family.
+const WHEEL_COLORS = ["#ffc93c", "#6fcf7a", "#ff9f5a", "#5bc0eb", "#b389f2", "#4dd0c4", "#ff8fb1", "#a8d94a", "#ffd76a", "#7fc8f8"];
+// v1.11.43 (spec section 2 — VERY IMPORTANT, visual only): no single visual wedge should ever look like it
+// swallows a huge chunk of the wheel, even when its REAL probability is large (most commonly "ไม่ได้รางวัล",
+// but the same rule applies to any one big real prize too). MAX_SLICE_DEG caps how wide a single wedge is
+// allowed to look; splitSpan() divides an oversized share into several EQUAL smaller wedges that still sum
+// to exactly the same total degrees (e.g. spec's own "12.5+12.5+12.5+12.4 = 49.9%" example). This is a pure
+// layout concern — pickWheelOutcome() above never reads segment count/size, and spin() below finds a target
+// wedge purely by matching `id` (a prize keeps the SAME id across every one of its own split wedges), so
+// splitting a prize or the none-remainder into more pieces can never change what a spin actually wins.
+const MAX_SLICE_DEG = 46; // ≈12.8% of the circle
+function splitSpan(totalDeg, minPieces) {
+  if (totalDeg <= 0) return [];
+  const pieces = Math.max(minPieces || 1, Math.ceil(totalDeg / MAX_SLICE_DEG));
+  return new Array(pieces).fill(totalDeg / pieces);
+}
+// Spreads every same-identity group of wedges evenly across the FULL circle (by each wedge's own fractional
+// position within its group), then merges every group by that position — this is what keeps, say, 4
+// "ไม่ได้รางวัล" wedges from ending up clumped next to each other, purely for visual balance. Deterministic
+// (no randomness) so re-rendering the same prize config always lays out the same wheel.
+function distributeWheelGroups(groups) {
+  const items = [];
+  groups.forEach((g, gi) => {
+    g.pieces.forEach((span, i) => {
+      const pos = g.pieces.length > 0 ? (i + 0.5) / g.pieces.length : 0;
+      items.push({ id: g.id, label: g.label, isNone: g.isNone, isSoldOut: g.isSoldOut, color: g.color, span, pos, gi });
+    });
+  });
+  items.sort((a, b) => a.pos - b.pos || a.gi - b.gi);
+  let acc = 0;
+  return items.map((it) => { const seg = { id: it.id, label: it.label, isNone: it.isNone, isSoldOut: it.isSoldOut, color: it.color, span: it.span, start: acc }; acc += it.span; return seg; });
+}
 // Purely cosmetic wheel layout — segment size reflects `probability` (spec 6.6), never `qty`/stock count.
-// "ไม่ได้รางวัล" is deliberately split into one sliver interleaved after every real segment rather than one
-// giant arc (spec 6.7), but the segments here are NEVER consulted by pickWheelOutcome — they only decide
-// where the pointer visually lands once the outcome is already known (see spin() below).
+// "ไม่ได้รางวัล" (and, per v1.11.43, any unusually large real prize too) is split into several smaller
+// wedges spread evenly around the wheel rather than one giant arc (spec 6.7 / v1.11.43 section 2), but the
+// segments here are NEVER consulted by pickWheelOutcome — they only decide where the pointer visually lands
+// once the outcome is already known (see spin() below).
 function buildWheelSegments(prizes, showSoldOut) {
   const real = (prizes || []).filter((p) => p.type !== "none").sort((a, b) => (a.wheelOrder ?? 0) - (b.wheelOrder ?? 0));
   // showSoldOut ("แสดงทั้งหมด"): keep depleted prizes visible (unwinnable, but not visibly gone) so a
@@ -11718,19 +11772,30 @@ function buildWheelSegments(prizes, showSoldOut) {
   const shownProbTotal = shown.reduce((s, p) => s + Math.max(0, Number(p.probability) || 0), 0);
   const noPrizeTotal = Math.max(0, 100 - shownProbTotal);
   if (shown.length === 0) {
-    return noPrizeTotal > 0 ? [{ id: "__none__", label: "ไม่ได้รางวัล", isNone: true, isSoldOut: false, span: 360, start: 0, color: NONE_SLICE_COLOR }] : [];
+    const pieces = splitSpan((noPrizeTotal / 100) * 360, 6); // still several miss wedges, never one giant blank circle, even with zero prizes configured
+    return pieces.length === 0 ? [] : distributeWheelGroups([{ id: "__none__", label: "ไม่ได้รางวัล", isNone: true, isSoldOut: false, color: NONE_SLICE_COLOR, pieces }]);
   }
-  const noPrizeEach = noPrizeTotal / shown.length; // even split across every gap — purely visual balance
-  const units = [];
-  shown.forEach((p) => {
-    const span = (Math.max(0, Number(p.probability) || 0) / 100) * 360;
-    units.push({ ...p, span, isNone: false, isSoldOut: prizeQty(p) === 0, color: colorById[p.id] });
-    // a near-zero sliver so there is always at least one "ไม่ได้รางวัล" target to animate to as a fallback,
-    // even when configured probabilities sum to exactly 100% (see spin()'s defensive fallback below)
-    units.push({ id: "__none__", label: "ไม่ได้รางวัล", isNone: true, isSoldOut: false, span: Math.max(noPrizeEach, 0.001), color: NONE_SLICE_COLOR });
-  });
-  let acc = 0;
-  return units.map((u) => { const seg = { ...u, start: acc }; acc += u.span; return seg; });
+  const groups = shown.map((p) => ({
+    id: p.id, label: p.label, isNone: false, isSoldOut: prizeQty(p) === 0, color: colorById[p.id],
+    pieces: splitSpan((Math.max(0, Number(p.probability) || 0) / 100) * 360, 1),
+  }));
+  const noPrizeDeg = (noPrizeTotal / 100) * 360;
+  // a near-zero sliver so there is always at least one "ไม่ได้รางวัล" target to animate to as a fallback,
+  // even when configured probabilities sum to exactly 100% (see spin()'s defensive fallback below)
+  const noPrizePieces = noPrizeDeg > 0 ? splitSpan(noPrizeDeg, shown.length) : [0.001];
+  groups.push({ id: "__none__", label: "ไม่ได้รางวัล", isNone: true, isSoldOut: false, color: NONE_SLICE_COLOR, pieces: noPrizePieces });
+  return distributeWheelGroups(groups);
+}
+// v1.11.43 (spec section 8): wording for the post-spin result card, derived ENTIRELY from the already-
+// selected prize's existing structured fields (type/amount/label) — never re-derives or duplicates the
+// redemption/probability logic itself (that already fully ran via applyWheelPrize by the time this renders).
+function wheelResultCopy(prize) {
+  if (!prize) return { icon: "🏸", title: "รอบนี้ยังไม่ได้รางวัล", sub: "ไว้ลองใหม่ครั้งหน้า!", isWin: false };
+  const amt = Math.round(Number(prize.amount) || 0);
+  if (prize.type === "now") return { icon: "🎉", title: `ส่วนลด ฿${amt}`, sub: "ใช้ได้ทันทีในก๊วนนี้", isWin: true };
+  if (prize.type === "next") return { icon: "🎉", title: `ส่วนลด ฿${amt}`, sub: "ใช้ในก๊วนครั้งถัดไป", isWin: true };
+  if (prize.type === "cash") return { icon: "🎉", title: `เงินสด ฿${amt}`, sub: "รับได้เลยตอนนี้", isWin: true };
+  return { icon: "🎉", title: prize.label, sub: "ของรางวัลพิเศษ 🎁", isWin: true }; // "item"
 }
 function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose }) {
   const [rotation, setRotation] = useState(0);
@@ -11743,6 +11808,17 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
   // Built once via useState's lazy initializer so the layout stays put for as long as this wheel instance
   // is open (the parent unmounts/remounts SpinWheel — see wheelFor in PaymentTab — between spins).
   const [segs] = useState(() => buildWheelSegments(prizes, showSoldOut));
+  // v1.11.43 (spec section 7): 4-6 full rotations, decided once per wheel instance — purely cosmetic dial
+  // dressing on top of the exact same landing-angle math as before (see target below); never affects which
+  // segment the pointer actually lands on.
+  const [spinCount] = useState(() => 4 + Math.floor(Math.random() * 3));
+  const SPIN_MS = 4400;
+  // v1.11.43 (spec section 9): a tasteful, lightweight confetti burst for WINNING results only — built once
+  // (not re-randomized on every re-render) and purely decorative; it never reads/affects prize data.
+  const [confettiPieces] = useState(() => Array.from({ length: 14 }, (_, i) => ({
+    left: 4 + ((i * 37) % 92), delay: (i % 7) * 0.08, duration: 1.5 + ((i * 13) % 7) / 10,
+    color: WHEEL_COLORS[i % WHEEL_COLORS.length], rotate: (i * 53) % 360, size: 6 + (i % 3) * 2,
+  })));
 
   const spin = () => {
     if (spinning || resultPrize !== undefined || segs.length === 0) return;
@@ -11756,20 +11832,27 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
     const candidates = outcome ? segs.filter((s) => !s.isNone && s.id === outcome.id && !s.isSoldOut) : segs.filter((s) => s.isNone);
     const chosen = candidates.length > 0 ? candidates[Math.floor(Math.random() * candidates.length)] : segs[segs.length - 1]; // defensive fallback, should not normally happen
     const center = chosen.start + chosen.span / 2;
-    const target = 5 * 360 + (360 - center);
+    const target = spinCount * 360 + (360 - center);
     setSpinning(true);
     setRotation(target);
     // Step 4-5: animate to the pre-determined outcome, then reveal it — remainingQuantity/discount/expense/
-    // history (steps 6-8) all happen in the parent's onFinish (applyWheelPrize), never here.
-    setTimeout(() => { setSpinning(false); setResultPrize(outcome); onFinish(outcome); }, 4200);
+    // history (steps 6-8) all happen in the parent's onFinish (applyWheelPrize), never here. The button is
+    // already disabled the instant setSpinning(true) runs above, so a rapid double-tap can never re-enter
+    // this function before that disabled state takes effect (spinning/resultPrize guard at the top too).
+    setTimeout(() => { setSpinning(false); setResultPrize(outcome); onFinish(outcome); }, SPIN_MS);
   };
 
   const R = 125, CX = 125, CY = 125, LABEL_R = R * 0.58; // centered between the hub (~22) and the rim (125), not hugging the center — SVG drawing math stays in this fixed 250-unit space; only the on-screen CSS size below scales
   // scale the wheel to fill most of the screen on any device (phone or tablet, portrait or landscape) while
   // always leaving room for the title/subtitle above and the spin/close buttons below so nothing overflows
-  const wheelSize = "min(90vw, 58vh, 640px)";
+  const wheelSize = "min(88vw, 56vh, 620px)";
+  const copy = resultPrize !== undefined ? wheelResultCopy(resultPrize) : null;
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 80, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 80, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom))", boxSizing: "border-box", overflow: "hidden" }}>
+      <style>{`
+        @keyframes badq-wheel-confetti { 0% { transform: translateY(-10px) rotate(0deg); opacity: 1; } 100% { transform: translateY(210px) rotate(340deg); opacity: 0; } }
+        @keyframes badq-result-pop { 0% { transform: scale(0.85); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+      `}</style>
       <div style={{ color: "#fff", fontSize: 17, fontWeight: 800, marginBottom: 6 }}>🎡 หมุนวงล้อรางวัล</div>
       {/* v1.11.19: when "แสดงทั้งหมด" (showSoldOut) is on, the wheel deliberately still displays sold-out
           slices so players can't tell prizes ran out (see wheelShowSoldOut) — showing this "เหลือรางวัล 0
@@ -11777,42 +11860,78 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
           under "แค่ที่เหลือ" (the default), where seeing the live count is the point. */}
       {!showSoldOut && totalPlayers > 0 && <div style={{ color: "#cbd5cf", fontSize: 11.5, marginBottom: 12 }}>เหลือรางวัล {totalPrizeQty} จาก {totalPlayers} คนที่ยังไม่ได้หมุน</div>}
       <div style={{ position: "relative", width: wheelSize, height: wheelSize, flexShrink: 0 }}>
-        <div style={{ position: "absolute", top: -10, left: "50%", transform: "translateX(-50%)", zIndex: 2, fontSize: "min(7vw, 32px)" }}>🔻</div>
-        <div style={{ width: "100%", height: "100%", borderRadius: "50%", boxShadow: "0 8px 30px rgba(0,0,0,0.4)", transition: "transform 4.2s cubic-bezier(0.17,0.67,0.24,1)", transform: `rotate(${rotation}deg)`, overflow: "hidden", border: "6px solid #fff", boxSizing: "border-box", background: T.surface2 }}>
+        {/* subtle static outer ring — never rotates, purely a "this is one polished component" frame around the spinning disc (spec sections 1/6) */}
+        <div style={{ position: "absolute", inset: "-3.5%", borderRadius: "50%", border: `3px solid rgba(255,255,255,0.18)`, boxShadow: "0 2px 10px rgba(0,0,0,0.25)", pointerEvents: "none" }} />
+        {/* pointer — redesigned as a small clean triangle + knob (not an emoji), fixed dead-center at 12
+            o'clock and slightly overlapping the rim so it reads as physically attached to the wheel. Its
+            position is purely cosmetic and never disagrees with the actual selected reward: the wheel's own
+            rotation target (see `target` above) is what guarantees the winning wedge's center lands exactly
+            under this fixed point, not the other way around. */}
+        <div style={{ position: "absolute", top: "-3%", left: "50%", transform: "translateX(-50%)", zIndex: 3, display: "flex", flexDirection: "column", alignItems: "center", filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.35))" }}>
+          <div style={{ width: 0, height: 0, borderLeft: "9px solid transparent", borderRight: "9px solid transparent", borderTop: `18px solid ${T.accent}`, marginBottom: -4 }} />
+          <div style={{ width: 12, height: 12, borderRadius: "50%", background: T.accent, border: "2px solid #fff" }} />
+        </div>
+        <div style={{ width: "100%", height: "100%", borderRadius: "50%", boxShadow: "0 10px 34px rgba(0,0,0,0.45)", transition: `transform ${SPIN_MS / 1000}s cubic-bezier(0.22, 1.32, 0.36, 1)`, transform: `rotate(${rotation}deg)`, overflow: "hidden", border: "7px solid #fff", boxSizing: "border-box", background: T.surface2 }}>
           <svg viewBox="0 0 250 250" width="100%" height="100%">
             {segs.map((s, i) => (
-              <path key={i} d={describeSlicePath(CX, CY, R, s.start, s.start + s.span)} fill={s.color} stroke="#fff" strokeWidth={1} />
+              <path key={i} d={describeSlicePath(CX, CY, R, s.start, s.start + s.span)} fill={s.color} stroke="#fff" strokeWidth={1.6} />
             ))}
+            {/* a faint radial sheen overlay for a touch of depth/polish — purely decorative, sits above the
+                colored slices but below the labels, never intercepts interaction (this whole disc has no
+                click targets of its own — spin/close are the buttons below). */}
+            <circle cx={CX} cy={CY} r={R} fill="url(#badq-wheel-sheen)" pointerEvents="none" />
+            <defs>
+              <radialGradient id="badq-wheel-sheen" cx="50%" cy="38%" r="75%">
+                <stop offset="0%" stopColor="#ffffff" stopOpacity="0.22" />
+                <stop offset="55%" stopColor="#ffffff" stopOpacity="0.05" />
+                <stop offset="100%" stopColor="#000000" stopOpacity="0.06" />
+              </radialGradient>
+            </defs>
             {segs.map((s, i) => {
               if (s.isNone || s.span < 6) return null; // skip labels on miss slices, and on slivers too thin to hold text
               const mid = s.start + s.span / 2; // slice bisector angle — text runs straight along this line, so it's always centered within its own colored slice
               const pt = polarToCartesian(CX, CY, LABEL_R, mid);
               const rot = mid - 90; // radial orientation, but centered (textAnchor="middle") on pt rather than starting there — reads centered within the slice, clear of both the hub and the rim
-              // dark fill + white outline reads clearly on every slice now that the palette is bright/light (yellow text on a yellow slice would vanish)
+              const label = wheelShortLabel(s.label);
+              // responsive font sizing: a short slice keeps a comfortably large size, a longer one shrinks
+              // just enough to keep clear of the segment's own edges (spec section 4) — dark fill + white
+              // outline keeps it readable on every slice now that the palette is bright/light.
+              const fontSize = label.length <= 6 ? 11 : label.length <= 10 ? 9.5 : 8.2;
               return (
-                <text key={"t" + i} x={pt.x} y={pt.y} transform={`rotate(${rot} ${pt.x} ${pt.y})`} textAnchor="middle" dominantBaseline="middle" fontSize="9.5" fontWeight="800" fill="#1f2937" stroke="#ffffff" strokeWidth="3" paintOrder="stroke" style={{ fontFamily: "inherit" }}>
-                  {truncateLabel(s.label, 22)}
+                <text key={"t" + i} x={pt.x} y={pt.y} transform={`rotate(${rot} ${pt.x} ${pt.y})`} textAnchor="middle" dominantBaseline="middle" fontSize={fontSize} fontWeight="800" fill="#1f2937" stroke="#ffffff" strokeWidth="3" paintOrder="stroke" style={{ fontFamily: "inherit" }}>
+                  {label}
                 </text>
               );
             })}
           </svg>
         </div>
-        <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: "17.6%", height: "17.6%", borderRadius: "50%", background: "#fff", boxShadow: "0 2px 8px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "min(7vw, 32px)" }}>🏸</div>
+        {/* center hub — slightly smaller than before so it covers less reward text, same BadQ badminton
+            identity (🏸), clean white circle with a subtle border + shadow (spec section 5) */}
+        <div style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: "15%", height: "15%", borderRadius: "50%", background: "#fff", border: `2px solid ${T.border}`, boxShadow: "0 2px 8px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "min(6vw, 26px)" }}>🏸</div>
       </div>
       {resultPrize === undefined ? (
         <>
-          <button onClick={spin} disabled={spinning || segs.length === 0} style={{ marginTop: 26, padding: "13px 34px", borderRadius: 30, background: spinning ? T.muted : T.green, border: "none", color: "#fff", fontSize: 15, fontWeight: 800 }}>{spinning ? "กำลังหมุน..." : "หมุนเลย!"}</button>
+          <button onClick={spin} disabled={spinning || segs.length === 0} style={{ marginTop: 26, padding: "13px 34px", borderRadius: 30, background: spinning ? T.muted : T.green, border: "none", color: "#fff", fontSize: 15, fontWeight: 800, boxShadow: spinning ? "none" : "0 4px 14px rgba(18,152,106,0.45)" }}>{spinning ? "กำลังหมุน..." : "หมุนเลย!"}</button>
           {segs.length === 0 && <div style={{ color: "#e5b3b3", fontSize: 12.5, marginTop: 10 }}>ยังไม่ได้ตั้งค่ารางวัลในวงล้อ</div>}
           {!spinning && <button onClick={onClose} style={{ marginTop: 14, background: "none", border: "none", color: "#cbd5cf", fontSize: 13 }}>ปิด</button>}
         </>
       ) : (
-        <>
-          <div style={{ marginTop: 22, background: "#fff", borderRadius: 16, padding: "16px 24px", textAlign: "center", maxWidth: 290, boxSizing: "border-box" }}>
-            <div style={{ fontSize: 13, color: T.muted, marginBottom: 4 }}>ผลการหมุน</div>
-            <div style={{ fontSize: 16.5, fontWeight: 800, color: resultPrize ? T.green : T.muted }}>{resultPrize ? `🎉 ${resultPrize.label}` : "😅 ไม่ได้รางวัล"}</div>
+        <div style={{ position: "relative", width: "100%", display: "flex", flexDirection: "column", alignItems: "center" }}>
+          {/* v1.11.43 (spec section 9): confetti only for a real win, never for "ไม่ได้รางวัล" */}
+          {copy.isWin && confettiPieces.map((c, i) => (
+            <div key={i} style={{ position: "absolute", top: 0, left: `${c.left}%`, width: c.size, height: c.size, borderRadius: 2, background: c.color, transform: `rotate(${c.rotate}deg)`, animation: `badq-wheel-confetti ${c.duration}s ease-in ${c.delay}s forwards`, pointerEvents: "none" }} />
+          ))}
+          {/* v1.11.43 (spec section 8): clear result card — icon + short title + timing/context line, using
+              ONLY the already-selected prize's existing type/amount/label (wheelResultCopy above); the
+              organizer's exact original label/redemption bookkeeping (applyWheelPrize) is untouched. */}
+          <div style={{ marginTop: 22, background: "#fff", borderRadius: 18, padding: "22px 26px", textAlign: "center", width: "min(86vw, 300px)", boxSizing: "border-box", animation: "badq-result-pop 0.35s cubic-bezier(0.34,1.56,0.64,1)" }}>
+            <div style={{ fontSize: 30, marginBottom: 6 }}>{copy.icon}</div>
+            {copy.isWin && <div style={{ fontSize: 13, color: T.green, fontWeight: 800, marginBottom: 2 }}>ยินดีด้วย!</div>}
+            <div style={{ fontSize: 18, fontWeight: 800, color: copy.isWin ? T.text : T.muted, marginBottom: 4 }}>{copy.title}</div>
+            <div style={{ fontSize: 12.5, color: T.muted }}>{copy.sub}</div>
           </div>
-          <button onClick={onClose} style={{ marginTop: 18, padding: "11px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}>ปิด</button>
-        </>
+          <button onClick={onClose} style={{ marginTop: 18, padding: "11px 30px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}>{copy.isWin ? "รับรางวัล" : "ปิด"}</button>
+        </div>
       )}
     </div>
   );
