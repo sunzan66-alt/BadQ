@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.34";
+const APP_VERSION = "1.11.36";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -116,6 +116,19 @@ const PSTATUS = {
   left: { label: "กลับแล้ว", color: "#9333ea", bg: "#f1eafd" },
 };
 const PSTATUS_OPTS = ["absent", "registered", "waiting", "ready", "resting", "left"];
+// v1.11.36: the ONE canonical "is this player actually here in THIS session right now" check — introduced
+// so every UI surface that should offer only session attendees (not the full permanent member list) reads
+// from the same place instead of several slightly different ad-hoc filters. Deliberately distinct from
+// computeBill/computeSplitExpenseSummary's "attended" (billing intentionally still counts a player who has
+// since left, since they owe money for games already played): here "left" (กลับแล้ว) is EXCLUDED, since
+// someone who has physically gone home cannot meaningfully be part of a lock/avoid or picker decision for
+// games still to come. "absent" (never checked in) and "registered" (said they're coming, not arrived yet)
+// are excluded for the same reason. Everyone else who has a status at all — waiting (waitlist, but
+// physically present), ready, resting — counts as an attendee; archived members are never selectable for
+// new work anywhere in the app (see activePlayers), so they're excluded here too.
+function isSessionAttendee(p) {
+  return !!(p && !p.archived && p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "left");
+}
 // v1.9.17: handedness badge on the Player Card — a violet distinct from every skill-level color
 // (LEVEL_COLORS_BY_INDEX has no purple), every PSTATUS color, T.blue, and T.accent, as specified.
 // v1.11.1: ขวา (right) and ซ้าย (left) now get their own distinct colors (previously both purple,
@@ -156,6 +169,12 @@ const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "a
   // in App()); never read by matchmaking, billing, or attendance. Missing on every pre-existing player ->
   // false, so nobody is silently locked by the upgrade.
   isLocked: p.isLocked === true,
+  // v1.11.35 (Member Portal Phase 1): globally-unique public identifier, allocated ONLY by the
+  // allocateBadqId Cloud Function once this player is migrated to a Cloud Club (see MemberPortalSheet) —
+  // never generated/guessed locally. Missing on every existing player/backup -> null, meaning nobody is
+  // considered "on the cloud" until an Owner explicitly runs the migration; purely additive, read by
+  // nothing else in the app yet.
+  badqId: p.badqId || null,
   // v1.11.7 (Part D): per-session attendance window. null = "full session" (use session.sessionStartTime/
   // sessionEndTime as-is) — this is the correct default for both a brand-new registration AND every
   // pre-existing registered/ready player from a save made before this field existed, so nobody's
@@ -216,7 +235,25 @@ function syncCourtLabels(labels, count) {
 // Court Recommendation engine and attendance-time defaulting always have something sane to fall back to.
 function normSession(s) {
   const base = s && typeof s === "object" ? s : {};
-  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00" };
+  // v1.11.35 (Member Portal Phase 1): which Cloud Club (if any) this session's ก๊วน name is bound to —
+  // set only once the Owner explicitly links a groupDefaults name to a Cloud Club (see MemberPortalSheet).
+  // null on every existing/new session until then; not read by any sync logic yet (Phase 2+).
+  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null };
+}
+// v1.11.35 (Member Portal Phase 1) — this LOCAL install's link (if any) to a Cloud Club. Entirely
+// additive/local bookkeeping: null/disabled is the default and identical-to-before state for every
+// existing install. Set only by an explicit Owner action in MemberPortalSheet (Settings → Member Portal
+// (Beta)) — never inferred/guessed. Persisted the same way as every other top-level state slice (see
+// buildBackupPayload/migrateBackupData/applyPersistedState/applyRestore/undoRestore/wipeAllAppData).
+function normCloudClub(c) {
+  const base = c && typeof c === "object" ? c : {};
+  return {
+    clubId: base.clubId || null,
+    ownerUid: base.ownerUid || null,
+    sourceGroupName: base.sourceGroupName || null, // the groupDefaults key (or custom name) this club was created from — see plan v2 item 12
+    enabled: base.enabled === true,
+    migratedAt: base.migratedAt || null, // last time the local roster was pushed up via allocateBadqId
+  };
 }
 function courtLabelFor(labels, idx) {
   const v = Array.isArray(labels) ? labels[idx - 1] : null;
@@ -312,7 +349,13 @@ function counts(matches) {
 // across all of them and the existing criteria (balance, partner history, wait time, hand pref) decide
 // exactly as before — see spec section 4 ("final preference/penalty", "ไม่ได้ถูก Block จากการเล่น").
 const OWNER_PENALTY = 1000;
-function buildMatch(pool, mode, lockPairs, players, stats) {
+// v1.11.36: "อย่าซ้ำคู่เกมล่าสุด" — a small ADDITIVE soft-preference penalty (see latestPartnerMap/
+// buildLatestPartnerMap below), independent from the existing pRep*3 aggregate-history term: pRep counts
+// EVERY prior match together, while this only ever looks at each player's single most recent game. Kept
+// well under pRep's weight so it only breaks ties among otherwise-similar combinations — never overrides
+// balance/partner-repeat/opponent-repeat/wait/hand-pref/owner, per explicit "soft preference only" spec.
+const LATEST_TEAMMATE_PENALTY = 1.5;
+function buildMatch(pool, mode, lockPairs, players, stats, latestPartnerMap) {
   const need = mode === "doubles" ? 4 : 2;
   if (pool.length < need) return null;
   const w = (id) => players.find((p) => p.id === id)?.skillIndex || 0;
@@ -322,6 +365,9 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
   const idxOf = (id) => win.indexOf(id);
   const pc = (a, b) => stats.partner[keyOf(a, b)] || 0;
   const oc = (a, b) => stats.opp[keyOf(a, b)] || 0;
+  // v1.11.36: true only when a/b were EACH OTHER's own most recent teammate (see buildLatestPartnerMap) —
+  // optional param, so every existing caller that doesn't pass it keeps behaving exactly as before.
+  const latestRep = (a, b) => (latestPartnerMap && (latestPartnerMap[a] === b || latestPartnerMap[b] === a)) ? LATEST_TEAMMATE_PENALTY : 0;
 
   if (mode === "singles") {
     let best = null;
@@ -382,7 +428,8 @@ function buildMatch(pool, mode, lockPairs, players, stats) {
       const oRep = oc(A[0], B[0]) + oc(A[0], B[1]) + oc(A[1], B[0]) + oc(A[1], B[1]);
       const waitPen = idxOf(trio[0]) + idxOf(trio[1]) + idxOf(trio[2]);
       const handPen = handPrefNudge(A[0], A[1]) + handPrefNudge(B[0], B[1]);
-      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4 + handPen + ownerPenalty;
+      const latestPen = latestRep(A[0], A[1]) + latestRep(B[0], B[1]);
+      const score = bal * 2 + pRep * 3 + oRep * 1.2 + waitPen * 0.4 + handPen + ownerPenalty + latestPen;
       if (!best || score < best.score) best = { score, teamA: A, teamB: B };
     }
   }
@@ -426,6 +473,30 @@ function reservedIdsFromCurrent(matches) {
     if (m.queued) [...(m.queued.teamA || []), ...(m.queued.teamB || [])].filter(Boolean).forEach((id) => out.add(id));
   }
   return out;
+}
+// v1.11.36: "same teammate as the latest game" detection (spec: warn + soft nudge, NOT based on aggregate
+// historical partner counts like stats.partner in buildMatch — only each player's SINGLE most recent
+// completed/in-progress match matters, per explicit "LATEST relevant match only" requirement). Scans
+// newest-first: any match currently "playing"/"paused" right now is more recent than anything in history
+// (history[] is itself oldest-first — appended to on every finish — so it's walked from the end backward).
+// The FIRST time a player is seen fixes their latest match's partner for good in this pass; everything
+// scanned after that for the same player is strictly older and ignored. A "next" (not-yet-started) row is
+// never considered here — it hasn't actually been played yet, so it can't be anyone's "latest game".
+// Singles teams are single-player arrays, so a singles match naturally yields partner: null for everyone.
+function buildLatestPartnerMap(history, current) {
+  const map = {};
+  const consider = (m) => {
+    for (const team of [m.teamA, m.teamB]) {
+      if (!team) continue;
+      for (const pid of team) {
+        if (!pid || Object.prototype.hasOwnProperty.call(map, pid)) continue;
+        map[pid] = team.find((x) => x && x !== pid) || null;
+      }
+    }
+  };
+  (current || []).filter((m) => m.status === "playing" || m.status === "paused").forEach(consider);
+  for (let i = (history || []).length - 1; i >= 0; i--) consider(history[i]);
+  return map;
 }
 // promotes a court's prepared queued match into the live "next" slot (paired, awaiting manual เริ่มเกม —
 // same status/flow as an auto-paired match) instead of running fresh auto-pairing — used by both
@@ -2063,6 +2134,7 @@ function buildBackupPayload(state) {
       discountCredits: state.discountCredits || [],
       groupDefaults: state.groupDefaults || {},
       rewardHistory: state.rewardHistory || [], // v1.11.34: global Reward History ledger, see App()'s rewardHistory state
+      cloudClub: state.cloudClub || null, // v1.11.35: Member Portal Phase 1 — this install's Cloud Club link, if any
     },
   };
 }
@@ -2121,6 +2193,7 @@ function migrateBackupData(parsed) {
   data.discountCredits = (Array.isArray(data.discountCredits) ? data.discountCredits : []).map(normDiscountCredit); // no field at all (old backup) -> []
   data.groupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {}; // no field at all (old backup) -> no saved group defaults
   data.rewardHistory = Array.isArray(data.rewardHistory) ? data.rewardHistory : []; // v1.11.34: no field at all (old backup) -> []
+  data.cloudClub = normCloudClub(data.cloudClub); // v1.11.35: no field at all (old backup) -> disabled/local-only
   return { ...parsed, schemaVersion: SCHEMA_VERSION, data };
 }
 // deeper integrity check AFTER migration — corrupted core structure rejects the whole restore;
@@ -2877,6 +2950,10 @@ export default function App() {
   // (saveGroupDefault); applying happens when the organizer picks a previously-used name from that
   // dropdown (applyGroupDefaultsFor) — see both, defined near endSession below.
   const [groupDefaults, setGroupDefaults] = useState({});
+  // v1.11.35 (Member Portal Phase 1): this LOCAL install's link to a Cloud Club, if any — see
+  // normCloudClub above and MemberPortalSheet (Settings → Member Portal (Beta)). null/disabled by
+  // default; nothing else in the app reads this yet outside that one panel.
+  const [cloudClub, setCloudClub] = useState(() => normCloudClub(null));
   const [now, setNow] = useState(Date.now());
   const [loaded, setLoaded] = useState(false);
   const [hasPreRestoreBackup, setHasPreRestoreBackup] = useState(false); // safety snapshot exists -> show "undo last restore"
@@ -2992,6 +3069,7 @@ export default function App() {
     setActiveTournament(normTournament(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
     setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(normTournament));
     setGroupDefaults(s.groupDefaults && typeof s.groupDefaults === "object" ? s.groupDefaults : {}); // new field: absent on old saves -> no saved group defaults yet
+    setCloudClub(normCloudClub(s.cloudClub)); // v1.11.35: absent on old saves -> disabled/local-only
     // old saves (pre-v1.9.15) have no `savedAt` — treat them as "current as of right now" rather than 0,
     // so upgrading doesn't itself trigger a false "newer data elsewhere" flag on the very next save.
     lastKnownSavedAtRef.current = typeof s.savedAt === "number" ? s.savedAt : Date.now();
@@ -3025,7 +3103,7 @@ export default function App() {
   };
   const saveAutoBackup = async (reason) => {
     try {
-      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults });
+      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
@@ -3247,7 +3325,7 @@ export default function App() {
         // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
         if (await refreshFromStorageIfNewer(true)) return;
         const savedAt = Date.now();
-        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, savedAt });
+        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, savedAt });
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         const result = await window.storage.set("bg-v11", json);
         lastKnownSavedAtRef.current = savedAt;
@@ -3260,7 +3338,7 @@ export default function App() {
         }
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, loaded, loadCorrupted, bootStatus]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, loaded, loadCorrupted, bootStatus]);
   // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
   // most recently computed save payload when the app backgrounds — insurance for the narrow window
   // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
@@ -3814,6 +3892,11 @@ export default function App() {
       if (newStatus === "playing") {
         if (m.status === "paused") { resumeMatch(mid); return; }
         if (m.status === "next" || m.status === "done") {
+          // v1.11.36: an upcoming game created with no court yet (see addExtraMatch/fillCourt) must have one
+          // assigned via its สนาม dropdown before it can actually start — starting playing is what makes
+          // the court assignment "real"; only "next" rows can ever be court-less, a reopened "done" row
+          // already has a real court from when it originally played.
+          if (m.status === "next" && m.court == null) { alert("กรุณาเลือกสนามก่อนเริ่มเกม"); return; }
           if (!startReadyMatch(m)) { alert("เลือกผู้เล่นให้ครบก่อนเริ่มเกม"); return; }
           startGame(mid);
         }
@@ -3872,45 +3955,64 @@ export default function App() {
     const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...others]);
+    const latestPartnerMap = buildLatestPartnerMap(history, others); // v1.11.36: soft "don't repeat latest teammate" nudge
     const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
-    const nm = buildMatch(order, mode, lockPairs, base, stats);
+    const nm = buildMatch(order, mode, lockPairs, base, stats, latestPartnerMap);
     if (!nm) return;
     setCurrent((prev) => prev.map((c) => (c.id === mid ? { ...c, teamA: nm.teamA, teamB: nm.teamB } : c)));
     setSel(null);
   };
 
-  // fill an empty court — auto-pick from the waiting pool, or open empty slots for manual pick
+  // fill an empty court — auto-pick from the waiting pool, or open empty slots for manual pick. `court` may
+  // be null (v1.11.36: an as-yet-unassigned upcoming game — see addExtraMatch below); the sort below treats
+  // an unassigned row as sorting after every real court number so it doesn't jump ahead of them visually.
   const fillCourt = (court) => {
+    const byCourt = (a, b) => (a.court ?? Infinity) - (b.court ?? Infinity);
     if (settings.pairingMode === "manual") {
       const nc = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: roundNo + 1, court, locked: false };
-      setCurrent((prev) => [...prev, nc].sort((a, b) => a.court - b.court));
+      setCurrent((prev) => [...prev, nc].sort(byCourt));
       setSel(null);
       return;
     }
     const reserved = reservedIdsFromCurrent(current); // excludes players queued into any court's next match too
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...current]);
+    const latestPartnerMap = buildLatestPartnerMap(history, current); // v1.11.36: soft "don't repeat latest teammate" nudge
     const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
-    const nm = buildMatch(order, mode, lockPairs, base, stats);
+    const nm = buildMatch(order, mode, lockPairs, base, stats, latestPartnerMap);
     if (!nm) return;
     const nc = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
-    setCurrent((prev) => [...prev, nc].sort((a, b) => a.court - b.court));
+    setCurrent((prev) => [...prev, nc].sort(byCourt));
     setSel(null);
   };
 
   // v1.11.32: "+ เพิ่มแมชใหม่" — explicit request for a button at the bottom of the table to add ONE more
   // "เกมต่อไป" row for hand-picking, on demand, beyond whatever each court's own auto-spawned companion
-  // already covers (see buildFreshNextRecord/startGame — those cap at one companion per court). This just
-  // reuses fillCourt (already tolerant of a court that's non-empty — it appends unconditionally, sorted by
-  // court) so it respects pairingMode exactly like every other match-creation path in the app: manual mode
-  // gets 4 empty "+ เลือก" slots to fill by hand, auto mode gets an immediate auto-paired match. Picks
-  // whichever court doesn't already have a "next" row yet (so the new row is actually useful at a glance);
-  // falls back to court 1 if every court already has one queued — the row's own court <select> lets the
-  // organizer instantly retarget it either way.
+  // already covers (see buildFreshNextRecord/startGame — those cap at one companion per court).
+  // v1.11.36 REDESIGN (real-world testing feedback): this used to immediately claim whichever court didn't
+  // have a "next" row yet (or fell back to court 1) — i.e. a court was picked before any player was even
+  // selected, and one fixed row got generated per court. Player matchmaking and court assignment must be
+  // fully independent: the new row is now created with court: null (fillCourt already accepts this —
+  // renders as the "เลือกสนาม" placeholder, see MatchRow's สนาม <select>), and the organizer assigns a real
+  // court afterward, once one is actually free, via that same dropdown (reassignCourt already handles a
+  // starting value of null correctly — see its own comment). Still respects pairingMode exactly like every
+  // other match-creation path: manual mode gets 4 empty "+ เลือก" slots, auto mode gets an immediate
+  // auto-paired match — just without a court attached yet either way.
   const addExtraMatch = () => {
-    const coveredCourts = new Set(current.filter((c) => c.status === "next").map((c) => c.court));
-    const court = Array.from({ length: courtCount }, (_, i) => i + 1).find((c) => !coveredCourts.has(c)) || 1;
-    fillCourt(court);
+    fillCourt(null);
+  };
+  // v1.11.36: cancelling/deleting an upcoming ("next") game entirely — needed now that a game can exist
+  // before a court is assigned (see addExtraMatch), so the organizer needs a way to back out of one they
+  // no longer want, not just clear its slots. Only ever applies to a not-yet-started, unlocked row — a
+  // playing/paused/done match is never removable this way. Removing the row from `current` is the ONLY
+  // thing this does: no player status is touched, so every player who was in it becomes selectable again
+  // immediately via waitQueue/inPlay recomputing off the new (shorter) `current` array, with zero extra
+  // bookkeeping — exactly like removing one player from a slot, just for all of them at once.
+  const deleteMatch = (mid) => {
+    const m = current.find((x) => x.id === mid);
+    if (!m || m.status !== "next" || m.locked) return;
+    setCurrent((prev) => prev.filter((x) => x.id !== mid));
+    setSel(null);
   };
 
   // regenerate all not-started courts at once (reserve playing + locked)
@@ -3925,10 +4027,11 @@ export default function App() {
     const used = new Set(fixed.flatMap((c) => [...c.teamA, ...c.teamB].filter(Boolean)));
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...fixed]);
+    const latestPartnerMap = buildLatestPartnerMap(history, fixed); // v1.11.36: soft "don't repeat latest teammate" nudge
     const out = current.map((c) => {
       if (c.status !== "next" || c.locked) return c;
       const order = base.filter((p) => p.status === "ready" && !p.archived && !used.has(p.id)).sort(SORT);
-      const nm = buildMatch(order, mode, lockPairs, base, stats);
+      const nm = buildMatch(order, mode, lockPairs, base, stats, latestPartnerMap);
       if (!nm) return c;
       [...nm.teamA, ...nm.teamB].filter(Boolean).forEach((id) => used.add(id));
       return { ...c, teamA: nm.teamA, teamB: nm.teamB };
@@ -4515,7 +4618,7 @@ export default function App() {
   // Returns null if the user cancelled the native share sheet or every fallback failed; otherwise
   // { stats, sizeLabel } for the caller to show a success banner with.
   const exportBackup = async () => {
-    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults });
+    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
     const json = JSON.stringify(payload);
     // v1.9.19: "BadQ Back-up <date> <time>.json" per explicit naming request — colon-free time (HH-mm)
     // so the filename stays valid on every OS (Windows rejects ":" in filenames).
@@ -4571,7 +4674,7 @@ export default function App() {
     const data = backup.data;
     if (restoreMode === "replace") {
       try {
-        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults });
+        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
       } catch (e) {}
@@ -4594,6 +4697,7 @@ export default function App() {
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
       setRewardHistory(data.rewardHistory || []); // v1.11.34
       setGroupDefaults(data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {});
+      setCloudClub(normCloudClub(data.cloudClub)); // v1.11.35
     } else if (restoreMode === "mergeHistory") {
       setSessionHistory((prev) => {
         const existing = new Set(prev.map((s) => s.id));
@@ -4628,7 +4732,7 @@ export default function App() {
     mode: "doubles", settings: getDefaultSettings(),
     session: { id: uid(), name: "", date: new Date().toISOString().slice(0, 10), mode: "casual" },
     lockPairs: [], sessionHistory: [], generalExpenses: [], otherIncome: [], activeTournament: null,
-    tournamentHistory: [], discountCredits: [], rewardHistory: [],
+    tournamentHistory: [], discountCredits: [], rewardHistory: [], cloudClub: null, // v1.11.35
   } });
   // revert the most recent "replace all" restore using the safety snapshot taken right before it.
   const undoRestore = async () => {
@@ -4655,6 +4759,7 @@ export default function App() {
       setOtherIncome(data.otherIncome || []);
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
       setRewardHistory(data.rewardHistory || []); // v1.11.34
+      setCloudClub(normCloudClub(data.cloudClub)); // v1.11.35
       await window.storage.delete("bg-v11-prerestore");
       setHasPreRestoreBackup(false);
       return true;
@@ -4741,8 +4846,8 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }} />}
-        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub }} />}
+        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
@@ -4770,7 +4875,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
@@ -4927,6 +5032,8 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
           deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
           archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
+          players={players} groupDefaults={groupDefaults} session={session}
+          cloudClub={cloudClub} setCloudClub={setCloudClub} updatePlayer={updatePlayer}
           onClose={() => setGeneralSettingsOpen(false)}
         />
       )}
@@ -5545,10 +5652,11 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
 // BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
 // both reused in place rather than reimplemented, per "do not create duplicate implementations".
-function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, onClose }) {
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, groupDefaults, session, cloudClub, setCloudClub, updatePlayer, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
+  const [portalSheetOpen, setPortalSheetOpen] = useState(false); // v1.11.35: "Member Portal (Beta)"
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
@@ -5595,6 +5703,22 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
         />
         <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>เดือน</span>
       </div>
+
+      {/* v1.11.35 (Member Portal Phase 1 — Firebase Foundation): Owner-only Cloud setup entry point.
+          Does nothing when Firebase isn't configured (see firebase-config.js/firebase-sync.js) — every
+          existing install keeps working 100% locally/offline whether or not this section is ever opened. */}
+      <div style={{ marginTop: 14 }}><Label>🌐 Member Portal (Beta)</Label></div>
+      <NavRow onClick={() => setPortalSheetOpen(true)}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{cloudClub?.clubId ? `เชื่อมต่อแล้ว: ${cloudClub.sourceGroupName || cloudClub.clubId}` : "ยังไม่เชื่อมต่อ Cloud"}</span>
+        <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
+      </NavRow>
+      {portalSheetOpen && (
+        <MemberPortalSheet
+          cloudClub={cloudClub} setCloudClub={setCloudClub}
+          players={players} updatePlayer={updatePlayer} groupDefaults={groupDefaults} session={session}
+          onClose={() => setPortalSheetOpen(false)}
+        />
+      )}
 
       <div style={{ marginTop: 6 }}><Label>🔒 ความเป็นส่วนตัวและข้อมูล</Label></div>
 
@@ -5670,6 +5794,143 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
   );
 }
 
+// ===== MEMBER PORTAL (BETA) — v1.11.35, Phase 1: Firebase Foundation ONLY =====
+// Owner-only setup screen: connect this install to a Firebase project (see firebase-config.js/
+// firebase-sync.js at the app root), sign in as this Club's Owner, create/link a Cloud Club, and migrate
+// the current local roster's PERMANENT-IDENTITY fields (name/skill/handedness/memberType/phone/lineId —
+// never photo, never session-scoped fields like status/games/paid) up to Firestore, allocating each
+// player a globally-unique BadQ ID via the allocateBadqId Cloud Function (never a client-generated id —
+// see the approved architecture plan, item 6).
+//
+// Explicitly NOT built here — deferred to later phases per the approved plan, do not add speculatively:
+//   - Any member-facing self-registration/claim UI, PIN setup            (Phase 1.5 / Phase 2)
+//   - Any capacity/waiting-list logic or auto-promotion                  (business rules not finalized)
+//   - Photo sync                                                         (V1 decision: never synced)
+//   - Tournament sync                                                    (permanently out of scope)
+// This panel is a complete no-op, with zero console errors, whenever Firebase isn't configured
+// (window.BadQCloud is undefined or {available:false}) — the default state for every existing install,
+// and the state this was tested in here since no live Firebase project is wired up yet.
+function MemberPortalSheet({ cloudClub, setCloudClub, players, updatePlayer, groupDefaults, session, onClose }) {
+  const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
+  const available = !!(cloud && cloud.available);
+  const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
+  const [authMode, setAuthMode] = useState("signin"); // "signin" | "register"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [customName, setCustomName] = useState("");
+  const [migrating, setMigrating] = useState(false);
+  const [migrateResult, setMigrateResult] = useState(null); // { done, skipped, failed }
+
+  useEffect(() => {
+    if (!available || !cloud.onAuthChange) return;
+    const unsub = cloud.onAuthChange((u) => setAuthUser(u || null));
+    return () => { try { unsub && unsub(); } catch (e) {} };
+  }, [available]);
+
+  const doAuth = async () => {
+    setBusy(true); setErr("");
+    try {
+      if (authMode === "register") await cloud.registerOwner(email.trim(), password);
+      else await cloud.signInOwner(email.trim(), password);
+    } catch (e) { setErr(e?.message || "เข้าสู่ระบบไม่สำเร็จ"); }
+    finally { setBusy(false); }
+  };
+
+  const doCreateClub = async (name) => {
+    const n = (name || "").trim();
+    if (!n || !cloud) return;
+    setBusy(true); setErr("");
+    try {
+      const clubId = await cloud.createClub(n);
+      setCloudClub(normCloudClub({ clubId, ownerUid: authUser?.uid || null, sourceGroupName: n, enabled: true, migratedAt: null }));
+    } catch (e) { setErr(e?.message || "สร้าง Club ไม่สำเร็จ"); }
+    finally { setBusy(false); }
+  };
+
+  // v1.11.35: migrates only players missing a badqId — safe to run repeatedly (idempotent both here and
+  // server-side in allocateBadqId), never touches players already migrated, never touches archived
+  // players (this panel only ever receives the active roster), never reads/writes photo.
+  const doMigrate = async () => {
+    if (!cloudClub?.clubId || !cloud) return;
+    setMigrating(true); setErr(""); setMigrateResult(null);
+    let done = 0, skipped = 0, failed = 0;
+    for (const p of players || []) {
+      if (p.badqId) { skipped++; continue; }
+      try {
+        const res = await cloud.allocateBadqId({
+          clubId: cloudClub.clubId, localId: p.id, name: p.name, skillIndex: p.skillIndex,
+          levelSnapshot: p.level, handedness: p.handedness, handPref: p.handPref,
+          memberType: p.memberType, phone: p.phone, lineId: p.lineId,
+        });
+        if (res && res.badqId) { updatePlayer(p.id, { badqId: res.badqId }); done++; } else failed++;
+      } catch (e) { failed++; }
+    }
+    setCloudClub((c) => normCloudClub({ ...c, migratedAt: Date.now() }));
+    setMigrateResult({ done, skipped, failed });
+    setMigrating(false);
+  };
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>🌐 Member Portal (Beta)</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14, lineHeight: 1.6 }}>
+        ขั้นนี้เป็นแค่ "การเชื่อมต่อพื้นฐาน" เท่านั้น (สร้าง Club บน Cloud + ย้ายรายชื่อสมาชิกที่มีอยู่ขึ้นไปพร้อม BadQ ID) — ยังไม่มีหน้าลงทะเบียนออนไลน์หรือระบบคิวรอ แอปทำงานตามปกติแบบออฟไลน์เหมือนเดิมทุกประการไม่ว่าจะเชื่อมต่อ Cloud หรือไม่
+      </div>
+
+      {!available && (
+        <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12.5, color: T.muted, lineHeight: 1.7 }}>
+          ยังไม่ได้ตั้งค่า Firebase สำหรับเครื่องนี้ — ฟีเจอร์นี้ยังปิดอยู่และไม่กระทบการใช้งานปกติของแอป ผู้ดูแลระบบต้องกรอกค่า config ในไฟล์ firebase-config.js ก่อนจึงจะเปิดใช้งานได้ (ดูขั้นตอนใน Firebase Console setup)
+        </div>
+      )}
+
+      {available && !authUser && (
+        <div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <button onClick={() => setAuthMode("signin")} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "signin" ? T.green : T.surface, color: authMode === "signin" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>เข้าสู่ระบบ Owner</button>
+            <button onClick={() => setAuthMode("register")} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "register" ? T.green : T.surface, color: authMode === "register" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>สมัคร Owner ใหม่</button>
+          </div>
+          <input type="email" placeholder="อีเมล" value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+          <input type="password" placeholder="รหัสผ่าน" value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+          <button disabled={busy || !email || !password} onClick={doAuth} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังดำเนินการ..." : authMode === "register" ? "สมัคร Owner" : "เข้าสู่ระบบ"}</button>
+        </div>
+      )}
+
+      {available && authUser && !cloudClub?.clubId && (
+        <div>
+          <Label>สร้าง Club จากชื่อก๊วนที่เคยบันทึกไว้</Label>
+          {Object.keys(groupDefaults || {}).length === 0 && (
+            <div style={{ fontSize: 12, color: T.muted, marginBottom: 8 }}>ยังไม่มีชื่อก๊วนที่บันทึกไว้ — พิมพ์ชื่อ Club ด้านล่างแทนได้</div>
+          )}
+          {Object.keys(groupDefaults || {}).map((name) => (
+            <button key={name} disabled={busy} onClick={() => doCreateClub(name)} style={{ width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, marginBottom: 6, fontSize: 13, fontWeight: 700, color: T.text }}>สร้าง Club: {name}</button>
+          ))}
+          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+            <input placeholder="หรือพิมพ์ชื่อ Club เอง" value={customName} onChange={(e) => setCustomName(e.target.value)} style={{ flex: 1, padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13 }} />
+            <button disabled={busy || !customName.trim()} onClick={() => doCreateClub(customName)} style={{ padding: "9px 14px", borderRadius: 9, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>สร้าง</button>
+          </div>
+        </div>
+      )}
+
+      {available && authUser && cloudClub?.clubId && (
+        <div>
+          <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>เชื่อมต่อแล้ว</div>
+            <div style={{ fontSize: 11.5, color: T.muted, marginTop: 2 }}>Club: {cloudClub.sourceGroupName || cloudClub.clubId}</div>
+          </div>
+          <button disabled={migrating} onClick={doMigrate} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, opacity: migrating ? 0.6 : 1 }}>{migrating ? "กำลังย้ายข้อมูล..." : "ย้ายข้อมูลสมาชิกขึ้น Cloud"}</button>
+          {migrateResult && (
+            <div style={{ marginTop: 8, fontSize: 12, color: T.muted }}>สำเร็จ {migrateResult.done} คน · ข้ามไปแล้ว (มี BadQ ID อยู่แล้ว) {migrateResult.skipped} คน{migrateResult.failed ? ` · ล้มเหลว ${migrateResult.failed} คน` : ""}</div>
+          )}
+        </div>
+      )}
+
+      {err && <div style={{ marginTop: 10, fontSize: 12, color: "#c0392b" }}>{err}</div>}
+    </Overlay>
+  );
+}
+
 // v1.11.6: "สมาชิกที่เก็บไว้" — reached from ⚙️ ตั้งค่า. Deliberately minimal (photo/name/skill/hand/type
 // + a single "กู้คืนสมาชิก" action) per spec section 4: this is a recovery list, not a second member-
 // management surface — full editing/stats are still only reachable from the normal Player Profile/
@@ -5738,7 +5999,7 @@ function Fairness({ sA, sB }) {
 
 /* ============ SESSION ============ */
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
@@ -5809,9 +6070,12 @@ function SessionTab(props) {
     const historySet = new Set(history);
     const merged = [...history, ...current];
     const rank = (m) => (historySet.has(m) ? 0 : m.status === "playing" || m.status === "paused" ? 1 : 2);
-    merged.sort((a, b) => rank(a) - rank(b) || (a.round ?? 0) - (b.round ?? 0) || (a.court ?? 0) - (b.court ?? 0));
+    merged.sort((a, b) => rank(a) - rank(b) || (a.round ?? 0) - (b.round ?? 0) || (a.court ?? Infinity) - (b.court ?? Infinity));
     return merged.map((m, i) => ({ m, no: i + 1, done: historySet.has(m) }));
   }, [history, current]);
+  // v1.11.36: "same teammate as the latest game" — see buildLatestPartnerMap; used only to render the
+  // non-blocking ⚠️ warning badge below (MatchRow), the actual soft-pairing nudge lives in buildMatch itself.
+  const latestPartnerMap = useMemo(() => buildLatestPartnerMap(history, current), [history, current]);
   const finishedOrdered = orderedMatches.filter((x) => x.done);
   const liveOrdered = orderedMatches.filter((x) => !x.done);
   // same cap the old ประวัติแมตช์ accordion used (HISTORY_PAGE) — keeps a long day's match log from
@@ -5823,7 +6087,7 @@ function SessionTab(props) {
   // v1.11.24: fixed pixel column widths (NOT flex:1) so the table never squeezes to fit the screen —
   // it scrolls horizontally instead (explicit request: "ตารางไม่ต้องบีบให้พอดีจอ ถ้าไม่พอ ให้สามารถ
   // เลื่อนไปดูด้านซ้ายได้"). The scroll container itself is the div wrapping the header + all rows below.
-  const COLW = { no: 26, court: 92, team: 232, result: 66, status: 122, actions: 50 };
+  const COLW = { no: 26, court: 92, team: 232, result: 66, status: 122, actions: 72 }; // v1.11.36: widened for the new delete-game icon (was 50, fit only 2 icons)
   const TABLE_MIN_WIDTH = COLW.no + COLW.court + COLW.team * 2 + COLW.result + COLW.status + COLW.actions + 7 * 6 + 22; // columns + gaps + row padding
 
   // ONE unified row for every match — whether it's permanently archived (history[]) or still a live
@@ -5839,11 +6103,15 @@ function SessionTab(props) {
     const st = done ? "done" : m.status;
     const reassign = done ? reassignHistoryCourt : reassignCourt;
     const replace = done ? replaceHistorySlot : replaceSlot;
-    // a "next" court's swap dropdown also offers players already paired into OTHER not-yet-started
-    // courts (not just the free/waiting pool) — see nextPoolFor/replaceSlot for how the actual swap
-    // avoids duplicating anyone onto two courts at once. Every other status (playing/paused/finished)
-    // only offers the genuinely free/waiting pool.
-    const bench = !done && st === "next" ? [...waitQueue, ...nextPoolFor(m.id)] : waitQueue;
+    // v1.11.36 REDESIGN (real-world testing feedback — "player picker still shows people already assigned
+    // to another upcoming game"): a "next" row's bench used to also offer players already paired into
+    // OTHER not-yet-started courts (nextPoolFor) so they could be swapped across courts before either
+    // started. That's exactly the bug: a player belonging to Upcoming Game 1 must NOT be selectable while
+    // editing Upcoming Game 2. waitQueue alone is the single reusable eligibility source for every status
+    // here — it already excludes anyone seated ANYWHERE in `current` right now (any match, any status,
+    // including this very row's own other slot — see `inPlay`), and it recomputes live off `current`, so
+    // removing/deleting a game frees its players again immediately with zero extra bookkeeping.
+    const bench = waitQueue;
     const rowOpenSlot = openSlot && openSlot.mid === m.id ? { team: openSlot.team, idx: openSlot.idx, rect: openSlot.rect } : null;
     const setRowOpenSlot = (v) => setOpenSlot(v ? { mid: m.id, ...v } : null);
     const allowed = allowedNextStatuses(st);
@@ -5851,8 +6119,17 @@ function SessionTab(props) {
     // v1.11.29: a "next" row's court might already be occupied by its own playing/paused primary match
     // (the prep-ahead companion case) — its "▶ เริ่มเกม" button stays disabled until that court frees up,
     // instead of letting the tap through and relying only on startGame's alert as the only guard.
-    const busyCourt = !done && st === "next" && current.some((c) => c.id !== m.id && c.court === m.court && (c.status === "playing" || c.status === "paused"));
-    const canStart = !done && st === "next" && startReady(m) && !busyCourt;
+    const busyCourt = !done && st === "next" && m.court != null && current.some((c) => c.id !== m.id && c.court === m.court && (c.status === "playing" || c.status === "paused"));
+    // v1.11.36: an upcoming game with no court assigned yet (see addExtraMatch) can't start until one is —
+    // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
+    const noCourt = !done && st === "next" && m.court == null;
+    const canStart = !done && st === "next" && startReady(m) && !busyCourt && !noCourt;
+    // v1.11.36: non-blocking "same teammate as the latest game" warning — pure display, computed fresh from
+    // this row's current team composition; covers manual AND automatic selection alike since it doesn't
+    // care how the teams got filled. Doubles only (a singles team has no "teammate").
+    const repeatsLatest = (team) => mode === "doubles" && team && team.length === 2 && team[0] && team[1] && (latestPartnerMap[team[0]] === team[1] || latestPartnerMap[team[1]] === team[0]);
+    const latestWarnA = !done && st === "next" && repeatsLatest(m.teamA);
+    const latestWarnB = !done && st === "next" && repeatsLatest(m.teamB);
     // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
     // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
     // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
@@ -5863,10 +6140,13 @@ function SessionTab(props) {
         <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`, background: rowBg, minWidth: TABLE_MIN_WIDTH }}>
           <span style={{ width: COLW.no, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>{String(no).padStart(2, "0")}</span>
           <select
-            value={m.court}
-            onChange={(e) => reassign(m.id, Number(e.target.value))}
-            style={{ width: COLW.court, flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "6px 4px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text }}
+            value={m.court == null ? "" : m.court}
+            onChange={(e) => reassign(m.id, e.target.value === "" ? null : Number(e.target.value))}
+            style={{ width: COLW.court, flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "6px 4px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: m.court == null ? T.muted : T.text }}
           >
+            {/* v1.11.36: a freshly-added upcoming game (see addExtraMatch) starts with no court at all —
+                this placeholder is what actually renders as "เลือกสนาม" until the organizer assigns one. */}
+            {m.court == null && <option value="">เลือกสนาม</option>}
             {Array.from({ length: courtCount }, (_, i) => i + 1).map((c) => (
               <option key={c} value={c}>สนาม {courtLabelFor(courtLabels, c)}</option>
             ))}
@@ -5906,7 +6186,7 @@ function SessionTab(props) {
             <button
               onClick={() => setMatchStatus(m.id, "playing")}
               disabled={!canStart}
-              title={!startReady(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
+              title={!startReady(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : noCourt ? "กรุณาเลือกสนามก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
               style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, color: canStart ? STATUS.playing.color : T.muted, background: canStart ? STATUS.playing.bg : T.surface2, opacity: canStart ? 1 : 0.6 }}
             >
               <Play size={12} /> เริ่มเกม
@@ -5945,6 +6225,12 @@ function SessionTab(props) {
                 <button onClick={() => regenCourt(m.id)} disabled={m.locked} title="สุ่มผู้เล่นให้อัตโนมัติ (ใช้ได้ทั้งโหมดสุ่ม/เลือกเอง)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.muted, opacity: m.locked ? 0.5 : 1 }}>
                   <Shuffle size={14} />
                 </button>
+                {/* v1.11.36: cancel/delete this upcoming game entirely (see deleteMatch) — needed now that a
+                    game can be created before a court is chosen, so the organizer can back out of one they
+                    no longer want without leaving an empty court-less row sitting in the table. */}
+                <button onClick={() => deleteMatch(m.id)} disabled={m.locked} title="ลบเกมนี้ (ผู้เล่นในเกมนี้จะกลับไปพร้อมเล่นทันที)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.accent, opacity: m.locked ? 0.5 : 1 }}>
+                  <Trash2 size={14} />
+                </button>
               </>
             )}
           </div>
@@ -5954,6 +6240,14 @@ function SessionTab(props) {
             and was noisy (see the screenshot: 3+ copies of the same line stacked down the table). The
             disabled "▶ เริ่มเกม" button and its title="เลือกผู้เล่นให้ครบก่อนเริ่มเกม" tooltip already convey
             the same thing on tap/hover, so nothing is lost — this was purely the extra always-visible line. */}
+        {(latestWarnA || latestWarnB) && (
+          // v1.11.36: "⚠️ คู่เกมล่าสุด" — WARNING ONLY, never blocks selection (see canStart/startReady —
+          // this has no effect on either). Purely informational, same tinted-row visual language as the
+          // status backgrounds above rather than a modal or alert.
+          <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, fontSize: 11, fontWeight: 700, color: "#c2650a" }}>
+            ⚠️ คู่เกมล่าสุด — {[latestWarnA && "ทีม A", latestWarnB && "ทีม B"].filter(Boolean).join(" และ ")} เพิ่งเป็นคู่กันในเกมล่าสุด (ยังเลือกคู่นี้ได้ตามปกติ)
+          </div>
+        )}
       </div>
     );
   };
@@ -7468,6 +7762,11 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
   const [editCourtLabels, setEditCourtLabels] = useState(false);
   const [showCourtRecDetail, setShowCourtRecDetail] = useState(false); // v1.11.7 (Part I/J)
   const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
+  // v1.11.36: the lock/avoid pair editor's dropdowns must only offer people actually here THIS session, not
+  // the full permanent member list (see isSessionAttendee) — computed here, once, and threaded down as a
+  // separate `attendees` prop so LockPairEditor's own existing-rule display (which must still resolve/show
+  // a rule for someone who has since left/gone absent) keeps reading from the untouched `players` list.
+  const attendeePlayers = useMemo(() => players.filter(isSessionAttendee), [players]);
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
 
   return (
@@ -7563,7 +7862,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           )}
 
           <Label>ล็อคคู่ / เลี่ยงคู่ (เฉพาะโหมดตีคู่ ยกเว้น "ไม่อยากสู้/ไม่อยากเจอเลย" ใช้ได้ทั้งเดี่ยว-คู่)</Label>
-          <LockPairEditor {...{ players, lockPairs, addLockPair, removeLockPair, setHandPref, getP }} />
+          <LockPairEditor {...{ players, attendees: attendeePlayers, lockPairs, addLockPair, removeLockPair, setHandPref, getP }} />
           <button onClick={resetGames} style={{ marginTop: 14, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><RotateCcw size={14} /> รีเซ็ตจำนวนเกม</button>
         </div>
       )}
@@ -10488,11 +10787,15 @@ const HAND_PREF_META = {
   preferLeft: { label: "อยากคู่กับมือซ้าย", short: "อยากคู่มือซ้าย", bg: HAND_BADGE.left.bg, border: "#ddc8fb", color: HAND_BADGE.left.color },
   avoidLeft: { label: "ไม่อยากคู่กับมือซ้าย", short: "ไม่อยากคู่มือซ้าย", bg: "#fdecec", border: "#f5c9c9", color: "#c0392b" },
 };
-function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, setHandPref, getP }) {
+function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLockPair, setHandPref, getP }) {
   const [a, setA] = useState(""); const [b, setB] = useState(""); const [type, setType] = useState("lock");
   const sty = { flex: 1, padding: "9px 8px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, minWidth: 0 };
   const isHandPrefType = type === "preferLeft" || type === "avoidLeft";
   const handPrefPlayers = players.filter((p) => p.handPref === "preferLeft" || p.handPref === "avoidLeft");
+  // v1.11.36: both sides of BOTH dropdowns must use the same attendee-only source (spec) — falls back to
+  // the full `players` list if a caller doesn't pass `attendees`, so this component keeps working exactly
+  // as before for any other reuse that doesn't care about session attendance.
+  const pickable = attendees || players;
   const add = () => {
     if (isHandPrefType) { if (a) setHandPref(a, type); }
     else addLockPair(a, b, type);
@@ -10527,10 +10830,10 @@ function LockPairEditor({ players, lockPairs, addLockPair, removeLockPair, setHa
         </div>
       )}
       <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-        <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">เลือกคน</option>{players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+        <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
         {!isHandPrefType && <>
           <span style={{ color: T.muted, fontWeight: 800 }}>+</span>
-          <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{players.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+          <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
         </>}
       </div>
       <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
