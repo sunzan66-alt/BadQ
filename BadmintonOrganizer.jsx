@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.37";
+const APP_VERSION = "1.11.38";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -916,6 +916,14 @@ function computeBill(players, settings) {
     const total = Math.max(0, Math.round(court + shuttle + other - discount - wheelDiscount));
     return { ...p, eCourt: court, eShuttle: shuttle, eOther: other, eDiscount: discount, eWheelDiscount: wheelDiscount, eCarriedInDiscount: carriedInDiscount, total };
   });
+}
+// v1.11.38: true if this player is still mid-match (playing or paused, i.e. NOT finished yet) right now —
+// used to block marking them as paid before their current game is actually finished. computeBill's
+// per-game shuttle charge above reads `p.games`, which only counts FINISHED matches (bumped by
+// finishAndAdvance on "จบเกม") — charging while a match is still live risks silently missing that last
+// game's cost entirely if the organizer forgets to press "จบเกม" afterward (the exact miss this guards against).
+function playerHasLiveMatch(playerId, current) {
+  return (current || []).some((m) => (m.status === "playing" || m.status === "paused") && [...(m.teamA || []), ...(m.teamB || [])].includes(playerId));
 }
 // ===================== FLEXIBLE COST MODEL — AUTO EXPENSE LINES (v1.9.4) =====================
 // Returns ready-to-file session expense items ({id, category, description, amount, date, auto:true}) for
@@ -4054,7 +4062,15 @@ export default function App() {
   };
   const clearScore = (mid) => { const upd = (arr) => arr.map((m) => (m.id === mid ? { ...m, scores: null } : m)); setCurrent((prev) => upd(prev)); setHistory((prev) => upd(prev)); };
 
-  const togglePaid = (id) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, paid: !p.paid } : p)));
+  // v1.11.38: marking someone as paid means they're settled up and heading home — reflect that immediately
+  // in their attendance status too ("กลับแล้ว"), so the organizer doesn't have to flip status separately
+  // right after every payment. Only forced on the way TO paid; un-marking (undo a mistaken tap) leaves
+  // status alone, since we don't know whether they'd actually already left before that tap.
+  const togglePaid = (id) => setPlayers((prev) => prev.map((p) => {
+    if (p.id !== id) return p;
+    const nowPaid = !p.paid;
+    return { ...p, paid: nowPaid, status: nowPaid ? "left" : p.status };
+  }));
 
   // undo a mistakenly-finished match (only while still in current round, not yet advanced)
   const undoFinish = (mid) => {
@@ -10142,6 +10158,8 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   // NOT auto-applied, just surfaced as a suggestion with a manual "ใช้กับก๊วนนี้" action (see spec: SUGGEST, never auto-deduct).
   const detailPCredits = detailP ? (discountCredits || []).filter((c) => c.playerId === detailP.id && c.status === "available") : [];
   const detailPCreditTotal = detailPCredits.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  // v1.11.38: same "must finish the match first" guard as the list row above, for the detail overlay's own payment button.
+  const detailIsLive = !!(detailP && detailBill && !detailBill.paid && playerHasLiveMatch(detailP.id, current));
 
   const started = history.length + doneCurrent.length > 0 || current.length > 0 || played.length > 0;
   if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "วันนี้" ก่อน</div>;
@@ -10191,7 +10209,12 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
         {visibleBill.length === 0 ? (
           <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{q ? "ไม่พบผู้เล่นที่ค้นหา" : payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีข้อมูลการชำระเงิน"}</div>
-        ) : visibleBill.map((b) => (
+        ) : visibleBill.map((b) => {
+          // v1.11.38: still playing/paused right now (match not finished) -> charging is blocked until the
+          // organizer presses "จบเกม", so the games-played count above (and this bill's shuttle charge)
+          // definitely includes their current game before any money changes hands.
+          const isLive = !b.paid && playerHasLiveMatch(b.id, current);
+          return (
           <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
             <button onClick={() => setDetail(b.id)} style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", textAlign: "left", padding: 0 }}>
               <Avatar p={b} size={30} />
@@ -10200,9 +10223,15 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
                 <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{b.games || 0} เกม · {formatCurrency(b.total)}</span>
               </span>
             </button>
-            <button onClick={() => togglePaid(b.id)} style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: b.paid ? "#e2f5ec" : "#fdecea", color: b.paid ? T.green : T.accent }}>{b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+            <button
+              onClick={() => { if (isLive) return; togglePaid(b.id); }}
+              disabled={isLive}
+              title={isLive ? "กำลังเล่นอยู่ — กดจบเกมก่อนถึงจะคิดตังค์ได้" : undefined}
+              style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: isLive ? T.surface2 : b.paid ? "#e2f5ec" : "#fdecea", color: isLive ? T.muted : b.paid ? T.green : T.accent, opacity: isLive ? 0.75 : 1, cursor: isLive ? "not-allowed" : "pointer" }}
+            >{isLive ? "⏳ กำลังเล่นอยู่" : b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
           </div>
-        ))}
+          );
+        })}
       </div>
         );
       })()}
@@ -10259,7 +10288,11 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               </div>
             )}
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-              <button onClick={() => togglePaid(detailP.id)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", fontSize: 13.5, fontWeight: 800, background: detailBill.paid ? "#e2f5ec" : T.green, color: detailBill.paid ? T.green : "#fff" }}>{detailBill.paid ? "🟢 จ่ายแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าจ่ายแล้ว"}</button>
+              <button
+                onClick={() => { if (detailIsLive) return; togglePaid(detailP.id); }}
+                disabled={detailIsLive}
+                style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", fontSize: 13.5, fontWeight: 800, background: detailIsLive ? T.surface2 : detailBill.paid ? "#e2f5ec" : T.green, color: detailIsLive ? T.muted : detailBill.paid ? T.green : "#fff", opacity: detailIsLive ? 0.75 : 1, cursor: detailIsLive ? "not-allowed" : "pointer" }}
+              >{detailIsLive ? "⏳ กำลังเล่นอยู่ — จบเกมก่อนถึงจะคิดตังค์ได้" : detailBill.paid ? "🟢 จ่ายแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าจ่ายแล้ว"}</button>
             </div>
 
             {detailP.spun ? (
