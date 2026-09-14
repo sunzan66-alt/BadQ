@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.44";
+const APP_VERSION = "1.11.45";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -4509,7 +4509,13 @@ export default function App() {
   const endSession = () => {
     const doneCurrent = current.filter((m) => m.status === "done");
     const totalMatches = history.length + doneCurrent.length;
-    const gamesArr = players.map((p) => p.games || 0);
+    // v1.11.45 (History attendee filter): same "attended" definition computeBill()/computeSplitExpenseSummary()
+    // already use elsewhere in this file — present in some capacity (ready/resting/left), not merely
+    // registered/absent/waitlisted. Used below both to freeze the correct player list AND to compute
+    // minGames/maxGames/totalGames from only the people who were actually here (a non-attendee's games:0
+    // was previously dragging minGames down to 0 even when every real attendee played several).
+    const attendedPlayers = players.filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
+    const gamesArr = attendedPlayers.map((p) => p.games || 0);
     const bill = computeBill(players, settings);
     const wc = players.reduce((s, p) => s + (p.waitCount || 0), 0);
     const wt = players.reduce((s, p) => s + (p.waitTotal || 0), 0);
@@ -4523,7 +4529,12 @@ export default function App() {
       courtCount, mode,
       settings: { ...settings },
       levelPresetId: settings.levelPresetId || "isan", // freeze which preset was active — historical display must never change later
-      players: players.map((p) => ({ id: p.id, name: p.name, level: p.level, skillIndex: p.skillIndex, photo: p.photo || null, games: p.games || 0 })),
+      // v1.11.45 (History attendee filter): freeze only players who ACTUALLY ATTENDED this session (see
+      // attendedPlayers above), never the whole master roster — so the frozen player list and the frozen
+      // payment list (`bill`, already attendee-only via computeBill) can never disagree about who was
+      // actually here. A player who attended but played 0 games (status "ready"/"resting"/"left") still
+      // passes this filter — this is NOT a gamesPlayed>0 filter, which would incorrectly drop them.
+      players: attendedPlayers.map((p) => ({ id: p.id, name: p.name, level: p.level, skillIndex: p.skillIndex, photo: p.photo || null, games: p.games || 0 })),
       matches: [...history, ...current].map((m) => ({ ...m })),
       stats: {
         totalMatches,
@@ -11773,19 +11784,45 @@ function splitSpan(totalDeg, minPieces) {
   const pieces = Math.max(minPieces || 1, Math.ceil(totalDeg / MAX_SLICE_DEG));
   return new Array(pieces).fill(totalDeg / pieces);
 }
-// Spreads every same-identity group of wedges evenly across the FULL circle (by each wedge's own fractional
-// position within its group), then merges every group by that position — this is what keeps, say, 4
-// "ไม่ได้รางวัล" wedges from ending up clumped next to each other, purely for visual balance. Deterministic
-// (no randomness) so re-rendering the same prize config always lays out the same wheel.
+// v1.11.45 (spec section 2): merges two ordered arrays into one, spreading whichever is smaller as evenly
+// as possible into the gaps of the larger one — a standard "fair distribution" / Euclidean-rhythm pattern,
+// symmetric regardless of which side is actually longer. Order within each input array is preserved. Used
+// purely to decide the ANGULAR ORDER of already-computed wheel wedges (reward wedges vs "ไม่ได้รางวัล"
+// wedges) — never touches span/probability, only which position around the circle each wedge occupies.
+function interleaveEvenly(a, b) {
+  const total = a.length + b.length;
+  if (total === 0) return [];
+  const result = [];
+  let ai = 0, bi = 0;
+  for (let i = 0; i < total; i++) {
+    const bTarget = ((i + 1) * b.length) / total;
+    if (bi < b.length && (ai >= a.length || bTarget - bi >= 0.5)) result.push(b[bi++]);
+    else result.push(a[ai++]);
+  }
+  return result;
+}
+// v1.11.45 (spec section 2 — Reward/No-Prize alternation, VISUAL ONLY): first spreads every same-identity
+// group of wedges evenly within its own bucket (same trick as before — keeps, say, 4 "ไม่ได้รางวัล" wedges,
+// or a single oversized real prize's split pieces, from clumping together), THEN interleaves the "real
+// prize" bucket and the "ไม่ได้รางวัล" bucket as evenly as possible against EACH OTHER (Reward, No Prize,
+// Reward, No Prize, ...) via interleaveEvenly() below. Previously only the first step existed — every real
+// prize's single wedge landed at the same "middle of its own 1-piece group" position (0.5), so with several
+// distinct prizes they could all tie and cluster together relative to the none-wedges spread around them.
+// Deterministic (no randomness) so re-rendering the same prize config always lays out the same wheel.
 function distributeWheelGroups(groups) {
-  const items = [];
+  const rewardItems = [];
+  const noneItems = [];
   groups.forEach((g, gi) => {
     g.pieces.forEach((span, i) => {
       const pos = g.pieces.length > 0 ? (i + 0.5) / g.pieces.length : 0;
-      items.push({ id: g.id, label: g.label, isNone: g.isNone, isSoldOut: g.isSoldOut, color: g.color, span, pos, gi });
+      const item = { id: g.id, label: g.label, isNone: g.isNone, isSoldOut: g.isSoldOut, color: g.color, span, pos, gi };
+      (g.isNone ? noneItems : rewardItems).push(item);
     });
   });
-  items.sort((a, b) => a.pos - b.pos || a.gi - b.gi);
+  const byPos = (a, b) => a.pos - b.pos || a.gi - b.gi;
+  rewardItems.sort(byPos);
+  noneItems.sort(byPos);
+  const items = interleaveEvenly(rewardItems, noneItems);
   let acc = 0;
   return items.map((it) => { const seg = { id: it.id, label: it.label, isNone: it.isNone, isSoldOut: it.isSoldOut, color: it.color, span: it.span, start: acc }; acc += it.span; return seg; });
 }
@@ -11896,14 +11933,13 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
       <div style={{ position: "relative", width: wheelSize, height: wheelSize, flexShrink: 0 }}>
         {/* subtle static outer ring — never rotates, purely a "this is one polished component" frame around the spinning disc (spec sections 1/6) */}
         <div style={{ position: "absolute", inset: "-3.5%", borderRadius: "50%", border: `3px solid rgba(255,255,255,0.18)`, boxShadow: "0 2px 10px rgba(0,0,0,0.25)", pointerEvents: "none" }} />
-        {/* pointer — redesigned as a small clean triangle + knob (not an emoji), fixed dead-center at 12
-            o'clock and slightly overlapping the rim so it reads as physically attached to the wheel. Its
-            position is purely cosmetic and never disagrees with the actual selected reward: the wheel's own
-            rotation target (see `target` above) is what guarantees the winning wedge's center lands exactly
-            under this fixed point, not the other way around. */}
-        <div style={{ position: "absolute", top: "-3%", left: "50%", transform: "translateX(-50%)", zIndex: 3, display: "flex", flexDirection: "column", alignItems: "center", filter: "drop-shadow(0 2px 3px rgba(0,0,0,0.35))" }}>
-          <div style={{ width: 0, height: 0, borderLeft: "9px solid transparent", borderRight: "9px solid transparent", borderTop: `18px solid ${T.accent}`, marginBottom: -4 }} />
-          <div style={{ width: 12, height: 12, borderRadius: "50%", background: T.accent, border: "2px solid #fff" }} />
+        {/* pointer — v1.11.45: a single bigger, cleaner triangle (no dot/knob underneath any more), fixed
+            dead-center at 12 o'clock with its tip overlapping the rim so it reads as physically attached to
+            the wheel. Its position is purely cosmetic and never disagrees with the actual selected reward:
+            the wheel's own rotation target (see `target` above) is what guarantees the winning wedge's
+            center lands exactly under this fixed point, not the other way around. */}
+        <div style={{ position: "absolute", top: "-2%", left: "50%", transform: "translateX(-50%)", zIndex: 3, filter: "drop-shadow(0 3px 4px rgba(0,0,0,0.35))" }}>
+          <div style={{ width: 0, height: 0, borderLeft: "15px solid transparent", borderRight: "15px solid transparent", borderTop: `28px solid ${T.accent}` }} />
         </div>
         <div style={{ width: "100%", height: "100%", borderRadius: "50%", boxShadow: "0 10px 34px rgba(0,0,0,0.45)", transition: `transform ${SPIN_MS / 1000}s cubic-bezier(0.22, 1.32, 0.36, 1)`, transform: `rotate(${rotation}deg)`, overflow: "hidden", border: "7px solid #fff", boxSizing: "border-box", background: T.surface2 }}>
           <svg viewBox="0 0 250 250" width="100%" height="100%">
