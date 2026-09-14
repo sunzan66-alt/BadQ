@@ -118,6 +118,12 @@
   // is fine, since ordering only ever needs to be correct between writes racing within one page lifetime.
   var __writeSeq = 0;
   var __writeLastCommittedSeq = {};
+  // v1.11.48 (Section E): most browsers cap a single origin's total localStorage around 5-10MB (iOS
+  // Safari/WebKit included); a single string anywhere near or above that can never fit regardless of free
+  // space elsewhere. 4MB leaves real headroom under the smallest common ceiling (~5MB) for the "bg:"+k
+  // prefix, other keys (bg-v11-diag, bg-v11-autobackups, etc.) and normal browser/UA overhead, while still
+  // comfortably covering ordinary (non-photo-bloated) club sizes.
+  var MIRROR_SIZE_LIMIT_CHARS = 4 * 1024 * 1024; // ~4,194,304 chars (~4MB for ASCII/base64-heavy JSON)
   function idbSetIfNewer(k, v, mySeq){
     return idbOpen().then(function(db){
       return new Promise(function(resolve, reject){
@@ -221,23 +227,49 @@
       var mySeq = ++__writeSeq;
       var primaryOk = true, error = null;
       try { await idbSetIfNewer(k, v, mySeq); } catch(e) { primaryOk = false; error = String((e && e.message) || e); }
-      var mirrorOk = true;
-      // v1.11.46: the SAME call-order sequence guard applied to the localStorage mirror, sharing
-      // `__writeLastCommittedSeq` with the primary write above — a call proven stale for primary is stale
-      // for the mirror too, since they're the same underlying save attempt. This block has no `await` in
-      // it, so — JS being single-threaded — the check and write below are atomic with respect to any other
-      // code in this tab; the only way to lose this race is a genuinely concurrent write from ANOTHER
-      // tab/origin instance, a separate, pre-existing multi-tab scenario already handled elsewhere
-      // (refreshFromStorageIfNewer, the pagehide/visibility guard).
-      try {
-        if (mySeq >= (__writeLastCommittedSeq[k] || 0)) {
-          localStorage.setItem("bg:"+k, v);
-          __writeLastCommittedSeq[k] = mySeq;
+      var mirrorOk = true, mirrorSkipped = false, mirrorSkipReason = null, mirrorFailureReason = null;
+      // v1.11.48 (Section E): diagnostics on a real device showed mirrorOk=false on EVERY save once the
+      // full state reached ~42MB — almost certainly localStorage's QuotaExceededError, since most
+      // browsers (including iOS Safari/WebKit) cap a single origin's localStorage around 5-10MB total,
+      // and a single ~40MB string cannot fit regardless of how much else is stored. Before this fix, the
+      // code below unconditionally called localStorage.setItem with the full string on EVERY save and only
+      // caught the exception AFTER the (wasted) attempt — repeatedly forcing the engine to allocate/copy a
+      // huge string and fail, on every single state change, forever. That is itself wasted CPU/memory work
+      // piling on top of the real IndexedDB primary write, exactly the kind of "repeated expensive failed
+      // write" the investigation flagged. Now: if `v` is over MIRROR_SIZE_LIMIT_CHARS, the write is SKIPPED
+      // entirely — no setItem call is even attempted — and reported as `mirrorSkipped` with a reason,
+      // rather than as a mirror FAILURE. This is explicitly NOT treated as a primary failure (primaryOk is
+      // computed entirely independently above) and never clears/touches any existing localStorage data.
+      if (typeof v === "string" && v.length > MIRROR_SIZE_LIMIT_CHARS) {
+        mirrorSkipped = true;
+        mirrorSkipReason = "state-too-large";
+      } else {
+        // v1.11.46: the SAME call-order sequence guard applied to the localStorage mirror, sharing
+        // `__writeLastCommittedSeq` with the primary write above — a call proven stale for primary is
+        // stale for the mirror too, since they're the same underlying save attempt. This block has no
+        // `await` in it, so — JS being single-threaded — the check and write below are atomic with respect
+        // to any other code in this tab; the only way to lose this race is a genuinely concurrent write
+        // from ANOTHER tab/origin instance, a separate, pre-existing multi-tab scenario already handled
+        // elsewhere (refreshFromStorageIfNewer, the pagehide/visibility guard).
+        try {
+          if (mySeq >= (__writeLastCommittedSeq[k] || 0)) {
+            localStorage.setItem("bg:"+k, v);
+            __writeLastCommittedSeq[k] = mySeq;
+          }
+          // else: a later-invoked call has already committed for this key since this call started — skip,
+          // preserving what that later call wrote.
+        } catch(e) {
+          // v1.11.48 (Section E): capture the ACTUAL exception (name/message) — e.g. "QuotaExceededError"
+          // — instead of silently discarding it, so a genuine (non-size-predicted) mirror failure is still
+          // visible in diagnostics without ever being treated as a primary failure.
+          mirrorOk = false;
+          mirrorFailureReason = String((e && (e.name ? (e.name + ": " + e.message) : e.message)) || e);
         }
-        // else: a later-invoked call has already committed for this key since this call started — skip,
-        // preserving what that later call wrote.
-      } catch(e) { mirrorOk = false; }
-      return { value: v, primaryOk: primaryOk, mirrorOk: mirrorOk, error: error };
+      }
+      if (mirrorSkipped || !mirrorOk) {
+        try { window.__pushDiag && window.__pushDiag("mirrorSkipped", { key: k, jsonLen: v && v.length, mirrorSkipped: mirrorSkipped, mirrorSkipReason: mirrorSkipReason, mirrorOk: mirrorOk, mirrorFailureReason: mirrorFailureReason }); } catch(e) {}
+      }
+      return { value: v, primaryOk: primaryOk, mirrorOk: mirrorOk, mirrorSkipped: mirrorSkipped, mirrorSkipReason: mirrorSkipReason, mirrorFailureReason: mirrorFailureReason, error: error };
     },
     async delete(k){
       var mirrorOk = true;
@@ -310,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.11.47";
+      var CURRENT_VERSION = "1.11.48";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -694,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION="1.11.47";const LEVELS=["R","BG1","BG2","BG3","S-","S","N-","N","P-","P","C"];const WEIGHT={R:1,BG1:2,BG2:3,BG3:4,"S-":5,S:6,"N-":7,N:8,"P-":9,P:10,C:11};const LEVEL_COLOR={R:"#64748b",BG1:"#0284c7",BG2:"#0891b2",BG3:"#0d9488","S-":"#16a34a",S:"#65a30d","N-":"#ca8a04",N:"#d97706","P-":"#ea580c",P:"#dc2626",C:"#b91c1c"};/* ============ LEVEL PRESET SYSTEM ============
+const APP_VERSION="1.11.48";const LEVELS=["R","BG1","BG2","BG3","S-","S","N-","N","P-","P","C"];const WEIGHT={R:1,BG1:2,BG2:3,BG3:4,"S-":5,S:6,"N-":7,N:8,"P-":9,P:10,C:11};const LEVEL_COLOR={R:"#64748b",BG1:"#0284c7",BG2:"#0891b2",BG3:"#0d9488","S-":"#16a34a",S:"#65a30d","N-":"#ca8a04",N:"#d97706","P-":"#ea580c",P:"#dc2626",C:"#b91c1c"};/* ============ LEVEL PRESET SYSTEM ============
    Canonical source of truth for matchmaking is the numeric skillIndex (1–11), stored per player.
    A "preset" only controls the DISPLAY label shown for each skillIndex — swapping presets never
    changes skillIndex, so matchmaking / fairness / queue priority are unaffected. */const LEVEL_COLORS_BY_INDEX=["#64748b","#0284c7","#0891b2","#0d9488","#16a34a","#65a30d","#ca8a04","#d97706","#ea580c","#dc2626","#b91c1c"];function levelColor(skillIndex){return LEVEL_COLORS_BY_INDEX[Math.max(1,Math.min(11,skillIndex||1))-1];}const SKILL_DESC={1:"เริ่มต้น — เพิ่งเริ่มจับไม้ ยังไม่คุ้นการตีโต้",2:"เริ่มตี — เริ่มตีโต้ได้บ้าง ยังไม่นิ่ง",3:"พื้นฐาน — ตีโต้ได้พอสมควร เริ่มคุมลูก และเล่นเกมได้ในระดับพื้นฐาน",4:"เล่นเป็นเกม — เริ่มเข้าใจแทคติก เล่นเป็นเกมได้",5:"กลางล่าง — ตีได้หลากหลายลูก คุมเกมได้ระดับหนึ่ง",6:"กลาง — เล่นได้คล่อง มีจังหวะ คุมเกมได้ดี",7:"กลางสูง — ตีแม่นขึ้น มีกลยุทธ์ชัดเจน",8:"มือดี — ควบคุมเกมได้ดี ตีได้หลากหลายจังหวะ",9:"มือแข็ง — ฝีมือสูง แข่งขันได้ในระดับก๊วน",10:"แข่งขัน — ระดับแข่งขันจริงจัง",11:"ระดับสูง — ฝีมือสูงสุด เล่นแข่งขันระดับสูง"};const LEVEL_PRESETS=[{id:"isan",name:"อีสาน",description:"ใช้ลำดับ: R → BG1 → BG2 → BG3 → S- → S → N- → N → P- → P → C",levels:["R","BG1","BG2","BG3","S-","S","N-","N","P-","P","C"]},{id:"badweb-central",name:"Bad Web / กลาง",description:"ใช้ลำดับ: BG → BG+ → NB → N- → N → NS → S → P- → P → P+ → C",levels:["BG","BG+","NB","N-","N","NS","S","P-","P","P+","C"]},{id:"north",name:"เหนือ / เชียงใหม่",description:"ใช้ลำดับ: มือหัดตี → Beginner → ตีโต้ → N → N+ → S → S+ → P- → P → Open → Open+",levels:["มือหัดตี","Beginner","ตีโต้","N","N+","S","S+","P-","P","Open","Open+"]}];function getPresetMeta(id){if(id==="custom")return{id:"custom",name:"กำหนดเอง",description:"Organizer กำหนดระดับฝีมือเองได้ โดย map เข้ากับ Skill Index 1–11"};return LEVEL_PRESETS.find(p=>p.id===id)||LEVEL_PRESETS[0];}// display label for a given skillIndex, resolved against whichever preset is currently active (incl. custom)
@@ -1329,7 +1361,27 @@ function stableHash(str){let h=5381;for(let i=0;i<str.length;i++)h=(h<<5)+h+str.
 function ensureSessionExpenses(s){return{...s,expenses:Array.isArray(s.expenses)?s.expenses:[]};}// wraps the currently-persisted state shape into the exportable envelope
 function buildBackupPayload(state){return{app:BACKUP_APP_ID,backupVersion:BACKUP_VERSION,schemaVersion:SCHEMA_VERSION,appVersion:APP_VERSION,exportedAt:new Date().toISOString(),data:{players:state.players,history:state.history,current:state.current,future:state.future,roundNo:state.roundNo,courtCount:state.courtCount,courtLabels:state.courtLabels,mode:state.mode,settings:state.settings,session:state.session,lockPairs:state.lockPairs,sessionHistory:state.sessionHistory,generalExpenses:state.generalExpenses||[],otherIncome:state.otherIncome||[],activeTournament:state.activeTournament||null,tournamentHistory:state.tournamentHistory||[],discountCredits:state.discountCredits||[],groupDefaults:state.groupDefaults||{},rewardHistory:state.rewardHistory||[],// v1.11.34: global Reward History ledger, see App()'s rewardHistory state
 cloudClub:state.cloudClub||null// v1.11.35: Member Portal Phase 1 — this install's Cloud Club link, if any
-}};}// stats shown both on the post-export success banner and the pre-import preview
+}};}// v1.11.48 (Section C/D): lightweight variant of buildBackupPayload used EXCLUSIVELY by NEW Auto-Backup
+// checkpoints (saveAutoBackup). The manual "สำรองข้อมูล" export/import flow (exportBackup, and every other
+// buildBackupPayload call site) is UNTOUCHED and still produces a full-fidelity payload — this hotfix does
+// not change what a user-initiated backup file contains.
+//
+// Investigation finding (Section A): buildBackupPayload does NOT include autoBackups/bootLog/diagnostics
+// anywhere — there is no recursive "backup contains backups" structure to remove. The actual bloat is that
+// EVERY checkpoint embeds a full, non-delta copy of `players` (each with a `photo` Data URL, ~90-100KB
+// apiece on a real device) AND a full copy of `sessionHistory`, whose OLDER (pre-v1.11.47) entries may
+// still carry their own embedded per-attendee photo Data URLs. With AUTO_BACKUP_MAX=8 checkpoints
+// serialized together in ONE JSON.stringify call, that duplication is what made saveAutoBackup's
+// synchronous work large enough to matter.
+//
+// buildBackupSnapshot strips only `photo` fields — never any other field — from (1) the master `players`
+// copy captured into this checkpoint (still resolvable live from the current roster by id) and (2) any
+// sessionHistory player-snapshot copies captured into this checkpoint (covers legacy pre-v1.11.47 records
+// too). This is a reduction of what gets copied into NEW checkpoints only: it does NOT migrate, rewrite,
+// or touch the actual live `players`/`sessionHistory` state, and it does NOT touch any already-stored
+// auto-backup entry — those remain exactly as they were, photos and all, per Section D/H ("do not make a
+// destructive migration in this hotfix").
+function stripPhotoField(p){if(!p||typeof p!=="object"||!("photo"in p))return p;const{photo,...rest}=p;return rest;}function buildBackupSnapshot(state){const full=buildBackupPayload(state);const lightPlayers=Array.isArray(full.data.players)?full.data.players.map(stripPhotoField):full.data.players;const lightSessionHistory=Array.isArray(full.data.sessionHistory)?full.data.sessionHistory.map(h=>h&&Array.isArray(h.players)?{...h,players:h.players.map(stripPhotoField)}:h):full.data.sessionHistory;return{...full,data:{...full.data,players:lightPlayers,sessionHistory:lightSessionHistory}};}// stats shown both on the post-export success banner and the pre-import preview
 function backupStats(data){return{playerCount:(data.players||[]).length,sessionHistoryCount:(data.sessionHistory||[]).length,matchCount:(data.history?.length||0)+(data.current?.length||0)+(data.future?.length||0),hasCurrentSession:(data.current?.length||0)>0||!!(data.session&&data.session.name),hasPayment:(data.players||[]).some(p=>p.paid)||(data.sessionHistory||[]).some(s=>(s.bill||[]).some(b=>b.paid)),hasQR:!!(data.settings&&data.settings.qr),tournamentHistoryCount:(data.tournamentHistory||[]).length,hasActiveTournament:!!data.activeTournament,hasFinanceData:(data.generalExpenses||[]).length>0||(data.otherIncome||[]).length>0||(data.sessionHistory||[]).some(s=>(s.expenses||[]).length>0),discountCreditCount:(data.discountCredits||[]).length,rewardHistoryCount:(data.rewardHistory||[]).length};}// cheap structural check — catches "this isn't even a BadQ backup" before we try to migrate/use it
 function validateBackupStructure(parsed){if(!parsed||typeof parsed!=="object")return{ok:false,reason:"โครงสร้างไฟล์ไม่ถูกต้อง"};if(parsed.app!==BACKUP_APP_ID)return{ok:false,reason:"ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"};if(typeof parsed.backupVersion!=="number"||typeof parsed.schemaVersion!=="number")return{ok:false,reason:"ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"};if(!parsed.data||typeof parsed.data!=="object"||!Array.isArray(parsed.data.players))return{ok:false,reason:"โครงสร้างข้อมูลในไฟล์สำรองไม่ถูกต้อง"};return{ok:true};}// forward-migrates `data` up to SCHEMA_VERSION, then fills in backward-compatible defaults for any
 // field that predates this export — never reject a backup just because a newer field is missing.
@@ -1684,13 +1736,19 @@ const prevHistLenRef=useRef({session:0,tournament:0});// baseline to detect "his
 // v1.9.18: forensic boot/heal log — see BOOT_LOG_KEY above. Pure diagnostics: read-only in the UI,
 // never influences load/save behavior.
 const[bootLog,setBootLog]=useState([]);// newest first, capped at BOOT_LOG_MAX
-const pushBootLog=entry=>{try{setBootLog(prev=>{const next=[{t:Date.now(),...entry},...prev].slice(0,BOOT_LOG_MAX);window.storage.set(BOOT_LOG_KEY,JSON.stringify(next)).catch(()=>{});return next;});}catch(e){}};const saveAutoBackup=async reason=>{try{// v1.11.47 (TEMPORARY DIAGNOSTICS): this fires from the SAME state-change (sessionHistory growing)
-// that endSession() just caused, essentially concurrently with the main save effect above — flagged
-// in the investigation as a suspect for compounding memory pressure at exactly the moment of End
-// Session (Section F). Each of up to AUTO_BACKUP_MAX (8) kept checkpoints embeds a FULL copy of
-// sessionHistory (every past session, not a delta) — `next` below is an array of up to 8 such full
-// copies, and the JSON.stringify a few lines down serializes ALL of them into one string at once.
-window.__pushDiag&&window.__pushDiag("beforeAutoBackup",{reason:reason||"auto",sessionHistoryCount:sessionHistory.length,existingBackupCount:autoBackups.length});const payload=buildBackupPayload({players,history,current,future,roundNo,courtCount,courtLabels,mode,settings,session,lockPairs,sessionHistory,activeTournament,tournamentHistory,generalExpenses,otherIncome,discountCredits,rewardHistory,groupDefaults,cloudClub});const entry={savedAt:Date.now(),reason:reason||"auto",stats:backupStats(payload.data),payload};const next=[entry,...autoBackups].slice(0,AUTO_BACKUP_MAX);setAutoBackups(next);const autoBackupJson=JSON.stringify(next);window.__pushDiag&&window.__pushDiag("afterAutoBackupSerialize",{jsonLen:autoBackupJson.length,checkpointCount:next.length});await window.storage.set(AUTO_BACKUP_KEY,autoBackupJson);window.__pushDiag&&window.__pushDiag("afterAutoBackupWrite");}catch(e){}};// Re-reads "bg-v11"; if its `savedAt` is newer than what THIS instance's memory reflects, pulls it in
+const pushBootLog=entry=>{try{setBootLog(prev=>{const next=[{t:Date.now(),...entry},...prev].slice(0,BOOT_LOG_MAX);window.storage.set(BOOT_LOG_KEY,JSON.stringify(next)).catch(()=>{});return next;});}catch(e){}};const saveAutoBackup=async reason=>{try{// v1.11.48 (Section B/F, CRITICAL ORDERING FIX): this is now called ONLY from the main save effect
+// below, AFTER that effect's own primary IndexedDB write for the current state (which by this point
+// may already include a just-archived session/tournament) has been confirmed. It is still called
+// WITHOUT `await` (fire-and-forget) from there by design — Auto Backup is a convenience checkpoint,
+// never allowed to block or fail the primary save. Everything in this function is wrapped so that no
+// failure here can ever propagate/crash/roll back anything the caller already committed.
+window.__pushDiag&&window.__pushDiag("beforeAutoBackup",{reason:reason||"auto",sessionHistoryCount:sessionHistory.length,existingBackupCount:autoBackups.length});// v1.11.48 (Section C/D): buildBackupSnapshot (not buildBackupPayload) — a lightweight, photo-
+// stripped copy built specifically for this checkpoint. See buildBackupSnapshot's own comment for
+// why this is safe and non-destructive to existing data.
+const payload=buildBackupSnapshot({players,history,current,future,roundNo,courtCount,courtLabels,mode,settings,session,lockPairs,sessionHistory,activeTournament,tournamentHistory,generalExpenses,otherIncome,discountCredits,rewardHistory,groupDefaults,cloudClub});const entry={savedAt:Date.now(),reason:reason||"auto",stats:backupStats(payload.data),payload};const next=[entry,...autoBackups].slice(0,AUTO_BACKUP_MAX);setAutoBackups(next);const autoBackupJson=JSON.stringify(next);window.__pushDiag&&window.__pushDiag("afterAutoBackupSerialize",{jsonLen:autoBackupJson.length,backupJsonLen:autoBackupJson.length,checkpointCount:next.length});await window.storage.set(AUTO_BACKUP_KEY,autoBackupJson);window.__pushDiag&&window.__pushDiag("afterAutoBackupWrite");window.__pushDiag&&window.__pushDiag("afterAutoBackup",{backupJsonLen:autoBackupJson.length,checkpointCount:next.length});}catch(e){// v1.11.48 (Section B): "Auto Backup failure must never make End Session fail" — by construction
+// this catch can only ever discard a failed CONVENIENCE checkpoint; the primary state/History write
+// this fired after (see call site in the main save effect) has already succeeded and is untouched.
+try{window.__pushDiag&&window.__pushDiag("autoBackupFailed",{reason:reason||"auto",error:String(e&&e.message||e)});}catch(e2){}}};// Re-reads "bg-v11"; if its `savedAt` is newer than what THIS instance's memory reflects, pulls it in
 // (instead of letting this instance later write stale data over it) and, optionally, tells the user.
 // Returns true iff a newer save was found and applied.
 const refreshFromStorageIfNewer=async announce=>{try{const r=await window.storage.get("bg-v11");if(!r?.value)return false;const s=JSON.parse(r.value);const storedSavedAt=typeof s.savedAt==="number"?s.savedAt:0;if(storedSavedAt>lastKnownSavedAtRef.current){const prevKnownSavedAt=lastKnownSavedAtRef.current;applyPersistedState(s);pushBootLog({event:"heal",fromSavedAt:prevKnownSavedAt,toSavedAt:storedSavedAt,playerCount:Array.isArray(s.players)?s.players.length:0,sessionHistoryCount:Array.isArray(s.sessionHistory)?s.sessionHistory.length:0});if(announce){setStaleSyncNotice("มีข้อมูลใหม่กว่าจากอุปกรณ์/แท็บอื่น — รีเฟรชให้แล้ว");setTimeout(()=>setStaleSyncNotice(null),4000);}return true;}}catch(e){}return false;};useEffect(()=>{// v1.11.0 PERSISTENCE REWRITE — startup recovery waterfall (replaces the v1.9.26 "read bg-v11,
@@ -1738,12 +1796,20 @@ saveBlockedDuringBoot:bootStatusResult==="recovery-required",storageErrors:stora
 setBootStatus("error");setLoadCorrupted(true);setLoaded(true);});},[]);// Proactively re-check freshness the moment this instance becomes active again — catches a stale
 // instance BEFORE the user touches anything, not just reactively at the next save.
 useEffect(()=>{if(!loaded)return;const onVisible=()=>{if(document.visibilityState==="visible")refreshFromStorageIfNewer(true);};const onPageShow=e=>{if(e.persisted)refreshFromStorageIfNewer(true);// bfcache restore (common on iOS Safari)
-};document.addEventListener("visibilitychange",onVisible);window.addEventListener("pageshow",onPageShow);window.addEventListener("focus",onVisible);return()=>{document.removeEventListener("visibilitychange",onVisible);window.removeEventListener("pageshow",onPageShow);window.removeEventListener("focus",onVisible);};},[loaded]);// Fire an auto-backup checkpoint whenever sessionHistory or tournamentHistory GROWS — i.e. a ก๊วน or
-// Tournament was just archived (via endSession()/tCompleteTournament(), or history merged in from a
-// restore). Watching the array lengths (rather than calling saveAutoBackup() from inside each of those
-// functions individually) means every present AND future "something just got archived" path is covered
-// automatically, and a delete (length going DOWN) never triggers a checkpoint.
-useEffect(()=>{if(!loaded)return;const grew=sessionHistory.length>prevHistLenRef.current.session||tournamentHistory.length>prevHistLenRef.current.tournament;const reason=tournamentHistory.length>prevHistLenRef.current.tournament?"tournament":"session";prevHistLenRef.current={session:sessionHistory.length,tournament:tournamentHistory.length};if(grew)saveAutoBackup(reason);},[sessionHistory,tournamentHistory,loaded]);useEffect(()=>{// v1.11.0 BOOT BARRIER (CRITICAL): saves are blocked for any bootStatus other than "restored" or
+};document.addEventListener("visibilitychange",onVisible);window.addEventListener("pageshow",onPageShow);window.addEventListener("focus",onVisible);return()=>{document.removeEventListener("visibilitychange",onVisible);window.removeEventListener("pageshow",onPageShow);window.removeEventListener("focus",onVisible);};},[loaded]);// v1.11.48 (Section B/F — CRITICAL ORDERING FIX, root cause of the v1.11.48 crash): this used to be a
+// SEPARATE useEffect here, watching [sessionHistory, tournamentHistory, loaded] and calling
+// saveAutoBackup() un-awaited whenever history grew. Because React runs passive effects in HOOK
+// DECLARATION ORDER on a shared commit, and this effect was declared textually BEFORE the main
+// "save everything to bg-v11 Primary" effect below, its heavy SYNCHRONOUS work — buildBackupPayload,
+// building `entry`, and critically `JSON.stringify(next)` serializing up to 8 full-state checkpoints
+// (tens of MB on a real device) — ran and blocked the main thread on the SAME commit BEFORE the primary
+// effect's own code (including the primary IndexedDB write of the just-archived session) ever got to
+// run. Real-device diagnostics showed EXACTLY this: `beforeAutoBackup` fired, then the process was
+// killed, with NO successful primary persistence of the new session ever recorded.
+// The trigger logic (the "did sessionHistory/tournamentHistory grow" check using prevHistLenRef) has been
+// moved INTO the main save effect below, and is only reached AFTER that effect's own primary write has
+// been confirmed successful — see the "afterPrimaryEndSessionPersist" block a few lines down.
+useEffect(()=>{// v1.11.0 BOOT BARRIER (CRITICAL): saves are blocked for any bootStatus other than "restored" or
 // "new-install" — i.e. while the recovery waterfall is still running ("loading") or concluded that
 // nothing safe to save exists yet ("recovery-required"/"error"). This is what makes "primary missing
 // -> defaults to [] -> save [] over recoverable data" structurally impossible: there is no path from
@@ -1775,7 +1841,23 @@ if(saveGenerationRef.current!==mySaveGeneration)return;try{window.__pushDiag&&wi
 // primary is exactly the "existing valid current state" this snapshot is meant to capture.
 if(result?.primaryOk!==false){// v1.11.44: same generation re-check before the LKG write — LKG is a fallback layer and must
 // never be allowed to regress to stale content either.
-if(saveGenerationRef.current===mySaveGeneration){try{await window.storage.set(LKG_KEY,json);}catch(e){}}}}catch(e){}})();},[players,history,current,future,roundNo,courtCount,courtLabels,mode,settings,session,lockPairs,sessionHistory,generalExpenses,otherIncome,discountCredits,rewardHistory,activeTournament,tournamentHistory,groupDefaults,cloudClub,loaded,loadCorrupted,bootStatus]);// v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
+if(saveGenerationRef.current===mySaveGeneration){try{await window.storage.set(LKG_KEY,json);}catch(e){}}// v1.11.48 (Section B/F, CRITICAL ORDERING FIX): Auto Backup's trigger now lives HERE — strictly
+// AFTER the primary write above has been confirmed (`result?.primaryOk !== false`) and the LKG
+// write attempted. Required order per spec: 1. build completed session snapshot (already done by
+// endSession()'s own setSessionHistory before this effect ever ran) 2. commit new application
+// state (the React commit that triggered this effect) 3. persist NEW state safely to IndexedDB
+// Primary (window.storage.set above) 4. verify primary write succeeded (this `if` branch) 5. ONLY
+// THEN attempt an Auto Backup (below). If Auto Backup subsequently fails, throws, or the process
+// dies, the session/History captured in `json` above is ALREADY safely on IndexedDB Primary —
+// Auto Backup failure can no longer affect it.
+try{window.__pushDiag&&window.__pushDiag("afterPrimaryEndSessionPersist",{gen:mySaveGeneration,sessionHistoryCount:sessionHistory.length,tournamentHistoryCount:tournamentHistory.length});}catch(e){}if(saveGenerationRef.current===mySaveGeneration){// Relocated from the old standalone effect (see its removal comment above): detect "did
+// sessionHistory/tournamentHistory GROW" (a ก๊วน or Tournament just archived, or history
+// merged in from a restore) using the same prevHistLenRef bookkeeping as before — a delete
+// (length going down) still never triggers a checkpoint.
+const backupGrew=sessionHistory.length>prevHistLenRef.current.session||tournamentHistory.length>prevHistLenRef.current.tournament;const backupReason=tournamentHistory.length>prevHistLenRef.current.tournament?"tournament":"session";prevHistLenRef.current={session:sessionHistory.length,tournament:tournamentHistory.length};// Fire-and-forget by design (not awaited) — saveAutoBackup has its own try/catch and never
+// throws back into this effect; a slow or failing Auto Backup must never delay or roll back
+// the already-committed primary/LKG writes above.
+if(backupGrew)saveAutoBackup(backupReason);}}}catch(e){}})();},[players,history,current,future,roundNo,courtCount,courtLabels,mode,settings,session,lockPairs,sessionHistory,generalExpenses,otherIncome,discountCredits,rewardHistory,activeTournament,tournamentHistory,groupDefaults,cloudClub,loaded,loadCorrupted,bootStatus]);// v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
 // most recently computed save payload when the app backgrounds — insurance for the narrow window
 // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
 // the process. This is NOT the primary durability guarantee (that's the save effect firing on every

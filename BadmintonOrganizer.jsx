@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.47";
+const APP_VERSION = "1.11.48";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -2262,6 +2262,39 @@ function buildBackupPayload(state) {
     },
   };
 }
+// v1.11.48 (Section C/D): lightweight variant of buildBackupPayload used EXCLUSIVELY by NEW Auto-Backup
+// checkpoints (saveAutoBackup). The manual "สำรองข้อมูล" export/import flow (exportBackup, and every other
+// buildBackupPayload call site) is UNTOUCHED and still produces a full-fidelity payload — this hotfix does
+// not change what a user-initiated backup file contains.
+//
+// Investigation finding (Section A): buildBackupPayload does NOT include autoBackups/bootLog/diagnostics
+// anywhere — there is no recursive "backup contains backups" structure to remove. The actual bloat is that
+// EVERY checkpoint embeds a full, non-delta copy of `players` (each with a `photo` Data URL, ~90-100KB
+// apiece on a real device) AND a full copy of `sessionHistory`, whose OLDER (pre-v1.11.47) entries may
+// still carry their own embedded per-attendee photo Data URLs. With AUTO_BACKUP_MAX=8 checkpoints
+// serialized together in ONE JSON.stringify call, that duplication is what made saveAutoBackup's
+// synchronous work large enough to matter.
+//
+// buildBackupSnapshot strips only `photo` fields — never any other field — from (1) the master `players`
+// copy captured into this checkpoint (still resolvable live from the current roster by id) and (2) any
+// sessionHistory player-snapshot copies captured into this checkpoint (covers legacy pre-v1.11.47 records
+// too). This is a reduction of what gets copied into NEW checkpoints only: it does NOT migrate, rewrite,
+// or touch the actual live `players`/`sessionHistory` state, and it does NOT touch any already-stored
+// auto-backup entry — those remain exactly as they were, photos and all, per Section D/H ("do not make a
+// destructive migration in this hotfix").
+function stripPhotoField(p) {
+  if (!p || typeof p !== "object" || !("photo" in p)) return p;
+  const { photo, ...rest } = p;
+  return rest;
+}
+function buildBackupSnapshot(state) {
+  const full = buildBackupPayload(state);
+  const lightPlayers = Array.isArray(full.data.players) ? full.data.players.map(stripPhotoField) : full.data.players;
+  const lightSessionHistory = Array.isArray(full.data.sessionHistory)
+    ? full.data.sessionHistory.map((h) => (h && Array.isArray(h.players) ? { ...h, players: h.players.map(stripPhotoField) } : h))
+    : full.data.sessionHistory;
+  return { ...full, data: { ...full.data, players: lightPlayers, sessionHistory: lightSessionHistory } };
+}
 // stats shown both on the post-export success banner and the pre-import preview
 function backupStats(data) {
   return {
@@ -3355,22 +3388,31 @@ export default function App() {
   };
   const saveAutoBackup = async (reason) => {
     try {
-      // v1.11.47 (TEMPORARY DIAGNOSTICS): this fires from the SAME state-change (sessionHistory growing)
-      // that endSession() just caused, essentially concurrently with the main save effect above — flagged
-      // in the investigation as a suspect for compounding memory pressure at exactly the moment of End
-      // Session (Section F). Each of up to AUTO_BACKUP_MAX (8) kept checkpoints embeds a FULL copy of
-      // sessionHistory (every past session, not a delta) — `next` below is an array of up to 8 such full
-      // copies, and the JSON.stringify a few lines down serializes ALL of them into one string at once.
+      // v1.11.48 (Section B/F, CRITICAL ORDERING FIX): this is now called ONLY from the main save effect
+      // below, AFTER that effect's own primary IndexedDB write for the current state (which by this point
+      // may already include a just-archived session/tournament) has been confirmed. It is still called
+      // WITHOUT `await` (fire-and-forget) from there by design — Auto Backup is a convenience checkpoint,
+      // never allowed to block or fail the primary save. Everything in this function is wrapped so that no
+      // failure here can ever propagate/crash/roll back anything the caller already committed.
       window.__pushDiag && window.__pushDiag("beforeAutoBackup", { reason: reason || "auto", sessionHistoryCount: sessionHistory.length, existingBackupCount: autoBackups.length });
-      const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
+      // v1.11.48 (Section C/D): buildBackupSnapshot (not buildBackupPayload) — a lightweight, photo-
+      // stripped copy built specifically for this checkpoint. See buildBackupSnapshot's own comment for
+      // why this is safe and non-destructive to existing data.
+      const payload = buildBackupSnapshot({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
       const autoBackupJson = JSON.stringify(next);
-      window.__pushDiag && window.__pushDiag("afterAutoBackupSerialize", { jsonLen: autoBackupJson.length, checkpointCount: next.length });
+      window.__pushDiag && window.__pushDiag("afterAutoBackupSerialize", { jsonLen: autoBackupJson.length, backupJsonLen: autoBackupJson.length, checkpointCount: next.length });
       await window.storage.set(AUTO_BACKUP_KEY, autoBackupJson);
       window.__pushDiag && window.__pushDiag("afterAutoBackupWrite");
-    } catch (e) {}
+      window.__pushDiag && window.__pushDiag("afterAutoBackup", { backupJsonLen: autoBackupJson.length, checkpointCount: next.length });
+    } catch (e) {
+      // v1.11.48 (Section B): "Auto Backup failure must never make End Session fail" — by construction
+      // this catch can only ever discard a failed CONVENIENCE checkpoint; the primary state/History write
+      // this fired after (see call site in the main save effect) has already succeeded and is untouched.
+      try { window.__pushDiag && window.__pushDiag("autoBackupFailed", { reason: reason || "auto", error: String((e && e.message) || e) }); } catch (e2) {}
+    }
   };
   // Re-reads "bg-v11"; if its `savedAt` is newer than what THIS instance's memory reflects, pulls it in
   // (instead of letting this instance later write stale data over it) and, optionally, tells the user.
@@ -3587,18 +3629,19 @@ export default function App() {
       window.removeEventListener("focus", onVisible);
     };
   }, [loaded]);
-  // Fire an auto-backup checkpoint whenever sessionHistory or tournamentHistory GROWS — i.e. a ก๊วน or
-  // Tournament was just archived (via endSession()/tCompleteTournament(), or history merged in from a
-  // restore). Watching the array lengths (rather than calling saveAutoBackup() from inside each of those
-  // functions individually) means every present AND future "something just got archived" path is covered
-  // automatically, and a delete (length going DOWN) never triggers a checkpoint.
-  useEffect(() => {
-    if (!loaded) return;
-    const grew = sessionHistory.length > prevHistLenRef.current.session || tournamentHistory.length > prevHistLenRef.current.tournament;
-    const reason = tournamentHistory.length > prevHistLenRef.current.tournament ? "tournament" : "session";
-    prevHistLenRef.current = { session: sessionHistory.length, tournament: tournamentHistory.length };
-    if (grew) saveAutoBackup(reason);
-  }, [sessionHistory, tournamentHistory, loaded]);
+  // v1.11.48 (Section B/F — CRITICAL ORDERING FIX, root cause of the v1.11.48 crash): this used to be a
+  // SEPARATE useEffect here, watching [sessionHistory, tournamentHistory, loaded] and calling
+  // saveAutoBackup() un-awaited whenever history grew. Because React runs passive effects in HOOK
+  // DECLARATION ORDER on a shared commit, and this effect was declared textually BEFORE the main
+  // "save everything to bg-v11 Primary" effect below, its heavy SYNCHRONOUS work — buildBackupPayload,
+  // building `entry`, and critically `JSON.stringify(next)` serializing up to 8 full-state checkpoints
+  // (tens of MB on a real device) — ran and blocked the main thread on the SAME commit BEFORE the primary
+  // effect's own code (including the primary IndexedDB write of the just-archived session) ever got to
+  // run. Real-device diagnostics showed EXACTLY this: `beforeAutoBackup` fired, then the process was
+  // killed, with NO successful primary persistence of the new session ever recorded.
+  // The trigger logic (the "did sessionHistory/tournamentHistory grow" check using prevHistLenRef) has been
+  // moved INTO the main save effect below, and is only reached AFTER that effect's own primary write has
+  // been confirmed successful — see the "afterPrimaryEndSessionPersist" block a few lines down.
   useEffect(() => {
     // v1.11.0 BOOT BARRIER (CRITICAL): saves are blocked for any bootStatus other than "restored" or
     // "new-install" — i.e. while the recovery waterfall is still running ("loading") or concluded that
@@ -3651,6 +3694,29 @@ export default function App() {
           // never be allowed to regress to stale content either.
           if (saveGenerationRef.current === mySaveGeneration) {
             try { await window.storage.set(LKG_KEY, json); } catch (e) {}
+          }
+          // v1.11.48 (Section B/F, CRITICAL ORDERING FIX): Auto Backup's trigger now lives HERE — strictly
+          // AFTER the primary write above has been confirmed (`result?.primaryOk !== false`) and the LKG
+          // write attempted. Required order per spec: 1. build completed session snapshot (already done by
+          // endSession()'s own setSessionHistory before this effect ever ran) 2. commit new application
+          // state (the React commit that triggered this effect) 3. persist NEW state safely to IndexedDB
+          // Primary (window.storage.set above) 4. verify primary write succeeded (this `if` branch) 5. ONLY
+          // THEN attempt an Auto Backup (below). If Auto Backup subsequently fails, throws, or the process
+          // dies, the session/History captured in `json` above is ALREADY safely on IndexedDB Primary —
+          // Auto Backup failure can no longer affect it.
+          try { window.__pushDiag && window.__pushDiag("afterPrimaryEndSessionPersist", { gen: mySaveGeneration, sessionHistoryCount: sessionHistory.length, tournamentHistoryCount: tournamentHistory.length }); } catch (e) {}
+          if (saveGenerationRef.current === mySaveGeneration) {
+            // Relocated from the old standalone effect (see its removal comment above): detect "did
+            // sessionHistory/tournamentHistory GROW" (a ก๊วน or Tournament just archived, or history
+            // merged in from a restore) using the same prevHistLenRef bookkeeping as before — a delete
+            // (length going down) still never triggers a checkpoint.
+            const backupGrew = sessionHistory.length > prevHistLenRef.current.session || tournamentHistory.length > prevHistLenRef.current.tournament;
+            const backupReason = tournamentHistory.length > prevHistLenRef.current.tournament ? "tournament" : "session";
+            prevHistLenRef.current = { session: sessionHistory.length, tournament: tournamentHistory.length };
+            // Fire-and-forget by design (not awaited) — saveAutoBackup has its own try/catch and never
+            // throws back into this effect; a slow or failing Auto Backup must never delay or roll back
+            // the already-committed primary/LKG writes above.
+            if (backupGrew) saveAutoBackup(backupReason);
           }
         }
       } catch (e) {}
