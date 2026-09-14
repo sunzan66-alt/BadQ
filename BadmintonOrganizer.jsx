@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.46";
+const APP_VERSION = "1.11.47";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -3085,6 +3085,24 @@ function suggestNextTMatch(t) {
 }
 
 export default function App() {
+  // v1.11.47 (TEMPORARY DIAGNOSTICS): fires exactly once per real App mount. window.__pageInstanceId is
+  // assigned at script-evaluation time in index.html (see its comment there) — it changes ONLY on a true
+  // page reload / PWA process restart, never on a React re-render. Comparing it against the last id this
+  // effect itself recorded (in localStorage, so it survives the crash we're trying to detect) is what
+  // proves a restart happened, per Section G/A of the investigation: if the app was on "การเงิน" the
+  // instant before End Session and comes back on "ผู้เล่น" (App's initial `tab` state, above) with a
+  // DIFFERENT pageInstanceId than before, that's conclusive proof of a full remount/reload, not a
+  // navigation bug in endSession() (which never calls setTab at all — confirmed by reading it in full).
+  useEffect(() => {
+    try {
+      var LAST_PID_KEY = "bg-v11-last-pid";
+      var lastPid = null;
+      try { lastPid = localStorage.getItem(LAST_PID_KEY); } catch (e) {}
+      var isRestart = lastPid != null && lastPid !== window.__pageInstanceId;
+      window.__pushDiag && window.__pushDiag("appMounted", { previousPid: lastPid, isRestart: isRestart });
+      try { localStorage.setItem(LAST_PID_KEY, window.__pageInstanceId); } catch (e) {}
+    } catch (e) {}
+  }, []);
   const isWide = useIsWide(); // landscape phone / tablet — widen the shell so it doesn't look squeezed into a narrow column
   const [tab, setTab] = useState("members");
   const [players, setPlayers] = useState([]);
@@ -3337,11 +3355,21 @@ export default function App() {
   };
   const saveAutoBackup = async (reason) => {
     try {
+      // v1.11.47 (TEMPORARY DIAGNOSTICS): this fires from the SAME state-change (sessionHistory growing)
+      // that endSession() just caused, essentially concurrently with the main save effect above — flagged
+      // in the investigation as a suspect for compounding memory pressure at exactly the moment of End
+      // Session (Section F). Each of up to AUTO_BACKUP_MAX (8) kept checkpoints embeds a FULL copy of
+      // sessionHistory (every past session, not a delta) — `next` below is an array of up to 8 such full
+      // copies, and the JSON.stringify a few lines down serializes ALL of them into one string at once.
+      window.__pushDiag && window.__pushDiag("beforeAutoBackup", { reason: reason || "auto", sessionHistoryCount: sessionHistory.length, existingBackupCount: autoBackups.length });
       const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
-      await window.storage.set(AUTO_BACKUP_KEY, JSON.stringify(next));
+      const autoBackupJson = JSON.stringify(next);
+      window.__pushDiag && window.__pushDiag("afterAutoBackupSerialize", { jsonLen: autoBackupJson.length, checkpointCount: next.length });
+      await window.storage.set(AUTO_BACKUP_KEY, autoBackupJson);
+      window.__pushDiag && window.__pushDiag("afterAutoBackupWrite");
     } catch (e) {}
   };
   // Re-reads "bg-v11"; if its `savedAt` is newer than what THIS instance's memory reflects, pulls it in
@@ -3580,9 +3608,15 @@ export default function App() {
     // in-memory state is trustworthy, however it got here." (loadCorrupted is kept as a legacy alias of
     // "recovery-required" for the existing banner/tests — both are checked as belt-and-suspenders.)
     if (!loaded || loadCorrupted || (bootStatus !== "restored" && bootStatus !== "new-install")) return;
+    // v1.11.47 (TEMPORARY DIAGNOSTICS): this useEffect body only runs AFTER React has committed the
+    // triggering state change (that's what "effect" means) — so this marker firing at all is itself proof
+    // the preceding setSessionHistory/setPlayers/etc from endSession() were committed successfully
+    // ("afterReactCommit" in the investigation spec). mySaveGeneration is included so the log can
+    // distinguish which of several overlapping runs a later marker belongs to.
     // v1.11.44: bumped SYNCHRONOUSLY here (React commit time, not inside the async IIFE below) — see
     // saveGenerationRef's declaration above for why this must happen here to be a reliable ordering signal.
     const mySaveGeneration = ++saveGenerationRef.current;
+    try { window.__pushDiag && window.__pushDiag("afterReactCommit", { gen: mySaveGeneration, sessionHistoryCount: sessionHistory.length }); } catch (e) {}
     (async () => {
       try {
         // Guard: never write this instance's in-memory state over a newer save made elsewhere — pull
@@ -3595,14 +3629,18 @@ export default function App() {
         // risk writing stale data over the newer run's write later (see saveGenerationRef comment).
         if (saveGenerationRef.current !== mySaveGeneration) return;
         const savedAt = Date.now();
+        try { window.__pushDiag && window.__pushDiag("beforeStorageSerialize", { gen: mySaveGeneration }); } catch (e) {}
         const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, savedAt });
+        try { window.__pushDiag && window.__pushDiag("afterStorageSerialize", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
         // newer run to have started in the meantime (this is the exact check that closes the race that
         // caused "ended session missing from History": without it, an older run delayed by IndexedDB
         // latency could still complete its write after a newer, correct run's write).
         if (saveGenerationRef.current !== mySaveGeneration) return;
+        try { window.__pushDiag && window.__pushDiag("beforeIDBWrite", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
         const result = await window.storage.set("bg-v11", json);
+        try { window.__pushDiag && window.__pushDiag("afterIDBWrite", { gen: mySaveGeneration, primaryOk: result?.primaryOk, mirrorOk: result?.mirrorOk }); } catch (e) {}
         lastKnownSavedAtRef.current = savedAt;
         // Last Known Good: only ever updated from HERE, i.e. only once bootStatus has already resolved
         // to a trustworthy state — so a failed/interrupted boot can never overwrite a good LKG with an
@@ -4507,6 +4545,17 @@ export default function App() {
 
   // archive the current session into sessionHistory, then reset session-specific state (keeps player roster)
   const endSession = () => {
+    // v1.11.47 (TEMPORARY DIAGNOSTICS): approximate payload sizes at the moment the organizer confirms End
+    // Session — logged BEFORE any state mutation, so a crash immediately after this point still leaves a
+    // record of exactly how large things were right before it happened (Section B's size measurements).
+    try {
+      var photoBytes = 0, photoCount = 0;
+      players.forEach((p) => { if (p.photo) { photoBytes += p.photo.length; photoCount++; } });
+      window.__pushDiag && window.__pushDiag("beforeEndSession", {
+        playerCount: players.length, photoCount: photoCount, photoBytesApprox: photoBytes,
+        sessionHistoryCount: sessionHistory.length, matchCount: history.length + current.length,
+      });
+    } catch (e) {}
     const doneCurrent = current.filter((m) => m.status === "done");
     const totalMatches = history.length + doneCurrent.length;
     // v1.11.45 (History attendee filter): same "attended" definition computeBill()/computeSplitExpenseSummary()
@@ -4534,7 +4583,23 @@ export default function App() {
       // payment list (`bill`, already attendee-only via computeBill) can never disagree about who was
       // actually here. A player who attended but played 0 games (status "ready"/"resting"/"left") still
       // passes this filter — this is NOT a gamesPlayed>0 filter, which would incorrectly drop them.
-      players: attendedPlayers.map((p) => ({ id: p.id, name: p.name, level: p.level, skillIndex: p.skillIndex, photo: p.photo || null, games: p.games || 0 })),
+      //
+      // v1.11.47 (CRITICAL FIX — real iOS PWA crash/restart on End Session): this used to also freeze
+      // `photo: p.photo || null` for every attended player. Player photos are 640×640 JPEG data URLs (see
+      // ImageCropper's confirm(), ~line 1969) — routinely tens of KB each as base64 text. Duplicating the
+      // full photo string into EVERY historical session's snapshot, for every attendee, every time a
+      // session ends, made the single "bg-v11" JSON blob grow without bound as history accumulated (a club
+      // with 30+ regular attendees and dozens of past sessions could easily reach many MB of duplicated
+      // image text) — then JSON.stringify() plus separate primary/mirror/LKG/auto-backup copies of that
+      // string spiked transient memory, which is exactly the kind of pressure known to cause iOS
+      // Safari/WKWebView to silently kill and restart a PWA's page process (see also `pageInstanceId`
+      // diagnostics below, which confirmed the process actually restarts, not merely re-navigates).
+      // Historical players now freeze only small, stable identity fields; `photo` is intentionally omitted
+      // from NEW records. Rendering resolves a historical player's avatar from the CURRENT master player
+      // by id when possible (HistoricalDetail below), falling back to the initial-letter placeholder
+      // Avatar already draws when there's no photo — old records that still literally have `photo` embedded
+      // keep rendering it as-is (Section E backward compatibility; no migration is run here).
+      players: attendedPlayers.map((p) => ({ id: p.id, name: p.name, level: p.level, skillIndex: p.skillIndex, games: p.games || 0 })),
       matches: [...history, ...current].map((m) => ({ ...m })),
       stats: {
         totalMatches,
@@ -4567,7 +4632,17 @@ export default function App() {
       shuttleEcoSnapshot: { ...(settings.shuttleEco || {}) },
       shuttlecockRevenue: computeShuttleEcoFinance(settings.shuttleEco, totalMatches).revenue,
     };
+    // v1.11.47 (TEMPORARY DIAGNOSTICS): the snapshot object exists now — record its approximate size
+    // (JSON.stringify of just this one object, cheap since it's a single session, not the whole app) before
+    // handing it to setSessionHistory. If a crash happens between here and "afterSetSessionHistory" below,
+    // this proves the snapshot itself was built successfully and roughly how large it was.
+    try {
+      var snapshotJsonLen = 0;
+      try { snapshotJsonLen = JSON.stringify(snapshot).length; } catch (e) {}
+      window.__pushDiag && window.__pushDiag("afterSnapshotBuilt", { snapshotJsonLen: snapshotJsonLen, snapshotPlayerCount: snapshot.players.length });
+    } catch (e) {}
     setSessionHistory((prev) => [snapshot, ...prev]);
+    try { window.__pushDiag && window.__pushDiag("afterSetSessionHistory"); } catch (e) {}
     // จบก๊วน also clears everyone's attendance back to "ไม่ได้มา" — the next session starts from a
     // clean slate and the organizer marks people "พร้อมเล่น" again as they actually show up, instead of
     // carrying over today's roster as still-checked-in into a brand new quan.
@@ -8993,7 +9068,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 
       {open && (
         <Overlay onClose={() => setOpenId(null)}>
-          <HistoricalDetail s={open} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} />
+          <HistoricalDetail s={open} playersById={playersById} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} />
         </Overlay>
       )}
 
@@ -9019,7 +9094,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
   );
 }
 
-function HistoricalDetail({ s, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
+function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
   const stats = s.stats || {};
   const bill = s.bill || [];
   // v1.11.42 (Owner Payment Exemption): sessions archived from now on freeze bill entries with
@@ -9079,9 +9154,17 @@ function HistoricalDetail({ s, rewardHistory, toggleHistoricalPaid, onDelete, op
         {ranking.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีผู้เล่น</div> :
           ranking.map((p) => {
             const st = playerStats(p.id, s.matches || []);
+            // v1.11.47: new-style historical player records (see endSession()) no longer carry a frozen
+            // `photo` — resolve it from the CURRENT master player by id when the player still exists in the
+            // roster, so a photo still shows without ever having duplicated the image bytes into this
+            // snapshot. Old records that still literally have `photo` embedded (pre-v1.11.47 archives) take
+            // priority via `p.photo ||`, so nothing already saved changes appearance. If neither is
+            // available (photo never set, or the player was later deleted from the roster), Avatar's own
+            // fallback (initial-letter badge) takes over — never a broken image.
+            const avatarPhoto = p.photo || (playersById && playersById[p.id] && playersById[p.id].photo) || null;
             return (
               <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
-                <Avatar p={p} size={28} />
+                <Avatar p={avatarPhoto ? { ...p, photo: avatarPhoto } : p} size={28} />
                 <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: levelColor(p.skillIndex), fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
                 {(st.win + st.loss + st.draw) > 0 && <span style={{ fontSize: 11.5, color: T.muted }}>{st.win}-{st.loss}-{st.draw}</span>}
                 <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{p.games || 0} เกม</span>
@@ -11512,6 +11595,25 @@ function CustomLevelEditor({ customLevels, setCustomLevels }) {
 function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog }) {
   const [busy, setBusy] = useState(false);
   const [showBootLog, setShowBootLog] = useState(false); // v1.9.18: collapsed by default — diagnostic only
+  // v1.11.47 (TEMPORARY DIAGNOSTICS): the diagnostic log lives in raw localStorage (written synchronously,
+  // outside React, by window.__pushDiag — see index.html) specifically so it survives a hard crash even
+  // React state wouldn't. Read on demand (button tap) rather than kept live in state, since nothing needs
+  // to re-render as it grows.
+  const [showDiagLog, setShowDiagLog] = useState(false);
+  const [diagLog, setDiagLog] = useState(null);
+  const loadDiagLog = () => {
+    try {
+      const raw = localStorage.getItem("bg-v11-diag");
+      setDiagLog(raw ? JSON.parse(raw) : []);
+    } catch (e) { setDiagLog([]); }
+  };
+  const copyDiagLog = async () => {
+    try {
+      const raw = localStorage.getItem("bg-v11-diag") || "[]";
+      if (navigator.clipboard) { await navigator.clipboard.writeText(raw); alert("คัดลอก Diagnostic Log แล้ว"); }
+      else alert(raw);
+    } catch (e) { alert("คัดลอกไม่สำเร็จ"); }
+  };
   const [showAllAutoBackups, setShowAllAutoBackups] = useState(false); // v1.11.16: only the newest checkpoint shows by default — rest collapsed behind a tap
   const [successMsg, setSuccessMsg] = useState(null); // { kind: "export"|"import"|"undo", stats?, sizeLabel? }
   const [importError, setImportError] = useState(null);
@@ -11639,6 +11741,49 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
           )}
         </div>
       )}
+
+      {/* v1.11.47 (TEMPORARY DIAGNOSTICS — real-device "End Session blanks/restarts the app" investigation):
+          shows the raw pageInstanceId/lifecycle/endSession/serialize/write marker log written synchronously
+          to localStorage by window.__pushDiag (see index.html). Read on tap, not kept live, so opening this
+          panel never itself perturbs anything. Meant to be removed once the investigation concludes. */}
+      <div style={{ marginTop: 16 }}>
+        <button onClick={() => { const next = !showDiagLog; setShowDiagLog(next); if (next) loadDiagLog(); }} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>Diagnostic Log (v1.11.47, ชั่วคราว)</span>
+          <ChevronDown size={13} color={T.muted} style={{ transform: showDiagLog ? "rotate(180deg)" : "none" }} />
+        </button>
+        {showDiagLog && (
+          <div style={{ marginTop: 8 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <button onClick={loadDiagLog} style={{ fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text }}>รีเฟรช</button>
+              <button onClick={copyDiagLog} style={{ fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text }}>คัดลอกทั้งหมด</button>
+              <span style={{ fontSize: 10.5, color: T.muted, alignSelf: "center" }}>Page ID: {(typeof window !== "undefined" && window.__pageInstanceId) || "-"}</span>
+            </div>
+            {!diagLog ? (
+              <div style={{ fontSize: 11.5, color: T.muted }}>แตะ "รีเฟรช" เพื่อโหลด</div>
+            ) : diagLog.length === 0 ? (
+              <div style={{ fontSize: 11.5, color: T.muted }}>ยังไม่มีข้อมูล</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 320, overflowY: "auto" }}>
+                {diagLog.map((e, i) => (
+                  <div key={e.t + "-" + i} style={{ fontSize: 10, fontFamily: "monospace", color: T.muted, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 8, padding: "5px 7px", lineHeight: 1.5, wordBreak: "break-all" }}>
+                    {fmtThaiDateTime(e.t)} · {e.event} · pid={e.pid}
+                    {e.isRestart != null && ` · isRestart=${e.isRestart ? "YES" : "no"}${e.previousPid ? " (prev=" + e.previousPid + ")" : ""}`}
+                    {e.gen != null && ` · gen=${e.gen}`}
+                    {e.jsonLen != null && ` · jsonLen=${(e.jsonLen / 1024).toFixed(1)}KB`}
+                    {e.snapshotJsonLen != null && ` · snapshotLen=${(e.snapshotJsonLen / 1024).toFixed(1)}KB`}
+                    {e.photoBytesApprox != null && ` · photoBytes=${(e.photoBytesApprox / 1024).toFixed(1)}KB(${e.photoCount})`}
+                    {e.playerCount != null && ` · players=${e.playerCount}`}
+                    {e.sessionHistoryCount != null && ` · history=${e.sessionHistoryCount}`}
+                    {e.primaryOk != null && ` · primaryOk=${e.primaryOk} mirrorOk=${e.mirrorOk}`}
+                    {e.state != null && ` · state=${e.state}`}
+                    {e.persisted != null && ` · persisted=${e.persisted}`}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {preview && (
         <div onClick={() => setPreview(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
