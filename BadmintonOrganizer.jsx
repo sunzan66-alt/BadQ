@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.50";
+const APP_VERSION = "1.11.51";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -244,7 +244,18 @@ function normSession(s) {
   // v1.11.35 (Member Portal Phase 1): which Cloud Club (if any) this session's ก๊วน name is bound to —
   // set only once the Owner explicitly links a groupDefaults name to a Cloud Club (see MemberPortalSheet).
   // null on every existing/new session until then; not read by any sync logic yet (Phase 2+).
-  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null };
+  // v1.11.51 (Court Cost Per-Court Enhancement, spec B/D/H/L): per-court hours are session-specific (never
+  // a Group Default — see buildGroupDefaultBundle, which never spreads the whole `session` object) and must
+  // always reset to a clean slate on a brand new session (see endSession()'s explicit setSession field
+  // list below, which never re-lists courtHours — exactly the same mechanism that already keeps `id` fresh
+  // every session). Old (pre-v1.11.51) sessions simply have no `courtHours` at all — backfilled to [] here,
+  // which reconcileCourtHours() safely treats as "every court is AUTO" (identical behavior to before this
+  // feature existed). Field-by-field validation (never trust a raw array wholesale) so a corrupt/hand-
+  // edited value can never crash a later .map()/.reduce() or produce NaN/negative hours.
+  const courtHours = (Array.isArray(base.courtHours) ? base.courtHours : [])
+    .filter((r) => r && typeof r === "object" && Number(r.court) > 0)
+    .map((r) => ({ court: Math.round(Number(r.court)), hours: Math.max(0, Number(r.hours) || 0), source: r.source === "manual" ? "manual" : "auto" }));
+  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours };
 }
 // v1.11.35 (Member Portal Phase 1) — this LOCAL install's link (if any) to a Cloud Club. Entirely
 // additive/local bookkeeping: null/disabled is the default and identical-to-before state for every
@@ -1041,6 +1052,60 @@ function computeCourtCostFinance(courtCost, courtCount, durationHours) {
 function otherExpensesTotal(items) {
   return (items || []).reduce((s, it) => s + (Number(it && it.amount) || 0), 0);
 }
+// ===================== COURT COST PER-COURT ENHANCEMENT (v1.11.51) =====================
+// v1.11.51 (spec B/C/D/H): each court can book a different number of hours (e.g. 2 courts for the whole
+// ก๊วน + a 3rd court only for the last hour). Storage design: `session.courtHours` (session-specific, NEVER
+// a Group Default — see normSession/buildGroupDefaultBundle) holds ONLY the courts the organizer has
+// explicitly edited by hand, each tagged `source:"manual"`. A court with no entry in that array is AUTO —
+// its hours are always the LIVE session duration, recomputed fresh on every read. This is a deliberate
+// design choice, not an implementation shortcut: it makes "AUTO follows session-duration changes, MANUAL
+// never does" (spec D) fall out for free, with no separate sync step, and it satisfies spec's explicit
+// "ห้ามตัดสินจากแค่ว่าตัวเลขเท่ากับ Session Duration หรือไม่" (never infer auto/manual from a numeric
+// coincidence) because AUTO vs MANUAL is decided ENTIRELY by presence/absence in this array (a real,
+// explicit `source` tag), never by comparing numbers.
+//
+// reconcileCourtHours() is the single place that turns (possibly stale/partial/absent) stored courtHours
+// into exactly `courtCount` live rows for the CURRENT session — increasing courtCount (spec E) naturally
+// yields a fresh AUTO row for the new court (nothing stored for it yet); decreasing it naturally hides any
+// higher-numbered rows (their stored data, if any, is left untouched, never deleted, so re-increasing the
+// count later restores a previously-set manual value instead of silently losing it).
+function reconcileCourtHours(courtHours, courtCount, durationHours) {
+  const stored = Array.isArray(courtHours) ? courtHours : [];
+  const manualByCourt = new Map();
+  stored.forEach((r) => {
+    if (r && r.source === "manual" && Number(r.court) > 0) manualByCourt.set(Math.round(Number(r.court)), Math.max(0, Number(r.hours) || 0));
+  });
+  const n = Math.max(0, Math.round(Number(courtCount) || 0));
+  const rows = [];
+  for (let c = 1; c <= n; c++) {
+    if (manualByCourt.has(c)) rows.push({ court: c, hours: manualByCourt.get(c), source: "manual" });
+    else rows.push({ court: c, hours: Math.max(0, Number(durationHours) || 0), source: "auto" });
+  }
+  return rows;
+}
+// v1.11.51 (spec F): per-court cost = hours × rate; each row keeps its own hours/source so the UI and the
+// History snapshot can show a full per-court breakdown, not just the total.
+function buildCourtCostRows(rows, ratePerHour) {
+  const r = Math.max(0, Number(ratePerHour) || 0);
+  return (rows || []).map((row) => {
+    const hours = Math.max(0, Number(row.hours) || 0);
+    return { court: row.court, hours, source: row.source || "auto", rate: r, cost: Math.round((hours * r + Number.EPSILON) * 100) / 100 };
+  });
+}
+// v1.11.51 (spec F): Total Court Cost = sum of every court's own cost — never a single
+// จำนวนสนาม × Session Duration × Court Rate shortcut (spec I explicitly forbids that once hours can differ).
+function totalCourtCostFromRows(rows) {
+  return Math.round(((rows || []).reduce((s, r) => s + (Number(r.cost) || 0), 0) + Number.EPSILON) * 100) / 100;
+}
+// v1.11.51: true once a per-court rate is configured — the per-court-hours equivalent of the v1.11.50
+// courtCostConfigured() above (kept untouched below for backward compatibility), used to decide whether the
+// new always-on per-court "ค่าสนาม/สถานที่" line supersedes the legacy perCourt/hourly auto-line, same
+// supersede pattern as before. Unlike the old flag, this never considers manualOverrideTotal — spec G
+// retires that concept for any NEW session's calculation (the field itself is still preserved untouched in
+// the data model; see the backward-compat fallback in computeCostModelExpenses below).
+function courtRateConfigured(ratePerHour) {
+  return Math.max(0, Number(ratePerHour) || 0) > 0;
+}
 // ===================== FLEXIBLE COST MODEL — AUTO EXPENSE LINES (v1.9.4) =====================
 // Returns ready-to-file session expense items ({id, category, description, amount, date, auto:true}) for
 // the organizer's REAL out-of-pocket cost, per active costModel — feeds the EXISTING session.expenses list
@@ -1048,7 +1113,7 @@ function otherExpensesTotal(items) {
 // "simple"/"perPerson" return [] (unchanged — simple stays revenue-only as today; perPerson is a revenue
 // override handled entirely inside computeBill above, no expense line needed) EXCEPT for the shuttle line,
 // which (v1.11.41) is independent of costModel — see shuttleLine() below.
-function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours) {
+function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries) {
   const model = settings.costModel || "simple";
   const out = [];
   // v1.11.41: prefers the new cost/tube-derived per-shuttle cost (auto — reuses the existing `used` match
@@ -1079,13 +1144,28 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, us
   // computeSplitExpenseSummary) are intentionally left untouched by this — courtCost only ever supersedes
   // the two revenue-neutral expense-only models.
   let courtHandled = false;
-  if (courtCostConfigured(settings.courtCost)) {
-    const cf = computeCourtCostFinance(settings.courtCost, courtCount, durationHours);
+  const cCost = settings.courtCost || {};
+  if (courtRateConfigured(cCost.ratePerHour)) {
+    // v1.11.51 (spec F/I): per-court hours × rate, summed — NEVER the old
+    // จำนวนสนาม × Session Duration × Court Rate shortcut, since courts can now carry different hours.
+    const rows = buildCourtCostRows(reconcileCourtHours(courtEntries, courtCount, durationHours), cCost.ratePerHour);
+    const total = totalCourtCostFromRows(rows);
+    if (total > 0) {
+      const uniform = rows.length > 0 && rows.every((r) => r.hours === rows[0].hours);
+      const description = uniform
+        ? `ค่าสนาม ${courtCount} สนาม × ${rows[0].hours} ชม. × ฿${cCost.ratePerHour}/ชม.`
+        : `ค่าสนาม ${rows.map((r) => `คอร์ด${courtLabelFor(courtLabels, r.court)} ${r.hours}ชม.`).join(", ")} × ฿${cCost.ratePerHour}/ชม.`;
+      out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description, amount: total, date: dateStr, auto: true });
+    }
+    courtHandled = true;
+  } else if (cCost.manualOverrideTotal != null && !isNaN(Number(cCost.manualOverrideTotal))) {
+    // v1.11.51 (spec G — backward compatibility): a rate-less legacy v1.11.50 Manual Total Override must
+    // keep working exactly as before for any session that still has one configured — never silently
+    // dropped. New sessions never CREATE one any more (removed from the UI — see CourtCostSection), but an
+    // old value already sitting in `settings.courtCost.manualOverrideTotal` is neither deleted nor ignored.
+    const cf = computeCourtCostFinance(cCost, courtCount, durationHours);
     if (cf.effective > 0) {
-      const description = cf.overridden
-        ? `ค่าคอร์ด (กำหนดเอง) ${courtCount} สนาม`
-        : `ค่าคอร์ด ${courtCount} สนาม × ${cf.durationHours} ชม. × ฿${cf.ratePerHour}/สนาม/ชม.`;
-      out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description, amount: cf.effective, date: dateStr, auto: true });
+      out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: `ค่าคอร์ด (กำหนดเอง) ${courtCount} สนาม`, amount: cf.effective, date: dateStr, auto: true });
     }
     courtHandled = true;
   }
@@ -4786,7 +4866,21 @@ export default function App() {
       // v1.11.41: `totalMatches` (computed above, the SAME authoritative match count used for stats) is
       // threaded in as the "shuttlecocks used" count for the new cost/tube auto-expense line (see
       // computeCostModelExpenses/shuttleLine) — no new manual field.
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime)), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      // v1.11.51 (Court Cost Per-Court Enhancement, spec K): freeze the FULL per-court breakdown — rate,
+      // hours/source/cost per court, and the total — so History can never be affected by a LATER change to
+      // Court Rate/Session Time/Court Count (this object is computed once, right now, from the live values,
+      // and never recomputed again). The "ค่าสนาม/สถานที่" auto expense line above already carries the total
+      // into the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline (no double counting — this is purely an
+      // additional structured record for audit/detail, spec K's "อย่างน้อย" minimum).
+      courtCostSnapshot: (() => {
+        const rows = buildCourtCostRows(reconcileCourtHours(session.courtHours, courtCount, sessionDurationHours(session.sessionStartTime, session.sessionEndTime)), settings.courtCost && settings.courtCost.ratePerHour);
+        return {
+          ratePerHour: Math.max(0, Number(settings.courtCost && settings.courtCost.ratePerHour) || 0),
+          courts: rows.map((r) => ({ court: r.court, hours: r.hours, source: r.source, cost: r.cost })),
+          totalCourtCost: totalCourtCostFromRows(rows),
+        };
+      })(),
       // v1.11.41 (spec D/E): ลูกแบด revenue (used × ราคาขาย/ลูก) is computed ONCE here, at finalization, and
       // frozen — later Settings changes must never retroactively change an already-archived session's
       // numbers (spec section E). `shuttleEcoSnapshot` freezes the pricing that was actually in effect, for
@@ -5404,7 +5498,7 @@ export default function App() {
         {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -8696,35 +8790,54 @@ function SplitExpensesEditor({ settings, setSettings, players }) {
 // v1.11.50 (Financial Setup Enhancement, spec D): auto court-cost display + manual override toggle — kept as
 // its own component so FinanceSettingsSheet's render body stays readable. `durationHours` is derived by the
 // caller from session.sessionStartTime/sessionEndTime (see sessionDurationHours) — no new time input here.
-function CourtCostSection({ settings, setSettings, courtCount, durationHours }) {
-  const cc = settings.courtCost || {};
-  const cf = computeCourtCostFinance(cc, courtCount, durationHours);
+// v1.11.51 (Court Cost Per-Court Enhancement): full rewrite of the v1.11.50 court-cost UI per spec A/B/C/G —
+// a single "ค่าสนาม/ชั่วโมง" rate (label EXACT per spec A: never "ค่าคอร์ด/สนาม/ชั่วโมง" or "ค่าสนาม/สนาม/ชั่วโมง"),
+// one compact row per court ([hours] ชม. × ฿rate = ฿cost, spec M "ไม่ต้องมี card ใหญ่แยกต่อสนาม"), and a
+// "รวมค่าคอร์ด" total. The old "แก้ยอดรวมเอง (เหมาจ่าย/โปรโมชั่น)" manual-total-override UI is REMOVED here per
+// spec G — it is no longer possible to create one from this screen — but the underlying
+// settings.courtCost.manualOverrideTotal field is never read or written by this component either way, so an
+// old value already sitting there from before this upgrade is left completely untouched (see the backward-
+// compat fallback branch in computeCostModelExpenses).
+function CourtCostSection({ settings, setSettings, courtCount, courtLabels, durationHours, session, setSession }) {
+  const rate = (settings.courtCost && settings.courtCost.ratePerHour) || 0;
+  const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), rate);
+  const total = totalCourtCostFromRows(rows);
   const setRate = (v) => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), ratePerHour: v } }));
-  const setOverride = (v) => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), manualOverrideTotal: v } }));
-  const clearOverride = () => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), manualOverrideTotal: null } }));
+  // v1.11.51 (spec C/D): editing a court's hours is ALWAYS an explicit, real "this court is now MANUAL"
+  // action — never inferred later by comparing numbers. Stored in `session` (not `settings`) so it's
+  // session-specific (spec H) and resets to a clean slate every new session (see normSession/endSession).
+  const setCourtHours = (court, hours) => setSession((s) => {
+    const others = (s.courtHours || []).filter((r) => r.court !== court);
+    return { ...s, courtHours: [...others, { court, hours: Math.max(0, Number(hours) || 0), source: "manual" }] };
+  });
   return (
     <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
       <Label>🏟️ ต้นทุนค่าคอร์ด</Label>
-      <div style={{ marginBottom: 8 }}>
-        <NumField label="ค่าคอร์ด/สนาม/ชั่วโมง (฿)" value={cc.ratePerHour || 0} onChange={setRate} />
+      <div style={{ marginBottom: 10 }}>
+        <NumField label="ค่าสนาม/ชั่วโมง (฿)" value={rate} onChange={setRate} />
       </div>
-      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>
-        {courtCount} สนาม × {cf.durationHours} ชม. × ฿{cf.ratePerHour} = <b>{formatCurrency(cf.auto)}</b> — คำนวณอัตโนมัติจากจำนวนสนาม/เวลาก๊วน (ตั้งค่าใน "ตั้งค่าก๊วน"/"วันนี้")
-      </div>
-      {/* v1.11.50 (spec D1): manual override — never silently recalculated away by a later courtCount/time
-          change (computeCourtCostFinance always prefers manualOverrideTotal when it is set); only an
-          explicit "ใช้ค่าอัตโนมัติ" tap clears it. */}
-      {cf.overridden ? (
-        <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 10 }}>
-          <div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>กำหนดยอดรวมเอง (แทนค่าที่คำนวณอัตโนมัติ — เช่น เหมาจ่าย/โปรโมชั่น)</div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <input type="number" value={cc.manualOverrideTotal} onChange={(e) => setOverride(Number(e.target.value) || 0)} onFocus={(e) => e.target.select()} style={{ flex: 1, minWidth: 0, padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, outline: "none", boxSizing: "border-box" }} />
-            <button onClick={clearOverride} style={{ flexShrink: 0, padding: "10px 12px", borderRadius: 10, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>ใช้ค่าอัตโนมัติ</button>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+        {rows.map((row) => (
+          <div key={row.court} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
+            <span style={{ fontSize: 12.5, fontWeight: 800, flexShrink: 0, minWidth: 52, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>สนาม {courtLabelFor(courtLabels, row.court)}</span>
+            <input
+              type="number"
+              value={row.hours}
+              onChange={(e) => setCourtHours(row.court, e.target.value)}
+              onFocus={(e) => e.target.select()}
+              style={{ width: 52, padding: "6px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 800, outline: "none", flexShrink: 0 }}
+            />
+            <span style={{ fontSize: 11.5, color: T.muted, flexShrink: 0 }}>ชม. × ฿{rate} =</span>
+            <span style={{ fontSize: 13, fontWeight: 800, marginLeft: "auto", flexShrink: 0 }}>{formatCurrency(row.cost)}</span>
           </div>
-        </div>
-      ) : (
-        <button onClick={() => setOverride(cf.auto)} style={{ width: "100%", padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>แก้ยอดรวมเอง (เหมาจ่าย/โปรโมชั่น)</button>
-      )}
+        ))}
+      </div>
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 8 }}>
+        ชั่วโมงเริ่มต้นของแต่ละสนามอิงจากเวลาก๊วน (ตั้งค่าใน "ตั้งค่าก๊วน"/"วันนี้") — แก้รายสนามได้ทุกเมื่อ
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 4, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+        <span style={{ color: T.muted, fontWeight: 700 }}>รวมค่าคอร์ด</span><span>{formatCurrency(total)}</span>
+      </div>
     </div>
   );
 }
@@ -8788,7 +8901,10 @@ function OtherExpensesEditor({ items, setSettings }) {
 // "ประมาณการ ไม่ใช่ยอดจริง" convention computeSplitExpenseSummary already established, never a new concept.
 function FinancialEstimatePanel({ settings, players, courtCount, session, history, current }) {
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
-  const cf = computeCourtCostFinance(settings.courtCost, courtCount, durationHours);
+  // v1.11.51 (spec J): reflects the new per-court hours × rate total — updates immediately when any court's
+  // hours are edited (session.courtHours), never the old single-figure ratePerHour×courtCount×duration.
+  const courtCostRows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), settings.courtCost && settings.courtCost.ratePerHour);
+  const courtCostTotal = totalCourtCostFromRows(courtCostRows);
   const otherTotal = otherExpensesTotal(settings.otherExpenses);
   const matchesSoFar = (history || []).length + (current || []).filter((m) => m.status === "done").length;
   const shuttleUnit = shuttleCostPerUnit(settings.shuttleEco);
@@ -8806,7 +8922,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, histor
       revenueEstimate = summary.hasAttendance ? summary.totalCollected : Math.round(summary.perPersonEstimate * summary.projectedRegistered * 100) / 100;
     } else revenueEstimate = count * (settings.court || 0) + (settings.other || 0);
   }
-  const expenseTotal = Math.round((cf.effective + shuttleEstimate + otherTotal + Number.EPSILON) * 100) / 100;
+  const expenseTotal = Math.round((courtCostTotal + shuttleEstimate + otherTotal + Number.EPSILON) * 100) / 100;
   const profitEstimate = revenueEstimate != null ? Math.round((revenueEstimate - expenseTotal) * 100) / 100 : null;
   return (
     <div>
@@ -8821,7 +8937,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, histor
           <div style={{ color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 8 }}>ยังไม่สามารถประมาณการรายได้ได้ — ยังไม่มีผู้เล่นลงทะเบียน/เช็คอิน</div>
         )}
         <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, margin: "8px 0 4px" }}>ค่าใช้จ่ายคาดการณ์</div>
-        <BillRow label="ค่าคอร์ด" v={cf.effective} kind="expense" />
+        <BillRow label="ค่าคอร์ด" v={courtCostTotal} kind="expense" />
         <BillRow label="ต้นทุนลูกแบด" v={shuttleEstimate} kind="expense" />
         {matchesSoFar === 0 && <div style={{ fontSize: 10.5, color: T.muted, marginTop: -3, marginBottom: 4 }}>ยังไม่เริ่มเล่น — จะคำนวณจากจำนวนเกมที่เล่นจริง</div>}
         <BillRow label="ค่าใช้จ่ายอื่น" v={otherTotal} kind="expense" />
@@ -8836,7 +8952,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, histor
     </div>
   );
 }
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, history, current, onClose }) {
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, onClose }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | "prize" | null
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
@@ -8973,7 +9089,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
             </div>
             <div style={{ fontSize: 11.5, color: T.muted }}>ต้นทุนต่อลูก: {shuttleCostPerUnit(settings.shuttleEco).toFixed(2)} บาท — คำนวณจากจำนวนแมตช์ที่จบจริงในก๊วน (ไม่ต้องกรอกจำนวนลูกที่ใช้เอง)</div>
           </div>
-          <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} durationHours={durationHours} />
+          <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} />
           <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} />
         </div>
       )}
@@ -9634,7 +9750,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
   // v1.9.9 IA cleanup (Phase 1) / v1.11.14: "ชำระเงิน" is no longer a standalone bottom-nav tab — it now
   // lives here as a sub-tab, reusing PaymentTab UNCHANGED (same payment logic/state/fee calc — no
   // duplicated payment system). v1.11.14: always defaults to "ชำระเงิน" per spec — the organizer should
@@ -9696,7 +9812,7 @@ function FinanceTab({ sessionHistory, session, generalExpenses, otherIncome, add
           sees every player regardless of archive status, and a member who played earlier today keeps
           showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
-        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
       ) : (
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -10922,7 +11038,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
 // same component/logic/state that used to be this entire file, just renamed and unpinched from the outer
 // switcher; zero behavior change. Tournament payment is a NEW sibling reusing the same visual patterns
 // (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
-function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
   return (
     <div>
@@ -10930,14 +11046,14 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
         <SegSecondary options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
       </div>
       {payerTab === "quan" ? (
-        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }} />
+        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }} />
       ) : (
         <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
       )}
     </div>
   );
 }
-function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }) {
+function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -10988,7 +11104,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         <ChevronRight size={18} color={T.muted} />
       </button>
       {openFinanceSettings && (
-        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} history={history} current={current} onClose={() => setOpenFinanceSettings(false)} />
+        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} onClose={() => setOpenFinanceSettings(false)} />
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
