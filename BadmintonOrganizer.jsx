@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.52";
+const APP_VERSION = "1.11.53";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -264,7 +264,21 @@ function normSession(s) {
   const shuttleUsage = (rawUsage && typeof rawUsage === "object" && rawUsage.source === "manual" && !isNaN(Number(rawUsage.value)))
     ? { value: Math.max(0, Math.round(Number(rawUsage.value) || 0)), source: "manual" }
     : null;
-  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage };
+  // v1.11.53 (Financial Estimate & Live P/L Patch, spec A): "จำนวนผู้เล่นคาดการณ์"/"เกมเฉลี่ยต่อคน" are
+  // planning-only inputs for "ประมาณการก๊วน" — session-specific for the same reason courtHours/shuttleUsage
+  // above are (never a Group Default, always reset to a clean slate on a brand new session since endSession()
+  // never re-lists `estimate` in its explicit setSession field list). `null` fields mean "not yet edited by
+  // the organizer this session" — the UI computes a live default (session capacity/current headcount) to
+  // display but never writes it back until the organizer actually types a value, exactly like every other
+  // AUTO-until-touched field in this file.
+  const rawEstimate = base.estimate;
+  const estimate = (rawEstimate && typeof rawEstimate === "object")
+    ? {
+        expectedPlayers: rawEstimate.expectedPlayers != null && !isNaN(Number(rawEstimate.expectedPlayers)) ? Math.max(0, Math.round(Number(rawEstimate.expectedPlayers))) : null,
+        expectedGamesPerPerson: rawEstimate.expectedGamesPerPerson != null && !isNaN(Number(rawEstimate.expectedGamesPerPerson)) ? Math.max(0, Number(rawEstimate.expectedGamesPerPerson)) : null,
+      }
+    : null;
+  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage, estimate };
 }
 // v1.11.35 (Member Portal Phase 1) — this LOCAL install's link (if any) to a Cloud Club. Entirely
 // additive/local bookkeeping: null/disabled is the default and identical-to-before state for every
@@ -1295,6 +1309,50 @@ function computeRewardExpenses(rewardHistory, sessionId, dateStr) {
     byName[key].amount += Number(r.rewardValue) || 0;
   });
   return Object.entries(byName).map(([name, v]) => ({ id: uid(), category: "ค่ารางวัล", description: `${name} ×${v.count}`, amount: v.amount, date: dateStr, auto: true, sourceType: "wheel" }));
+}
+// ===================== FINANCIAL ESTIMATE & LIVE P/L (v1.11.53) =====================
+// spec B: player-slots-per-match uses the SAME doubles/singles definition buildMatch already uses
+// elsewhere in this file (mode === "doubles" ? 4 : 2) — never hardcoded to doubles.
+function slotsPerMatchFor(mode) { return mode === "singles" ? 2 : 4; }
+// spec B: Expected Match Count = Expected Players × Expected Games per Person ÷ player-slots-per-match,
+// rounded to the nearest whole match (a fractional match can't actually be played). Guards every input so
+// this can never produce NaN/Infinity/negative even with 0/empty/garbage values.
+function expectedMatchCount(expectedPlayers, expectedGamesPerPerson, mode) {
+  const players = Math.max(0, Number(expectedPlayers) || 0);
+  const gpp = Math.max(0, Number(expectedGamesPerPerson) || 0);
+  const slots = slotsPerMatchFor(mode);
+  return slots > 0 ? Math.round((players * gpp) / slots) : 0;
+}
+// spec C: Expected Revenue from the PLANNED headcount/games — reuses the exact same per-model settings
+// (settings.court/settings.shuttle/settings.perPersonRate/settings.other) computeBill() already bills real
+// attendance with, so a planning number and a real one can never drift apart from using different rates.
+// splitExpenses is intentionally left to its own existing (unchanged) real-cost-driven estimate — spec's
+// worked examples never touch it, and its inputs (settings.splitExpenses.*) aren't games/court-rate based.
+function computeExpectedRevenue(settings, expectedPlayers, expectedGamesPerPerson, players) {
+  const model = settings.costModel || "simple";
+  const p = Math.max(0, Number(expectedPlayers) || 0);
+  const g = Math.max(0, Number(expectedGamesPerPerson) || 0);
+  if (model === "perPerson") return Math.round(p * (Number(settings.perPersonRate) || 0) * 100) / 100;
+  if (model === "splitExpenses") {
+    const summary = computeSplitExpenseSummary(players, settings);
+    return summary.hasAttendance ? summary.totalCollected : Math.round(summary.perPersonEstimate * summary.projectedRegistered * 100) / 100;
+  }
+  const courtRevenue = p * (Number(settings.court) || 0);
+  const shuttleRevenue = p * g * (Number(settings.shuttle) || 0);
+  const otherRevenue = Number(settings.other) || 0; // flat per-session amount, not multiplied by players (same as computeBill's otherShare, which sums back to this flat total across all payers)
+  return Math.round((courtRevenue + shuttleRevenue + otherRevenue + Number.EPSILON) * 100) / 100;
+}
+// spec F/G: the ONE authoritative live expense total — literally the same computeCostModelExpenses() +
+// computeRewardExpenses() calls endSession() files into History, just summed here instead of archived, so
+// the live Finance summary and the eventual frozen History total can never diverge (spec G: "reuse the same
+// authoritative Finance calculation helpers to prevent divergence" / "do not create a second independent
+// expense calculation").
+function computeLiveExpenseTotal(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, rewardHistory, sessionId) {
+  const lines = [
+    ...computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride),
+    ...computeRewardExpenses(rewardHistory, sessionId, dateStr),
+  ];
+  return Math.round((lines.reduce((s, e) => s + (Number(e.amount) || 0), 0) + Number.EPSILON) * 100) / 100;
 }
 // ===================== FINANCE (v1.8.4) =====================
 // Accounting model kept deliberately simple:
@@ -5625,7 +5683,7 @@ export default function App() {
         {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -9092,71 +9150,76 @@ function OtherExpensesEditor({ items, setSettings }) {
     </div>
   );
 }
-// v1.11.50 (spec F/G): "📊 ประมาณการก๊วน" — Estimated (not final) รายได้/ค่าใช้จ่าย/กำไร from CURRENT settings +
-// CURRENT attendance/usage. Deliberately never invents a forward-looking match/shuttle-usage assumption
-// (spec: "ห้ามสร้าง assumption ใหม่เอง"): shuttle cost is computed from matches ACTUALLY finished so far this
-// session (0 before the session starts, growing live as matches finish — "ประมาณการจากข้อมูลปัจจุบัน", not a
-// forecast), and Estimated Revenue is shown only when there is a real headcount basis (real attendance, or —
-// clearly labeled "ประมาณการ" — registered count), reusing the SAME attended/registered definitions and
-// "ประมาณการ ไม่ใช่ยอดจริง" convention computeSplitExpenseSummary already established, never a new concept.
-function FinancialEstimatePanel({ settings, players, courtCount, session, history, current }) {
+// v1.11.50 (spec F/G): "📊 ประมาณการก๊วน" — a PLANNING estimate, deliberately separate from both the live
+// Finance summary (spec J: current billable/actual status) and History (frozen final result).
+// v1.11.53 (Financial Estimate & Live P/L Patch, spec A-E): now driven by two explicit planning inputs —
+// "จำนวนผู้เล่นคาดการณ์"/"เกมเฉลี่ยต่อคน" — instead of real attendance, so the organizer can estimate BEFORE
+// anyone has checked in (and get a shuttle/revenue estimate that includes per-game charges, which the old
+// real-attendance-only version deliberately never did — "ยังไม่เล่นจริง ไม่รู้จำนวนเกม"). These inputs never
+// change actual attendance/matchmaking/payment records (spec A) — session.estimate is a session-scoped
+// planning field, same storage pattern as session.courtHours/shuttleUsage (see normSession), always resets
+// to a clean slate on a brand new session.
+function FinancialEstimatePanel({ settings, players, courtCount, session, setSession, history, current, mode }) {
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.51 (spec J): reflects the new per-court hours × rate total — updates immediately when any court's
-  // hours are edited (session.courtHours), never the old single-figure ratePerHour×courtCount×duration.
+  // hours are edited (session.courtHours), never the old single-figure ratePerHour×courtCount×duration. Court
+  // cost is about court/time configuration, not planned headcount — spec D: "Keep current cost logic".
   const courtCostRows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), settings.courtCost && settings.courtCost.ratePerHour);
   const courtCostTotal = totalCourtCostFromRows(courtCostRows);
   const otherTotal = otherExpensesTotal(settings.otherExpenses);
-  const matchesSoFar = (history || []).length + (current || []).filter((m) => m.status === "done").length;
-  // v1.11.52 (spec E/H): weighted-average cost × the EFFECTIVE usage (MANUAL override if the organizer set
-  // one this session, else the live completed-match count) — never a fabricated forward assumption, and
-  // never the total purchase amount (spec F).
-  const shuttleUsageResolved = resolveShuttleUsage(session && session.shuttleUsage, matchesSoFar);
-  const shuttleUnit = weightedShuttleCostPerUnit(settings.shuttleEco);
-  const shuttleEstimate = Math.round((shuttleUsageResolved.used * shuttleUnit + Number.EPSILON) * 100) / 100;
+  // spec A: default "จำนวนผู้เล่นคาดการณ์" from session capacity (settings.maxPlayers) when the organizer has
+  // set one, else the current real headcount (attended, or registered as a fallback) — otherwise 0. Only
+  // ever written to session.estimate once the organizer actually edits it (AUTO-until-touched, same
+  // convention as every other default-then-editable field in this file).
   const attended = (players || []).filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
   const registeredOnly = (players || []).filter((p) => p.status === "registered").length;
-  const hasAttendance = attended.length > 0;
-  const count = hasAttendance ? attended.length : attended.length + registeredOnly;
-  const model = settings.costModel || "simple";
-  let revenueEstimate = null;
-  if (count > 0) {
-    if (model === "perPerson") revenueEstimate = count * (settings.perPersonRate || 0);
-    else if (model === "splitExpenses") {
-      const summary = computeSplitExpenseSummary(players, settings);
-      revenueEstimate = summary.hasAttendance ? summary.totalCollected : Math.round(summary.perPersonEstimate * summary.projectedRegistered * 100) / 100;
-    } else revenueEstimate = count * (settings.court || 0) + (settings.other || 0);
-  }
+  const liveHeadcount = attended.length > 0 ? attended.length : attended.length + registeredOnly;
+  const est = (session && session.estimate) || null;
+  const expectedPlayersDefault = Number(settings.maxPlayers) > 0 ? Number(settings.maxPlayers) : liveHeadcount;
+  const expectedGamesPerPersonDefault = 4;
+  const expectedPlayers = est && est.expectedPlayers != null ? est.expectedPlayers : expectedPlayersDefault;
+  const expectedGamesPerPerson = est && est.expectedGamesPerPerson != null ? est.expectedGamesPerPerson : expectedGamesPerPersonDefault;
+  const setExpectedPlayers = (v) => setSession((s) => ({ ...s, estimate: { expectedPlayers: Math.max(0, Math.round(Number(v) || 0)), expectedGamesPerPerson: (s.estimate && s.estimate.expectedGamesPerPerson != null) ? s.estimate.expectedGamesPerPerson : expectedGamesPerPersonDefault } }));
+  const setExpectedGamesPerPerson = (v) => setSession((s) => ({ ...s, estimate: { expectedPlayers: (s.estimate && s.estimate.expectedPlayers != null) ? s.estimate.expectedPlayers : expectedPlayersDefault, expectedGamesPerPerson: Math.max(0, Number(v) || 0) } }));
+  // spec B: player-slots-per-match from the CURRENT game format (doubles=4, singles=2) — never hardcoded.
+  const expectedMatches = expectedMatchCount(expectedPlayers, expectedGamesPerPerson, mode);
+  // spec D: shuttle usage while AUTO uses Expected Match Count (a forward planning number, on purpose, for
+  // THIS panel only) — a MANUAL override the organizer already set this session is still respected as-is
+  // (same resolveShuttleUsage() helper as everywhere else, never a second usage concept).
+  const shuttleUsageResolved = resolveShuttleUsage(session && session.shuttleUsage, expectedMatches);
+  const shuttleUnit = weightedShuttleCostPerUnit(settings.shuttleEco);
+  const shuttleEstimate = Math.round((shuttleUsageResolved.used * shuttleUnit + Number.EPSILON) * 100) / 100;
+  // spec C: Expected Revenue from the PLANNED headcount/games (computeExpectedRevenue — shared pure helper,
+  // same settings.court/settings.shuttle/settings.perPersonRate computeBill() bills real attendance with).
+  const revenueEstimate = computeExpectedRevenue(settings, expectedPlayers, expectedGamesPerPerson, players);
   const expenseTotal = Math.round((courtCostTotal + shuttleEstimate + otherTotal + Number.EPSILON) * 100) / 100;
-  const profitEstimate = revenueEstimate != null ? Math.round((revenueEstimate - expenseTotal) * 100) / 100 : null;
+  const profitEstimate = Math.round((revenueEstimate - expenseTotal) * 100) / 100;
   return (
     <div>
-      <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>ประมาณการจากข้อมูลปัจจุบัน (การตั้งค่า + ผู้เล่นที่ลงทะเบียน/เช็คอินแล้ว) — ไม่ใช่ยอดปิดจริง ยอดจริงจะเห็นได้เมื่อ "จบก๊วน"</div>
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>ประมาณการสำหรับวางแผน (ไม่ใช่ยอดจริง) — ยอดจริงตอนนี้ดูได้ที่หน้า "การชำระเงิน" ยอดจริงสุดท้ายดูได้เมื่อ "จบก๊วน"</div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
+        <NumField label="จำนวนผู้เล่นคาดการณ์" value={expectedPlayers} onChange={setExpectedPlayers} />
+        <NumField label="เกมเฉลี่ยต่อคน" value={expectedGamesPerPerson} onChange={setExpectedGamesPerPerson} />
+      </div>
+      <div style={{ fontSize: 10.5, color: T.muted, marginTop: -6, marginBottom: 10 }}>≈ {expectedMatches} เกมที่คาดว่าจะเล่น ({mode === "singles" ? "เดี่ยว 2 คน/เกม" : "คู่ 4 คน/เกม"})</div>
       <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 12 }}>
-        {revenueEstimate != null ? (
-          <>
-            <BillRow label="รายได้คาดการณ์" v={revenueEstimate} kind="revenue" />
-            <div style={{ fontSize: 10.5, color: T.muted, marginTop: -3, marginBottom: 6 }}>{hasAttendance ? `จากผู้เล่นที่มาแล้ว ${count} คน` : `ประมาณการจากผู้ลงทะเบียน ${count} คน (ไม่ใช่ยอดจริง)`} · ไม่รวมค่าลูก/เกม (ทราบได้เมื่อเล่นจริง)</div>
-          </>
-        ) : (
-          <div style={{ color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 8 }}>ยังไม่สามารถประมาณการรายได้ได้ — ยังไม่มีผู้เล่นลงทะเบียน/เช็คอิน</div>
-        )}
+        <BillRow label="รายได้คาดการณ์" v={revenueEstimate} kind="revenue" />
         <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, margin: "8px 0 4px" }}>ค่าใช้จ่ายคาดการณ์</div>
         <BillRow label="ค่าคอร์ด" v={courtCostTotal} kind="expense" />
         <BillRow label="ต้นทุนลูกแบด" v={shuttleEstimate} kind="expense" />
-        {shuttleUsageResolved.used === 0 && <div style={{ fontSize: 10.5, color: T.muted, marginTop: -3, marginBottom: 4 }}>ยังไม่เริ่มเล่น — จะคำนวณจากจำนวนเกมที่เล่นจริง</div>}
         <BillRow label="ค่าใช้จ่ายอื่น" v={otherTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
           <span>รวมค่าใช้จ่าย</span><span style={{ color: T.accent }}>{formatCurrency(expenseTotal)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-          <span>{profitEstimate == null ? "กำไรคาดการณ์" : profitEstimate >= 0 ? "กำไรคาดการณ์" : "ขาดทุนคาดการณ์"}</span>
-          <span style={{ color: profitEstimate == null ? T.muted : profitEstimate >= 0 ? T.green : T.accent }}>{profitEstimate == null ? "-" : formatCurrency(Math.abs(profitEstimate))}</span>
+          <span>{profitEstimate >= 0 ? "กำไรคาดการณ์" : "ขาดทุนคาดการณ์"}</span>
+          <span style={{ color: profitEstimate >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(profitEstimate))}</span>
         </div>
       </div>
     </div>
   );
 }
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, onClose }) {
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, onClose }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | "prize" | null
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.52 (spec C): "จำนวนลูกที่ใช้"'s AUTO baseline — the SAME live completed-match definition already
@@ -9298,7 +9361,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
       </button>
       {open === "estimate" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <FinancialEstimatePanel settings={settings} players={players} courtCount={courtCount} session={session} history={history} current={current} />
+          <FinancialEstimatePanel settings={settings} players={players} courtCount={courtCount} session={session} setSession={setSession} history={history} current={current} mode={mode} />
         </div>
       )}
 
@@ -9946,7 +10009,11 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+  // v1.11.53: this component's OWN local `mode` state (below) is the finance period view toggle
+  // (day/month/overview) — unrelated to and pre-dating the doubles/singles game format, hence the `gameMode`
+  // prop name here specifically (every other component in this file still just calls it `mode`, matching
+  // the top-level doubles/singles state — there is no collision anywhere else in the chain).
   // v1.9.9 IA cleanup (Phase 1) / v1.11.14: "ชำระเงิน" is no longer a standalone bottom-nav tab — it now
   // lives here as a sub-tab, reusing PaymentTab UNCHANGED (same payment logic/state/fee calc — no
   // duplicated payment system). v1.11.14: always defaults to "ชำระเงิน" per spec — the organizer should
@@ -10008,7 +10075,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
           sees every player regardless of archive status, and a member who played earlier today keeps
           showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
-        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
       ) : (
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -11234,7 +11301,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
 // same component/logic/state that used to be this entire file, just renamed and unpinched from the outer
 // switcher; zero behavior change. Tournament payment is a NEW sibling reusing the same visual patterns
 // (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
-function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
   return (
     <div>
@@ -11242,14 +11309,14 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
         <SegSecondary options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
       </div>
       {payerTab === "quan" ? (
-        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }} />
+        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory }} />
       ) : (
         <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
       )}
     </div>
   );
 }
-function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels }) {
+function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -11274,6 +11341,18 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const receivable = grandTotal - collected;
   const paidCount = payableBill.filter((b) => b.paid).length;
   const allPaid = payableBill.length > 0 && paidCount === payableBill.length;
+  // v1.11.53 (Live Finance Summary, spec F/G/H): a compact live รายได้/ค่าใช้จ่าย/กำไร card — CURRENT actual
+  // session status, distinct from both "ประมาณการก๊วน" (forward planning) and History (frozen final result;
+  // see FinancialEstimatePanel's comment / spec J). Live Revenue = TOTAL current billable amount (received +
+  // still-owed), never only money already collected — grandTotal above already IS collected+receivable by
+  // construction, so no separate calculation is needed. Live Expense reuses the EXACT SAME authoritative
+  // helper endSession() files into History (computeLiveExpenseTotal -> computeCostModelExpenses +
+  // computeRewardExpenses) so this number can never drift from what History will eventually freeze.
+  const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
+  const matchesSoFar = history.length + doneCurrent.length;
+  const liveRevenue = grandTotal;
+  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, matchesSoFar, durationHours, session && session.courtHours, session && session.shuttleUsage, rewardHistory, session && session.id);
+  const liveProfit = Math.round((liveRevenue - liveExpenseTotal + Number.EPSILON) * 100) / 100;
   const detailP = detail ? players.find((p) => p.id === detail) : null;
   const detailBill = detailP ? billBy(detailP.id) : null;
   // "available" discount credits for the player currently open in the payment detail overlay (v1.9.1) —
@@ -11300,7 +11379,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         <ChevronRight size={18} color={T.muted} />
       </button>
       {openFinanceSettings && (
-        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} onClose={() => setOpenFinanceSettings(false)} />
+        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} mode={mode} onClose={() => setOpenFinanceSettings(false)} />
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
@@ -11324,6 +11403,30 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         <Search size={15} style={{ position: "absolute", left: 10, top: 9.5, color: T.muted }} />
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหาผู้เล่น" style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
       </div>
+
+      {/* v1.11.53 (Live Finance Summary, spec F/G/H/I): ONE compact P&L card — deliberately NOT a second set
+          of 3 cards duplicating จ่ายแล้ว/รับแล้ว/ค้างรับ above (spec I). Distinct background+divider so it
+          reads as a status summary, not another payment control. */}
+      <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 14 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginBottom: 8 }}>📊 สถานะการเงินก๊วน</div>
+        <div style={{ display: "flex", alignItems: "stretch" }}>
+          <div style={{ flex: 1, textAlign: "center" }}>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>รายได้</div>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>{formatCurrency(liveRevenue)}</div>
+          </div>
+          <div style={{ width: 1, background: T.border, margin: "1px 8px" }} />
+          <div style={{ flex: 1, textAlign: "center" }}>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>ค่าใช้จ่าย</div>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>{formatCurrency(liveExpenseTotal)}</div>
+          </div>
+          <div style={{ width: 1, background: T.border, margin: "1px 8px" }} />
+          <div style={{ flex: 1, textAlign: "center" }}>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>{liveProfit >= 0 ? "กำไร" : "ขาดทุน"}</div>
+            <div style={{ fontSize: 14.5, fontWeight: 800, color: liveProfit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(liveProfit))}</div>
+          </div>
+        </div>
+      </div>
+
       {(() => {
         const q = search.trim().toLowerCase();
         // v1.11.42: Owner rows always pass the payFilter (unpaid/all/paid don't apply to them — they have
