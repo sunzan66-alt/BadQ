@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.51";
+const APP_VERSION = "1.11.52";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -255,7 +255,16 @@ function normSession(s) {
   const courtHours = (Array.isArray(base.courtHours) ? base.courtHours : [])
     .filter((r) => r && typeof r === "object" && Number(r.court) > 0)
     .map((r) => ({ court: Math.round(Number(r.court)), hours: Math.max(0, Number(r.hours) || 0), source: r.source === "manual" ? "manual" : "auto" }));
-  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours };
+  // v1.11.52 (Shuttlecock Cost Redesign, spec C/D/H): "จำนวนลูกที่ใช้" is session-specific for the exact same
+  // reason `courtHours` above is — it must always reset to a clean slate on a brand new session (endSession()
+  // never re-lists it in its explicit setSession field list) and must never become a Group Default. Only a
+  // MANUAL override is ever stored (an explicit `{value, source:"manual"}`, never inferred from a numeric
+  // coincidence); `null` means AUTO (always the live completed-match count — see resolveShuttleUsage()).
+  const rawUsage = base.shuttleUsage;
+  const shuttleUsage = (rawUsage && typeof rawUsage === "object" && rawUsage.source === "manual" && !isNaN(Number(rawUsage.value)))
+    ? { value: Math.max(0, Math.round(Number(rawUsage.value) || 0)), source: "manual" }
+    : null;
+  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage };
 }
 // v1.11.35 (Member Portal Phase 1) — this LOCAL install's link (if any) to a Cloud Club. Entirely
 // additive/local bookkeeping: null/disabled is the default and identical-to-before state for every
@@ -1007,6 +1016,72 @@ function computeShuttleEcoFinance(shuttleEco, used) {
     costPerUnit, expense, revenue, profit: round2(revenue - expense),
   };
 }
+// ===================== SHUTTLECOCK PURCHASE ROWS / WEIGHTED AVERAGE COST (v1.11.52) =====================
+// v1.11.52 (Shuttlecock Cost Redesign): replaces the single ราคา/กระบอก + จำนวนลูก/กระบอก pair with real
+// purchase-record rows (ยี่ห้อ/ราคาต่อหลอด/จำนวนหลอด/จำนวนลูกต่อหลอด) so mixed purchases (e.g. 2 tubes of RSL
+// + 1 tube of a cheaper brand) produce a correct WEIGHTED average cost per shuttle, not just a single price.
+// `shuttleCostPerUnit`/`shuttleEcoConfigured`/`computeShuttleEcoFinance` above are kept completely UNCHANGED
+// (dead code from here on, never called by the new flow) purely for backward compatibility — old regression
+// tests that extract and exercise them directly must keep passing unmodified.
+function shuttlePurchaseRowCost(row) {
+  const price = Math.max(0, Number(row && row.costPerTube) || 0);
+  const tubes = Math.max(0, Number(row && row.tubes) || 0);
+  return Math.round((price * tubes + Number.EPSILON) * 100) / 100;
+}
+function shuttlePurchaseRowCount(row) {
+  const tubes = Math.max(0, Number(row && row.tubes) || 0);
+  const perTube = Math.max(0, Number(row && row.shuttlesPerTube) || 0);
+  return tubes * perTube;
+}
+// Resolves the actual rows to use for a calculation, given a raw `shuttleEco` object (normalized OR raw —
+// this is deliberately self-sufficient so it behaves correctly even when called with a settings object that
+// never passed through normSettings, e.g. from a regression test). If `purchaseRows` is a real array
+// (including an explicitly-emptied one — the organizer deleted every row on purpose) it is trusted as-is;
+// only when the field is completely ABSENT (pre-v1.11.52 data that has never been touched by this feature)
+// does it synthesize a single legacy row from the old flat costPerTube/shuttlesPerTube fields, reproducing
+// the exact pre-v1.11.52 single-price behavior.
+function shuttlePurchaseRowsFor(shuttleEco) {
+  const eco = shuttleEco || {};
+  if (Array.isArray(eco.purchaseRows)) return eco.purchaseRows;
+  const legacyCostPerTube = Math.max(0, Number(eco.costPerTube) || 0);
+  const legacyShuttlesPerTube = Math.max(0, Number(eco.shuttlesPerTube) || 0);
+  if (legacyCostPerTube > 0 && legacyShuttlesPerTube > 0) {
+    return [{ id: "legacy", brand: "", costPerTube: legacyCostPerTube, tubes: 1, shuttlesPerTube: legacyShuttlesPerTube }];
+  }
+  return [];
+}
+// v1.11.52 (spec B): Average Cost per Shuttlecock = Total Purchase Cost ÷ Total Available Shuttlecocks,
+// summed across every purchase row — a true weighted average when multiple rows exist (NOT an average of
+// per-row unit prices, which would be wrong whenever tube counts differ between rows).
+function weightedShuttleCostPerUnit(shuttleEco) {
+  const rows = shuttlePurchaseRowsFor(shuttleEco);
+  const totalCost = rows.reduce((s, r) => s + shuttlePurchaseRowCost(r), 0);
+  const totalCount = rows.reduce((s, r) => s + shuttlePurchaseRowCount(r), 0);
+  return totalCount > 0 ? totalCost / totalCount : 0;
+}
+function shuttlePurchaseConfigured(shuttleEco) {
+  return weightedShuttleCostPerUnit(shuttleEco) > 0;
+}
+// v1.11.52 (spec C/D): resolves the EFFECTIVE "จำนวนลูกที่ใช้" for this session — MANUAL (an explicit
+// `{value, source:"manual"}` the organizer typed in) always wins and never gets silently overwritten by a
+// newly-completed match; otherwise AUTO, which is always the LIVE completed-match count, recomputed fresh on
+// every read (same "AUTO is live, MANUAL is a frozen explicit tag" design as v1.11.51's per-court hours —
+// AUTO/MANUAL is decided by the presence of a real `source` tag, never by comparing numbers).
+function resolveShuttleUsage(shuttleUsage, matchesSoFar) {
+  const auto = Math.max(0, Math.round(Number(matchesSoFar) || 0));
+  if (shuttleUsage && shuttleUsage.source === "manual") {
+    return { used: Math.max(0, Math.round(Number(shuttleUsage.value) || 0)), source: "manual" };
+  }
+  return { used: auto, source: "auto" };
+}
+// v1.11.52 (spec E/F): the CURRENT/finalized shuttlecock cost — used(effective) × weighted average cost per
+// shuttle. Deliberately NEVER the total purchase amount (spec F) — unused shuttlecocks remain economically
+// available for future sessions and must not inflate this session's cost.
+function computeShuttleUsageFinance(shuttleEco, shuttleUsage, matchesSoFar) {
+  const unit = weightedShuttleCostPerUnit(shuttleEco);
+  const resolved = resolveShuttleUsage(shuttleUsage, matchesSoFar);
+  return { unit, used: resolved.used, source: resolved.source, cost: Math.round((resolved.used * unit + Number.EPSILON) * 100) / 100 };
+}
 // ===================== COURT COST / OTHER EXPENSES (v1.11.50, Financial Setup Enhancement) =====================
 // v1.11.50 (spec D): session duration in hours, derived from the SAME session.sessionStartTime/sessionEndTime
 // fields the Court Recommendation engine already reads (via the existing timeStrToMinutes helper) — never a
@@ -1113,7 +1188,7 @@ function courtRateConfigured(ratePerHour) {
 // "simple"/"perPerson" return [] (unchanged — simple stays revenue-only as today; perPerson is a revenue
 // override handled entirely inside computeBill above, no expense line needed) EXCEPT for the shuttle line,
 // which (v1.11.41) is independent of costModel — see shuttleLine() below.
-function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries) {
+function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries, shuttleUsageOverride) {
   const model = settings.costModel || "simple";
   const out = [];
   // v1.11.41: prefers the new cost/tube-derived per-shuttle cost (auto — reuses the existing `used` match
@@ -1121,11 +1196,15 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, us
   // entry otherwise (pre-v1.11.41 behavior, fully backward compatible). NEVER both — that would double-file
   // "ค่าลูกแบต" for the same session.
   const shuttleLine = () => {
-    if (shuttleEcoConfigured(settings.shuttleEco)) {
-      const unit = shuttleCostPerUnit(settings.shuttleEco);
-      const used = Math.max(0, Number(usedShuttlecocks) || 0);
-      if (used > 0 && unit > 0) {
-        out.push({ id: uid(), category: "ค่าลูกแบต", description: `ค่าลูกแบด ${used} ลูก × ฿${unit.toFixed(2)} (ต้นทุนต่อลูก)`, amount: Math.round((used * unit + Number.EPSILON) * 100) / 100, date: dateStr, auto: true });
+    // v1.11.52 (spec B/C/D/E): weighted-average cost across every purchase row × the EFFECTIVE usage
+    // (MANUAL override if the organizer set one, else the live completed-match count) — never the total
+    // purchase amount (spec F). Supersedes the legacy manual shuttleCalc qty×price line exactly as the old
+    // single-price shuttleEco feature did (still never both, never double-filed).
+    const unit = weightedShuttleCostPerUnit(settings.shuttleEco);
+    if (unit > 0) {
+      const resolved = resolveShuttleUsage(shuttleUsageOverride, usedShuttlecocks);
+      if (resolved.used > 0) {
+        out.push({ id: uid(), category: "ค่าลูกแบต", description: `ค่าลูกแบด ${resolved.used} ลูก × ฿${unit.toFixed(2)} (ต้นทุนเฉลี่ย/ลูก)`, amount: Math.round((resolved.used * unit + Number.EPSILON) * 100) / 100, date: dateStr, auto: true });
       }
       return;
     }
@@ -2184,7 +2263,11 @@ function getDefaultSettings() {
     // concept — a second "selling price per shuttle" was a duplicate concept per organizer request. The
     // field itself stays in the settings shape (never deleted/force-zeroed here) purely so an OLD backup
     // that still carries a nonzero value continues to load without error (Section L: no destructive migration).
-    shuttleEco: { costPerTube: 0, shuttlesPerTube: 0, sellingPricePerShuttle: 0 },
+    // v1.11.52 (Shuttlecock Cost Redesign, spec A): `purchaseRows` is the new source of truth — a real
+    // purchase-record list (ยี่ห้อ/ราคาต่อหลอด/จำนวนหลอด/จำนวนลูกต่อหลอด). `costPerTube`/`shuttlesPerTube`
+    // stay in the shape untouched (never deleted/force-zeroed) purely so an OLD backup that predates this
+    // feature keeps loading without error (Section L) — see shuttlePurchaseRowsFor()'s legacy fallback.
+    shuttleEco: { costPerTube: 0, shuttlesPerTube: 0, sellingPricePerShuttle: 0, purchaseRows: [] },
     // v1.11.50 (Financial Setup Enhancement, spec C/D): ต้นทุนก๊วน — new, independent-of-costModel cost
     // fields, same "always shown, supersedes the model-derived auto expense line" pattern as shuttleEco
     // above. courtCost.manualOverrideTotal: null = auto-calculate from courtCount × session duration ×
@@ -2250,6 +2333,23 @@ function normSettings(s) {
   // partially-shaped object as-is instead of coercing/clamping each sub-field) so a corrupt/partial value
   // can never produce NaN/negative pricing downstream.
   const sEco = base.shuttleEco && typeof base.shuttleEco === "object" ? base.shuttleEco : {};
+  // v1.11.52 (Shuttlecock Cost Redesign, spec A/J): materialize `purchaseRows` into a REAL, always-present
+  // array so the new multi-row editor always has real editable state to render/update/delete. When the
+  // stored value is already a genuine array (even an explicitly-emptied one — the organizer deleted every
+  // row on purpose) it is trusted field-by-field; when the field is completely ABSENT (any pre-v1.11.52
+  // backup) it is synthesized ONCE from the old flat costPerTube/shuttlesPerTube fields via the same
+  // shuttlePurchaseRowsFor() fallback the calculation functions use, so the organizer sees their existing
+  // config as a real, editable row instead of losing it. This is additive normalization, not destructive
+  // migration — the old flat fields are still written back below untouched either way.
+  const sEcoPurchaseRows = Array.isArray(sEco.purchaseRows)
+    ? sEco.purchaseRows.filter((r) => r && typeof r === "object").map((r) => ({
+        id: r.id || uid(),
+        brand: String(r.brand || ""),
+        costPerTube: Math.max(0, Number(r.costPerTube) || 0),
+        tubes: Math.max(0, Number(r.tubes) || 0),
+        shuttlesPerTube: Math.max(0, Number(r.shuttlesPerTube) || 0),
+      }))
+    : shuttlePurchaseRowsFor(sEco).map((r) => ({ ...r, id: uid() }));
   // v1.11.50: same field-by-field backfill discipline as shuttleEco above — a missing/partial/corrupt
   // courtCost or otherExpenses (any pre-v1.11.50 backup, or a hand-edited/corrupted import) must never
   // produce NaN/negative pricing or crash a later .map()/.reduce() over otherExpenses.
@@ -2262,6 +2362,7 @@ function normSettings(s) {
       costPerTube: Math.max(0, Number(sEco.costPerTube) || 0),
       shuttlesPerTube: Math.max(0, Number(sEco.shuttlesPerTube) || 0),
       sellingPricePerShuttle: Math.max(0, Number(sEco.sellingPricePerShuttle) || 0),
+      purchaseRows: sEcoPurchaseRows,
     },
     courtCost: {
       ratePerHour: Math.max(0, Number(cCost.ratePerHour) || 0),
@@ -4864,9 +4965,11 @@ export default function App() {
       // v1.11.34 (spec 6.4/6.5): plus one "ค่ารางวัล" line per physical/cash reward actually distributed
       // this session (discount-type rewards excluded — see computeRewardExpenses).
       // v1.11.41: `totalMatches` (computed above, the SAME authoritative match count used for stats) is
-      // threaded in as the "shuttlecocks used" count for the new cost/tube auto-expense line (see
-      // computeCostModelExpenses/shuttleLine) — no new manual field.
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      // threaded in as the AUTO "shuttlecocks used" baseline for the cost/tube auto-expense line (see
+      // computeCostModelExpenses/shuttleLine). v1.11.52: `session.shuttleUsage` is threaded in alongside it
+      // so a MANUAL override the organizer set THIS session is respected/frozen exactly as-is, never
+      // silently replaced by `totalMatches` at the moment of finalization.
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, session.shuttleUsage), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
       // v1.11.51 (Court Cost Per-Court Enhancement, spec K): freeze the FULL per-court breakdown — rate,
       // hours/source/cost per court, and the total — so History can never be affected by a LATER change to
       // Court Rate/Session Time/Court Count (this object is computed once, right now, from the live values,
@@ -4879,6 +4982,30 @@ export default function App() {
           ratePerHour: Math.max(0, Number(settings.courtCost && settings.courtCost.ratePerHour) || 0),
           courts: rows.map((r) => ({ court: r.court, hours: r.hours, source: r.source, cost: r.cost })),
           totalCourtCost: totalCourtCostFromRows(rows),
+        };
+      })(),
+      // v1.11.52 (Shuttlecock Cost Redesign, spec I): freeze the FULL shuttlecock breakdown needed to
+      // reproduce this session's result forever — the purchase rows used to derive the average, the average
+      // itself, the actual usage AND whether it was Auto or Manual at the moment of finalization, and the
+      // finalized cost. Computed once, right now, from the live values — a later change to purchase rows,
+      // usage mode, or future matches played can never retroactively change this session's numbers (same
+      // freeze-once pattern as courtCostSnapshot above). The "ค่าลูกแบต" auto expense line above already
+      // carries the total into the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline — no double counting, this is
+      // purely an additional structured audit record.
+      shuttleCostSnapshot: (() => {
+        const purchaseRows = shuttlePurchaseRowsFor(settings.shuttleEco).map((r) => ({
+          id: r.id, brand: r.brand || "",
+          costPerTube: Math.max(0, Number(r.costPerTube) || 0),
+          tubes: Math.max(0, Number(r.tubes) || 0),
+          shuttlesPerTube: Math.max(0, Number(r.shuttlesPerTube) || 0),
+        }));
+        const finance = computeShuttleUsageFinance(settings.shuttleEco, session.shuttleUsage, totalMatches);
+        return {
+          purchaseRows,
+          costPerShuttle: finance.unit,
+          used: finance.used,
+          source: finance.source,
+          totalShuttleCost: finance.cost,
         };
       })(),
       // v1.11.41 (spec D/E): ลูกแบด revenue (used × ราคาขาย/ลูก) is computed ONCE here, at finalization, and
@@ -8791,6 +8918,79 @@ function SplitExpensesEditor({ settings, setSettings, players }) {
 // its own component so FinanceSettingsSheet's render body stays readable. `durationHours` is derived by the
 // caller from session.sessionStartTime/sessionEndTime (see sessionDurationHours) — no new time input here.
 // v1.11.51 (Court Cost Per-Court Enhancement): full rewrite of the v1.11.50 court-cost UI per spec A/B/C/G —
+// v1.11.52 (Shuttlecock Cost Redesign): full rewrite of the ต้นทุนลูกแบด UI per spec A/B/C/D/E/K — a list of
+// real purchase rows (ยี่ห้อ/ราคาต่อหลอด/จำนวนหลอด/จำนวนลูกต่อหลอด, add/delete, spec A), a computed weighted
+// "ต้นทุนเฉลี่ย/ลูก" (spec B), and an editable "จำนวนลูกที่ใช้" that defaults to (and, while AUTO, always
+// follows) the live completed-match count, switching to a frozen MANUAL value the instant the organizer
+// types their own number (spec C/D) — mirroring the AUTO/MANUAL pattern CourtCostSection below already
+// established for per-court hours. Purchase amount is never treated as this session's cost (spec F) — only
+// `usage.used × unit` ever is.
+function ShuttlecockCostSection({ settings, setSettings, session, setSession, matchesSoFar }) {
+  const eco = settings.shuttleEco || {};
+  const rows = Array.isArray(eco.purchaseRows) ? eco.purchaseRows : [];
+  const unit = weightedShuttleCostPerUnit(eco);
+  const usage = resolveShuttleUsage(session && session.shuttleUsage, matchesSoFar);
+  const cost = Math.round((usage.used * unit + Number.EPSILON) * 100) / 100;
+
+  const updateRow = (id, patch) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: (s.shuttleEco?.purchaseRows || []).map((r) => (r.id === id ? { ...r, ...patch } : r)) } }));
+  const addRow = () => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: [...(s.shuttleEco?.purchaseRows || []), { id: uid(), brand: "", costPerTube: 0, tubes: 1, shuttlesPerTube: 12 }] } }));
+  const removeRow = (id) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: (s.shuttleEco?.purchaseRows || []).filter((r) => r.id !== id) } }));
+  // v1.11.52 (spec C/D): editing "จำนวนลูกที่ใช้" is ALWAYS an explicit, real "this is now MANUAL" action —
+  // never inferred later by comparing numbers. Stored in `session` (not `settings`) so it's session-specific
+  // (spec H-equivalent) and resets to AUTO every new session (see normSession/endSession).
+  const setUsage = (v) => setSession((s) => ({ ...s, shuttleUsage: { value: Math.max(0, Number(v) || 0), source: "manual" } }));
+  const resetToAuto = () => setSession((s) => ({ ...s, shuttleUsage: null }));
+
+  const smallInput = { flex: 1, minWidth: 0, padding: "7px 9px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 700, outline: "none", boxSizing: "border-box" };
+  return (
+    <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+      <Label>🏸 ต้นทุนลูกแบด</Label>
+      {rows.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+          {rows.map((row) => (
+            <div key={row.id} style={{ padding: 9, borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
+                <input type="text" value={row.brand} onChange={(e) => updateRow(row.id, { brand: e.target.value })} placeholder="ยี่ห้อ (ไม่บังคับ)" style={smallInput} />
+                <button onClick={() => removeRow(row.id)} style={{ background: "none", border: "none", color: T.accent, padding: 4, flexShrink: 0 }}><Trash2 size={14} /></button>
+              </div>
+              <div style={{ display: "flex", gap: 8, marginBottom: 7 }}>
+                <NumField label="ราคาต่อหลอด (฿)" value={row.costPerTube} onChange={(v) => updateRow(row.id, { costPerTube: v })} />
+                <NumField label="จำนวนหลอด" value={row.tubes} onChange={(v) => updateRow(row.id, { tubes: v })} />
+              </div>
+              <NumField label="จำนวนลูกต่อหลอด" value={row.shuttlesPerTube} onChange={(v) => updateRow(row.id, { shuttlesPerTube: v })} />
+            </div>
+          ))}
+        </div>
+      )}
+      {rows.length === 0 && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "6px 0", marginBottom: 8 }}>ยังไม่มีรายการลูกแบด</div>}
+      <button onClick={addRow} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}><Plus size={14} /> เพิ่มรายการลูกแบด</button>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+        <span style={{ color: T.muted }}>ต้นทุนเฉลี่ย/ลูก</span><span style={{ fontWeight: 800 }}>{formatCurrency(unit)}</span>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 6 }}>
+        <span>เกมที่จบแล้ว</span><span>{matchesSoFar} เกม</span>
+      </div>
+      <div style={{ marginBottom: 6 }}>
+        <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนลูกที่ใช้</div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input type="number" value={usage.used} onChange={(e) => setUsage(e.target.value)} onFocus={(e) => e.target.select()} style={{ width: 64, flexShrink: 0, padding: "9px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 800, outline: "none", boxSizing: "border-box" }} />
+          <span style={{ fontSize: 12, color: T.muted, fontWeight: 700 }}>ลูก</span>
+          <span style={{ fontSize: 11, fontWeight: 800, color: usage.source === "manual" ? T.accent : T.green, padding: "3px 8px", borderRadius: 20, background: usage.source === "manual" ? "#fdecea" : "#e2f5ec", flexShrink: 0 }}>
+            {usage.source === "manual" ? "กำหนดเอง" : "ตามจำนวนเกม"}
+          </span>
+          {usage.source === "manual" && (
+            <button onClick={resetToAuto} style={{ marginLeft: "auto", flexShrink: 0, padding: "7px 10px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ใช้ตามจำนวนเกม</button>
+          )}
+        </div>
+      </div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{usage.used} ลูก × {formatCurrency(unit)}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+        <span style={{ color: T.muted, fontWeight: 700 }}>รวมต้นทุนลูกแบด</span><span>{formatCurrency(cost)}</span>
+      </div>
+    </div>
+  );
+}
 // a single "ค่าสนาม/ชั่วโมง" rate (label EXACT per spec A: never "ค่าคอร์ด/สนาม/ชั่วโมง" or "ค่าสนาม/สนาม/ชั่วโมง"),
 // one compact row per court ([hours] ชม. × ฿rate = ฿cost, spec M "ไม่ต้องมี card ใหญ่แยกต่อสนาม"), and a
 // "รวมค่าคอร์ด" total. The old "แก้ยอดรวมเอง (เหมาจ่าย/โปรโมชั่น)" manual-total-override UI is REMOVED here per
@@ -8907,8 +9107,12 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, histor
   const courtCostTotal = totalCourtCostFromRows(courtCostRows);
   const otherTotal = otherExpensesTotal(settings.otherExpenses);
   const matchesSoFar = (history || []).length + (current || []).filter((m) => m.status === "done").length;
-  const shuttleUnit = shuttleCostPerUnit(settings.shuttleEco);
-  const shuttleEstimate = Math.round((matchesSoFar * shuttleUnit + Number.EPSILON) * 100) / 100;
+  // v1.11.52 (spec E/H): weighted-average cost × the EFFECTIVE usage (MANUAL override if the organizer set
+  // one this session, else the live completed-match count) — never a fabricated forward assumption, and
+  // never the total purchase amount (spec F).
+  const shuttleUsageResolved = resolveShuttleUsage(session && session.shuttleUsage, matchesSoFar);
+  const shuttleUnit = weightedShuttleCostPerUnit(settings.shuttleEco);
+  const shuttleEstimate = Math.round((shuttleUsageResolved.used * shuttleUnit + Number.EPSILON) * 100) / 100;
   const attended = (players || []).filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
   const registeredOnly = (players || []).filter((p) => p.status === "registered").length;
   const hasAttendance = attended.length > 0;
@@ -8939,7 +9143,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, histor
         <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, margin: "8px 0 4px" }}>ค่าใช้จ่ายคาดการณ์</div>
         <BillRow label="ค่าคอร์ด" v={courtCostTotal} kind="expense" />
         <BillRow label="ต้นทุนลูกแบด" v={shuttleEstimate} kind="expense" />
-        {matchesSoFar === 0 && <div style={{ fontSize: 10.5, color: T.muted, marginTop: -3, marginBottom: 4 }}>ยังไม่เริ่มเล่น — จะคำนวณจากจำนวนเกมที่เล่นจริง</div>}
+        {shuttleUsageResolved.used === 0 && <div style={{ fontSize: 10.5, color: T.muted, marginTop: -3, marginBottom: 4 }}>ยังไม่เริ่มเล่น — จะคำนวณจากจำนวนเกมที่เล่นจริง</div>}
         <BillRow label="ค่าใช้จ่ายอื่น" v={otherTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
           <span>รวมค่าใช้จ่าย</span><span style={{ color: T.accent }}>{formatCurrency(expenseTotal)}</span>
@@ -8955,6 +9159,10 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, histor
 function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, onClose }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | "prize" | null
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
+  // v1.11.52 (spec C): "จำนวนลูกที่ใช้"'s AUTO baseline — the SAME live completed-match definition already
+  // used by FinancialEstimatePanel (history + current matches with status "done"; playing/paused/upcoming
+  // never count).
+  const matchesSoFar = (history || []).length + (current || []).filter((m) => m.status === "done").length;
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
   const model = settings.costModel || "simple";
   const setCourtRate = (court, amount) => setSettings((s) => {
@@ -9076,19 +9284,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
       </button>
       {open === "cost" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          {/* v1.11.41/v1.11.50: ต้นทุนลูกแบด — independent of costModel (always shown, not gated behind a
-              specific model). Configuring this supersedes the legacy "จำนวนลูก/ราคา-ลูก" manual line for the
-              auto-expense calculation (see computeCostModelExpenses) so the two never double-file
-              "ค่าลูกแบต"; stays fully separate from "ค่าลูก/เกม" (revenue, above) by explicit design. Spec B:
-              "ราคาขายต่อลูก" is REMOVED — that revenue concept is now covered entirely by ค่าลูก/เกม. */}
-          <div style={{ marginBottom: 4 }}>
-            <Label>🏸 ต้นทุนลูกแบด (คำนวณอัตโนมัติจากจำนวนเกมที่เล่นจริง)</Label>
-            <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
-              <NumField label="ราคาลูกแบดต่อกระบอก (฿)" value={settings.shuttleEco?.costPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), costPerTube: v } }))} />
-              <NumField label="จำนวนลูกต่อกระบอก" value={settings.shuttleEco?.shuttlesPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), shuttlesPerTube: v } }))} />
-            </div>
-            <div style={{ fontSize: 11.5, color: T.muted }}>ต้นทุนต่อลูก: {shuttleCostPerUnit(settings.shuttleEco).toFixed(2)} บาท — คำนวณจากจำนวนแมตช์ที่จบจริงในก๊วน (ไม่ต้องกรอกจำนวนลูกที่ใช้เอง)</div>
-          </div>
+          <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} />
           <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} />
           <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} />
         </div>
