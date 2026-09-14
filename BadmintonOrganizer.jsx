@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.53";
+const APP_VERSION = "1.11.54";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -278,7 +278,25 @@ function normSession(s) {
         expectedGamesPerPerson: rawEstimate.expectedGamesPerPerson != null && !isNaN(Number(rawEstimate.expectedGamesPerPerson)) ? Math.max(0, Number(rawEstimate.expectedGamesPerPerson)) : null,
       }
     : null;
-  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage, estimate };
+  // v1.11.54 (Shuttlecock Inventory-Lite / Carry Forward Cost, spec B/L): "ลูกยกมา" (opening balance) is
+  // session-specific for the exact same reason estimate/shuttleUsage/courtHours above are — never a Group
+  // Default (buildGroupDefaultBundle never spreads the whole `session` object), always reset to a clean
+  // slate on a brand new session (endSession()'s explicit setSession field list below never re-lists
+  // `shuttleOpening`). `null` fields mean "not yet edited by the organizer this session" — the UI/finance
+  // functions compute a live carry-forward default (from the most recent ended session of the SAME
+  // session.name — see carryForwardShuttleOpeningFor) but never write it back here until the organizer
+  // actually types a value, exactly like session.estimate's two independent fields. Editing qty and editing
+  // avgCost are deliberately independent (spec R.4/R.5) — this is NOT a whole-object AUTO/MANUAL tag like
+  // shuttleUsage/courtHours above, since the two fields must be correctable one at a time (recount vs.
+  // re-price) without disturbing the other.
+  const rawShuttleOpening = base.shuttleOpening;
+  const shuttleOpening = (rawShuttleOpening && typeof rawShuttleOpening === "object")
+    ? {
+        qty: rawShuttleOpening.qty != null && !isNaN(Number(rawShuttleOpening.qty)) ? Math.max(0, Math.round(Number(rawShuttleOpening.qty))) : null,
+        avgCost: rawShuttleOpening.avgCost != null && !isNaN(Number(rawShuttleOpening.avgCost)) ? Math.max(0, Number(rawShuttleOpening.avgCost)) : null,
+      }
+    : null;
+  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage, estimate, shuttleOpening };
 }
 // v1.11.35 (Member Portal Phase 1) — this LOCAL install's link (if any) to a Cloud Club. Entirely
 // additive/local bookkeeping: null/disabled is the default and identical-to-before state for every
@@ -1096,6 +1114,73 @@ function computeShuttleUsageFinance(shuttleEco, shuttleUsage, matchesSoFar) {
   const resolved = resolveShuttleUsage(shuttleUsage, matchesSoFar);
   return { unit, used: resolved.used, source: resolved.source, cost: Math.round((resolved.used * unit + Number.EPSILON) * 100) / 100 };
 }
+// ===================== SHUTTLECOCK INVENTORY-LITE / CARRY FORWARD COST (v1.11.54) =====================
+// v1.11.54 (Inventory-Lite spec A/D): the weighted average cost now factors in an opening balance carried
+// forward from the previous session of the SAME named ก๊วน (or manually corrected by the organizer),
+// alongside this session's own new purchases. `weightedShuttleCostPerUnit`/`computeShuttleUsageFinance`
+// above are left completely UNCHANGED (dead code from here on for the new flow, kept only so old
+// regression tests that extract/exercise them directly keep passing) and superseded by the functions below
+// for every NEW call site (Finance, the Estimate panel, the settings UI, End Session).
+//
+// Resolves the EFFECTIVE opening balance for THIS session: an explicit organizer edit to either field
+// always wins for that field (spec L — always editable, edits apply to the current session only); a field
+// left untouched falls back to the carried-forward value. Deliberately per-field independent (spec R.4/R.5)
+// — never a single whole-object AUTO/MANUAL tag, since qty (recount) and avgCost (re-price) must be
+// correctable one at a time without disturbing the other.
+function resolveShuttleOpening(shuttleOpening, carryForward) {
+  const cf = carryForward || { qty: 0, avgCost: 0 };
+  const qty = shuttleOpening && shuttleOpening.qty != null && !isNaN(Number(shuttleOpening.qty)) ? Math.max(0, Number(shuttleOpening.qty)) : Math.max(0, Number(cf.qty) || 0);
+  const avgCost = shuttleOpening && shuttleOpening.avgCost != null && !isNaN(Number(shuttleOpening.avgCost)) ? Math.max(0, Number(shuttleOpening.avgCost)) : Math.max(0, Number(cf.avgCost) || 0);
+  return { qty, avgCost };
+}
+// v1.11.54 (spec I/J): scoped strictly to the SAME session.name, never just "the most recent session
+// overall" — this install supports multiple concurrently-maintained named quan groups (see groupDefaults,
+// keyed the same way). `sessionHistory` is newest-first (endSession always prepends), so the first matching
+// entry is the most recently ended session for this exact named ก๊วน. Reads the frozen closing balance from
+// that entry's shuttleCostSnapshot (see endSession below); a pre-v1.11.54 entry has no such fields, and a
+// brand-new name has no entry at all — both naturally yield {qty:0, avgCost:0} (spec P backward compat).
+function carryForwardShuttleOpeningFor(sessionName, sessionHistory) {
+  const name = (sessionName || "").trim();
+  const prior = name ? (sessionHistory || []).find((s) => (s.name || "").trim() === name) : null;
+  const scs = prior && prior.shuttleCostSnapshot;
+  return { qty: Math.max(0, Number(scs && scs.closingQty) || 0), avgCost: Math.max(0, Number(scs && scs.closingAvgCost) || 0) };
+}
+// v1.11.54 (spec D): weighted average across BOTH the (resolved) opening balance and this session's new
+// purchases — Total Value (opening qty×avgCost + purchase cost) ÷ Total Available (opening qty + purchase
+// qty). Zero opening degrades to exactly weightedShuttleCostPerUnit's purchases-only result; zero purchases
+// degrades to exactly the opening avg cost; both zero returns 0 (no divide-by-zero).
+function weightedShuttleCostWithOpening(shuttleEco, opening) {
+  const rows = shuttlePurchaseRowsFor(shuttleEco);
+  const purchaseCost = rows.reduce((s, r) => s + shuttlePurchaseRowCost(r), 0);
+  const purchaseQty = rows.reduce((s, r) => s + shuttlePurchaseRowCount(r), 0);
+  const openingQty = Math.max(0, Number(opening && opening.qty) || 0);
+  const openingAvgCost = Math.max(0, Number(opening && opening.avgCost) || 0);
+  const totalQty = openingQty + purchaseQty;
+  const totalValue = openingQty * openingAvgCost + purchaseCost;
+  return { purchaseQty, purchaseCost, totalQty, avgCost: totalQty > 0 ? totalValue / totalQty : 0 };
+}
+// v1.11.54 (spec E/F/G/H): the CURRENT/finalized shuttlecock picture for this session — used(effective) ×
+// the opening-balance-aware weighted average is the session's ACTUAL expense (spec G — never the purchase
+// amount, never the total stock value); closing = available − used carries forward to the next session at
+// the SAME weighted-average rate (spec H). Usage exceeding availability is surfaced via overUsed/overUsedBy
+// (spec F) rather than silently clamped — the caller decides how to warn; this function never hides it by
+// capping `used` or `closingQty` here.
+function computeShuttleUsageFinanceWithOpening(shuttleEco, opening, shuttleUsage, matchesSoFar) {
+  const w = weightedShuttleCostWithOpening(shuttleEco, opening);
+  const resolved = resolveShuttleUsage(shuttleUsage, matchesSoFar);
+  const cost = Math.round((resolved.used * w.avgCost + Number.EPSILON) * 100) / 100;
+  const closingQty = Math.round((w.totalQty - resolved.used) * 100) / 100;
+  return {
+    unit: w.avgCost, used: resolved.used, source: resolved.source, cost,
+    openingQty: Math.max(0, Number(opening && opening.qty) || 0),
+    openingAvgCost: Math.max(0, Number(opening && opening.avgCost) || 0),
+    purchaseQty: w.purchaseQty, purchaseCost: w.purchaseCost,
+    totalAvailable: w.totalQty, weightedAvgCost: w.avgCost,
+    closingQty, closingAvgCost: w.avgCost,
+    overUsed: resolved.used > w.totalQty,
+    overUsedBy: resolved.used > w.totalQty ? Math.round((resolved.used - w.totalQty) * 100) / 100 : 0,
+  };
+}
 // ===================== COURT COST / OTHER EXPENSES (v1.11.50, Financial Setup Enhancement) =====================
 // v1.11.50 (spec D): session duration in hours, derived from the SAME session.sessionStartTime/sessionEndTime
 // fields the Court Recommendation engine already reads (via the existing timeStrToMinutes helper) — never a
@@ -1202,7 +1287,7 @@ function courtRateConfigured(ratePerHour) {
 // "simple"/"perPerson" return [] (unchanged — simple stays revenue-only as today; perPerson is a revenue
 // override handled entirely inside computeBill above, no expense line needed) EXCEPT for the shuttle line,
 // which (v1.11.41) is independent of costModel — see shuttleLine() below.
-function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries, shuttleUsageOverride) {
+function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries, shuttleUsageOverride, openingBalance) {
   const model = settings.costModel || "simple";
   const out = [];
   // v1.11.41: prefers the new cost/tube-derived per-shuttle cost (auto — reuses the existing `used` match
@@ -1214,7 +1299,12 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, us
     // (MANUAL override if the organizer set one, else the live completed-match count) — never the total
     // purchase amount (spec F). Supersedes the legacy manual shuttleCalc qty×price line exactly as the old
     // single-price shuttleEco feature did (still never both, never double-filed).
-    const unit = weightedShuttleCostPerUnit(settings.shuttleEco);
+    // v1.11.54 (Inventory-Lite spec D/G/M): `openingBalance` (an already-resolved {qty,avgCost}, see
+    // resolveShuttleOpening/carryForwardShuttleOpeningFor) folds the carried-forward/organizer-corrected
+    // opening balance into the weighted average alongside this session's purchase rows. A caller that omits
+    // it (any pre-v1.11.54 direct call, e.g. an old test) gets {qty:0,avgCost:0}, which degrades this to
+    // EXACTLY the v1.11.52 purchases-only formula — fully backward compatible.
+    const unit = weightedShuttleCostWithOpening(settings.shuttleEco, openingBalance || { qty: 0, avgCost: 0 }).avgCost;
     if (unit > 0) {
       const resolved = resolveShuttleUsage(shuttleUsageOverride, usedShuttlecocks);
       if (resolved.used > 0) {
@@ -1347,9 +1437,9 @@ function computeExpectedRevenue(settings, expectedPlayers, expectedGamesPerPerso
 // the live Finance summary and the eventual frozen History total can never diverge (spec G: "reuse the same
 // authoritative Finance calculation helpers to prevent divergence" / "do not create a second independent
 // expense calculation").
-function computeLiveExpenseTotal(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, rewardHistory, sessionId) {
+function computeLiveExpenseTotal(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, rewardHistory, sessionId, openingBalance) {
   const lines = [
-    ...computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride),
+    ...computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, openingBalance),
     ...computeRewardExpenses(rewardHistory, sessionId, dateStr),
   ];
   return Math.round((lines.reduce((s, e) => s + (Number(e.amount) || 0), 0) + Number.EPSILON) * 100) / 100;
@@ -4961,6 +5051,13 @@ export default function App() {
     } catch (e) {}
     const doneCurrent = current.filter((m) => m.status === "done");
     const totalMatches = history.length + doneCurrent.length;
+    // v1.11.54 (Inventory-Lite / Carry Forward Cost, spec I/O): resolved ONCE here and reused for both the
+    // auto "ค่าลูกแบต" expense line below and shuttleCostSnapshot, so they can never diverge. Looks up the
+    // most recent ENDED session of this exact SAME session.name (never just "most recent overall" — this
+    // install supports multiple concurrently-maintained named ก๊วน groups, see groupDefaults) using the
+    // live `sessionHistory` (not yet updated with this session's own snapshot).
+    const shuttleOpeningCarryForward = carryForwardShuttleOpeningFor(session.name, sessionHistory);
+    const shuttleOpeningResolved = resolveShuttleOpening(session.shuttleOpening, shuttleOpeningCarryForward);
     // v1.11.45 (History attendee filter): same "attended" definition computeBill()/computeSplitExpenseSummary()
     // already use elsewhere in this file — present in some capacity (ready/resting/left), not merely
     // registered/absent/waitlisted. Used below both to freeze the correct player list AND to compute
@@ -5027,7 +5124,7 @@ export default function App() {
       // computeCostModelExpenses/shuttleLine). v1.11.52: `session.shuttleUsage` is threaded in alongside it
       // so a MANUAL override the organizer set THIS session is respected/frozen exactly as-is, never
       // silently replaced by `totalMatches` at the moment of finalization.
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, session.shuttleUsage), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, session.shuttleUsage, shuttleOpeningResolved), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
       // v1.11.51 (Court Cost Per-Court Enhancement, spec K): freeze the FULL per-court breakdown — rate,
       // hours/source/cost per court, and the total — so History can never be affected by a LATER change to
       // Court Rate/Session Time/Court Count (this object is computed once, right now, from the live values,
@@ -5050,6 +5147,12 @@ export default function App() {
       // freeze-once pattern as courtCostSnapshot above). The "ค่าลูกแบต" auto expense line above already
       // carries the total into the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline — no double counting, this is
       // purely an additional structured audit record.
+      // v1.11.54 (Inventory-Lite / Carry Forward Cost, spec O): extends the v1.11.52 snapshot with the full
+      // opening→purchases→usage→closing picture. `costPerShuttle`/`used`/`source`/`totalShuttleCost` are
+      // kept byte-for-byte in shape and meaning (old regression tests read these exact field names) — the
+      // new named fields below are purely additive. `closingQty`/`closingAvgCost` are what the NEXT session
+      // of this SAME ก๊วน name will read as its opening-balance default (carryForwardShuttleOpeningFor) —
+      // frozen here, once, and never recalculated later (same freeze-once discipline as courtCostSnapshot).
       shuttleCostSnapshot: (() => {
         const purchaseRows = shuttlePurchaseRowsFor(settings.shuttleEco).map((r) => ({
           id: r.id, brand: r.brand || "",
@@ -5057,13 +5160,23 @@ export default function App() {
           tubes: Math.max(0, Number(r.tubes) || 0),
           shuttlesPerTube: Math.max(0, Number(r.shuttlesPerTube) || 0),
         }));
-        const finance = computeShuttleUsageFinance(settings.shuttleEco, session.shuttleUsage, totalMatches);
+        const finance = computeShuttleUsageFinanceWithOpening(settings.shuttleEco, shuttleOpeningResolved, session.shuttleUsage, totalMatches);
         return {
           purchaseRows,
           costPerShuttle: finance.unit,
           used: finance.used,
           source: finance.source,
           totalShuttleCost: finance.cost,
+          openingQty: finance.openingQty,
+          openingAvgCost: finance.openingAvgCost,
+          totalPurchaseQty: finance.purchaseQty,
+          totalPurchaseCost: finance.purchaseCost,
+          weightedAvgCost: finance.weightedAvgCost,
+          actualUsedQty: finance.used,
+          usageMode: finance.source,
+          shuttleExpense: finance.cost,
+          closingQty: finance.closingQty,
+          closingAvgCost: finance.closingAvgCost,
         };
       })(),
       // v1.11.41 (spec D/E): ลูกแบด revenue (used × ราคาขาย/ลูก) is computed ONCE here, at finalization, and
@@ -8983,12 +9096,17 @@ function SplitExpensesEditor({ settings, setSettings, players }) {
 // types their own number (spec C/D) — mirroring the AUTO/MANUAL pattern CourtCostSection below already
 // established for per-court hours. Purchase amount is never treated as this session's cost (spec F) — only
 // `usage.used × unit` ever is.
-function ShuttlecockCostSection({ settings, setSettings, session, setSession, matchesSoFar }) {
+function ShuttlecockCostSection({ settings, setSettings, session, setSession, matchesSoFar, carryForward, opening }) {
   const eco = settings.shuttleEco || {};
   const rows = Array.isArray(eco.purchaseRows) ? eco.purchaseRows : [];
-  const unit = weightedShuttleCostPerUnit(eco);
-  const usage = resolveShuttleUsage(session && session.shuttleUsage, matchesSoFar);
-  const cost = Math.round((usage.used * unit + Number.EPSILON) * 100) / 100;
+  const cf = carryForward || { qty: 0, avgCost: 0 };
+  const ob = opening || { qty: 0, avgCost: 0 };
+  // v1.11.54 (Inventory-Lite spec D/E/F/G/H): opening-balance-aware weighted average + usage/closing —
+  // supersedes the v1.11.52 purchases-only `weightedShuttleCostPerUnit`/`resolveShuttleUsage` pair used
+  // here before (both left untouched elsewhere for old regression tests, see their own comments).
+  const finance = computeShuttleUsageFinanceWithOpening(eco, ob, session && session.shuttleUsage, matchesSoFar);
+  const usage = { used: finance.used, source: finance.source };
+  const cost = finance.cost;
 
   const updateRow = (id, patch) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: (s.shuttleEco?.purchaseRows || []).map((r) => (r.id === id ? { ...r, ...patch } : r)) } }));
   const addRow = () => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: [...(s.shuttleEco?.purchaseRows || []), { id: uid(), brand: "", costPerTube: 0, tubes: 1, shuttlesPerTube: 12 }] } }));
@@ -8999,10 +9117,38 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
   const setUsage = (v) => setSession((s) => ({ ...s, shuttleUsage: { value: Math.max(0, Number(v) || 0), source: "manual" } }));
   const resetToAuto = () => setSession((s) => ({ ...s, shuttleUsage: null }));
 
+  // v1.11.54 (Inventory-Lite spec B/L): "ลูกยกมา" — auto-populated from the most recently ended session of
+  // this SAME ก๊วน name (carryForward, resolved by the caller via carryForwardShuttleOpeningFor), but ALWAYS
+  // organizer-editable (recount, correct a lost/duplicate purchase, adjust cost). Editing one field freezes
+  // the OTHER field's current effective value rather than resetting it — same independent-field discipline
+  // as session.estimate's two fields (v1.11.53) — so R.4/R.5 (edit qty vs edit avgCost independently) both
+  // leave the untouched field's EFFECTIVE number unchanged.
+  const openingTouched = !!(session && session.shuttleOpening && (session.shuttleOpening.qty != null || session.shuttleOpening.avgCost != null));
+  const setOpeningQty = (v) => setSession((s) => ({ ...s, shuttleOpening: { qty: Math.max(0, Math.round(Number(v) || 0)), avgCost: (s.shuttleOpening && s.shuttleOpening.avgCost != null) ? s.shuttleOpening.avgCost : cf.avgCost } }));
+  const setOpeningAvgCost = (v) => setSession((s) => ({ ...s, shuttleOpening: { qty: (s.shuttleOpening && s.shuttleOpening.qty != null) ? s.shuttleOpening.qty : cf.qty, avgCost: Math.max(0, Number(v) || 0) } }));
+  const resetOpening = () => setSession((s) => ({ ...s, shuttleOpening: null }));
+
   const smallInput = { flex: 1, minWidth: 0, padding: "7px 9px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 700, outline: "none", boxSizing: "border-box" };
   return (
     <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
       <Label>🏸 ต้นทุนลูกแบด</Label>
+
+      {/* v1.11.54 (Inventory-Lite spec B/K): ลูกยกมา */}
+      <div style={{ marginBottom: 10, padding: 9, borderRadius: 10, background: T.surface2 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
+          <span style={{ fontSize: 12, fontWeight: 800, color: T.muted }}>ลูกยกมา</span>
+          <span style={{ fontSize: 10.5, fontWeight: 800, color: openingTouched ? T.accent : T.green, padding: "2px 7px", borderRadius: 20, background: openingTouched ? "#fdecea" : "#e2f5ec" }}>
+            {openingTouched ? "กำหนดเอง" : (cf.qty > 0 || cf.avgCost > 0) ? "ดึงจากก๊วนก่อน" : "ก๊วนใหม่"}
+          </span>
+          {openingTouched && <button onClick={resetOpening} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 10.5, fontWeight: 700 }}>ใช้ยอดจากก๊วนก่อน</button>}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <NumField label="จำนวนลูกยกมา" value={ob.qty} onChange={setOpeningQty} />
+          <NumField label="ต้นทุนเฉลี่ยยกมา/ลูก (฿)" value={ob.avgCost} onChange={setOpeningAvgCost} />
+        </div>
+      </div>
+
+      <div style={{ fontSize: 11.5, color: T.muted, fontWeight: 700, marginBottom: 6 }}>ซื้อเพิ่มครั้งนี้</div>
       {rows.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
           {rows.map((row) => (
@@ -9023,8 +9169,20 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
       {rows.length === 0 && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "6px 0", marginBottom: 8 }}>ยังไม่มีรายการลูกแบด</div>}
       <button onClick={addRow} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}><Plus size={14} /> เพิ่มรายการลูกแบด</button>
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        <span style={{ color: T.muted }}>ต้นทุนเฉลี่ย/ลูก</span><span style={{ fontWeight: 800 }}>{formatCurrency(unit)}</span>
+      {/* v1.11.54 (Inventory-Lite spec K): สรุปต้นทุนลูกแบด — opening + this session's purchases combined. */}
+      <div style={{ paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 4 }}>
+          <span>ลูกยกมา</span><span>{finance.openingQty} ลูก</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 4 }}>
+          <span>ซื้อเพิ่มครั้งนี้</span><span>{finance.purchaseQty} ลูก</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 8 }}>
+          <span>ลูกพร้อมใช้ทั้งหมด</span><span>{finance.totalAvailable} ลูก</span>
+        </div>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>
+        <span style={{ color: T.muted }}>ต้นทุนเฉลี่ย/ลูก</span><span style={{ fontWeight: 800 }}>{formatCurrency(finance.weightedAvgCost)}</span>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 6 }}>
         <span>เกมที่จบแล้ว</span><span>{matchesSoFar} เกม</span>
@@ -9042,9 +9200,26 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
           )}
         </div>
       </div>
-      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{usage.used} ลูก × {formatCurrency(unit)}</div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+      {/* v1.11.54 (Inventory-Lite spec F): explicit, visible warning — never silently capped. Blocking End
+          Session on this is deliberately NOT done (spec F: only do so if it can never risk reintroducing
+          the End Session persistence crash fixed in v1.11.44/46/48 — this stays a pure display concern). */}
+      {finance.overUsed && (
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: "#c0392b", background: "#fdecea", borderRadius: 8, padding: "7px 9px", marginBottom: 8 }}>
+          ⚠️ จำนวนลูกที่ใช้มากกว่าลูกที่มีอยู่ {finance.overUsedBy} ลูก
+        </div>
+      )}
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{usage.used} ลูก × {formatCurrency(finance.weightedAvgCost)}</div>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, paddingTop: 8, borderTop: `1px solid ${T.border}`, marginBottom: 10 }}>
         <span style={{ color: T.muted, fontWeight: 700 }}>รวมต้นทุนลูกแบด</span><span>{formatCurrency(cost)}</span>
+      </div>
+
+      {/* v1.11.54 (Inventory-Lite spec H/I): ลูกคงเหลือ — carries forward as the next session's (same ก๊วน
+          name) opening balance once End Session freezes it into shuttleCostSnapshot.closingQty/closingAvgCost. */}
+      <div style={{ paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, marginBottom: 3 }}>
+          <span style={{ color: T.muted }}>ลูกคงเหลือ</span><span>{finance.closingQty} ลูก @ {formatCurrency(finance.closingAvgCost)}</span>
+        </div>
+        <div style={{ fontSize: 10.5, color: T.muted }}>จะยกยอดนี้ไปก๊วนครั้งถัดไป</div>
       </div>
     </div>
   );
@@ -9159,7 +9334,7 @@ function OtherExpensesEditor({ items, setSettings }) {
 // change actual attendance/matchmaking/payment records (spec A) — session.estimate is a session-scoped
 // planning field, same storage pattern as session.courtHours/shuttleUsage (see normSession), always resets
 // to a clean slate on a brand new session.
-function FinancialEstimatePanel({ settings, players, courtCount, session, setSession, history, current, mode }) {
+function FinancialEstimatePanel({ settings, players, courtCount, session, setSession, history, current, mode, openingBalance }) {
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.51 (spec J): reflects the new per-court hours × rate total — updates immediately when any court's
   // hours are edited (session.courtHours), never the old single-figure ratePerHour×courtCount×duration. Court
@@ -9187,7 +9362,11 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
   // THIS panel only) — a MANUAL override the organizer already set this session is still respected as-is
   // (same resolveShuttleUsage() helper as everywhere else, never a second usage concept).
   const shuttleUsageResolved = resolveShuttleUsage(session && session.shuttleUsage, expectedMatches);
-  const shuttleUnit = weightedShuttleCostPerUnit(settings.shuttleEco);
+  // v1.11.54 (Inventory-Lite spec N): the estimate's shuttle cost is now opening-balance-aware too — reuses
+  // the SAME weighted-average formula Finance/History use (never a second, divergent estimate-only formula).
+  // `openingBalance` is the already-resolved {qty,avgCost} the caller computed once (session's own edits, or
+  // the carry-forward from the previous session of this SAME ก๊วน name — see carryForwardShuttleOpeningFor).
+  const shuttleUnit = weightedShuttleCostWithOpening(settings.shuttleEco, openingBalance || { qty: 0, avgCost: 0 }).avgCost;
   const shuttleEstimate = Math.round((shuttleUsageResolved.used * shuttleUnit + Number.EPSILON) * 100) / 100;
   // spec C: Expected Revenue from the PLANNED headcount/games (computeExpectedRevenue — shared pure helper,
   // same settings.court/settings.shuttle/settings.perPersonRate computeBill() bills real attendance with).
@@ -9219,13 +9398,19 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
     </div>
   );
 }
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, onClose }) {
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, onClose }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | "prize" | null
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.52 (spec C): "จำนวนลูกที่ใช้"'s AUTO baseline — the SAME live completed-match definition already
   // used by FinancialEstimatePanel (history + current matches with status "done"; playing/paused/upcoming
   // never count).
   const matchesSoFar = (history || []).length + (current || []).filter((m) => m.status === "done").length;
+  // v1.11.54 (Inventory-Lite spec B/I/J/N): resolved ONCE here and handed to both ShuttlecockCostSection
+  // (editing) and FinancialEstimatePanel (read-only estimate calc) so they can never disagree. Scoped
+  // strictly to THIS session's own name (see carryForwardShuttleOpeningFor) — never just "the most recent
+  // session overall", since this install supports multiple concurrently-maintained named ก๊วน groups.
+  const shuttleOpeningCarryForward = carryForwardShuttleOpeningFor(session && session.name, sessionHistory);
+  const shuttleOpeningResolved = resolveShuttleOpening(session && session.shuttleOpening, shuttleOpeningCarryForward);
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
   const model = settings.costModel || "simple";
   const setCourtRate = (court, amount) => setSettings((s) => {
@@ -9347,7 +9532,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
       </button>
       {open === "cost" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} />
+          <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} carryForward={shuttleOpeningCarryForward} opening={shuttleOpeningResolved} />
           <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} />
           <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} />
         </div>
@@ -9361,7 +9546,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
       </button>
       {open === "estimate" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <FinancialEstimatePanel settings={settings} players={players} courtCount={courtCount} session={session} setSession={setSession} history={history} current={current} mode={mode} />
+          <FinancialEstimatePanel settings={settings} players={players} courtCount={courtCount} session={session} setSession={setSession} history={history} current={current} mode={mode} openingBalance={shuttleOpeningResolved} />
         </div>
       )}
 
@@ -10075,7 +10260,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
           sees every player regardless of archive status, and a member who played earlier today keeps
           showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
-        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} sessionHistory={sessionHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
       ) : (
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -11301,7 +11486,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
 // same component/logic/state that used to be this entire file, just renamed and unpinched from the outer
 // switcher; zero behavior change. Tournament payment is a NEW sibling reusing the same visual patterns
 // (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
-function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
   return (
     <div>
@@ -11309,14 +11494,14 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
         <SegSecondary options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
       </div>
       {payerTab === "quan" ? (
-        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory }} />
+        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory }} />
       ) : (
         <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
       )}
     </div>
   );
 }
-function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory }) {
+function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -11351,7 +11536,12 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   const matchesSoFar = history.length + doneCurrent.length;
   const liveRevenue = grandTotal;
-  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, matchesSoFar, durationHours, session && session.courtHours, session && session.shuttleUsage, rewardHistory, session && session.id);
+  // v1.11.54 (Inventory-Lite spec M): the live expense figure must use the SAME opening-balance-aware
+  // weighted average as History/the settings UI/the estimate panel — resolved here from this session's own
+  // name (never just "the most recent session overall") so Live P/L can never drift from what End Session
+  // will eventually freeze into shuttleCostSnapshot.
+  const shuttleOpeningResolved = resolveShuttleOpening(session && session.shuttleOpening, carryForwardShuttleOpeningFor(session && session.name, sessionHistory));
+  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, matchesSoFar, durationHours, session && session.courtHours, session && session.shuttleUsage, rewardHistory, session && session.id, shuttleOpeningResolved);
   const liveProfit = Math.round((liveRevenue - liveExpenseTotal + Number.EPSILON) * 100) / 100;
   const detailP = detail ? players.find((p) => p.id === detail) : null;
   const detailBill = detailP ? billBy(detailP.id) : null;
@@ -11379,7 +11569,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         <ChevronRight size={18} color={T.muted} />
       </button>
       {openFinanceSettings && (
-        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} mode={mode} onClose={() => setOpenFinanceSettings(false)} />
+        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} mode={mode} sessionHistory={sessionHistory} onClose={() => setOpenFinanceSettings(false)} />
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
