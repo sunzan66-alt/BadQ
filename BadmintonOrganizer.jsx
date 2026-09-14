@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.48";
+const APP_VERSION = "1.11.49";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -12012,6 +12012,38 @@ function interleaveEvenly(a, b) {
   }
   return result;
 }
+// v1.11.49 (Reward Wheel UI fix — CIRCULAR adjacency, not just linear): interleaveEvenly() above only
+// guarantees a good spread along a straight LINE. The wheel is a circle, so the real adjacency check must
+// also compare the LAST placed slice against the FIRST one — the seam where the wheel closes back on
+// itself. A linear-only interleave can (and, per the reported bug, did) land two reward wedges adjacent to
+// each other exactly at that seam even though the array itself reads as perfectly alternating.
+//
+// This builds the arrangement circularly from scratch instead of patching a linear result. Treat the N
+// `noneItems` as N fixed anchor points spaced around the circle — that creates exactly N "gaps" between
+// consecutive anchors (gap i sits between noneItems[i] and noneItems[(i+1) % N], wrapping around from the
+// last anchor back to the first). The R `rewardItems` are distributed into those N gaps using the standard
+// evenly-spaced-bucket formula (floor((i+1)*R/N) - floor(i*R/N)), so:
+//   - whenever R <= N, every gap receives AT MOST one reward — a reward slice is therefore ALWAYS bounded
+//     by no-reward slices on both sides, including across the wrap, so NO two reward slices can ever touch
+//     anywhere on the wheel.
+//   - whenever R > N, at least one gap must hold 2+ rewards (unavoidable — pigeonhole: more rewards than
+//     separators exist), but the overflow is spread across DIFFERENT gaps as evenly as the bucket formula
+//     allows rather than piled into one spot, and rewards from different gaps still never touch each other.
+// Order within each of rewardItems/noneItems (already position-spread per identity group by the caller) is
+// preserved. Purely decides circular placement — never touches span/probability.
+function interleaveCircularNoAdjacency(rewardItems, noneItems) {
+  const N = noneItems.length, R = rewardItems.length;
+  if (N === 0) return rewardItems.slice(); // no no-reward anchors to separate rewards with — nothing more we can do
+  if (R === 0) return noneItems.slice();
+  const result = [];
+  let ri = 0;
+  for (let i = 0; i < N; i++) {
+    result.push(noneItems[i]);
+    const countForGap = Math.floor(((i + 1) * R) / N) - Math.floor((i * R) / N);
+    for (let k = 0; k < countForGap; k++) result.push(rewardItems[ri++]);
+  }
+  return result;
+}
 // v1.11.45 (spec section 2 — Reward/No-Prize alternation, VISUAL ONLY): first spreads every same-identity
 // group of wedges evenly within its own bucket (same trick as before — keeps, say, 4 "ไม่ได้รางวัล" wedges,
 // or a single oversized real prize's split pieces, from clumping together), THEN interleaves the "real
@@ -12033,7 +12065,11 @@ function distributeWheelGroups(groups) {
   const byPos = (a, b) => a.pos - b.pos || a.gi - b.gi;
   rewardItems.sort(byPos);
   noneItems.sort(byPos);
-  const items = interleaveEvenly(rewardItems, noneItems);
+  // v1.11.49: circular-aware placement (see interleaveCircularNoAdjacency above) — replaces the old
+  // interleaveEvenly() call here, which only checked linear adjacency and could leave two reward wedges
+  // touching at the wrap seam (last slice meeting the first). interleaveEvenly() itself is left in place,
+  // unused by this function, since it's still independently correct as a general-purpose linear helper.
+  const items = interleaveCircularNoAdjacency(rewardItems, noneItems);
   let acc = 0;
   return items.map((it) => { const seg = { id: it.id, label: it.label, isNone: it.isNone, isSoldOut: it.isSoldOut, color: it.color, span: it.span, start: acc }; acc += it.span; return seg; });
 }
@@ -12135,12 +12171,18 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
         @keyframes badq-wheel-confetti { 0% { transform: translateY(-10px) rotate(0deg); opacity: 1; } 100% { transform: translateY(210px) rotate(340deg); opacity: 0; } }
         @keyframes badq-result-pop { 0% { transform: scale(0.85); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
       `}</style>
-      <div style={{ color: "#fff", fontSize: 17, fontWeight: 800, marginBottom: 6 }}>🎡 หมุนวงล้อรางวัล</div>
-      {/* v1.11.19: when "แสดงทั้งหมด" (showSoldOut) is on, the wheel deliberately still displays sold-out
-          slices so players can't tell prizes ran out (see wheelShowSoldOut) — showing this "เหลือรางวัล 0
-          จาก N" line would immediately give that away, so it's hidden in that mode. Still shown normally
-          under "แค่ที่เหลือ" (the default), where seeing the live count is the point. */}
-      {!showSoldOut && totalPlayers > 0 && <div style={{ color: "#cbd5cf", fontSize: 11.5, marginBottom: 12 }}>เหลือรางวัล {totalPrizeQty} จาก {totalPlayers} คนที่ยังไม่ได้หมุน</div>}
+      {/* v1.11.49 (UI spacing fix): title + optional subtitle grouped into one header block with a fixed
+          marginBottom, so the gap down to the pointer/wheel is always ~18px regardless of whether the
+          subtitle line renders — previously the title's own small marginBottom (6px) was the ONLY gap when
+          the subtitle was hidden, reading as cramped against the pointer. Wheel size/centering untouched. */}
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ color: "#fff", fontSize: 17, fontWeight: 800 }}>🎡 หมุนวงล้อรางวัล</div>
+        {/* v1.11.19: when "แสดงทั้งหมด" (showSoldOut) is on, the wheel deliberately still displays sold-out
+            slices so players can't tell prizes ran out (see wheelShowSoldOut) — showing this "เหลือรางวัล 0
+            จาก N" line would immediately give that away, so it's hidden in that mode. Still shown normally
+            under "แค่ที่เหลือ" (the default), where seeing the live count is the point. */}
+        {!showSoldOut && totalPlayers > 0 && <div style={{ color: "#cbd5cf", fontSize: 11.5, marginTop: 4 }}>เหลือรางวัล {totalPrizeQty} จาก {totalPlayers} คนที่ยังไม่ได้หมุน</div>}
+      </div>
       <div style={{ position: "relative", width: wheelSize, height: wheelSize, flexShrink: 0 }}>
         {/* subtle static outer ring — never rotates, purely a "this is one polished component" frame around the spinning disc (spec sections 1/6) */}
         <div style={{ position: "absolute", inset: "-3.5%", borderRadius: "50%", border: `3px solid rgba(255,255,255,0.18)`, boxShadow: "0 2px 10px rgba(0,0,0,0.25)", pointerEvents: "none" }} />
