@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.49";
+const APP_VERSION = "1.11.50";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -996,6 +996,51 @@ function computeShuttleEcoFinance(shuttleEco, used) {
     costPerUnit, expense, revenue, profit: round2(revenue - expense),
   };
 }
+// ===================== COURT COST / OTHER EXPENSES (v1.11.50, Financial Setup Enhancement) =====================
+// v1.11.50 (spec D): session duration in hours, derived from the SAME session.sessionStartTime/sessionEndTime
+// fields the Court Recommendation engine already reads (via the existing timeStrToMinutes helper) — never a
+// new/duplicate time input. Handles an overnight window (e.g. 19:00–01:00) by wrapping past midnight.
+// Guarded to 0 for missing/malformed input so callers can never see NaN/negative hours.
+function sessionDurationHours(startTime, endTime) {
+  const s = timeStrToMinutes(startTime), e = timeStrToMinutes(endTime);
+  if (s == null || e == null) return 0;
+  let diff = e - s;
+  if (diff <= 0) diff += 24 * 60; // crosses midnight -> still a positive duration
+  return Math.round((diff / 60) * 100) / 100;
+}
+// auto-calculated (pre-override) court cost = จำนวนสนาม × จำนวนชั่วโมง × ราคาคอร์ด/สนาม/ชั่วโมง
+function autoCourtCost(courtCount, durationHours, ratePerHour) {
+  const c = Math.max(0, Number(courtCount) || 0);
+  const h = Math.max(0, Number(durationHours) || 0);
+  const r = Math.max(0, Number(ratePerHour) || 0);
+  return Math.round((c * h * r + Number.EPSILON) * 100) / 100;
+}
+// true once the organizer has actually opted into this feature (a rate configured, OR an explicit manual
+// override) — used to decide whether the new always-on court-cost line supersedes the legacy costModel
+// "perCourt"/"hourly" auto-expense line, so "ค่าสนาม/สถานที่" can never be double-filed for one session
+// (same supersede pattern as shuttleEcoConfigured() above for ค่าลูกแบต).
+function courtCostConfigured(courtCost) {
+  const cc = courtCost || {};
+  const hasRate = Math.max(0, Number(cc.ratePerHour) || 0) > 0;
+  const hasOverride = cc.manualOverrideTotal != null && !isNaN(Number(cc.manualOverrideTotal));
+  return hasRate || hasOverride;
+}
+// v1.11.50 (spec D1): effective court cost = manual override when the organizer set one, else the auto
+// calculation — and changing courtCount/session time only ever affects the AUTO figure; an existing
+// override is never silently recalculated out from under the organizer.
+function computeCourtCostFinance(courtCost, courtCount, durationHours) {
+  const cc = courtCost || {};
+  const ratePerHour = Math.max(0, Number(cc.ratePerHour) || 0);
+  const hours = Math.max(0, Number(durationHours) || 0);
+  const auto = autoCourtCost(courtCount, hours, ratePerHour);
+  const hasOverride = cc.manualOverrideTotal != null && !isNaN(Number(cc.manualOverrideTotal));
+  const effective = hasOverride ? Math.max(0, Number(cc.manualOverrideTotal) || 0) : auto;
+  return { auto, overridden: hasOverride, effective, ratePerHour, durationHours: hours };
+}
+// v1.11.50 (spec E): sum of the free-form "ค่าใช้จ่ายอื่น ๆ" list — pure addition, no categories/splitting.
+function otherExpensesTotal(items) {
+  return (items || []).reduce((s, it) => s + (Number(it && it.amount) || 0), 0);
+}
 // ===================== FLEXIBLE COST MODEL — AUTO EXPENSE LINES (v1.9.4) =====================
 // Returns ready-to-file session expense items ({id, category, description, amount, date, auto:true}) for
 // the organizer's REAL out-of-pocket cost, per active costModel — feeds the EXISTING session.expenses list
@@ -1003,7 +1048,7 @@ function computeShuttleEcoFinance(shuttleEco, used) {
 // "simple"/"perPerson" return [] (unchanged — simple stays revenue-only as today; perPerson is a revenue
 // override handled entirely inside computeBill above, no expense line needed) EXCEPT for the shuttle line,
 // which (v1.11.41) is independent of costModel — see shuttleLine() below.
-function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks) {
+function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours) {
   const model = settings.costModel || "simple";
   const out = [];
   // v1.11.41: prefers the new cost/tube-derived per-shuttle cost (auto — reuses the existing `used` match
@@ -1025,7 +1070,32 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, us
   // v1.11.41: filed for EVERY cost model (previously only perCourt/hourly) — the shuttlecock cost/selling
   // feature is orthogonal to how court/other costs are billed to players.
   shuttleLine();
-  if (model === "perCourt") {
+  // v1.11.50 (Financial Setup Enhancement, spec C/D): ต้นทุนค่าคอร์ด — independent of costModel (always
+  // filed here, like shuttleLine() above) whenever the organizer has configured it. When configured, it
+  // SUPERSEDES the legacy "perCourt"/"hourly" model-derived court-cost line below (courtHandled=true skips
+  // those branches) so "ค่าสนาม/สถานที่" can never be double-filed for the same session — same supersede
+  // relationship shuttleEco already has with the legacy shuttleCalc line. Cost models that are NOT purely
+  // expense-side (splitExpenses, whose ค่าสนาม figure is tied directly into computeBill's revenue via
+  // computeSplitExpenseSummary) are intentionally left untouched by this — courtCost only ever supersedes
+  // the two revenue-neutral expense-only models.
+  let courtHandled = false;
+  if (courtCostConfigured(settings.courtCost)) {
+    const cf = computeCourtCostFinance(settings.courtCost, courtCount, durationHours);
+    if (cf.effective > 0) {
+      const description = cf.overridden
+        ? `ค่าคอร์ด (กำหนดเอง) ${courtCount} สนาม`
+        : `ค่าคอร์ด ${courtCount} สนาม × ${cf.durationHours} ชม. × ฿${cf.ratePerHour}/สนาม/ชม.`;
+      out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description, amount: cf.effective, date: dateStr, auto: true });
+    }
+    courtHandled = true;
+  }
+  // v1.11.50 (spec E): free-form "ค่าใช้จ่ายอื่น ๆ" list — filed as individual "ค่าใช้จ่ายอื่น" expense lines,
+  // one per entry (so each stays independently editable/removable in History, same as any other expense).
+  (settings.otherExpenses || []).forEach((it) => {
+    const amt = Number(it && it.amount) || 0;
+    if (amt > 0) out.push({ id: uid(), category: "ค่าใช้จ่ายอื่น", description: (it.name || "ค่าใช้จ่ายอื่น").trim() || "ค่าใช้จ่ายอื่น", amount: amt, date: dateStr, auto: true });
+  });
+  if (!courtHandled && model === "perCourt") {
     const rates = settings.perCourtRates || [];
     let sum = 0;
     for (let c = 1; c <= courtCount; c++) {
@@ -1033,7 +1103,7 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, us
       if (r && r.amount > 0) sum += Number(r.amount) || 0;
     }
     if (sum > 0) out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: `ค่าคอร์ท ${courtCount} สนาม (แยกราคา)`, amount: sum, date: dateStr, auto: true });
-  } else if (model === "hourly") {
+  } else if (!courtHandled && model === "hourly") {
     const { courts, rate, hours } = settings.hourly || {};
     if (courts > 0 && rate > 0 && hours > 0) out.push({ id: uid(), category: "ค่าสนาม/สถานที่", description: `ค่าคอร์ท ${courts} สนาม × ${hours} ชม. × ฿${rate}`, amount: courts * rate * hours, date: dateStr, auto: true });
   } else if (model === "custom") {
@@ -2028,7 +2098,23 @@ function getDefaultSettings() {
     // shuttleCalc auto-expense-line so the two can never both file a "ค่าลูกแบต" expense for the same session (see
     // computeCostModelExpenses). Kept fully separate from `shuttle` (the flat ฿/game charge billed to players,
     // frozen into each session's bill/sessionRevenue) by explicit organizer decision — no automatic interaction.
+    // v1.11.50 (Financial Setup Enhancement, spec B): `sellingPricePerShuttle` is no longer editable in the
+    // UI and no longer contributes to any NEW session's revenue (see endSession() — shuttlecockRevenue is
+    // now always 0 going forward) because "ค่าลูก/เกม" (settings.shuttle, revenue side) already covers that
+    // concept — a second "selling price per shuttle" was a duplicate concept per organizer request. The
+    // field itself stays in the settings shape (never deleted/force-zeroed here) purely so an OLD backup
+    // that still carries a nonzero value continues to load without error (Section L: no destructive migration).
     shuttleEco: { costPerTube: 0, shuttlesPerTube: 0, sellingPricePerShuttle: 0 },
+    // v1.11.50 (Financial Setup Enhancement, spec C/D): ต้นทุนก๊วน — new, independent-of-costModel cost
+    // fields, same "always shown, supersedes the model-derived auto expense line" pattern as shuttleEco
+    // above. courtCost.manualOverrideTotal: null = auto-calculate from courtCount × session duration ×
+    // ratePerHour; a number = organizer's explicit override (เหมาจ่าย/โปรโมชั่น/ราคาจริงต่างจากปกติ), which
+    // auto-calculation must never silently clobber (see computeCourtCostFinance).
+    courtCost: { ratePerHour: 0, manualOverrideTotal: null },
+    // v1.11.50 (Financial Setup Enhancement, spec E): free-form "ค่าใช้จ่ายอื่น ๆ" list — [{id, name, amount}]
+    // — the organizer's own miscellaneous real costs (น้ำดื่ม/ค่าจอดรถ/อุปกรณ์ ฯลฯ), filed automatically as
+    // "ค่าใช้จ่ายอื่น" expense line(s) at endSession(), same pipeline as every other auto expense line.
+    otherExpenses: [],
     perPersonRate: 0, // model D: รายคน — overrides computeBill's per-person court charge directly (revenue-side)
     customCostRows: [], // model E: กำหนดเอง — [{ id, category, description, amount }, ...], reuses ExpenseListEditor
     // v1.11.12: model F (first in the picker) — หารค่าใช้จ่าย: organizer enters the 4 real cost lines below,
@@ -2084,6 +2170,11 @@ function normSettings(s) {
   // partially-shaped object as-is instead of coercing/clamping each sub-field) so a corrupt/partial value
   // can never produce NaN/negative pricing downstream.
   const sEco = base.shuttleEco && typeof base.shuttleEco === "object" ? base.shuttleEco : {};
+  // v1.11.50: same field-by-field backfill discipline as shuttleEco above — a missing/partial/corrupt
+  // courtCost or otherExpenses (any pre-v1.11.50 backup, or a hand-edited/corrupted import) must never
+  // produce NaN/negative pricing or crash a later .map()/.reduce() over otherExpenses.
+  const cCost = base.courtCost && typeof base.courtCost === "object" ? base.courtCost : {};
+  const cCostOverrideNum = Number(cCost.manualOverrideTotal);
   return {
     ...getDefaultSettings(),
     ...base,
@@ -2092,6 +2183,13 @@ function normSettings(s) {
       shuttlesPerTube: Math.max(0, Number(sEco.shuttlesPerTube) || 0),
       sellingPricePerShuttle: Math.max(0, Number(sEco.sellingPricePerShuttle) || 0),
     },
+    courtCost: {
+      ratePerHour: Math.max(0, Number(cCost.ratePerHour) || 0),
+      manualOverrideTotal: cCost.manualOverrideTotal != null && !isNaN(cCostOverrideNum) ? Math.max(0, cCostOverrideNum) : null,
+    },
+    otherExpenses: (Array.isArray(base.otherExpenses) ? base.otherExpenses : [])
+      .filter((it) => it && typeof it === "object")
+      .map((it) => ({ id: it.id || uid(), name: String(it.name || ""), amount: Math.max(0, Number(it.amount) || 0) })),
     averageMatchMinutes: amm > 0 ? amm : 15,
     courtUtilization: util > 0 && util <= 1 ? util : 0.9,
     courtRecommendationMode: ["busy", "balanced", "saving"].includes(base.courtRecommendationMode) ? base.courtRecommendationMode : "balanced",
@@ -4688,15 +4786,21 @@ export default function App() {
       // v1.11.41: `totalMatches` (computed above, the SAME authoritative match count used for stats) is
       // threaded in as the "shuttlecocks used" count for the new cost/tube auto-expense line (see
       // computeCostModelExpenses/shuttleLine) — no new manual field.
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime)), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
       // v1.11.41 (spec D/E): ลูกแบด revenue (used × ราคาขาย/ลูก) is computed ONCE here, at finalization, and
       // frozen — later Settings changes must never retroactively change an already-archived session's
       // numbers (spec section E). `shuttleEcoSnapshot` freezes the pricing that was actually in effect, for
       // transparency/audit; `shuttlecockRevenue` is the frozen number every P&L view reads (sessionProfit/
       // computeFinanceForRange) — kept OUT of `bill`/sessionRevenue so per-player payment tracking
       // (collected/receivable) is completely untouched by this feature, per explicit organizer decision.
+      // v1.11.50 (Financial Setup Enhancement, spec B): "ราคาขายต่อลูก" (sellingPricePerShuttle) is removed
+      // from the UI and from calculation going forward — ค่าลูก/เกม (settings.shuttle) is the one revenue
+      // stream for shuttlecocks now, so every NEW session freezes shuttlecockRevenue at 0, regardless of any
+      // stale sellingPricePerShuttle value an old settings object might still carry (never force-migrated —
+      // see the field's own comment in getDefaultSettings). OLD, already-archived sessions keep whatever
+      // nonzero value they were frozen with before this change; nothing here rewrites past history.
       shuttleEcoSnapshot: { ...(settings.shuttleEco || {}) },
-      shuttlecockRevenue: computeShuttleEcoFinance(settings.shuttleEco, totalMatches).revenue,
+      shuttlecockRevenue: 0,
     };
     // v1.11.47 (TEMPORARY DIAGNOSTICS): the snapshot object exists now — record its approximate size
     // (JSON.stringify of just this one object, cheap since it's a single session, not the whole app) before
@@ -8589,8 +8693,152 @@ function SplitExpensesEditor({ settings, setSettings, players }) {
     </div>
   );
 }
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, onClose }) {
-  const [open, setOpen] = useState("payment"); // "payment" | "prize" | null
+// v1.11.50 (Financial Setup Enhancement, spec D): auto court-cost display + manual override toggle — kept as
+// its own component so FinanceSettingsSheet's render body stays readable. `durationHours` is derived by the
+// caller from session.sessionStartTime/sessionEndTime (see sessionDurationHours) — no new time input here.
+function CourtCostSection({ settings, setSettings, courtCount, durationHours }) {
+  const cc = settings.courtCost || {};
+  const cf = computeCourtCostFinance(cc, courtCount, durationHours);
+  const setRate = (v) => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), ratePerHour: v } }));
+  const setOverride = (v) => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), manualOverrideTotal: v } }));
+  const clearOverride = () => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), manualOverrideTotal: null } }));
+  return (
+    <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+      <Label>🏟️ ต้นทุนค่าคอร์ด</Label>
+      <div style={{ marginBottom: 8 }}>
+        <NumField label="ค่าคอร์ด/สนาม/ชั่วโมง (฿)" value={cc.ratePerHour || 0} onChange={setRate} />
+      </div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>
+        {courtCount} สนาม × {cf.durationHours} ชม. × ฿{cf.ratePerHour} = <b>{formatCurrency(cf.auto)}</b> — คำนวณอัตโนมัติจากจำนวนสนาม/เวลาก๊วน (ตั้งค่าใน "ตั้งค่าก๊วน"/"วันนี้")
+      </div>
+      {/* v1.11.50 (spec D1): manual override — never silently recalculated away by a later courtCount/time
+          change (computeCourtCostFinance always prefers manualOverrideTotal when it is set); only an
+          explicit "ใช้ค่าอัตโนมัติ" tap clears it. */}
+      {cf.overridden ? (
+        <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 10 }}>
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>กำหนดยอดรวมเอง (แทนค่าที่คำนวณอัตโนมัติ — เช่น เหมาจ่าย/โปรโมชั่น)</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input type="number" value={cc.manualOverrideTotal} onChange={(e) => setOverride(Number(e.target.value) || 0)} onFocus={(e) => e.target.select()} style={{ flex: 1, minWidth: 0, padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, outline: "none", boxSizing: "border-box" }} />
+            <button onClick={clearOverride} style={{ flexShrink: 0, padding: "10px 12px", borderRadius: 10, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>ใช้ค่าอัตโนมัติ</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setOverride(cf.auto)} style={{ width: "100%", padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>แก้ยอดรวมเอง (เหมาจ่าย/โปรโมชั่น)</button>
+      )}
+    </div>
+  );
+}
+// v1.11.50 (spec E): free-form "ค่าใช้จ่ายอื่น ๆ" list editor — [{id, name, amount}], no category/date (those
+// belong to the full ExpenseListEditor used for History/custom-cost-model rows; this is a lighter, purpose-
+// built list so the settings sheet doesn't get cluttered per spec section M).
+function OtherExpensesEditor({ items, setSettings }) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [amount, setAmount] = useState("");
+  const list = items || [];
+  const add = () => {
+    const amt = Number(amount) || 0;
+    if (amt <= 0) return;
+    setSettings((s) => ({ ...s, otherExpenses: [...(s.otherExpenses || []), { id: uid(), name: name.trim() || "ค่าใช้จ่ายอื่น", amount: amt }] }));
+    setName(""); setAmount(""); setAdding(false);
+  };
+  const update = (id, patch) => setSettings((s) => ({ ...s, otherExpenses: (s.otherExpenses || []).map((it) => (it.id === id ? { ...it, ...patch } : it)) }));
+  const remove = (id) => setSettings((s) => ({ ...s, otherExpenses: (s.otherExpenses || []).filter((it) => it.id !== id) }));
+  return (
+    <div style={{ marginBottom: 4, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+      <Label>🧾 ค่าใช้จ่ายอื่น ๆ</Label>
+      {list.length === 0 && !adding && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "6px 0" }}>ยังไม่มีรายการ</div>}
+      {list.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+          {list.map((it) => (
+            <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
+              <input type="text" value={it.name} onChange={(e) => update(it.id, { name: e.target.value })} placeholder="ชื่อค่าใช้จ่าย" style={{ flex: 1, minWidth: 0, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700, outline: "none", boxSizing: "border-box" }} />
+              <span style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 13, fontWeight: 800, flexShrink: 0 }}>
+                ฿<input type="number" value={it.amount} onChange={(e) => update(it.id, { amount: Number(e.target.value) || 0 })} onFocus={(e) => e.target.select()} style={{ width: 64, padding: "6px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 800, outline: "none" }} />
+              </span>
+              <button onClick={() => remove(it.id)} style={{ background: "none", border: "none", color: T.accent, padding: 4, flexShrink: 0 }}><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+      {adding ? (
+        <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 10 }}>
+          <input type="text" placeholder="ชื่อค่าใช้จ่าย เช่น น้ำดื่ม" value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
+          <input type="number" placeholder="จำนวนเงิน (฿)" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={add} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>บันทึก</button>
+            <button onClick={() => { setAdding(false); setName(""); setAmount(""); }} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}>ยกเลิก</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setAdding(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><Plus size={14} /> เพิ่มค่าใช้จ่าย</button>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+        <span style={{ color: T.muted, fontWeight: 700 }}>ค่าใช้จ่ายอื่นรวม</span><span>{formatCurrency(otherExpensesTotal(list))}</span>
+      </div>
+    </div>
+  );
+}
+// v1.11.50 (spec F/G): "📊 ประมาณการก๊วน" — Estimated (not final) รายได้/ค่าใช้จ่าย/กำไร from CURRENT settings +
+// CURRENT attendance/usage. Deliberately never invents a forward-looking match/shuttle-usage assumption
+// (spec: "ห้ามสร้าง assumption ใหม่เอง"): shuttle cost is computed from matches ACTUALLY finished so far this
+// session (0 before the session starts, growing live as matches finish — "ประมาณการจากข้อมูลปัจจุบัน", not a
+// forecast), and Estimated Revenue is shown only when there is a real headcount basis (real attendance, or —
+// clearly labeled "ประมาณการ" — registered count), reusing the SAME attended/registered definitions and
+// "ประมาณการ ไม่ใช่ยอดจริง" convention computeSplitExpenseSummary already established, never a new concept.
+function FinancialEstimatePanel({ settings, players, courtCount, session, history, current }) {
+  const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
+  const cf = computeCourtCostFinance(settings.courtCost, courtCount, durationHours);
+  const otherTotal = otherExpensesTotal(settings.otherExpenses);
+  const matchesSoFar = (history || []).length + (current || []).filter((m) => m.status === "done").length;
+  const shuttleUnit = shuttleCostPerUnit(settings.shuttleEco);
+  const shuttleEstimate = Math.round((matchesSoFar * shuttleUnit + Number.EPSILON) * 100) / 100;
+  const attended = (players || []).filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
+  const registeredOnly = (players || []).filter((p) => p.status === "registered").length;
+  const hasAttendance = attended.length > 0;
+  const count = hasAttendance ? attended.length : attended.length + registeredOnly;
+  const model = settings.costModel || "simple";
+  let revenueEstimate = null;
+  if (count > 0) {
+    if (model === "perPerson") revenueEstimate = count * (settings.perPersonRate || 0);
+    else if (model === "splitExpenses") {
+      const summary = computeSplitExpenseSummary(players, settings);
+      revenueEstimate = summary.hasAttendance ? summary.totalCollected : Math.round(summary.perPersonEstimate * summary.projectedRegistered * 100) / 100;
+    } else revenueEstimate = count * (settings.court || 0) + (settings.other || 0);
+  }
+  const expenseTotal = Math.round((cf.effective + shuttleEstimate + otherTotal + Number.EPSILON) * 100) / 100;
+  const profitEstimate = revenueEstimate != null ? Math.round((revenueEstimate - expenseTotal) * 100) / 100 : null;
+  return (
+    <div>
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>ประมาณการจากข้อมูลปัจจุบัน (การตั้งค่า + ผู้เล่นที่ลงทะเบียน/เช็คอินแล้ว) — ไม่ใช่ยอดปิดจริง ยอดจริงจะเห็นได้เมื่อ "จบก๊วน"</div>
+      <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 12 }}>
+        {revenueEstimate != null ? (
+          <>
+            <BillRow label="รายได้คาดการณ์" v={revenueEstimate} kind="revenue" />
+            <div style={{ fontSize: 10.5, color: T.muted, marginTop: -3, marginBottom: 6 }}>{hasAttendance ? `จากผู้เล่นที่มาแล้ว ${count} คน` : `ประมาณการจากผู้ลงทะเบียน ${count} คน (ไม่ใช่ยอดจริง)`} · ไม่รวมค่าลูก/เกม (ทราบได้เมื่อเล่นจริง)</div>
+          </>
+        ) : (
+          <div style={{ color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 8 }}>ยังไม่สามารถประมาณการรายได้ได้ — ยังไม่มีผู้เล่นลงทะเบียน/เช็คอิน</div>
+        )}
+        <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, margin: "8px 0 4px" }}>ค่าใช้จ่ายคาดการณ์</div>
+        <BillRow label="ค่าคอร์ด" v={cf.effective} kind="expense" />
+        <BillRow label="ต้นทุนลูกแบด" v={shuttleEstimate} kind="expense" />
+        {matchesSoFar === 0 && <div style={{ fontSize: 10.5, color: T.muted, marginTop: -3, marginBottom: 4 }}>ยังไม่เริ่มเล่น — จะคำนวณจากจำนวนเกมที่เล่นจริง</div>}
+        <BillRow label="ค่าใช้จ่ายอื่น" v={otherTotal} kind="expense" />
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
+          <span>รวมค่าใช้จ่าย</span><span style={{ color: T.accent }}>{formatCurrency(expenseTotal)}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+          <span>{profitEstimate == null ? "กำไรคาดการณ์" : profitEstimate >= 0 ? "กำไรคาดการณ์" : "ขาดทุนคาดการณ์"}</span>
+          <span style={{ color: profitEstimate == null ? T.muted : profitEstimate >= 0 ? T.green : T.accent }}>{profitEstimate == null ? "-" : formatCurrency(Math.abs(profitEstimate))}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, history, current, onClose }) {
+  const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | "prize" | null
+  const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   const toggle = (key) => setOpen((v) => (v === key ? null : key));
   const model = settings.costModel || "simple";
   const setCourtRate = (court, amount) => setSettings((s) => {
@@ -8605,10 +8853,11 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>⚙️ ตั้งค่าค่าก๊วนและรางวัล</div>
 
-      {/* 💳 อัตราเรียกเก็บจากผู้เล่น — NOT organizer expense: this sets what's billed to players (Revenue side
-          of computeBill). Real out-of-pocket costs live separately as Expense items in the การเงิน tab. */}
+      {/* v1.11.50 (Financial Setup Enhancement, spec A): explicitly split into 💳 รายได้ (this section — what's
+          billed to players, Revenue side of computeBill) vs 💸 ต้นทุนก๊วน (below — the organizer's own real
+          out-of-pocket costs, configured HERE now instead of only after the fact in the การเงิน tab). */}
       <button onClick={() => toggle("payment")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "payment" ? 0 : 8 }}>
-        <Wallet size={15} color={T.muted} /> 💳 ค่าก๊วน (เรียกเก็บจากผู้เล่น)
+        <Wallet size={15} color={T.muted} /> 💳 รายได้ — เรียกเก็บจากผู้เล่น
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "payment" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "payment" && (
@@ -8683,22 +8932,6 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
             </div>
           )}
 
-          {/* v1.11.41: ต้นทุน/ราคาขายลูกแบดต่อลูก — independent of costModel (always shown here, not gated
-              behind a specific model like the legacy "จำนวนลูก/ราคา-ลูก" block above). Configuring this
-              supersedes that legacy manual line for the auto-expense calculation (see computeCostModelExpenses)
-              so the two never double-file "ค่าลูกแบต"; it stays fully separate from "ค่าลูก/เกม" above (the
-              flat per-game charge billed to players) by explicit design — no automatic interaction between them. */}
-          <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
-            <Label>ต้นทุน/ราคาขายลูกแบด (คำนวณอัตโนมัติจากจำนวนเกมที่เล่นจริง)</Label>
-            <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
-              <NumField label="ต้นทุนลูกแบดต่อกระบอก (฿)" value={settings.shuttleEco?.costPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), costPerTube: v } }))} />
-              <NumField label="จำนวนลูกต่อกระบอก" value={settings.shuttleEco?.shuttlesPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), shuttlesPerTube: v } }))} />
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <NumField label="ราคาขายต่อลูก (฿)" value={settings.shuttleEco?.sellingPricePerShuttle || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), sellingPricePerShuttle: v } }))} />
-            </div>
-            <div style={{ fontSize: 11.5, color: T.muted }}>ต้นทุนต่อลูก: {shuttleCostPerUnit(settings.shuttleEco).toFixed(2)} บาท — คำนวณจากจำนวนแมตช์ที่จบจริงในก๊วน (ไม่ต้องกรอกจำนวนลูกที่ใช้เอง)</div>
-          </div>
           <div style={{ marginBottom: 16 }}><NumField label="อื่น ๆ ที่เรียกเก็บรวม (หารเท่ากัน) (฿)" value={settings.other || 0} onChange={(v) => setSettings((s) => ({ ...s, other: v }))} /></div>
           <Label>QR รับเงิน</Label>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
@@ -8714,6 +8947,46 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เลขบัญชี / พร้อมเพย์ (สำหรับคนที่โอนเอง)</div>
             <textarea value={settings.bank || ""} onChange={(e) => setSettings((s) => ({ ...s, bank: e.target.value }))} placeholder="เช่น ธ.กสิกร 123-4-56789-0 นาย A / พร้อมเพย์ 08x-xxx-xxxx" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, outline: "none", boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }} />
           </div>
+        </div>
+      )}
+
+      {/* v1.11.50 (Financial Setup Enhancement, spec A/C/D/E): 💸 ต้นทุนก๊วน — the organizer's OWN real
+          out-of-pocket costs, configured up front instead of only after the fact in Finance. ต้นทุนลูกแบด
+          (moved here from the รายได้ section above, "ราคาขายต่อลูก" removed per spec B) + new ต้นทุนค่าคอร์ด +
+          new ค่าใช้จ่ายอื่น ๆ. */}
+      <button onClick={() => toggle("cost")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "cost" ? 0 : 8 }}>
+        <Wallet size={15} color={T.muted} /> 💸 ต้นทุนก๊วน
+        <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "cost" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {open === "cost" && (
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
+          {/* v1.11.41/v1.11.50: ต้นทุนลูกแบด — independent of costModel (always shown, not gated behind a
+              specific model). Configuring this supersedes the legacy "จำนวนลูก/ราคา-ลูก" manual line for the
+              auto-expense calculation (see computeCostModelExpenses) so the two never double-file
+              "ค่าลูกแบต"; stays fully separate from "ค่าลูก/เกม" (revenue, above) by explicit design. Spec B:
+              "ราคาขายต่อลูก" is REMOVED — that revenue concept is now covered entirely by ค่าลูก/เกม. */}
+          <div style={{ marginBottom: 4 }}>
+            <Label>🏸 ต้นทุนลูกแบด (คำนวณอัตโนมัติจากจำนวนเกมที่เล่นจริง)</Label>
+            <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
+              <NumField label="ราคาลูกแบดต่อกระบอก (฿)" value={settings.shuttleEco?.costPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), costPerTube: v } }))} />
+              <NumField label="จำนวนลูกต่อกระบอก" value={settings.shuttleEco?.shuttlesPerTube || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), shuttlesPerTube: v } }))} />
+            </div>
+            <div style={{ fontSize: 11.5, color: T.muted }}>ต้นทุนต่อลูก: {shuttleCostPerUnit(settings.shuttleEco).toFixed(2)} บาท — คำนวณจากจำนวนแมตช์ที่จบจริงในก๊วน (ไม่ต้องกรอกจำนวนลูกที่ใช้เอง)</div>
+          </div>
+          <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} durationHours={durationHours} />
+          <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} />
+        </div>
+      )}
+
+      {/* v1.11.50 (spec F): 📊 ประมาณการก๊วน — read-only summary, presentation only (never feeds back into
+          any stored value). */}
+      <button onClick={() => toggle("estimate")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "estimate" ? 0 : 8 }}>
+        <span style={{ fontSize: 15 }}>📊</span> ประมาณการก๊วน
+        <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "estimate" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {open === "estimate" && (
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
+          <FinancialEstimatePanel settings={settings} players={players} courtCount={courtCount} session={session} history={history} current={current} />
         </div>
       )}
 
@@ -10715,7 +10988,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         <ChevronRight size={18} color={T.muted} />
       </button>
       {openFinanceSettings && (
-        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} onClose={() => setOpenFinanceSettings(false)} />
+        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} history={history} current={current} onClose={() => setOpenFinanceSettings(false)} />
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
