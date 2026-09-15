@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.58";
+const APP_VERSION = "1.11.59";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -7234,8 +7234,14 @@ function SessionTab(props) {
             style={{ width: COLW.court, flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "6px 4px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: m.court == null ? T.muted : T.text }}
           >
             {/* v1.11.36: a freshly-added upcoming game (see addExtraMatch) starts with no court at all —
-                this placeholder is what actually renders as "เลือกสนาม" until the organizer assigns one. */}
-            {m.court == null && <option value="">เลือกสนาม</option>}
+                this placeholder is what actually renders as "เลือกสนาม" until the organizer assigns one.
+                v1.11.58 (Section 2): also offered on any NOT-YET-STARTED ("next") row even after a court has
+                already been picked, so the organizer can revert back to "ยังไม่แน่ใจ" from the dropdown
+                itself instead of it only ever appearing before the first pick. Deliberately excluded for
+                กำลังเล่น/พักเกม (a physically-occupying match must never lose its court label — see
+                reassignCourt's v1.11.39 comment) and for finished/history rows (a factual past record, not
+                a "to be decided" one) — this only ever appears while st === "next". */}
+            {(m.court == null || (!done && st === "next")) && <option value="">เลือกสนาม</option>}
             {Array.from({ length: courtCount }, (_, i) => i + 1).map((c) => (
               <option key={c} value={c}>สนาม {courtLabelFor(courtLabels, c)}</option>
             ))}
