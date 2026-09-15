@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.57";
+const APP_VERSION = "1.11.58";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -307,7 +307,7 @@ function normSession(s) {
         avgCost: rawShuttleOpening.avgCost != null && !isNaN(Number(rawShuttleOpening.avgCost)) ? Math.max(0, Number(rawShuttleOpening.avgCost)) : null,
       }
     : null;
-  return { id: base.id || uid(), name: base.name || "", date: base.date || new Date().toISOString().slice(0, 10), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage, estimate, shuttleOpening };
+  return { id: base.id || uid(), name: base.name || "", date: base.date || todayLocalISO(), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage, estimate, shuttleOpening };
 }
 // v1.11.35 (Member Portal Phase 1) — this LOCAL install's link (if any) to a Cloud Club. Entirely
 // additive/local bookkeeping: null/disabled is the default and identical-to-before state for every
@@ -1546,6 +1546,13 @@ function periodRange(period, custom) {
 function inPeriod(dateStr, range) { return !!dateStr && dateStr >= range.from && dateStr <= range.to; }
 function lastDayOfMonth(ym) { const [y, m] = ym.split("-").map(Number); return new Date(y, m, 0).getDate(); }
 function todayYm() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
+// v1.11.58: correct local-calendar-date "today" (YYYY-MM-DD), for use everywhere a default date is needed.
+// `new Date().toISOString().slice(0, 10)` is WRONG for this purpose outside UTC: .toISOString() converts to
+// UTC first, so for Thailand (UTC+7) any local time between 00:00:00–06:59:59 evaluates to the PREVIOUS
+// calendar day. That mis-files a late-night/near-midnight session (or expense/income/tournament default
+// date) under the wrong day in Finance's รายวัน view. This helper uses local Date getters instead, matching
+// the same correct approach already used by periodRange's iso() helper and todayYm() above.
+function todayLocalISO() { const d = new Date(); const pad = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
 // ===================== FINANCE PERIOD AGGREGATION (v1.9.6) =====================
 // Single financial calculation source for the whole Finance page — รายวัน/รายเดือน/ภาพรวม all read through
@@ -2796,7 +2803,7 @@ function migrateBackupData(parsed) {
   if (!Array.isArray(data.settings.customLevels)) data.settings.customLevels = [];
   if (!Array.isArray(data.settings.wheelPrizes) || data.settings.wheelPrizes.length === 0) data.settings.wheelPrizes = getDefaultSettings().wheelPrizes;
   else data.settings.wheelPrizes = normWheelPrizes(data.settings.wheelPrizes); // v1.11.34: old qty-only prizes -> new probability/value/wheelOrder model
-  data.session = data.session && typeof data.session === "object" ? data.session : { name: "", date: new Date().toISOString().slice(0, 10) };
+  data.session = data.session && typeof data.session === "object" ? data.session : { name: "", date: todayLocalISO() };
   if (!data.session.id) data.session.id = uid(); // backfill — pre-discount-credit sessions had no stable id
   data.lockPairs = migrateLockPairs(data.lockPairs);
   data.sessionHistory = (Array.isArray(data.sessionHistory) ? data.sessionHistory : []).map(ensureSessionId).map(ensureSessionExpenses); // e.g. no sessionHistory -> []
@@ -2975,7 +2982,7 @@ const TIE_BREAK_ORDER = ["points", "wins", "diff", "for", "h2h"];
 
 function makeTournament(overrides) {
   return {
-    id: uid(), name: "", date: new Date().toISOString().slice(0, 10), courtCount: 2, courtLabels: ["1", "2"],
+    id: uid(), name: "", date: todayLocalISO(), courtCount: 2, courtLabels: ["1", "2"],
     format: "knockout", teamEntryMode: "individual", teamBuildMode: "fixed", seedMode: "skill",
     status: "draft", // draft -> ready -> active -> (paused <-> active) -> completed -> archived
     guestPlayers: [], // { id, name, skillIndex } — NOT written into the permanent players[] roster unless the organizer opts in during Step 2
@@ -3694,6 +3701,12 @@ export default function App() {
   // every actual write and silently no-ops if a newer run has since started — closing the exact
   // check-then-act window that let a slow, stale run clobber a fast, correct one.
   const saveGenerationRef = useRef(0);
+  // v1.11.58: guards endSession() against being invoked twice for the same session (e.g. a fast real
+  // double-tap on "จบก๊วน" before React removes the confirm dialog). Keyed on session.id rather than a
+  // plain boolean so it correctly blocks a second call sharing the same stale `session` closure regardless
+  // of the exact timing between the two clicks, while still allowing a genuinely later End Session call to
+  // proceed once session.id has actually changed (which only happens after endSession() itself completes).
+  const lastEndedSessionIdRef = useRef(null);
   const [staleSyncNotice, setStaleSyncNotice] = useState(null); // brief banner text, or null when hidden
   // v1.9.23: mobile browsers (iOS Safari standalone "Add to Home Screen" apps especially) can and do
   // clear a site's localStorage under storage pressure or after enough time unvisited — there is no way
@@ -5098,6 +5111,14 @@ export default function App() {
 
   // archive the current session into sessionHistory, then reset session-specific state (keeps player roster)
   const endSession = () => {
+    // v1.11.58: idempotency guard — ignore a second invocation for the SAME session (rapid/double-press of
+    // "จบก๊วน" before React removes the confirm dialog). Without this, two closely-spaced clicks each
+    // independently build and push a snapshot of the same session into sessionHistory, double-counting its
+    // revenue/expenses everywhere Finance aggregates. Only blocks a repeat for this exact session.id — a
+    // later, genuine End Session (once session.id has changed, set at the bottom of this function) is
+    // unaffected.
+    if (lastEndedSessionIdRef.current === session.id) return;
+    lastEndedSessionIdRef.current = session.id;
     // v1.11.47 (TEMPORARY DIAGNOSTICS): approximate payload sizes at the moment the organizer confirms End
     // Session — logged BEFORE any state mutation, so a crash immediately after this point still leaves a
     // record of exactly how large things were right before it happened (Section B's size measurements).
@@ -5288,7 +5309,7 @@ export default function App() {
     setSettings((s) => ({ ...s, wheelPrizes: (s.wheelPrizes || []).map((wp) => ({ ...wp, qty: wp.totalQty != null ? wp.totalQty : prizeQty(wp) })) }));
     // keep the quan name + photo + the expected session time window (most groups reuse the same
     // name/photo/hours every time, e.g. "ก๊วนวันอาทิตย์ 19:00-23:00") — only the date resets to today
-    setSession((s) => ({ id: uid(), name: s.name, date: new Date().toISOString().slice(0, 10), mode: "casual", photo: s.photo || null, sessionStartTime: s.sessionStartTime || "19:00", sessionEndTime: s.sessionEndTime || "23:00" }));
+    setSession((s) => ({ id: uid(), name: s.name, date: todayLocalISO(), mode: "casual", photo: s.photo || null, sessionStartTime: s.sessionStartTime || "19:00", sessionEndTime: s.sessionEndTime || "23:00" }));
   };
   // ===== GROUP DEFAULT SETTINGS (v1.11.17, spec section 1) =====
   // Each named ก๊วน (session.name) can remember its own default configuration — game settings, court
@@ -5357,10 +5378,10 @@ export default function App() {
     }));
   };
   // ค่าใช้จ่ายทั่วไป / รายได้อื่น — not tied to any one session (buying a box of shuttles, sponsor money, etc.)
-  const addGeneralExpense = (item) => setGeneralExpenses((prev) => [{ id: uid(), category: item.category || "อื่น ๆ", description: item.description || "", amount: Number(item.amount) || 0, date: item.date || new Date().toISOString().slice(0, 10), sourceType: "general" }, ...prev]);
+  const addGeneralExpense = (item) => setGeneralExpenses((prev) => [{ id: uid(), category: item.category || "อื่น ๆ", description: item.description || "", amount: Number(item.amount) || 0, date: item.date || todayLocalISO(), sourceType: "general" }, ...prev]);
   const updateGeneralExpense = (id, patch) => setGeneralExpenses((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch, amount: patch.amount != null ? Number(patch.amount) || 0 : e.amount } : e)));
   const removeGeneralExpense = (id) => setGeneralExpenses((prev) => prev.filter((e) => e.id !== id));
-  const addOtherIncome = (item) => setOtherIncome((prev) => [{ id: uid(), description: item.description || "", amount: Number(item.amount) || 0, date: item.date || new Date().toISOString().slice(0, 10), sourceType: "general" }, ...prev]);
+  const addOtherIncome = (item) => setOtherIncome((prev) => [{ id: uid(), description: item.description || "", amount: Number(item.amount) || 0, date: item.date || todayLocalISO(), sourceType: "general" }, ...prev]);
   const updateOtherIncome = (id, patch) => setOtherIncome((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch, amount: patch.amount != null ? Number(patch.amount) || 0 : e.amount } : e)));
   const removeOtherIncome = (id) => setOtherIncome((prev) => prev.filter((e) => e.id !== id));
 
@@ -5747,7 +5768,7 @@ export default function App() {
   const wipeAllAppData = () => applyRestore("replace", { data: {
     players: [], history: [], current: [], future: [], roundNo: 0, courtCount: 2, courtLabels: ["1", "2"],
     mode: "doubles", settings: getDefaultSettings(),
-    session: { id: uid(), name: "", date: new Date().toISOString().slice(0, 10), mode: "casual" },
+    session: { id: uid(), name: "", date: todayLocalISO(), mode: "casual" },
     lockPairs: [], sessionHistory: [], generalExpenses: [], otherIncome: [], activeTournament: null,
     tournamentHistory: [], discountCredits: [], rewardHistory: [], cloudClub: null, // v1.11.35
   } });
@@ -7620,7 +7641,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
     (tournamentHistory || []).forEach((t) => { if (t.name && !seen.has(t.name)) { seen.add(t.name); out.push({ name: t.name, logo: t.logo || null }); } });
     return out;
   }, [tournamentHistory]);
-  const [date, setDate] = useState(() => iv.date || new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() => iv.date || todayLocalISO());
   const [courtCount, setCourtCount] = useState(() => iv.courtCount || 2);
   const [format, setFormat] = useState(() => iv.format || "knockout");
   const [matchMode, setMatchMode] = useState(() => iv.matchMode || "doubles"); // doubles | singles — Tournament's own, independent of Casual's `mode`
@@ -9829,7 +9850,7 @@ function SectionHead({ icon, title, sub }) {
    `categories` present → expense mode (category select shown, no sign). `categories` absent → income mode. */
 function ExpenseListEditor({ items, onAdd, onUpdate, onRemove, categories }) {
   const [adding, setAdding] = useState(false);
-  const blank = () => ({ category: categories ? categories[0] : undefined, description: "", amount: "", date: new Date().toISOString().slice(0, 10) });
+  const blank = () => ({ category: categories ? categories[0] : undefined, description: "", amount: "", date: todayLocalISO() });
   const [draft, setDraft] = useState(blank());
   const submit = () => {
     const amt = Number(draft.amount) || 0;
