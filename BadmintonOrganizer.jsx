@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.59";
+const APP_VERSION = "1.11.60";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -7167,6 +7167,21 @@ function SessionTab(props) {
   // old จัดใหม่/เริ่มเกม/จบเกม button row entirely (จัดใหม่ survives as a small icon action instead, since
   // it's a reshuffle that doesn't change สถานะ — an explicitly-preserved existing system).
   const MatchRow = ({ m, no, done }) => {
+    // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
+    // this patch) recreated as a new component instance on every SessionTab re-render — confirmed via
+    // direct inspection that even an unrelated state change (e.g. opening the ใส่ผล score popup) causes
+    // every row to fully unmount/remount. Since the old ลูก input was FULLY CONTROLLED straight off
+    // `matchShuttleUsed(m)` and called `setMatchShuttleUsed` on every keystroke, EVERY keystroke itself
+    // triggered exactly that remount — which drops DOM focus immediately after the first character lands,
+    // so a second keystroke never reaches the (now-replaced) input element at all. That, combined with no
+    // select-all-on-focus, is what produced the reported "types once, appends instead of replacing" bug.
+    // Fix: buffer the typed text in local state and only commit it (call setMatchShuttleUsed, the one
+    // thing that can trigger a remount) on blur/Enter — so typing itself never causes a re-render, and the
+    // field keeps focus for as many keystrokes as needed. Re-syncs from the real value whenever this exact
+    // match (m.id) or its committed shuttleUsed changes from elsewhere (e.g. a fresh mount after a
+    // different remount, or the value being edited from History instead).
+    const [shuttleDraft, setShuttleDraft] = useState(String(matchShuttleUsed(m)));
+    useEffect(() => { setShuttleDraft(String(matchShuttleUsed(m))); }, [m.id, m.shuttleUsed]);
     const st = done ? "done" : m.status;
     const reassign = done ? reassignHistoryCourt : reassignCourt;
     const replace = done ? replaceHistorySlot : replaceSlot;
@@ -7274,8 +7289,11 @@ function SessionTab(props) {
             <input
               type="number"
               min={0}
-              value={matchShuttleUsed(m)}
-              onChange={(e) => setMatchShuttleUsed(m.id, e.target.value)}
+              value={shuttleDraft}
+              onChange={(e) => setShuttleDraft(e.target.value)}
+              onBlur={() => setMatchShuttleUsed(m.id, shuttleDraft)}
+              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+              onFocus={(e) => e.target.select()}
               title="จำนวนลูกที่ใช้ในเกมนี้"
               style={{ width: "100%", padding: "7px 2px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text, textAlign: "center" }}
             />
