@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.56";
+const APP_VERSION = "1.11.57";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -7197,7 +7197,12 @@ function SessionTab(props) {
     // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
     // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
     // apart at a glance while scrolling, without adding any extra header/divider rows to the table.
-    const rowBg = done ? "#f4f6f5" : st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : st === "next" ? "#f5f8ff" : "transparent";
+    // v1.11.57 (Finished Game Row Visual Indicator): จบแล้ว rows changed from the old neutral gray
+    // ("#f4f6f5") to a very pale red/coral tint — same warm-red family as T.accent ("#ef5a44") — so a
+    // finished game is distinguishable from กำลังเล่น/เกมต่อไป at a glance, purely via this row's own
+    // background (no new badge/icon/text/column/border — see this row's existing borderBottom/borderLeft,
+    // both untouched). กำลังเล่น/พักเกม/เกมต่อไป colors are completely unchanged.
+    const rowBg = done ? "#FFF4F2" : st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : st === "next" ? "#f5f8ff" : "transparent";
     return (
       <div key={m.id}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`, background: rowBg, minWidth: TABLE_MIN_WIDTH }}>
