@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.54";
+const APP_VERSION = "1.11.55";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1180,6 +1180,25 @@ function computeShuttleUsageFinanceWithOpening(shuttleEco, opening, shuttleUsage
     overUsed: resolved.used > w.totalQty,
     overUsedBy: resolved.used > w.totalQty ? Math.round((resolved.used - w.totalQty) * 100) / 100 : 0,
   };
+}
+// v1.11.55 (Per-Match Shuttle Usage spec B/K): read-time normalization — a match's own shuttle usage, with a
+// safe fallback to 1 when the field is absent/invalid. This is intentionally a READ-time helper rather than a
+// write at every match-creation site (~11 literal object-creation call sites) or a destructive migration of
+// History: old matches (v1.11.54 and earlier) simply have no `shuttleUsed` field, and this fallback preserves
+// the exact old "1 completed match = 1 shuttle" behavior for them without ever touching stored data.
+function matchShuttleUsed(m) {
+  const v = m && m.shuttleUsed;
+  return v != null && !isNaN(Number(v)) && Number(v) >= 0 ? Math.round(Number(v)) : 1;
+}
+// v1.11.55 (spec E): the real, actual shuttlecock usage for a session — SUM(shuttleUsed) over ONLY matches
+// with status "done" (จบแล้ว). Matches that are next/playing/paused are never counted (spec test 5/7) — a
+// match's shuttleUsed can be edited before/while it's playing, but it only enters this sum once it's done.
+// This is the single source of truth actual Finance/History use; the Estimate panel (forward-looking, no real
+// matches exist yet) deliberately never calls this — see FinancialEstimatePanel, spec J.
+function actualShuttleUsedSoFar(history, current) {
+  const doneHistory = (history || []).filter((m) => m.status === "done");
+  const doneCurrent = (current || []).filter((m) => m.status === "done");
+  return doneHistory.reduce((s, m) => s + matchShuttleUsed(m), 0) + doneCurrent.reduce((s, m) => s + matchShuttleUsed(m), 0);
 }
 // ===================== COURT COST / OTHER EXPENSES (v1.11.50, Financial Setup Enhancement) =====================
 // v1.11.50 (spec D): session duration in hours, derived from the SAME session.sessionStartTime/sessionEndTime
@@ -4872,6 +4891,16 @@ export default function App() {
     setCurrent((prev) => upd(prev)); setHistory((prev) => upd(prev));
   };
   const clearScore = (mid) => { const upd = (arr) => arr.map((m) => (m.id === mid ? { ...m, scores: null } : m)); setCurrent((prev) => upd(prev)); setHistory((prev) => upd(prev)); };
+  // v1.11.55 (Per-Match Shuttle Usage spec B): edits a single match's own shuttle count — non-negative
+  // integer, 0 allowed (e.g. a match that reused old shuttles or a backdated correction), default 1 is
+  // handled by matchShuttleUsed()'s read-time fallback rather than written here. Mirrors setScore/setWin/
+  // clearScore's exact dual current+history update pattern so a match's count stays editable whether it's
+  // still live or already archived (spec test 8: editing a completed match's usage updates Finance live).
+  const setMatchShuttleUsed = (mid, val) => {
+    const n = Math.max(0, Math.round(Number(val) || 0));
+    const upd = (arr) => arr.map((m) => (m.id === mid ? { ...m, shuttleUsed: n } : m));
+    setCurrent((prev) => upd(prev)); setHistory((prev) => upd(prev));
+  };
 
   // v1.11.38: marking someone as paid means they're settled up and heading home — reflect that immediately
   // in their attendance status too ("กลับแล้ว"), so the organizer doesn't have to flip status separately
@@ -5051,6 +5080,11 @@ export default function App() {
     } catch (e) {}
     const doneCurrent = current.filter((m) => m.status === "done");
     const totalMatches = history.length + doneCurrent.length;
+    // v1.11.55 (Per-Match Shuttle Usage spec F): the REAL shuttlecock usage baseline for Finance/History —
+    // SUM(shuttleUsed) over only done matches (never a match count). `totalMatches` above is a SEPARATE,
+    // unrelated match-count kept exactly as-is for `stats.totalMatches` (a genuine games-played statistic) —
+    // this is intentionally a new, second value, not a repurposing of totalMatches.
+    const actualShuttleUsed = actualShuttleUsedSoFar(history, doneCurrent);
     // v1.11.54 (Inventory-Lite / Carry Forward Cost, spec I/O): resolved ONCE here and reused for both the
     // auto "ค่าลูกแบต" expense line below and shuttleCostSnapshot, so they can never diverge. Looks up the
     // most recent ENDED session of this exact SAME session.name (never just "most recent overall" — this
@@ -5124,7 +5158,11 @@ export default function App() {
       // computeCostModelExpenses/shuttleLine). v1.11.52: `session.shuttleUsage` is threaded in alongside it
       // so a MANUAL override the organizer set THIS session is respected/frozen exactly as-is, never
       // silently replaced by `totalMatches` at the moment of finalization.
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, totalMatches, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, session.shuttleUsage, shuttleOpeningResolved), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      // v1.11.55 (spec F): `actualShuttleUsed` (SUM of per-match shuttleUsed over done matches) replaces
+      // `totalMatches` as the usage baseline here; `null` replaces `session.shuttleUsage` — the old aggregate
+      // manual-override concept is retired for ACTUAL usage (per-match editing is now the only way to change
+      // it), so this always resolves to `{used: actualShuttleUsed, source:"auto"}` via resolveShuttleUsage.
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, actualShuttleUsed, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, null, shuttleOpeningResolved), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
       // v1.11.51 (Court Cost Per-Court Enhancement, spec K): freeze the FULL per-court breakdown — rate,
       // hours/source/cost per court, and the total — so History can never be affected by a LATER change to
       // Court Rate/Session Time/Court Count (this object is computed once, right now, from the live values,
@@ -5160,7 +5198,9 @@ export default function App() {
           tubes: Math.max(0, Number(r.tubes) || 0),
           shuttlesPerTube: Math.max(0, Number(r.shuttlesPerTube) || 0),
         }));
-        const finance = computeShuttleUsageFinanceWithOpening(settings.shuttleEco, shuttleOpeningResolved, session.shuttleUsage, totalMatches);
+        // v1.11.55 (spec F/L): same actualShuttleUsed/null swap as the expense line above, so the frozen
+        // snapshot's actualUsedQty/shuttleExpense/closingQty can never diverge from what was actually charged.
+        const finance = computeShuttleUsageFinanceWithOpening(settings.shuttleEco, shuttleOpeningResolved, null, actualShuttleUsed);
         return {
           purchaseRows,
           costPerShuttle: finance.unit,
@@ -5793,7 +5833,7 @@ export default function App() {
         )}
 
         {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub }} />}
-        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
         {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
@@ -6945,7 +6985,7 @@ function Fairness({ sA, sB }) {
 
 /* ============ SESSION ============ */
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint } = props;
   const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
   const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
@@ -7034,8 +7074,8 @@ function SessionTab(props) {
   // v1.11.24: fixed pixel column widths (NOT flex:1) so the table never squeezes to fit the screen —
   // it scrolls horizontally instead (explicit request: "ตารางไม่ต้องบีบให้พอดีจอ ถ้าไม่พอ ให้สามารถ
   // เลื่อนไปดูด้านซ้ายได้"). The scroll container itself is the div wrapping the header + all rows below.
-  const COLW = { no: 26, court: 92, team: 232, result: 66, status: 122, actions: 72 }; // v1.11.36: widened for the new delete-game icon (was 50, fit only 2 icons)
-  const TABLE_MIN_WIDTH = COLW.no + COLW.court + COLW.team * 2 + COLW.result + COLW.status + COLW.actions + 7 * 6 + 22; // columns + gaps + row padding
+  const COLW = { no: 26, court: 92, team: 232, result: 66, shuttle: 34, status: 122, actions: 72 }; // v1.11.36: widened for the new delete-game icon (was 50, fit only 2 icons); v1.11.55: added compact "ลูก" (shuttle used) column between ผล and สถานะ — kept narrow (1-2 digit width) since mobile table space is already tight, per spec constraint
+  const TABLE_MIN_WIDTH = COLW.no + COLW.court + COLW.team * 2 + COLW.result + COLW.shuttle + COLW.status + COLW.actions + 8 * 6 + 22; // columns + gaps + row padding
 
   // ONE unified row for every match — whether it's permanently archived (history[]) or still a live
   // court slot (current[], any status). Rewritten per explicit user correction ("ไม่ใช่แบบที่นายทำมา"):
@@ -7132,6 +7172,22 @@ function SessionTab(props) {
               </>,
               document.body
             )}
+          </div>
+          {/* v1.11.55 (Per-Match Shuttle Usage spec C/M): compact per-match "ลูก" (shuttle used) field —
+              default 1 (matchShuttleUsed's read-time fallback), always editable regardless of match status,
+              so the organizer can bump 1→2/1→3 right before or while marking a match "จบแล้ว" without any
+              separate step. Kept intentionally narrow (COLW.shuttle, 1-2 digit width) — mobile table space is
+              already tight and the spec explicitly forbids widening the table meaningfully. Label is just
+              "ลูก", not the full "จำนวนลูกแบดที่ใช้" (too long for a per-row header). */}
+          <div style={{ width: COLW.shuttle, flexShrink: 0 }}>
+            <input
+              type="number"
+              min={0}
+              value={matchShuttleUsed(m)}
+              onChange={(e) => setMatchShuttleUsed(m.id, e.target.value)}
+              title="จำนวนลูกที่ใช้ในเกมนี้"
+              style={{ width: "100%", padding: "7px 2px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text, textAlign: "center" }}
+            />
           </div>
           {!done && st === "next" && busyCourt ? (
             // v1.11.30: a prep-ahead companion whose court is still busy (primary match still playing/
@@ -7380,6 +7436,7 @@ function SessionTab(props) {
           <span style={{ width: COLW.team, flexShrink: 0 }}>ทีม A</span>
           <span style={{ width: COLW.team, flexShrink: 0 }}>ทีม B</span>
           <span style={{ width: COLW.result, flexShrink: 0, textAlign: "center" }}>ผล</span>
+          <span style={{ width: COLW.shuttle, flexShrink: 0, textAlign: "center" }}>ลูก</span>
           <span style={{ width: COLW.status, flexShrink: 0 }}>สถานะ</span>
           <span style={{ width: COLW.actions, flexShrink: 0 }}></span>
         </div>
@@ -9096,26 +9153,23 @@ function SplitExpensesEditor({ settings, setSettings, players }) {
 // types their own number (spec C/D) — mirroring the AUTO/MANUAL pattern CourtCostSection below already
 // established for per-court hours. Purchase amount is never treated as this session's cost (spec F) — only
 // `usage.used × unit` ever is.
-function ShuttlecockCostSection({ settings, setSettings, session, setSession, matchesSoFar, carryForward, opening }) {
+function ShuttlecockCostSection({ settings, setSettings, session, setSession, matchesSoFar, actualShuttleUsed, carryForward, opening }) {
   const eco = settings.shuttleEco || {};
   const rows = Array.isArray(eco.purchaseRows) ? eco.purchaseRows : [];
   const cf = carryForward || { qty: 0, avgCost: 0 };
   const ob = opening || { qty: 0, avgCost: 0 };
-  // v1.11.54 (Inventory-Lite spec D/E/F/G/H): opening-balance-aware weighted average + usage/closing —
-  // supersedes the v1.11.52 purchases-only `weightedShuttleCostPerUnit`/`resolveShuttleUsage` pair used
-  // here before (both left untouched elsewhere for old regression tests, see their own comments).
-  const finance = computeShuttleUsageFinanceWithOpening(eco, ob, session && session.shuttleUsage, matchesSoFar);
+  // v1.11.55 (Per-Match Shuttle Usage spec I): usage is no longer an editable session-level aggregate — it's
+  // now ALWAYS the real per-match sum (`actualShuttleUsed`, computed by the caller via
+  // actualShuttleUsedSoFar(history, current)), passed with `null` for the shuttleUsage-override argument so
+  // this always resolves as {used: actualShuttleUsed, source:"auto"}. This section becomes read-only for
+  // usage — see the summary block below (the old editable input/badge/reset-button UI is retired per spec).
+  const finance = computeShuttleUsageFinanceWithOpening(eco, ob, null, actualShuttleUsed);
   const usage = { used: finance.used, source: finance.source };
   const cost = finance.cost;
 
   const updateRow = (id, patch) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: (s.shuttleEco?.purchaseRows || []).map((r) => (r.id === id ? { ...r, ...patch } : r)) } }));
   const addRow = () => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: [...(s.shuttleEco?.purchaseRows || []), { id: uid(), brand: "", costPerTube: 0, tubes: 1, shuttlesPerTube: 12 }] } }));
   const removeRow = (id) => setSettings((s) => ({ ...s, shuttleEco: { ...(s.shuttleEco || {}), purchaseRows: (s.shuttleEco?.purchaseRows || []).filter((r) => r.id !== id) } }));
-  // v1.11.52 (spec C/D): editing "จำนวนลูกที่ใช้" is ALWAYS an explicit, real "this is now MANUAL" action —
-  // never inferred later by comparing numbers. Stored in `session` (not `settings`) so it's session-specific
-  // (spec H-equivalent) and resets to AUTO every new session (see normSession/endSession).
-  const setUsage = (v) => setSession((s) => ({ ...s, shuttleUsage: { value: Math.max(0, Number(v) || 0), source: "manual" } }));
-  const resetToAuto = () => setSession((s) => ({ ...s, shuttleUsage: null }));
 
   // v1.11.54 (Inventory-Lite spec B/L): "ลูกยกมา" — auto-populated from the most recently ended session of
   // this SAME ก๊วน name (carryForward, resolved by the caller via carryForwardShuttleOpeningFor), but ALWAYS
@@ -9187,18 +9241,14 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 6 }}>
         <span>เกมที่จบแล้ว</span><span>{matchesSoFar} เกม</span>
       </div>
+      {/* v1.11.55 (Per-Match Shuttle Usage spec I): "จำนวนลูกที่ใช้" is now a READ-ONLY summary — the real
+          source of truth is each match's own "ลูก" field in the วันนี้ tab's match table (SUM over only
+          matches marked "จบแล้ว"). No editable input/AUTO-MANUAL badge/reset-button here anymore. */}
       <div style={{ marginBottom: 6 }}>
-        <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนลูกที่ใช้</div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <input type="number" value={usage.used} onChange={(e) => setUsage(e.target.value)} onFocus={(e) => e.target.select()} style={{ width: 64, flexShrink: 0, padding: "9px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 800, outline: "none", boxSizing: "border-box" }} />
-          <span style={{ fontSize: 12, color: T.muted, fontWeight: 700 }}>ลูก</span>
-          <span style={{ fontSize: 11, fontWeight: 800, color: usage.source === "manual" ? T.accent : T.green, padding: "3px 8px", borderRadius: 20, background: usage.source === "manual" ? "#fdecea" : "#e2f5ec", flexShrink: 0 }}>
-            {usage.source === "manual" ? "กำหนดเอง" : "ตามจำนวนเกม"}
-          </span>
-          {usage.source === "manual" && (
-            <button onClick={resetToAuto} style={{ marginLeft: "auto", flexShrink: 0, padding: "7px 10px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ใช้ตามจำนวนเกม</button>
-          )}
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, marginBottom: 3 }}>
+          <span style={{ color: T.muted }}>จำนวนลูกที่ใช้จริง</span><span>{usage.used} ลูก</span>
         </div>
+        <div style={{ fontSize: 10.5, color: T.muted }}>อิงจากจำนวนลูกที่บันทึกในแต่ละเกม</div>
       </div>
       {/* v1.11.54 (Inventory-Lite spec F): explicit, visible warning — never silently capped. Blocking End
           Session on this is deliberately NOT done (spec F: only do so if it can never risk reintroducing
@@ -9342,15 +9392,16 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
   const courtCostRows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), settings.courtCost && settings.courtCost.ratePerHour);
   const courtCostTotal = totalCourtCostFromRows(courtCostRows);
   const otherTotal = otherExpensesTotal(settings.otherExpenses);
-  // spec A: default "จำนวนผู้เล่นคาดการณ์" from session capacity (settings.maxPlayers) when the organizer has
-  // set one, else the current real headcount (attended, or registered as a fallback) — otherwise 0. Only
-  // ever written to session.estimate once the organizer actually edits it (AUTO-until-touched, same
-  // convention as every other default-then-editable field in this file).
-  const attended = (players || []).filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
-  const registeredOnly = (players || []).filter((p) => p.status === "registered").length;
-  const liveHeadcount = attended.length > 0 ? attended.length : attended.length + registeredOnly;
+  // v1.11.55 (Revenue Estimate Eligibility spec A): default "จำนวนผู้เล่นคาดการณ์" is UNCONDITIONALLY the
+  // count of players with status "ลงทะเบียน" (registered) or "พร้อมเล่น" (ready) — never the whole roster,
+  // never settings.maxPlayers, never any other status (รอคิว/กำลังเล่น(derived)/พัก/กลับแล้ว/ไม่ได้มา excluded).
+  // Real status enum confirmed by direct source inspection (PSTATUS/PSTATUS_OPTS), not guessed. The organizer
+  // can still manually override this (session.estimate.expectedPlayers) to plan beyond current signups — this
+  // only replaces the AUTO default. Only ever written to session.estimate once the organizer actually edits it
+  // (AUTO-until-touched, same convention as every other default-then-editable field in this file).
+  const eligibleForEstimate = (players || []).filter((p) => p.status === "registered" || p.status === "ready").length;
   const est = (session && session.estimate) || null;
-  const expectedPlayersDefault = Number(settings.maxPlayers) > 0 ? Number(settings.maxPlayers) : liveHeadcount;
+  const expectedPlayersDefault = eligibleForEstimate;
   const expectedGamesPerPersonDefault = 4;
   const expectedPlayers = est && est.expectedPlayers != null ? est.expectedPlayers : expectedPlayersDefault;
   const expectedGamesPerPerson = est && est.expectedGamesPerPerson != null ? est.expectedGamesPerPerson : expectedGamesPerPersonDefault;
@@ -9405,6 +9456,10 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
   // used by FinancialEstimatePanel (history + current matches with status "done"; playing/paused/upcoming
   // never count).
   const matchesSoFar = (history || []).length + (current || []).filter((m) => m.status === "done").length;
+  // v1.11.55 (Per-Match Shuttle Usage spec F): the REAL shuttle usage baseline — SUM(shuttleUsed) over only
+  // done matches — separate from `matchesSoFar` above (a genuine match count, still used for the "เกมที่จบแล้ว"
+  // display line and left completely unchanged).
+  const actualShuttleUsed = actualShuttleUsedSoFar(history, current);
   // v1.11.54 (Inventory-Lite spec B/I/J/N): resolved ONCE here and handed to both ShuttlecockCostSection
   // (editing) and FinancialEstimatePanel (read-only estimate calc) so they can never disagree. Scoped
   // strictly to THIS session's own name (see carryForwardShuttleOpeningFor) — never just "the most recent
@@ -9532,7 +9587,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
       </button>
       {open === "cost" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} carryForward={shuttleOpeningCarryForward} opening={shuttleOpeningResolved} />
+          <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} actualShuttleUsed={actualShuttleUsed} carryForward={shuttleOpeningCarryForward} opening={shuttleOpeningResolved} />
           <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} />
           <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} />
         </div>
@@ -11541,7 +11596,11 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   // name (never just "the most recent session overall") so Live P/L can never drift from what End Session
   // will eventually freeze into shuttleCostSnapshot.
   const shuttleOpeningResolved = resolveShuttleOpening(session && session.shuttleOpening, carryForwardShuttleOpeningFor(session && session.name, sessionHistory));
-  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, matchesSoFar, durationHours, session && session.courtHours, session && session.shuttleUsage, rewardHistory, session && session.id, shuttleOpeningResolved);
+  // v1.11.55 (Per-Match Shuttle Usage spec F): Live P/L's shuttle usage baseline is now the real per-match
+  // sum (actualShuttleUsedSoFar), not a match count, and `null` replaces session.shuttleUsage (the aggregate
+  // manual-override concept is retired for ACTUAL usage) — same swap as endSession()/ShuttlecockCostSection,
+  // so this live figure can never drift from what End Session will eventually freeze.
+  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, actualShuttleUsedSoFar(history, current), durationHours, session && session.courtHours, null, rewardHistory, session && session.id, shuttleOpeningResolved);
   const liveProfit = Math.round((liveRevenue - liveExpenseTotal + Number.EPSILON) * 100) / 100;
   const detailP = detail ? players.find((p) => p.id === detail) : null;
   const detailBill = detailP ? billBy(detailP.id) : null;
