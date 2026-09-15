@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.60";
+const APP_VERSION = "1.11.61";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5885,17 +5885,22 @@ export default function App() {
         )}
 
         {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub }} />}
-        {tab === "session" && <SessionTab {...{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "session" && <GameTab
+          sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }}
+          summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
+        />}
         {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
-        {tab === "summary" && <SummaryTab {...{ players, history, current, getP, settings, session, tournamentHistory }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
         <div style={{ maxWidth: isWide ? 860 : 520, margin: "0 auto", display: "flex" }}>
           <TabBtn active={tab === "members"} onClick={() => setTab("members")} label="ผู้เล่น"><User size={20} strokeWidth={tab === "members" ? 2.4 : 1.8} /></TabBtn>
-          <TabBtn active={tab === "session"} onClick={() => setTab("session")} label="วันนี้"><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
-          <TabBtn active={tab === "summary"} onClick={() => setTab("summary")} label="สรุป"><ClipboardList size={20} strokeWidth={tab === "summary" ? 2.4 : 1.8} /></TabBtn>
+          {/* v1.11.61: bottom nav simplified from 5 items to 4 — "วันนี้" renamed to "เกม" (same 🏸 icon,
+              already badminton-appropriate, no change needed there) and the old standalone "สรุป" item is
+              retired; Summary now lives INSIDE this "เกม" page as a compact เกม/สรุป sub-tab (see GameTab
+              below) rather than being deleted. */}
+          <TabBtn active={tab === "session"} onClick={() => setTab("session")} label="เกม"><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
           <TabBtn active={tab === "finance"} onClick={() => setTab("finance")} label="การเงิน"><span style={{ fontSize: 19, lineHeight: "20px" }}>💰</span></TabBtn>
           <TabBtn active={tab === "history"} onClick={() => setTab("history")} label="ประวัติ"><History size={20} strokeWidth={tab === "history" ? 2.4 : 1.8} /></TabBtn>
         </div>
@@ -6319,7 +6324,7 @@ function TournamentRegistrationList({ players, activeTournament, tournamentRegis
     return <div style={{ textAlign: "center", padding: "40px 20px", color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14 }}>
       <div style={{ fontSize: 32, marginBottom: 8 }}>🏆</div>
       <div style={{ fontSize: 13.5 }}>ยังไม่มี Tournament ที่เปิดรับสมัคร</div>
-      <div style={{ fontSize: 11.5, marginTop: 4 }}>สร้าง Tournament ได้ที่แท็บ "วันนี้"</div>
+      <div style={{ fontSize: 11.5, marginTop: 4 }}>สร้าง Tournament ได้ที่แท็บ "เกม"</div>
     </div>;
   }
   const REG_LABEL = { none: "ยังไม่สมัคร", registered: "สมัครแล้ว", paid: "ชำระแล้ว" };
@@ -7031,6 +7036,30 @@ function Fairness({ sA, sB }) {
         </div>
         <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 42 }}>{sB} ทีม B</span>
       </div>
+    </div>
+  );
+}
+
+/* ============ GAME (v1.11.61 — merges the old standalone "วันนี้"/"สรุป" bottom-nav pages) ============ */
+// Navigation simplification: bottom nav went from 5 items (ผู้เล่น | วันนี้ | สรุป | การเงิน | ประวัติ) to 4
+// (ผู้เล่น | เกม | การเงิน | ประวัติ). "สรุป" is NOT deleted — SessionTab and SummaryTab are both reused
+// completely unchanged (this is a thin presentational wrapper only, zero duplication of either
+// implementation) and are now switched between via a compact เกม/สรุป segmented control (reusing the same
+// SegSecondary control already used elsewhere in the app, e.g. PaymentTab's ก๊วน/Tournament switch) instead
+// of two separate bottom-nav buttons. Local component state (not lifted into the App-level `tab`) means
+// this always resets to the "เกม" default (spec requirement) whenever the user leaves this page (taps
+// ผู้เล่น/การเงิน/ประวัติ) and comes back — GameTab unmounts and remounts fresh each time, same as
+// SessionTab/SummaryTab already did individually before this change. `current`/`history`/`session` (the
+// actual game/session state) live in the App component's own state regardless of which sub-tab is showing,
+// so switching เกม<->สรุป, or navigating away and back, never loses or duplicates session state.
+function GameTab({ sessionTabProps, summaryTabProps }) {
+  const [sub, setSub] = useState("game"); // "game" | "summary" — default "เกม" per spec
+  return (
+    <div>
+      <div style={{ marginBottom: 12 }}>
+        <SegSecondary options={[["game", "เกม"], ["summary", "สรุป"]]} value={sub} onChange={setSub} />
+      </div>
+      {sub === "game" ? <SessionTab {...sessionTabProps} /> : <SummaryTab {...summaryTabProps} />}
     </div>
   );
 }
@@ -11533,15 +11562,31 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
   const [detail, setDetail] = useState(null); // player id for detail
   const doneCurrent = current.filter((m) => m.status === "done");
   const totalMatches = history.length + doneCurrent.length;
-  const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered" && p.status !== "waiting"));
+  // v1.11.61 (Summary Owner Rule): the Owner/admin role (player.memberType === "owner", the same existing
+  // source-of-truth field computeBill/isOwnerExempt already use — see v1.11.42) must not be counted in
+  // Summary's player statistics merely because they own/created the ก๊วน. But an Owner who genuinely
+  // participates and actually plays games is a real player and must be counted exactly like anyone else —
+  // so this is NOT a blanket "memberType !== owner" exclusion (that would wrongly drop a playing Owner
+  // too). The rule: an Owner only counts as a participant once they have actually played at least one game
+  // (p.games > 0); a non-owner keeps the exact pre-existing "attended" definition (present in some
+  // capacity, not merely registered/absent/waitlisted — same condition computeBill()/endSession() already
+  // use elsewhere), unchanged. This only affects the LIVE in-progress Summary shown here; it intentionally
+  // does not touch endSession()'s own frozen History stats snapshot (out of scope for this UI-restructuring
+  // change — see the v1.11.61 report).
+  const isEligibleParticipant = (p) => {
+    if (p.memberType === "owner") return (p.games || 0) > 0;
+    return (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
+  };
+  const played = players.filter(isEligibleParticipant);
   const gamesArr = played.map((p) => p.games || 0);
   const minGames = gamesArr.length ? Math.min(...gamesArr) : 0;
   const maxGames = gamesArr.length ? Math.max(...gamesArr) : 0;
   const totalGames = gamesArr.reduce((s, g) => s + g, 0);
-  // session-long wait metrics accumulated when players entered a match
-  const wc = players.reduce((s, p) => s + (p.waitCount || 0), 0);
-  const wt = players.reduce((s, p) => s + (p.waitTotal || 0), 0);
-  const wmax = players.reduce((s, p) => Math.max(s, p.waitMax || 0), 0);
+  // session-long wait metrics accumulated when players entered a match — same eligible population as
+  // above, so an administrative Owner (who never actually waits/plays) can't skew these either.
+  const wc = played.reduce((s, p) => s + (p.waitCount || 0), 0);
+  const wt = played.reduce((s, p) => s + (p.waitTotal || 0), 0);
+  const wmax = played.reduce((s, p) => Math.max(s, p.waitMax || 0), 0);
   const avgWaitMin = wc > 0 ? Math.round(wt / wc / 60000) : null;
   const maxWaitMin = wc > 0 ? Math.round(wmax / 60000) : null;
   const ranking = [...played].sort((a, b) => (b.games || 0) - (a.games || 0) || a.name.localeCompare(b.name));
@@ -11552,7 +11597,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
   const detailTStats = detailP ? tournamentStatsForPlayer(detailP.id, tournamentHistory) : null;
 
   const started = totalMatches > 0 || current.length > 0 || played.length > 0;
-  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "วันนี้" ก่อน</div>;
+  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "เกม" ก่อน</div>;
 
   const Stat = ({ label, value }) => (
     <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 10px", textAlign: "center" }}>
@@ -11721,7 +11766,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const detailIsLive = !!(detailP && detailBill && !detailBill.paid && playerHasLiveMatch(detailP.id, current));
 
   const started = history.length + doneCurrent.length > 0 || current.length > 0 || played.length > 0;
-  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "วันนี้" ก่อน</div>;
+  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "เกม" ก่อน</div>;
 
   return (
     <div>
@@ -11978,7 +12023,7 @@ function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersBy
   const [search, setSearch] = useState(""); // v1.11.15 — filters the displayed list only, scoped to the selected Tournament's own registered players
 
   if (all.length === 0) {
-    return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มี Tournament — สร้าง Tournament ได้ในแท็บ "วันนี้"</div>;
+    return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มี Tournament — สร้าง Tournament ได้ในแท็บ "เกม"</div>;
   }
   const t = all.find((x) => x.id === selectedId) || all[0];
   const isActive = !!activeTournament && t.id === activeTournament.id;
