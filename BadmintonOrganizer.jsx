@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.55";
+const APP_VERSION = "1.11.56";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -205,6 +205,17 @@ function useIsWide() {
   return isWide;
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
+// v1.11.56 (Fix Game Ordering Logic): a genuine monotonic per-match creation-order stamp — NEVER court
+// number, never the shared/batchable `round` counter (root cause of the reported bug: `round` is stamped
+// identically across every court in a single batch — e.g. session start, or several "+ เพิ่มแมชใหม่" taps in
+// a row without an intervening finish — so sorting fell back to court number as a tiebreak whenever two
+// matches shared the same round, visibly reordering the table by สนาม instead of by real creation order).
+// `seq` combines the wall-clock ms epoch (so it stays correctly ordered across reloads — real time only
+// moves forward, so a freshly-created match's seq is always greater than any match created before a reload)
+// with a small in-tick counter (so several matches created within the same millisecond, e.g. a per-court
+// batch fill, still get distinct, correctly-ordered values reflecting the order they were actually built in).
+let __matchSeqTick = 0;
+const nextMatchSeq = () => { const t = Date.now(); __matchSeqTick = (__matchSeqTick + 1) % 1000; return t * 1000 + __matchSeqTick; };
 // v1.9.17: weight for the SOFT "อยากคู่/ไม่อยากคู่กับมือซ้าย" preference inside buildMatch's doubles
 // scoring (see handPrefNudge) — small relative to balance(*2)/partner-repeat(*3)/opponent-repeat(*1.2)
 // terms, so it nudges which otherwise-similar split gets picked without ever overriding real match
@@ -521,7 +532,7 @@ function genRound(localPlayers, mode, courtCount, lockPairs, stats, roundIndex, 
       const lp = localPlayers.find((p) => p.id === id);
       if (lp) lp.lastPlayedRound = roundIndex;
     });
-    matches.push({ id: uid(), mode, source: "casual", teamA: m.teamA, teamB: m.teamB, status: "next", round: roundIndex, court: i + 1, locked: false });
+    matches.push({ id: uid(), mode, source: "casual", teamA: m.teamA, teamB: m.teamB, status: "next", round: roundIndex, court: i + 1, locked: false, seq: nextMatchSeq() });
   }
   return matches;
 }
@@ -585,7 +596,7 @@ function buildLatestPartnerMap(history, current) {
 // organizer takes ("Current match ends but prepared next match exists → preserve prepared match").
 function promoteQueued(m, seq, court) {
   if (!m.queued) return null;
-  return { id: uid(), mode: m.mode, source: "casual", teamA: m.queued.teamA, teamB: m.queued.teamB, status: "next", round: seq, court, locked: false };
+  return { id: uid(), mode: m.mode, source: "casual", teamA: m.queued.teamA, teamB: m.queued.teamB, status: "next", round: seq, court, locked: false, seq: nextMatchSeq() };
 }
 // compact one-line summary for the "เกมถัดไป" mini-row, e.g. "Sun + Best vs Game + James"
 function queuedSummary(q, getP) {
@@ -4474,7 +4485,7 @@ export default function App() {
   const emptyTeam = () => (mode === "doubles" ? [null, null] : [null]);
   const genStart = () => {
     if (settings.pairingMode === "manual") {
-      const cur = Array.from({ length: courtCount }, (_, i) => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: 0, court: i + 1, locked: false }));
+      const cur = Array.from({ length: courtCount }, (_, i) => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: 0, court: i + 1, locked: false, seq: nextMatchSeq() }));
       setHistory([]); setCurrent(cur); setFuture([]); setRoundNo(0); setSel(null);
       return;
     }
@@ -4503,14 +4514,14 @@ export default function App() {
   // enough free players to auto-pair 2 of them, court 3 must still show an empty row rather than nothing —
   // that way the organizer can hand-pick it, and it's already there the instant a court is about to finish.
   const buildFreshNextRecord = (court, curArr, seq) => {
-    const emptyRecord = () => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false });
+    const emptyRecord = () => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false, seq: nextMatchSeq() });
     if (settings.pairingMode === "manual") return emptyRecord();
     const reserved = reservedIdsFromCurrent(curArr);
     const base = players.map((p) => ({ ...p }));
     const stats = counts([...history, ...curArr]);
     const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
     const nm = buildMatch(order, mode, lockPairs, base, stats);
-    return nm ? { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false } : emptyRecord();
+    return nm ? { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false, seq: nextMatchSeq() } : emptyRecord();
   };
   // v1.11.27 introduced auto-spawning a "เกมต่อไป" companion for a court the moment it started playing.
   // v1.11.37 REMOVES that auto-spawn per explicit request — after real-world use, having a new upcoming-game
@@ -4554,7 +4565,11 @@ export default function App() {
       const ids = new Set([...newMatch.teamA, ...newMatch.teamB].filter(Boolean));
       np = np.map((p) => { if (!ids.has(p.id)) return p; const wms = Math.max(0, t - (p.waitingSince || t)); return { ...p, lastPlayedRound: seq, waitingSince: t, waitTotal: (p.waitTotal || 0) + wms, waitCount: (p.waitCount || 0) + 1, waitMax: Math.max(p.waitMax || 0, wms) }; });
     } else if (settings.pairingMode === "manual") {
-      newMatch = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false };
+      // v1.11.56 (explicit request): Manual pairing mode no longer auto-creates a companion "next" match
+      // when a court's game finishes — the organizer must add the next game themselves via "+ เพิ่มแมชใหม่"/
+      // "จัดเกม" (fillCourt/addExtraMatch). Only a genuinely pre-queued match (handled above via
+      // promoteQueued) still appears automatically, since the organizer already built that one on purpose.
+      newMatch = null;
     } else {
       const others = current.filter((c) => c.id !== mid);
       const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
@@ -4566,7 +4581,7 @@ export default function App() {
       if (nm) {
         const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
         np = np.map((p) => { if (!ids.has(p.id)) return p; const wms = Math.max(0, t - (p.waitingSince || t)); return { ...p, lastPlayedRound: seq, waitingSince: t, waitTotal: (p.waitTotal || 0) + wms, waitCount: (p.waitCount || 0) + 1, waitMax: Math.max(p.waitMax || 0, wms) }; });
-        newMatch = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false };
+        newMatch = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: seq, court, locked: false, seq: nextMatchSeq() };
       }
     }
     const newCurrent = current.map((c) => (c.id === mid ? newMatch : c)).filter(Boolean);
@@ -4620,8 +4635,13 @@ export default function App() {
         np = bumpWait(np, ids, roundNo + 1);
         usedFreshRound = true;
       } else if (settings.pairingMode === "manual") {
-        newMatch = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: roundNo + 1, court, locked: false };
-        usedFreshRound = true;
+        // v1.11.56 (explicit request): Manual pairing mode no longer auto-creates a companion "next" match
+        // when a court's game finishes — the organizer must add the next game themselves via
+        // "+ เพิ่มแมชใหม่"/"จัดเกม" (fillCourt/addExtraMatch). Only a genuinely pre-queued match (handled in
+        // the `queuedNext`/legacy `promoteQueued` branches above) still appears automatically, since the
+        // organizer already built that one on purpose ahead of time. The court is simply left empty (via the
+        // `.filter(Boolean)` below), rendering as "ว่าง" / "จัดเกม" — same as any other empty court.
+        newMatch = null;
       } else {
         const reserved = reservedIdsFromCurrent(survivors); // excludes players queued into OTHER courts' next match too
         const base = np.map((p) => ({ ...p }));
@@ -4631,7 +4651,7 @@ export default function App() {
         if (nm) {
           const ids = new Set([...nm.teamA, ...nm.teamB].filter(Boolean));
           np = bumpWait(np, ids, roundNo + 1);
-          newMatch = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
+          newMatch = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false, seq: nextMatchSeq() };
           usedFreshRound = true;
         }
       }
@@ -4689,7 +4709,12 @@ export default function App() {
     }
     const st = newStatus === "paused" ? "paused" : newStatus === "playing" ? "playing" : "next";
     const revived = { ...m, status: st, finishedAt: null, startedAt: st === "playing" ? Date.now() : null };
-    const updated = [...current, revived].sort((a, b) => (a.court ?? Infinity) - (b.court ?? Infinity));
+    // v1.11.56 (Fix Game Ordering Logic): no longer sorts `current` by court number on insert — a match
+    // being reopened keeps its own original `seq` (carried over via the spread above), so it naturally
+    // re-takes its rightful position in the table via orderedMatches' seq-based sort regardless of where it
+    // physically lands in this array. Sorting the array itself by court was part of the root cause of games
+    // visibly reordering by สนาม instead of by creation order.
+    const updated = [...current, revived];
     setHistory((prev) => prev.filter((x) => x.id !== mid));
     setCurrent(updated);
   };
@@ -4786,13 +4811,19 @@ export default function App() {
   };
 
   // fill an empty court — auto-pick from the waiting pool, or open empty slots for manual pick. `court` may
-  // be null (v1.11.36: an as-yet-unassigned upcoming game — see addExtraMatch below); the sort below treats
-  // an unassigned row as sorting after every real court number so it doesn't jump ahead of them visually.
+  // be null (v1.11.36: an as-yet-unassigned upcoming game — see addExtraMatch below).
+  // v1.11.56 (Fix Game Ordering Logic — root cause fix): this used to `.sort(byCourt)` the WHOLE `current`
+  // array every time a new match was inserted here — physically reordering already-existing matches by
+  // court number the instant any new one was added or an empty court got filled. Combined with `round`
+  // being stamped identically (`roundNo + 1`, never incremented in this function) across repeated calls, two
+  // matches created back-to-back via this function would tie on both rank and round in `orderedMatches`'
+  // sort, falling back to court number and visibly reordering the table by สนาม instead of by creation
+  // order. Fixed by (a) never reordering the underlying array — a new match is simply appended, and (b)
+  // stamping a genuine monotonic `seq` (see nextMatchSeq) that `orderedMatches` now sorts by instead of court.
   const fillCourt = (court) => {
-    const byCourt = (a, b) => (a.court ?? Infinity) - (b.court ?? Infinity);
     if (settings.pairingMode === "manual") {
-      const nc = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: roundNo + 1, court, locked: false };
-      setCurrent((prev) => [...prev, nc].sort(byCourt));
+      const nc = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: roundNo + 1, court, locked: false, seq: nextMatchSeq() };
+      setCurrent((prev) => [...prev, nc]);
       setSel(null);
       return;
     }
@@ -4803,8 +4834,8 @@ export default function App() {
     const order = base.filter((p) => p.status === "ready" && !p.archived && !reserved.has(p.id)).sort(SORT);
     const nm = buildMatch(order, mode, lockPairs, base, stats, latestMap);
     if (!nm) return;
-    const nc = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false };
-    setCurrent((prev) => [...prev, nc].sort(byCourt));
+    const nc = { id: uid(), mode, source: "casual", teamA: nm.teamA, teamB: nm.teamB, status: "next", round: roundNo + 1, court, locked: false, seq: nextMatchSeq() };
+    setCurrent((prev) => [...prev, nc]);
     setSel(null);
   };
 
@@ -7030,7 +7061,19 @@ function SessionTab(props) {
   // below), never as a separate dashed-box format mixed into the table. queueEditFor/NextMatchBlock are
   // no longer rendered here; finishAndAdvance's own promoteQueued fallback is harmless dead weight for any
   // OLD saved session that still has an m.queued sitting around (it just won't happen anymore going forward).
-  const started = current.length > 0;
+  // v1.11.56 fix: also true once `history` has any entry, not just current.length > 0. Needed because of
+  // this same release's other change (Manual pairing mode no longer auto-creates a companion match when a
+  // court's game finishes — see finishAndAdvance) — a Manual-mode session with only ONE live match at a time
+  // can now have `current` legitimately drop to EXACTLY ZERO the instant that match is finished (no
+  // companion appears to replace it). Without this OR clause, `started` would flip back to false at that
+  // moment, which hides "+ เพิ่มแมชใหม่"/EmptyRow's "จัดเกม" buttons and reverts the primary action button
+  // back to "เริ่มก๊วน (เลือกเอง)" as if the ก๊วน had never started — exactly the opposite of what "ให้ผู้คุม
+  // กดสร้างเกมต่อไปด้วยตัวเอง" (let the organizer press to create the next game themselves) needs: the
+  // organizer must still be ABLE to press something. `history.length > 0` is a safe, minimal signal that a
+  // ก๊วน has already been started at least once (a match has been finished into it) — it's reset back to []
+  // together with `current` on both a fresh genStart() and endSession(), so a brand-new/just-ended ก๊วน is
+  // completely unaffected and still correctly shows the "not started yet" landing state.
+  const started = current.length > 0 || history.length > 0;
   const waitMin = (p) => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
   // Requirement 16: block starting a match with unfilled slots — surfaced as a disabled+dimmed button
   // rather than a silent no-op, plus a short hint line under the action row.
@@ -7048,15 +7091,31 @@ function SessionTab(props) {
   // continues 4,5,6.. เกมต่อไป continues after that). Previously this sorted purely by `round` (creation
   // order), which could interleave a stale "next" row ahead of an older still-"playing" one; grouping by
   // status first is what makes a fresh "เกมต่อไป" row for a just-freed court visibly "pop up at the
-  // bottom" the instant that court's match finishes, per explicit request. Within each group, ties break
-  // by (round asc, court asc) — `round` is a global counter stamped once at match-record creation and
-  // left untouched by in-place reshuffles (regenCourt/regenFuture), so ordering within a group still
-  // reflects creation order, and old saved sessions without `round` just default to 0.
+  // bottom" the instant that court's match finishes, per explicit request.
+  //
+  // v1.11.56 (Fix Game Ordering Logic — ROOT CAUSE FIX): within each status group, ties used to break on
+  // (round asc, court asc). That court fallback is exactly what made games visibly reorder by สนาม instead
+  // of by real creation/play order — `round` is a single shared value stamped across an ENTIRE batch of
+  // matches (e.g. every court at session start via genStart/genRound both use one `roundIndex`/`0` for all
+  // courts at once; fillCourt/addExtraMatch stamp `roundNo + 1` on every call without ever incrementing the
+  // underlying `roundNo` state) — so two, or many, matches routinely tie on `round`, and used to fall back to
+  // sorting by court number, e.g. "สนาม 8 เริ่มก่อนสนาม 6" showing สนาม 6 first anyway. The tiebreak is now
+  // `seq` (see nextMatchSeq, near uid()) — a genuine monotonic per-match creation-order stamp that is NEVER
+  // court number and never shared across a batch. A match saved before this fix has no `seq` field at all;
+  // when either side of a comparison lacks `seq`, the comparator returns 0 and JS's guaranteed-stable sort
+  // then leaves those matches exactly where they already sat in the pre-sort `merged` array — i.e. old
+  // sessions fall back to their existing array order with zero forced migration/reorder, per spec.
   const orderedMatches = useMemo(() => {
     const historySet = new Set(history);
     const merged = [...history, ...current];
     const rank = (m) => (historySet.has(m) ? 0 : m.status === "playing" || m.status === "paused" ? 1 : 2);
-    merged.sort((a, b) => rank(a) - rank(b) || (a.round ?? 0) - (b.round ?? 0) || (a.court ?? Infinity) - (b.court ?? Infinity));
+    const seqOf = (m) => (typeof m.seq === "number" ? m.seq : null);
+    merged.sort((a, b) => {
+      const r = rank(a) - rank(b);
+      if (r !== 0) return r;
+      const sa = seqOf(a), sb = seqOf(b);
+      return sa != null && sb != null ? sa - sb : 0;
+    });
     return merged.map((m, i) => ({ m, no: i + 1, done: historySet.has(m) }));
   }, [history, current]);
   // v1.11.36/v1.11.40: "same teammate/opponent as the latest game" — see buildLatestPartnerMap; used only
