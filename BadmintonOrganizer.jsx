@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.61";
+const APP_VERSION = "1.11.63";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -7425,6 +7425,14 @@ function SessionTab(props) {
   // an unoccupied court — same "ว่าง" + "จัดเกม" placeholder as before, now a table row (no Match No yet,
   // since no match record exists there until fillCourt creates one). Kept at the same min-width as the
   // data rows so it lines up while horizontally scrolling.
+  // v1.11.62 (explicit request): in Manual pairing mode, once every court's game has finished, this used
+  // to list one "ว่าง"/"จัดเกม" row PER empty court (e.g. 5 courts -> 5 identical rows) — noisy once a venue
+  // has many courts. Manual mode already has its own single, explicit "+ เพิ่มแมชใหม่" action at the bottom
+  // of the table (addExtraMatch) that creates a fresh row with a "เลือกสนาม" dropdown for picking exactly
+  // which court to use — so per-court EmptyRow is now SKIPPED entirely in Manual mode (see the render site
+  // below), leaving only that one button. Auto mode is untouched: it still lists EmptyRow per free court,
+  // since Auto mode's "จัดเกม" auto-pairs that SPECIFIC court immediately (no separate court-picker step
+  // exists for it), so removing it there would remove real functionality, not just visual noise.
   const EmptyRow = (c) => (
     <div key={"e" + c} style={{ borderBottom: `1px solid ${T.border}`, padding: 11, display: "flex", alignItems: "center", gap: 10, minWidth: TABLE_MIN_WIDTH }}>
       <span style={{ width: 22, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>–</span>
@@ -7585,9 +7593,11 @@ function SessionTab(props) {
         )}
         {finishedShown.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
         {liveOrdered.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
-        {empties.map(EmptyRow)}
+        {settings.pairingMode !== "manual" && empties.map(EmptyRow)}
         {/* v1.11.32: "+ เพิ่มแมชใหม่" — a way to add an extra "เกมต่อไป" row to hand-pick, on demand.
-            v1.11.37: this button is now the ONLY way a new upcoming row gets created; see addExtraMatch above. */}
+            v1.11.37: this button is now the ONLY way a new upcoming row gets created; see addExtraMatch above.
+            v1.11.62: in Manual mode this is now the ONLY thing shown for empty courts at all — no per-court
+            "ว่าง"/"จัดเกม" rows above it anymore (see EmptyRow's own comment). */}
         {started && (
           <button onClick={addExtraMatch} style={{ width: "100%", minWidth: TABLE_MIN_WIDTH, padding: "10px 0", background: "none", border: "none", borderTop: `1px dashed ${T.border}`, color: T.accent, fontSize: 12.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
             <Plus size={14} /> เพิ่มแมชใหม่
@@ -11765,7 +11775,23 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   // v1.11.38: same "must finish the match first" guard as the list row above, for the detail overlay's own payment button.
   const detailIsLive = !!(detailP && detailBill && !detailBill.paid && playerHasLiveMatch(detailP.id, current));
 
-  const started = history.length + doneCurrent.length > 0 || current.length > 0 || played.length > 0;
+  // v1.11.63 (Finance Available Before Game Start): Finance > ก๊วน represents the GROUP/SESSION's
+  // financial setup — it must never depend on a game having started, played, or finished. The OLD
+  // condition here only recognized a "started" ก๊วน once a match existed OR at least one player had
+  // played/was in a non-registered-non-absent-non-waiting status — so a freshly-created, just-named ก๊วน
+  // with zero registered players (e.g. "Super Smash", 18:00–21:00, 2 courts, nobody added yet) fell
+  // through to the "ยังไม่มีข้อมูลก๊วน" empty state, hiding ⚙️ ตั้งค่าค่าก๊วนและรางวัล (court/shuttle/other-
+  // expense/reward/income setup) and ประมาณการก๊วน entirely — even though the Owner should be able to
+  // prepare all of that before anyone shows up. Fixed by ADDING (never removing) the same "does a current
+  // group/session exist" signal already established elsewhere in this exact file for the identical
+  // question — see backupStats()'s `hasCurrentSession: (data.current?.length||0)>0 || !!(data.session &&
+  // data.session.name)` — instead of inventing a second, divergent definition. Every OLD truthy branch
+  // (match history/current/played-players) is kept exactly as-is, so nothing that used to show Finance
+  // stops showing it; this only ADDS the one missing case. `session.name` is the same field the ตั้งค่าก๊วน
+  // sheet's "ชื่อก๊วน" input writes to directly (see the SessionTab setup panel) — it's set as soon as the
+  // Owner names their ก๊วน, well before "เริ่มก๊วน" ever creates the first match. No new state, no second
+  // financial state — the existing `session` object already IS the group/session record.
+  const started = history.length + doneCurrent.length > 0 || current.length > 0 || played.length > 0 || !!(session && session.name && session.name.trim());
   if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "เกม" ก่อน</div>;
 
   return (
