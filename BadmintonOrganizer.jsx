@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.63";
+const APP_VERSION = "1.11.65";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -2281,12 +2281,20 @@ const SORT = (a, b) => {
   if (aOwner !== bOwner) return aOwner - bOwner;
   return fairnessScore(b, now) - fairnessScore(a, now) || (a.lastPlayedRound ?? -1) - (b.lastPlayedRound ?? -1) || a.order - b.order;
 };
-function matchScoreText(m) {
+// v1.11.65: split out from matchScoreText so the "ผล" column (SessionTab's MatchRow) can render one set
+// per line instead of a single " · "-joined string — matchScoreText itself (used everywhere else: player
+// history, Tournament cards/bracket, waitlist buttons) is unchanged, same per-set formatting, still
+// returns the joined string.
+function matchScoreParts(m) {
   if (!hasScore(m)) return null;
   return m.scores.filter((r) => r && (r.a != null || r.b != null || r.win != null)).map((r) => {
     if (r.a != null || r.b != null) return `${r.a ?? "-"}–${r.b ?? "-"}`;
     return r.win === "A" ? "A ชนะ" : r.win === "B" ? "B ชนะ" : "-";
-  }).join(" · ");
+  });
+}
+function matchScoreText(m) {
+  const parts = matchScoreParts(m);
+  return parts ? parts.join(" · ") : null;
 }
 
 async function resizePhoto(file) {
@@ -7226,7 +7234,6 @@ function SessionTab(props) {
     const rowOpenSlot = openSlot && openSlot.mid === m.id ? { team: openSlot.team, idx: openSlot.idx, rect: openSlot.rect } : null;
     const setRowOpenSlot = (v) => setOpenSlot(v ? { mid: m.id, ...v } : null);
     const allowed = allowedNextStatuses(st);
-    const sc = matchScoreText(m);
     // v1.11.29: a "next" row's court might already be occupied by its own playing/paused primary match
     // (the prep-ahead companion case) — its "▶ เริ่มเกม" button stays disabled until that court frees up,
     // instead of letting the tap through and relying only on startGame's alert as the only guard.
@@ -7297,7 +7304,35 @@ function SessionTab(props) {
             <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} />
           </div>
           <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
-            <button onClick={(e) => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : { mid: m.id, rect: rectOf(e.currentTarget) })} title="แตะเพื่อใส่ผลการแข่งขัน" style={{ width: "100%", padding: "8px 0", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text }}>{sc || "ใส่ผล"}</button>
+            {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
+                the old single-line text (e.g. "21–23 · 21–19 · 20–17") wrapped unpredictably at this
+                column's narrow fixed width and read as a run-on. scoreLines is null for an unscored match
+                (falls back to the original "ใส่ผล" label, unchanged); otherwise each set renders as its own
+                centered line with a tight line-height so 2-3 sets stay compact instead of ballooning the
+                row's height. Column width (COLW.result) is untouched — splitting into per-set lines only
+                ever needs enough width for ONE score pair ("21–23") at a time, which is narrower than the
+                old joined string ever needed, so this is a pure vertical-layout change with no truncation
+                risk. Purely presentational: sc itself (from matchScoreText, same scores/winner data) is
+                unchanged — no scoring/winner/status logic touched. */}
+            {(() => {
+              const scoreLines = matchScoreParts(m);
+              return (
+                <button
+                  onClick={(e) => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : { mid: m.id, rect: rectOf(e.currentTarget) })}
+                  title="แตะเพื่อใส่ผลการแข่งขัน"
+                  style={{
+                    width: "100%", padding: scoreLines ? "4px 2px" : "8px 0", borderRadius: 8, background: T.surface2,
+                    border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text,
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                    lineHeight: 1.25,
+                  }}
+                >
+                  {scoreLines
+                    ? scoreLines.map((line, i) => <span key={i} style={{ display: "block", textAlign: "center" }}>{line}</span>)
+                    : "ใส่ผล"}
+                </button>
+              );
+            })()}
             {scoreOpen && scoreOpen.mid === m.id && ReactDOM.createPortal(
               <>
                 <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
@@ -9866,13 +9901,93 @@ function WinLoseSelect({ state, onPick, locked }) {
 }
 function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
   // `rounds` here is "sets needed to win" (see maxSetsFor/visibleSetCount) — best-of-3 for 2, best-of-5
-  // for 3. Only reveal as many set rows as are actually needed right now: stop early once a side has
-  // clinched it in straight sets, but add the decider row the moment the score is split.
-  const visible = visibleSetCount(m, rounds || 1);
+  // for 3.
+  const maxSets = maxSetsFor(rounds || 1);
+  // v1.11.64 (Score Input Keyboard/Focus Fix): SAME root cause already diagnosed/fixed for the "ลูก"
+  // (shuttle count) input at v1.11.60 — MatchRow (SessionTab's per-row renderer, the ancestor of this
+  // portal-rendered ScoreEditor) is declared INLINE inside SessionTab, so it gets a BRAND NEW function
+  // reference on every SessionTab re-render; React treats a changed component "type" at the same tree
+  // position as a different component and unmounts+remounts the ENTIRE row subtree — including this
+  // ScoreEditor's <input> nodes — whenever that happens. The OLD code called setScore(...) directly from
+  // each score <input>'s onChange, which writes straight into the top-level `current`/`history` state on
+  // EVERY keystroke, forcing exactly that remount and destroying the very DOM node the on-screen keyboard
+  // was attached to the instant the first digit landed (confirmed live: right after typing "2",
+  // `document.activeElement` became `BODY` and the input was a genuinely NEW DOM node, not a blur) — so
+  // only the first digit of any score ever registered before the keyboard closed.
+  //
+  // Fix: buffer typed text in LOCAL draft state — onChange only ever updates `draft` (never calls setScore,
+  // so SessionTab never re-renders/remounts while a digit is being typed) — and commit the WHOLE draft to
+  // the real setScore only when this editor UNMOUNTS (the popover closes, or the organizer switches to a
+  // different match's popover), never per-keystroke or even per-field-blur. An earlier version of this fix
+  // committed per-field on blur (matching the shuttle input's own convention) — but that broke the exact
+  // "tap Team A, type, tap Team B, type" flow this bug report itself requires: focusing Team B fires a
+  // native blur on Team A FIRST (before Team B's focus lands), so a per-field onBlur commit still forced a
+  // remount in the middle of that same editing session and stole focus right back off Team B. Deferring
+  // every commit to unmount means NO top-level state change (and therefore no remount) ever happens while
+  // this popover is open at all — typing, backspacing, replacing, and switching between Team A/B or between
+  // sets are all pure local-state operations now. `draftRef`/`mRef` exist only so the unmount cleanup
+  // (whose closure is fixed at mount time) can still see the LATEST draft/match when it finally runs.
+  const buildDraft = () => Array.from({ length: maxSets }, (_, i) => {
+    const r = (m.scores && m.scores[i]) || {};
+    return { a: r.a != null ? String(r.a) : "", b: r.b != null ? String(r.b) : "" };
+  });
+  const [draft, setDraft] = useState(buildDraft);
+  const draftRef = useRef(draft);
+  useEffect(() => { draftRef.current = draft; }, [draft]);
+  const mRef = useRef(m);
+  useEffect(() => { mRef.current = m; });
+  useEffect(() => {
+    return () => {
+      const finalDraft = draftRef.current, finalM = mRef.current;
+      finalDraft.forEach((row, ri) => {
+        ["a", "b"].forEach((side) => {
+          const val = row[side];
+          const committedRaw = finalM.scores && finalM.scores[ri] ? finalM.scores[ri][side] : null;
+          const committedStr = committedRaw != null ? String(committedRaw) : "";
+          if (val !== committedStr) setScore(finalM.id, ri, side, val);
+        });
+      });
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    };
+  }, []); // mount/unmount only — see comment above for why this must never re-run mid-edit
+
+  const draftRow = (ri) => draft[ri] || { a: "", b: "" };
+  const setDraftVal = (ri, side, val) => setDraft((prev) => {
+    const next = prev.slice();
+    next[ri] = { ...(next[ri] || { a: "", b: "" }), [side]: val };
+    return next;
+  });
+  // v1.11.64 fix (post-repro): "ลบคะแนน" (clear score) calls clearScore(m.id) directly — an immediate,
+  // discrete top-level action, same as before this patch. But clearScore ALSO triggers the same
+  // MatchRow-remount as any other top-level update, which unmounts THIS ScoreEditor and runs the
+  // commit-on-unmount cleanup above. That cleanup diffs `draftRef.current` against `mRef.current` — and
+  // mRef.current is necessarily STALE (the pre-clear match), because a component being destroyed due to a
+  // remount never receives the post-clear props first. If the organizer had just typed an unsaved digit
+  // (e.g. changed Set 1 Team A but never blurred/closed), the cleanup would see that field as "changed
+  // from the stale pre-clear value" and re-apply the OLD typed value on top of the just-cleared match —
+  // partially resurrecting a score right after "ลบคะแนน" was pressed (confirmed via repro: clicking clear
+  // right after typing left `{a: <the typed value>, b: null}` instead of a fully cleared score). Fix:
+  // blank the draft ref (not React state — this instance is about to be destroyed, so a state update
+  // would never commit) to an all-empty draft BEFORE calling clearScore. The cleanup then sees every
+  // field as "changed from stale" and re-writes "" (-> null) for all of them, reinforcing the clear
+  // instead of fighting it.
+  const handleClearScore = () => {
+    draftRef.current = Array.from({ length: maxSets }, () => ({ a: "", b: "" }));
+    clearScore(m.id);
+  };
+
+  // visibility/derived-winner reflects the DRAFT (what's on screen right now), not just the last committed
+  // value — otherwise finishing a set's 2nd score wouldn't reveal the next set row until blur, which would
+  // feel laggy/broken compared to the existing live-decide behavior this must not regress.
+  const draftScores = Array.from({ length: maxSets }, (_, i) => {
+    const d = draftRow(i);
+    return { a: d.a === "" ? null : Number(d.a), b: d.b === "" ? null : Number(d.b), win: (m.scores && m.scores[i] && m.scores[i].win) || null };
+  });
+  const visible = visibleSetCount({ scores: draftScores }, rounds || 1);
   return (
     <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginTop: 6 }}>
       {Array.from({ length: visible }).map((_, ri) => {
-        const r = (m.scores && m.scores[ri]) || { a: null, b: null, win: null };
+        const r = draftScores[ri] || { a: null, b: null, win: null };
         const auto = r.a != null && r.b != null ? (Number(r.a) === Number(r.b) ? null : (Number(r.a) > Number(r.b) ? "A" : "B")) : null;
         const eff = auto || r.win || null; // "A" | "B" | null — effective round winner (auto beats manual pick)
         const locked = !!auto; // once both scores are in, the dropdowns just reflect the auto result
@@ -9882,14 +9997,15 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
           else if (v === "lose") setWin(m.id, ri, side === "A" ? "B" : "A");
           else setWin(m.id, ri, null);
         };
+        const d = draftRow(ri);
         return (
           <div key={ri} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: ri < visible - 1 ? 8 : 0 }}>
             {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
             {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} />}
             <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
-            <input type="number" value={r.a ?? ""} onChange={(e) => setScore(m.id, ri, "a", e.target.value)} style={scoreInput} />
+            <input type="number" value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={scoreInput} />
             <span style={{ color: T.muted, fontWeight: 800 }}>–</span>
-            <input type="number" value={r.b ?? ""} onChange={(e) => setScore(m.id, ri, "b", e.target.value)} style={scoreInput} />
+            <input type="number" value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={scoreInput} />
             <span style={{ fontSize: 11.5, fontWeight: 700, color: T.blue }}>B</span>
             {setWin && <WinLoseSelect state={stateFor("B")} onPick={pick("B")} locked={locked} />}
           </div>
@@ -9897,7 +10013,7 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
       })}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
         <span style={{ fontSize: 11, color: T.muted }}>คะแนนไม่บังคับ · แก้ภายหลังได้</span>
-        {hasScore(m) && <button onClick={() => clearScore(m.id)} style={{ background: "none", border: "none", color: T.accent, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><Trash2 size={13} /> ลบคะแนน</button>}
+        {hasScore(m) && <button onClick={handleClearScore} style={{ background: "none", border: "none", color: T.accent, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><Trash2 size={13} /> ลบคะแนน</button>}
       </div>
     </div>
   );
