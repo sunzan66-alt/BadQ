@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.67";
+const APP_VERSION = "1.11.68";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1645,6 +1645,301 @@ function membershipAlertInfo(player, membershipSettings, todayISO) {
   return { status, remainingDays };
 }
 
+// ===================== RANKING SYSTEM (v1.11.68) =====================
+// Per-club (session.name — same club/group identity groupDefaults already keys by) Ranking: Skill Index
+// (1-11, canonical, UNCHANGED — see WEIGHT/normPlayer) + Ranking Performance (RP, derived) + Rank Tier
+// (derived). Skill is NEVER auto-changed by anything below — only the organizer's own manual skillIndex
+// edit ever changes it.
+//
+// DESIGN DECISION (communicated to the organizer before implementation): RP/games/win-rate/Rank/Rank
+// history are intentionally NOT stored on the player object or anywhere else — they are recomputed on
+// demand, purely from `sessionHistory` (the existing match source-of-truth) + the per-club `rankingConfigs`
+// settings, by computeClubRanking() below. This mirrors the EXACT "derive, never duplicate" principle
+// computeFinanceForRange() already uses for Finance. Consequences: (a) zero migration risk — no new
+// player/match field to backfill on old data, (b) changing Rank thresholds/minGames/calc-range later can
+// NEVER corrupt or rewrite match history (spec section 16/R — match history is source data, Rank/RP is
+// derived data), (c) "same player, different RP in a different club" falls out for free — just call this
+// with a different clubName, (d) Tournament matches are automatically excluded (they live in the separate
+// `tournamentHistory` state, never in `sessionHistory`).
+//
+// SECOND DESIGN DECISION (the one genuine ambiguity in the spec, resolved and documented): section 1 says
+// "Final Ranking strength = Skill 40% + RP 60%", but sections 6/7's Rank-tier conditions (and every one of
+// their worked examples) are phrased purely in terms of RP / Win Rate / Top% — never a blended figure.
+// Rank-tier resolution below (resolveRankTier) therefore uses RP/WinRate/Top% ONLY, exactly as sections
+// 6/7 spell out. The Skill 40%+RP 60% blend is exposed separately as finalRankingStrength() — an
+// INFORMATIONAL "ความแข็งแกร่งโดยรวม" figure for the player profile — and never feeds Rank-tier math.
+const RP_PLACEMENT_BASE = 100;
+const RP_ELO_K = 16; // conservative K-factor — keeps ordinary players in the hundreds and long-term top players in the low thousands, never tens of thousands (spec section 3)
+const RP_ELO_SCALE = 400; // standard Elo logistic scale
+const RP_SKILL_ELO_PER_LEVEL = 100; // 1 Skill Index level (of the canonical 1-11 scale) ≈ 100 Elo-equivalent points
+const RP_MAX_DELTA = 15; // hard per-game cap on any single RP change — the main lever keeping growth conservative
+
+// Default Rank tiers (spec section 6) — non-medal icons per section 8 (badge/star/gem/diamond/shield/crown,
+// explicitly NOT 🥉🥈🥇 which would wrongly imply 1st/2nd/3rd placement). `image` is the organizer's own
+// uploaded icon (same ImageCropper/base64 pattern as club/Tournament images — see RankTierImage below);
+// `icon` is the built-in emoji fallback shown until a custom image is set.
+function getDefaultRankTiers() {
+  return [
+    { id: "bronze", name: "Bronze", order: 1, icon: "🔰", image: null, conditionType: "rp", rpMin: 0, winRateMin: 0, topPct: 100 },
+    { id: "silver", name: "Silver", order: 2, icon: "⭐", image: null, conditionType: "rp", rpMin: 150, winRateMin: 0, topPct: 100 },
+    { id: "gold", name: "Gold", order: 3, icon: "🌟", image: null, conditionType: "rp", rpMin: 200, winRateMin: 0, topPct: 100 },
+    { id: "platinum", name: "Platinum", order: 4, icon: "💠", image: null, conditionType: "rp", rpMin: 250, winRateMin: 0, topPct: 100 },
+    { id: "diamond", name: "Diamond", order: 5, icon: "💎", image: null, conditionType: "rp", rpMin: 300, winRateMin: 0, topPct: 100 },
+    { id: "commander", name: "Commander", order: 6, icon: "🛡️", image: null, conditionType: "rp_top", rpMin: 300, winRateMin: 0, topPct: 20 },
+    { id: "conqueror", name: "Conqueror", order: 7, icon: "👑", image: null, conditionType: "rp_top", rpMin: 300, winRateMin: 0, topPct: 10 },
+  ];
+}
+// Fallback only (mirrors DEFAULT_MEMBERSHIP_SETTINGS's role) — the real per-club config lives in the new
+// top-level `rankingConfigs` state (keyed by club/group name), NOT inside `settings`, because section 9
+// requires picking ANY club from a list and editing its Rank settings directly — independent of whichever
+// group happens to be the currently-active session — unlike `settings`, which always means "the current
+// group's config" via groupDefaults/applyGroupDefaultsFor.
+const DEFAULT_RANKING_SETTINGS = { enabled: false, minGames: 10, calcRange: { mode: "all", n: 30 }, rankTiers: null };
+// Backward/defensive normalization for ONE club's stored ranking config (same field-by-field-backfill
+// discipline as normSettings' shuttleEco/courtCost/membership blocks) — never trust a partially-shaped or
+// legacy object.
+function normRankingSettingsFor(rc) {
+  const base = rc && typeof rc === "object" ? rc : {};
+  const cr = base.calcRange && typeof base.calcRange === "object" ? base.calcRange : {};
+  const tiers = Array.isArray(base.rankTiers) && base.rankTiers.length
+    ? base.rankTiers.filter((t) => t && typeof t === "object").map((t, i) => ({
+        id: t.id || uid(), name: String(t.name || `Rank ${i + 1}`), order: Number(t.order) || i + 1,
+        icon: t.icon || "🔰", image: t.image || null,
+        conditionType: ["winrate", "rp", "top", "rp_top"].includes(t.conditionType) ? t.conditionType : "rp",
+        rpMin: Math.max(0, Number(t.rpMin) || 0), winRateMin: Math.max(0, Math.min(100, Number(t.winRateMin) || 0)),
+        topPct: Math.max(1, Math.min(100, Number(t.topPct) || 100)),
+      }))
+    : getDefaultRankTiers();
+  return {
+    enabled: !!base.enabled,
+    minGames: Number(base.minGames) > 0 ? Math.round(Number(base.minGames)) : 10,
+    calcRange: { mode: cr.mode === "latest" ? "latest" : "all", n: Number(cr.n) > 0 ? Math.round(Number(cr.n)) : 30 },
+    rankTiers: tiers,
+  };
+}
+// Normalizes the WHOLE `rankingConfigs` state object (keyed by club/group name) — used at boot-load and
+// backup-restore, exactly like every other top-level state normalizer in this file.
+function normRankingConfigs(rcs) {
+  const base = rcs && typeof rcs === "object" ? rcs : {};
+  const out = {};
+  Object.keys(base).forEach((name) => { out[name] = normRankingSettingsFor(base[name]); });
+  return out;
+}
+// convenience read accessor — a club that has never had its Rank settings opened yet simply isn't a key
+// in `rankingConfigs` (never auto-created just by being played at), so this always returns a safe,
+// fully-shaped, freshly-cloned default rather than undefined/shared-reference tiers.
+function getRankingConfigFor(rankingConfigs, clubName) {
+  const rc = rankingConfigs && rankingConfigs[clubName];
+  return rc ? normRankingSettingsFor(rc) : normRankingSettingsFor(null);
+}
+
+// standard Elo expected-score logistic — `diff` in Elo-equivalent points, positive = self side stronger.
+function eloExpected(diff, scale) { return 1 / (1 + Math.pow(10, -diff / (scale || RP_ELO_SCALE))); }
+// Combined expected score for one side of a match (spec section 3): 40% from Skill Index difference
+// (canonical 1-11, converted to Elo-equivalent points), 60% from current-RP difference.
+function rankingExpectedScore(selfSkill, selfRp, oppSkill, oppRp) {
+  const eSkill = eloExpected(((Number(selfSkill) || 1) - (Number(oppSkill) || 1)) * RP_SKILL_ELO_PER_LEVEL, RP_ELO_SCALE);
+  const eRp = eloExpected((Number(selfRp) || RP_PLACEMENT_BASE) - (Number(oppRp) || RP_PLACEMENT_BASE), RP_ELO_SCALE);
+  return 0.4 * eSkill + 0.6 * eRp;
+}
+// Dynamic (post-placement) RP delta for one side of a match. `result` is 1 (win) / 0.5 (draw) / 0 (loss).
+// Every directional rule in spec section 3 (win vs stronger gains more than win vs weaker; loss vs
+// stronger loses less, vs much-stronger loses very little; loss vs weaker loses more; draw nudges slightly
+// either way) falls straight out of the standard Elo expected-score curve — nothing hand-cased.
+function computeDynamicRpDelta(selfSkill, selfRp, oppSkill, oppRp, result) {
+  const expected = rankingExpectedScore(selfSkill, selfRp, oppSkill, oppRp);
+  let delta = Math.round(Math.max(-RP_MAX_DELTA, Math.min(RP_MAX_DELTA, RP_ELO_K * (result - expected))));
+  // a genuinely mismatched result (e.g. loss vs a much-stronger opponent) must still lose "very small" RP,
+  // never exactly zero — floor the magnitude to 1 in the correct direction rather than let it round to 0.
+  if (delta === 0 && result !== expected) delta = result > expected ? 1 : -1;
+  return delta;
+}
+// Placement-phase RP (spec section 2) — recomputed from the player's OWN win/draw/loss tally over their
+// first `minGames` games only: Base 100 + WinRate×100 (draws count as half a win), floor 100 always.
+// Worked examples all check out: 0W10L=100, 1W9L=110, 5W5L=150, 10W0L=200.
+function computePlacementRp(wins, draws, gamesPlayed) {
+  if (gamesPlayed <= 0) return RP_PLACEMENT_BASE;
+  const winRate = (wins + 0.5 * draws) / gamesPlayed;
+  return Math.max(RP_PLACEMENT_BASE, Math.round(RP_PLACEMENT_BASE + winRate * 100));
+}
+// One side's outcome for a completed casual match, from that side's point of view: "win" | "loss" |
+// "draw" | null (no valid/decided result — excluded from Ranking per spec section 5). Reuses the EXISTING
+// hasScore()/matchWinner() functions — the SAME ones playerStats() already uses for the player's own
+// history tab — so Ranking's notion of "a completed match" can never drift from what the app already shows
+// elsewhere. matchWinner()===null covers two different cases (see playerStats' own comment): a genuine
+// 2-เซต-เสมอได้ tie (m.scores.length===2, a real decided draw) vs. an ambiguous/incomplete best-of-N
+// scorecard (not a valid result) — only the former counts for Ranking.
+function rankingMatchOutcomeForSide(m, side) {
+  if (!hasScore(m)) return null;
+  const w = matchWinner(m);
+  if (w) return w === side ? "win" : "loss";
+  if (m.scores && m.scores.length === 2) return "draw";
+  return null;
+}
+function rankTierSortDesc(tiers) { return [...(tiers || [])].sort((a, b) => (b.order || 0) - (a.order || 0)); }
+// Does ONE tier's condition (spec section 7 — the 4 supported condition types) pass for this player's
+// current running `stats` + their current `topPercent` (0-100, lower=better; null if not qualified)?
+function rankTierConditionMet(tier, stats, topPercent) {
+  const rp = stats.rp;
+  const winRate = stats.gamesPlayed > 0 ? ((stats.wins + 0.5 * stats.draws) / stats.gamesPlayed) * 100 : 0;
+  switch (tier.conditionType) {
+    case "winrate": return winRate >= (Number(tier.winRateMin) || 0);
+    case "rp": return rp >= (Number(tier.rpMin) || 0);
+    case "top": return topPercent != null && topPercent <= (Number(tier.topPct) || 0);
+    case "rp_top": return rp >= (Number(tier.rpMin) || 0) && topPercent != null && topPercent <= (Number(tier.topPct) || 0);
+    default: return false;
+  }
+}
+// The HIGHEST satisfied Rank wins (spec sections 6/7, worked-example section, and test scenario M) —
+// tiers are evaluated from highest `order` down; the first one whose condition passes is the answer. An
+// unqualified player (hasn't reached Minimum Games) never gets a Rank at all (spec section 2/14).
+function resolveRankTier(stats, topPercent, rankTiers) {
+  if (!stats || !stats.qualified) return null;
+  const sorted = rankTierSortDesc(rankTiers && rankTiers.length ? rankTiers : getDefaultRankTiers());
+  for (const tier of sorted) { if (rankTierConditionMet(tier, stats, topPercent)) return tier; }
+  return null;
+}
+// THE single authoritative Ranking engine for one club — a pure function of (clubName, players,
+// sessionHistory, rankingSettings). Never mutates anything and never reads/writes any stored RP/Rank field
+// (there isn't one — see the design note above). Safe to call repeatedly / wrap in useMemo at render time.
+//
+// Returns: {
+//   stats: { [playerId]: { gamesPlayed, wins, losses, draws, rp, qualified, winRatePct } },
+//   rankByPlayer: { [playerId]: tierObject|null },
+//   topPercentByPlayer: { [playerId]: number|null },   // 0-100, lower = better, qualified players only
+//   qualifiedOrder: [playerId,...] sorted RP desc (qualified only, used for the Top% population + Showcase),
+//   unqualified: [{ playerId, gamesPlayed, minGames }] sorted by gamesPlayed desc ("ยังไม่มี Rank" section),
+//   rankHistoryByPlayer: { [playerId]: [{ date, fromTier, toTier, rpBefore, rpAfter }] },
+//   minGames, rankTiers,
+// }
+function computeClubRanking(clubName, players, sessionHistory, rankingSettings) {
+  const rs = normRankingSettingsFor(rankingSettings);
+  const minGames = rs.minGames;
+  const rankTiers = rs.rankTiers;
+  const playersById = {};
+  (players || []).forEach((p) => { playersById[p.id] = p; });
+
+  // 1) Gather every completed casual match belonging to THIS club, in chronological order. Tournament
+  // matches are never in sessionHistory (a separate tournamentHistory state) so no extra exclusion is
+  // needed for that (spec section 5). A deleted match is simply already absent from the array.
+  const clubEntries = (sessionHistory || [])
+    .filter((s) => (s.name || "ก๊วนไม่มีชื่อ") === clubName)
+    .slice()
+    .sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
+  let events = [];
+  clubEntries.forEach((entry) => {
+    const snapshotById = {};
+    (entry.players || []).forEach((p) => { snapshotById[p.id] = p; });
+    (entry.matches || []).forEach((m) => {
+      const teamA = (m.teamA || []).filter(Boolean);
+      const teamB = (m.teamB || []).filter(Boolean);
+      if (!teamA.length || !teamB.length) return; // an unfilled/singles-vs-nobody slot can't be a valid match
+      const outcomeA = rankingMatchOutcomeForSide(m, "A");
+      if (outcomeA == null) return; // no valid/decided result — excluded (spec section 5)
+      const outcomeB = outcomeA === "win" ? "loss" : outcomeA === "loss" ? "win" : "draw";
+      events.push({ date: entry.date, teamA, teamB, outcomeA, outcomeB, snapshotById });
+    });
+  });
+  // spec section 10 "Ranking calculation range": เกมทั้งหมด (all) vs เกมล่าสุด N เกม (latest N) — a
+  // club-wide rolling window applied to the eligible-match list BEFORE replay, so a "latest 30 games" club
+  // recomputes its whole RP curve fresh from just that recent window (reflects recent form), never mixed
+  // with the full-history curve.
+  if (rs.calcRange.mode === "latest" && events.length > rs.calcRange.n) {
+    events = events.slice(events.length - rs.calcRange.n);
+  }
+
+  const state = {};
+  const rankHistoryByPlayer = {};
+  const getState = (pid) => {
+    if (!state[pid]) state[pid] = { gamesPlayed: 0, wins: 0, losses: 0, draws: 0, rp: RP_PLACEMENT_BASE, qualified: false };
+    return state[pid];
+  };
+  const skillOf = (pid, snapshotById) => {
+    const snap = snapshotById[pid];
+    if (snap && Number(snap.skillIndex) > 0) return Number(snap.skillIndex);
+    const live = playersById[pid];
+    return live && Number(live.skillIndex) > 0 ? Number(live.skillIndex) : 1;
+  };
+  // TRUE historical Top% at this instant (not an end-state approximation): among players qualified so far,
+  // sorted by their RP so far. Recomputed only for the (at most 4) players actually in the match that just
+  // resolved — cheap at this app's real-world scale (tens of players, hundreds of matches per club).
+  const topPercentAt = (pid) => {
+    const qualifiedIds = Object.keys(state).filter((id) => state[id].qualified);
+    if (!qualifiedIds.length || !state[pid] || !state[pid].qualified) return null;
+    const sorted = qualifiedIds.slice().sort((a, b) => state[b].rp - state[a].rp);
+    return ((sorted.indexOf(pid) + 1) / sorted.length) * 100;
+  };
+  const provisionalTier = (pid) => resolveRankTier(state[pid], topPercentAt(pid), rankTiers);
+
+  events.forEach((ev) => {
+    const allIds = [...ev.teamA, ...ev.teamB];
+    const beforeTier = {}, beforeRp = {};
+    allIds.forEach((pid) => { getState(pid); beforeTier[pid] = provisionalTier(pid); beforeRp[pid] = state[pid].rp; });
+
+    ["A", "B"].forEach((side) => {
+      const team = side === "A" ? ev.teamA : ev.teamB;
+      const opp = side === "A" ? ev.teamB : ev.teamA;
+      const outcome = side === "A" ? ev.outcomeA : ev.outcomeB;
+      const result = outcome === "win" ? 1 : outcome === "draw" ? 0.5 : 0;
+      const teamSkillAvg = team.reduce((s, pid) => s + skillOf(pid, ev.snapshotById), 0) / team.length;
+      const oppSkillAvg = opp.reduce((s, pid) => s + skillOf(pid, ev.snapshotById), 0) / opp.length;
+      // Doubles rule (spec section 4): ONE team-level matchup difficulty -> ONE shared RP delta, applied
+      // identically to every DYNAMIC-phase teammate on this side (computed once per side, below). A
+      // teammate still in placement uses their own personal win/loss tally instead — there is no
+      // opponent-dependent "team delta" during placement to keep in sync in the first place.
+      const teamRpAvg = team.reduce((s, pid) => s + getState(pid).rp, 0) / team.length;
+      const oppRpAvg = opp.reduce((s, pid) => s + getState(pid).rp, 0) / opp.length;
+      let sharedDynamicDelta = null;
+      team.forEach((pid) => {
+        const st = getState(pid);
+        const wasQualified = st.gamesPlayed >= minGames;
+        if (outcome === "win") st.wins++; else if (outcome === "loss") st.losses++; else st.draws++;
+        st.gamesPlayed++;
+        if (!wasQualified) {
+          st.rp = computePlacementRp(st.wins, st.draws, st.gamesPlayed);
+          st.qualified = st.gamesPlayed >= minGames;
+        } else {
+          if (sharedDynamicDelta == null) sharedDynamicDelta = computeDynamicRpDelta(teamSkillAvg, teamRpAvg, oppSkillAvg, oppRpAvg, result);
+          st.rp = Math.max(RP_PLACEMENT_BASE, st.rp + sharedDynamicDelta);
+        }
+      });
+    });
+
+    // Rank-history transitions (spec section 11) — only ever evaluated/logged for players actually in this
+    // match, using the TRUE historical Top% at this point (see topPercentAt above) — never fabricated.
+    allIds.forEach((pid) => {
+      const after = provisionalTier(pid);
+      const before = beforeTier[pid];
+      const beforeName = before ? before.name : null, afterName = after ? after.name : null;
+      if (beforeName !== afterName) {
+        (rankHistoryByPlayer[pid] || (rankHistoryByPlayer[pid] = [])).push({ date: ev.date, fromTier: beforeName, toTier: afterName, rpBefore: beforeRp[pid], rpAfter: state[pid].rp });
+      }
+    });
+  });
+
+  const stats = {};
+  Object.keys(state).forEach((pid) => {
+    const st = state[pid];
+    stats[pid] = { ...st, winRatePct: st.gamesPlayed > 0 ? Math.round(((st.wins + 0.5 * st.draws) / st.gamesPlayed) * 1000) / 10 : 0 };
+  });
+  const qualifiedOrder = Object.keys(stats).filter((pid) => stats[pid].qualified).sort((a, b) => stats[b].rp - stats[a].rp);
+  const topPercentByPlayer = {};
+  qualifiedOrder.forEach((pid, idx) => { topPercentByPlayer[pid] = ((idx + 1) / qualifiedOrder.length) * 100; });
+  const rankByPlayer = {};
+  Object.keys(stats).forEach((pid) => { rankByPlayer[pid] = resolveRankTier(stats[pid], topPercentByPlayer[pid] != null ? topPercentByPlayer[pid] : null, rankTiers); });
+  const unqualified = Object.keys(stats).filter((pid) => !stats[pid].qualified)
+    .map((pid) => ({ playerId: pid, gamesPlayed: stats[pid].gamesPlayed, minGames }))
+    .sort((a, b) => b.gamesPlayed - a.gamesPlayed);
+
+  return { stats, rankByPlayer, topPercentByPlayer, qualifiedOrder, unqualified, rankHistoryByPlayer, minGames, rankTiers };
+}
+// Informational-only composite (spec section 1: Skill 40% + RP 60%) — NEVER used for Rank-tier
+// resolution (see design decision above). skillIndex (1-11) is scaled ×10 so neither term structurally
+// dominates the blend when displayed alongside RP (typically 100-a few hundred).
+function finalRankingStrength(skillIndex, rp) {
+  return Math.round(0.4 * ((Number(skillIndex) || 1) * 10) + 0.6 * (Number(rp) || RP_PLACEMENT_BASE));
+}
+
 // ===================== FINANCE PERIOD AGGREGATION (v1.9.6) =====================
 // Single financial calculation source for the whole Finance page — รายวัน/รายเดือน/ภาพรวม all read through
 // these instead of each computing its own totals, per the redesign's IMPLEMENTATION PRINCIPLE. Every function
@@ -2859,6 +3154,7 @@ function buildBackupPayload(state) {
       activeTournament: state.activeTournament || null, tournamentHistory: state.tournamentHistory || [],
       discountCredits: state.discountCredits || [],
       groupDefaults: state.groupDefaults || {},
+      rankingConfigs: state.rankingConfigs || {}, // v1.11.68: per-club Ranking config only (RP/Rank are always derived, never stored)
       rewardHistory: state.rewardHistory || [], // v1.11.34: global Reward History ledger, see App()'s rewardHistory state
       cloudClub: state.cloudClub || null, // v1.11.35: Member Portal Phase 1 — this install's Cloud Club link, if any
     },
@@ -2951,6 +3247,7 @@ function migrateBackupData(parsed) {
   data.tournamentHistory = (Array.isArray(data.tournamentHistory) ? data.tournamentHistory : []).map(normTournament);
   data.discountCredits = (Array.isArray(data.discountCredits) ? data.discountCredits : []).map(normDiscountCredit); // no field at all (old backup) -> []
   data.groupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {}; // no field at all (old backup) -> no saved group defaults
+  data.rankingConfigs = normRankingConfigs(data.rankingConfigs); // v1.11.68: no field at all (old backup) -> {} (no club has Ranking configured yet)
   data.rewardHistory = Array.isArray(data.rewardHistory) ? data.rewardHistory : []; // v1.11.34: no field at all (old backup) -> []
   data.cloudClub = normCloudClub(data.cloudClub); // v1.11.35: no field at all (old backup) -> disabled/local-only
   return { ...parsed, schemaVersion: SCHEMA_VERSION, data };
@@ -3786,6 +4083,14 @@ export default function App() {
   // (saveGroupDefault); applying happens when the organizer picks a previously-used name from that
   // dropdown (applyGroupDefaultsFor) — see both, defined near endSession below.
   const [groupDefaults, setGroupDefaults] = useState({});
+  // v1.11.68: Ranking System — per-club config ONLY (RP/Rank/history are always derived, never stored —
+  // see computeClubRanking's design note). Deliberately its OWN top-level state, keyed by club/group name,
+  // NOT nested inside `settings`/`groupDefaults` — spec section 9 requires picking ANY club from a list and
+  // editing its Rank settings directly, independent of whichever group is the currently-active session.
+  const [rankingConfigs, setRankingConfigs] = useState({});
+  const updateRankingConfig = (clubName, patch) => {
+    setRankingConfigs((prev) => ({ ...prev, [clubName]: normRankingSettingsFor({ ...getRankingConfigFor(prev, clubName), ...patch }) }));
+  };
   // v1.11.35 (Member Portal Phase 1): this LOCAL install's link to a Cloud Club, if any — see
   // normCloudClub above and MemberPortalSheet (Settings → Member Portal (Beta)). null/disabled by
   // default; nothing else in the app reads this yet outside that one panel.
@@ -3910,7 +4215,7 @@ export default function App() {
   const applyUpdateNow = async () => {
     try {
       const savedAt = Date.now();
-      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, savedAt });
+      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt });
       latestStateJsonRef.current = json;
       try { localStorage.setItem("bg:bg-v11", json); } catch (e) {} // (1) Mirror — synchronous, best-effort
       try { await window.storage.set("bg-v11", json); } catch (e) {} // (2) Primary
@@ -3970,6 +4275,7 @@ export default function App() {
     setActiveTournament(normTournament(s.activeTournament) || null); // new field: absent on old saves -> no active Tournament, Casual unaffected
     setTournamentHistory((Array.isArray(s.tournamentHistory) ? s.tournamentHistory : []).map(normTournament));
     setGroupDefaults(s.groupDefaults && typeof s.groupDefaults === "object" ? s.groupDefaults : {}); // new field: absent on old saves -> no saved group defaults yet
+    setRankingConfigs(normRankingConfigs(s.rankingConfigs)); // v1.11.68: new field, absent on old saves -> {} (no club has Ranking configured yet)
     setCloudClub(normCloudClub(s.cloudClub)); // v1.11.35: absent on old saves -> disabled/local-only
     // old saves (pre-v1.9.15) have no `savedAt` — treat them as "current as of right now" rather than 0,
     // so upgrading doesn't itself trigger a false "newer data elsewhere" flag on the very next save.
@@ -4289,7 +4595,7 @@ export default function App() {
         if (saveGenerationRef.current !== mySaveGeneration) return;
         const savedAt = Date.now();
         try { window.__pushDiag && window.__pushDiag("beforeStorageSerialize", { gen: mySaveGeneration }); } catch (e) {}
-        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, savedAt });
+        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt });
         try { window.__pushDiag && window.__pushDiag("afterStorageSerialize", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
@@ -4337,7 +4643,7 @@ export default function App() {
         }
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, cloudClub, loaded, loadCorrupted, bootStatus]);
+  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus]);
   // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
   // most recently computed save payload when the app backgrounds — insurance for the narrow window
   // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
@@ -5912,7 +6218,7 @@ export default function App() {
     const data = backup.data;
     if (restoreMode === "replace") {
       try {
-        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
+        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub });
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
       } catch (e) {}
@@ -5935,6 +6241,7 @@ export default function App() {
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
       setRewardHistory(data.rewardHistory || []); // v1.11.34
       setGroupDefaults(data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {});
+      setRankingConfigs(normRankingConfigs(data.rankingConfigs)); // v1.11.68
       setCloudClub(normCloudClub(data.cloudClub)); // v1.11.35
     } else if (restoreMode === "mergeHistory") {
       setSessionHistory((prev) => {
@@ -5970,7 +6277,7 @@ export default function App() {
     mode: "doubles", settings: getDefaultSettings(),
     session: { id: uid(), name: "", date: todayLocalISO(), mode: "casual" },
     lockPairs: [], sessionHistory: [], generalExpenses: [], otherIncome: [], activeTournament: null,
-    tournamentHistory: [], discountCredits: [], rewardHistory: [], cloudClub: null, // v1.11.35
+    tournamentHistory: [], discountCredits: [], rewardHistory: [], rankingConfigs: {}, cloudClub: null, // v1.11.35
   } });
   // revert the most recent "replace all" restore using the safety snapshot taken right before it.
   const undoRestore = async () => {
@@ -5997,6 +6304,7 @@ export default function App() {
       setOtherIncome(data.otherIncome || []);
       setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
       setRewardHistory(data.rewardHistory || []); // v1.11.34
+      setRankingConfigs(normRankingConfigs(data.rankingConfigs)); // v1.11.68
       setCloudClub(normCloudClub(data.cloudClub)); // v1.11.35
       await window.storage.delete("bg-v11-prerestore");
       setHasPreRestoreBackup(false);
@@ -6084,12 +6392,12 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig }} />}
         {tab === "session" && <GameTab
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }}
           summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
         />}
-        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport }} />}
+        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, rankingConfigs }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
       </div>
 
@@ -6118,7 +6426,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
@@ -6291,6 +6599,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
           players={players} groupDefaults={groupDefaults} session={session}
           cloudClub={cloudClub} setCloudClub={setCloudClub} updatePlayer={updatePlayer}
+          sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
           onClose={() => setGeneralSettingsOpen(false)}
         />
       )}
@@ -6470,6 +6779,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         <PlayerProfileSheet
           player={players.find((p) => p.id === profilePlayerId)}
           getP={getP}
+          players={players}
           history={history}
           current={current}
           sessionHistory={sessionHistory}
@@ -6479,6 +6789,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           otherIncome={otherIncome}
           payEntranceFee={payEntranceFee}
           payMembership={payMembership}
+          rankingConfigs={rankingConfigs}
           onEdit={() => { setEditPlayerId(profilePlayerId); setProfilePlayerId(null); }}
           onClose={() => setProfilePlayerId(null)}
         />
@@ -6851,7 +7162,7 @@ function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFe
 // reuses the existing playerStats/tournamentStatsForPlayer functions rather than reinventing counting
 // logic, so the "no-result matches never distort Win Rate" rule already built into playerStats (decided
 // = win+loss, noScore/draw excluded) is inherited for free.
-function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory, tournamentHistory, session, settings, otherIncome, payEntranceFee, payMembership, onEdit, onClose }) {
+function PlayerProfileSheet({ player: p, getP, players, history, current, sessionHistory, tournamentHistory, session, settings, otherIncome, payEntranceFee, payMembership, rankingConfigs, onEdit, onClose }) {
   const [showPhoto, setShowPhoto] = useState(false);
   const [showHistory, setShowHistory] = useState(false); // v1.11.8: "ดูประวัติการเล่น" drill-down sheet
   // all-time casual matches this player could appear in: today's completed matches (history + any
@@ -6907,6 +7218,25 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
   const { status: mStatus, remainingDays: mRemainingDays } = membershipAlertInfo(p, ms, todayISO);
   const membershipTrackingOn = ms.entranceFee.enabled || ms.recurring.enabled;
   const paymentHistory = useMemo(() => (otherIncome || []).filter((e) => e.sourceType === "membership" && e.playerId === p.id).sort((a, b) => (b.date || "").localeCompare(a.date || "")), [otherIncome, p.id]);
+  // v1.11.68 (Ranking System, section 11): per-club Ranking summary, shown ONLY for clubs where the
+  // organizer has actually enabled Ranking AND this player has at least one match there — a club with
+  // Ranking off, or one this player never played in, adds nothing to this screen (keeps it compact, per
+  // spec section 19). A player's Rank/RP in one club never affects, and is never mixed with, another.
+  const rankingClubNames = useMemo(() => {
+    const seen = new Set(), out = [];
+    (sessionHistory || []).forEach((s) => {
+      const name = s.name || "ก๊วนไม่มีชื่อ";
+      if (seen.has(name)) return;
+      const st = playerStats(p.id, s.matches || []);
+      if ((st.win + st.loss + st.draw + st.fixedDraw + st.noScore) > 0) { seen.add(name); out.push(name); }
+    });
+    return out;
+  }, [sessionHistory, p.id]);
+  const rankingCards = useMemo(() => rankingClubNames
+    .map((name) => ({ name, config: getRankingConfigFor(rankingConfigs, name) }))
+    .filter((c) => c.config.enabled)
+    .map((c) => ({ ...c, result: computeClubRanking(c.name, players || [p], sessionHistory, c.config) })),
+    [rankingClubNames, rankingConfigs, players, sessionHistory, p]);
   return (
     <Overlay onClose={onClose}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
@@ -6985,6 +7315,17 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
         <MiniStat label="🥉 อันดับ 3" value={ts.thirds} />
       </div>
 
+      {/* v1.11.68 (Ranking System, section 11): per-club Ranking — separate stats/Rank/history per club,
+          never combined. Hidden entirely when no club with Ranking enabled has any data for this player. */}
+      {rankingCards.length > 0 && (
+        <>
+          <SectionHead icon={<span style={{ fontSize: 15 }}>🏆</span>} title="Ranking" />
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
+            {rankingCards.map((c) => <PlayerRankingClubCard key={c.name} clubName={c.name} playerId={p.id} skillIndex={p.skillIndex} result={c.result} />)}
+          </div>
+        </>
+      )}
+
       {/* v1.11.8: entry point into the new full match-history drill-down (casual log / Tournament log /
           most-frequent-partner win rates) — placed right below the achievement stats per spec mockup. */}
       <button onClick={() => setShowHistory(true)} style={{ width: "100%", textAlign: "left", background: "none", border: "none", padding: "2px 0 16px", color: T.green, fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", gap: 4 }}>
@@ -7019,6 +7360,61 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
         />
       )}
     </Overlay>
+  );
+}
+// v1.11.68 (Ranking System, section 11): one club's compact Ranking summary inside the player profile —
+// Rank/RP/games/win-rate + (if any) a short recent Rank-change history, e.g. "16 Sep: Gold → Platinum, RP
+// 248 → 253". Never fabricates a transition — rankHistoryByPlayer only ever contains transitions actually
+// derived by replaying real match history (see computeClubRanking).
+function PlayerRankingClubCard({ clubName, playerId, skillIndex, result }) {
+  const [showHistory, setShowHistory] = useState(false);
+  const st = result.stats[playerId];
+  const tier = result.rankByPlayer[playerId];
+  const rankHistory = (result.rankHistoryByPlayer[playerId] || []).slice().reverse(); // most recent first
+  if (!st) {
+    return (
+      <div style={{ background: T.surface2, borderRadius: 12, padding: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 2 }}>{clubName}</div>
+        <div style={{ fontSize: 11.5, color: T.muted }}>ยังไม่มีข้อมูล Ranking ในก๊วนนี้</div>
+      </div>
+    );
+  }
+  return (
+    <div style={{ background: T.surface2, borderRadius: 12, padding: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: T.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{clubName}</div>
+        {tier ? (
+          <div style={{ display: "flex", alignItems: "center", gap: 4, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "3px 9px" }}>
+            {tier.image ? <img src={tier.image} alt="" style={{ width: 16, height: 16, borderRadius: 4, objectFit: "cover" }} /> : <span style={{ fontSize: 13 }}>{tier.icon}</span>}
+            <span style={{ fontSize: 11.5, fontWeight: 800, color: T.text }}>{tier.name}</span>
+          </div>
+        ) : (
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "3px 9px" }}>🔒 {st.gamesPlayed}/{result.minGames} เกม</span>
+        )}
+      </div>
+      <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: T.muted, flexWrap: "wrap" }}>
+        <span>RP <b style={{ color: T.text }}>{st.rp}</b></span>
+        <span>เกม <b style={{ color: T.text }}>{st.gamesPlayed}</b></span>
+        <span>Win Rate <b style={{ color: T.text }}>{st.winRatePct}%</b></span>
+        <span title="Skill 40% + RP 60% — ค่าข้อมูลเท่านั้น ไม่ใช้ตัดสิน Rank">รวม <b style={{ color: T.text }}>{finalRankingStrength(skillIndex, st.rp)}</b></span>
+      </div>
+      {rankHistory.length > 0 && (
+        <>
+          <button onClick={() => setShowHistory((v) => !v)} style={{ marginTop: 8, background: "none", border: "none", padding: 0, color: T.green, fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
+            {showHistory ? "ซ่อนประวัติ Rank" : `ดูประวัติ Rank (${rankHistory.length})`}
+          </button>
+          {showHistory && (
+            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
+              {rankHistory.slice(0, 10).map((h, i) => (
+                <div key={i} style={{ fontSize: 10.5, color: T.muted }}>
+                  {h.date}: {h.fromTier || "ยังไม่มี Rank"} → {h.toTier || "ยังไม่มี Rank"}, RP {h.rpBefore} → {h.rpAfter}
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 // v1.11.8: "ดูประวัติการเล่น" — full match-history drill-down opened from PlayerProfileSheet. Three
@@ -7121,8 +7517,10 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
 // BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
 // both reused in place rather than reimplemented, per "do not create duplicate implementations".
-function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, groupDefaults, session, cloudClub, setCloudClub, updatePlayer, onClose }) {
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, groupDefaults, session, cloudClub, setCloudClub, updatePlayer, sessionHistory, rankingConfigs, updateRankingConfig, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
+  const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false); // v1.11.68: section 9 club-picker-first flow
+  const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
   const [portalSheetOpen, setPortalSheetOpen] = useState(false); // v1.11.35: "Member Portal (Beta)"
@@ -7156,6 +7554,35 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
         <ChevronRight size={15} color={T.muted} />
       </NavRow>
       {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} onClose={() => setLevelSheetOpen(false)} />}
+
+      {/* v1.11.68 (Ranking System, section 9): placed directly under ระดับฝีมือ per spec. Tapping FIRST
+          shows a club-selection list (any club, independent of the currently-active session) — only after
+          picking a club does that club's own Rank settings screen open. No new bottom-nav tab. */}
+      <NavRow onClick={() => setRankingClubPickerOpen(true)}>
+        <span style={{ fontSize: 17 }}>🏆</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>ตั้งค่า Rank</div>
+          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 1 }}>กำหนดระบบ Ranking แยกตามก๊วน</div>
+        </div>
+        <ChevronRight size={15} color={T.muted} />
+      </NavRow>
+      {rankingClubPickerOpen && (
+        <RankingClubPickerSheet
+          sessionHistory={sessionHistory}
+          onPick={(name) => { setRankingClubPickerOpen(false); setRankingSettingsClub(name); }}
+          onClose={() => setRankingClubPickerOpen(false)}
+        />
+      )}
+      {rankingSettingsClub && (
+        <RankingSettingsSheet
+          clubName={rankingSettingsClub}
+          rankingConfig={getRankingConfigFor(rankingConfigs, rankingSettingsClub)}
+          updateRankingConfig={updateRankingConfig}
+          players={players}
+          sessionHistory={sessionHistory}
+          onClose={() => setRankingSettingsClub(null)}
+        />
+      )}
 
       {/* v1.11.34: "ไม่ได้มานานเกิน [N] เดือน" (spec section 2) — used ONLY by the ผู้เล่น tab's
           "ไม่ได้มานาน" filter, never auto-deletes/auto-archives anyone. Default 6 (see getDefaultSettings). */}
@@ -7259,6 +7686,206 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           <button onClick={() => { setWipedNotice(false); onClose(); }} style={btnPrimary}>ปิด</button>
         </Overlay>
       )}
+    </Overlay>
+  );
+}
+
+// ===== RANKING SYSTEM SETTINGS UI (v1.11.68) — spec sections 9/10 =====
+// Step 1: pick ANY club from the list — independent of whichever group is the currently-active session
+// (see rankingConfigs' design note above). Reuses the EXACT SAME dedup-by-name/most-recent-photo logic as
+// SessionTab's own "ชื่อก๊วนที่เคยใช้" picker (pastQuans) so the two club lists can never disagree.
+function RankingClubPickerSheet({ sessionHistory, onPick, onClose }) {
+  const clubs = useMemo(() => {
+    const seen = new Set(), out = [];
+    (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push({ name: s.name, photo: s.photo || null }); } });
+    return out;
+  }, [sessionHistory]);
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>🏆 เลือกก๊วนที่ต้องการตั้งค่า Rank</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>Ranking แยกการตั้งค่าและคะแนนเป็นรายก๊วน ไม่ปนกัน</div>
+      {clubs.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีประวัติก๊วน — จบก๊วนอย่างน้อย 1 ครั้งก่อนตั้งค่า Rank ได้</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+          {clubs.map((c) => (
+            <button key={c.name} onClick={() => onPick(c.name)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, cursor: "pointer" }}>
+              {c.photo ? <img src={c.photo} alt="" style={{ width: 36, height: 36, borderRadius: 18, objectFit: "cover", flexShrink: 0 }} /> : <div style={{ width: 36, height: 36, borderRadius: 18, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, fontSize: 16 }}>🏸</div>}
+              <span style={{ flex: 1, fontSize: 14, fontWeight: 700, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
+              <ChevronRight size={16} color={T.muted} />
+            </button>
+          ))}
+        </div>
+      )}
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+    </Overlay>
+  );
+}
+// Step 2: per-club Rank settings (spec section 10) — toggle / min games / calc range, THEN a compact tier
+// list highest-to-lowest; tap a row to open its full condition editor. Never shows every field at once.
+function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, players, sessionHistory, onClose }) {
+  const rc = rankingConfig;
+  const [editingTier, setEditingTier] = useState(null); // a tier object being edited/created, or null
+  const [confirmReset, setConfirmReset] = useState(false);
+  const sortedTiers = useMemo(() => rankTierSortDesc(rc.rankTiers), [rc.rankTiers]);
+  // section 21 note: this Showcase-population count is READ-ONLY here (just to show "N คน" per tier) — it
+  // never writes anything; RP/Rank themselves are always derived (see computeClubRanking's design note).
+  const ranking = useMemo(() => computeClubRanking(clubName, players, sessionHistory, rc), [clubName, players, sessionHistory, rc]);
+  const conditionLabel = (t) => {
+    if (t.conditionType === "winrate") return `Win Rate ≥ ${t.winRateMin}%`;
+    if (t.conditionType === "rp") return `RP ≥ ${t.rpMin}`;
+    if (t.conditionType === "top") return `Top ${t.topPct}%`;
+    return `RP ≥ ${t.rpMin} + Top ${t.topPct}%`;
+  };
+  const saveTier = (tier) => {
+    const exists = rc.rankTiers.some((t) => t.id === tier.id);
+    const nextTiers = exists ? rc.rankTiers.map((t) => (t.id === tier.id ? tier : t)) : [...rc.rankTiers, tier];
+    updateRankingConfig(clubName, { rankTiers: nextTiers });
+    setEditingTier(null);
+  };
+  const deleteTier = (tierId) => { updateRankingConfig(clubName, { rankTiers: rc.rankTiers.filter((t) => t.id !== tierId) }); setEditingTier(null); };
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🏆 Ranking — {clubName}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>ตั้งค่านี้มีผลกับก๊วน "{clubName}" เท่านั้น (ไม่กระทบก๊วนอื่น)</div>
+
+      <button onClick={() => updateRankingConfig(clubName, { enabled: !rc.enabled })} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: rc.enabled ? "#e2f5ec" : T.surface, border: `1.5px solid ${rc.enabled ? T.green : T.border}`, color: rc.enabled ? T.green : T.text, fontSize: 13, fontWeight: 800, marginBottom: 10 }}>
+        {rc.enabled ? "✓ เปิดใช้งาน Ranking" : "ปิดใช้งาน Ranking (แตะเพื่อเปิด)"}
+      </button>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flex: 1 }}>เกมขั้นต่ำก่อนมี Rank</span>
+        <input type="number" min={1} value={rc.minGames} onFocus={(e) => e.target.select()}
+          onChange={(e) => updateRankingConfig(clubName, { minGames: Math.max(1, Number(e.target.value) || 10) })}
+          style={{ width: 56, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }} />
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>เกม</span>
+      </div>
+
+      <div style={{ padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 8 }}>ช่วงข้อมูลที่ใช้คำนวณ Ranking</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, mode: "all" } })} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12.5, fontWeight: 700, border: `1px solid ${rc.calcRange.mode === "all" ? T.green : T.border}`, background: rc.calcRange.mode === "all" ? "#e2f5ec" : T.surface2, color: rc.calcRange.mode === "all" ? T.green : T.muted }}>เกมทั้งหมด</button>
+          <button onClick={() => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, mode: "latest" } })} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12.5, fontWeight: 700, border: `1px solid ${rc.calcRange.mode === "latest" ? T.green : T.border}`, background: rc.calcRange.mode === "latest" ? "#e2f5ec" : T.surface2, color: rc.calcRange.mode === "latest" ? T.green : T.muted }}>เกมล่าสุด</button>
+        </div>
+        {rc.calcRange.mode === "latest" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+            <span style={{ fontSize: 12.5, color: T.muted }}>ล่าสุด</span>
+            <input type="number" min={10} value={rc.calcRange.n} onFocus={(e) => e.target.select()}
+              onChange={(e) => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, n: Math.max(10, Number(e.target.value) || 30) } })}
+              style={{ width: 56, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }} />
+            <span style={{ fontSize: 12.5, color: T.muted }}>เกม (ขั้นต่ำ 10)</span>
+          </div>
+        )}
+      </div>
+
+      <Label>Rank Tiers (สูง → ต่ำ)</Label>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+        {sortedTiers.map((t) => {
+          const countInTier = Object.keys(ranking.rankByPlayer).filter((pid) => ranking.rankByPlayer[pid] && ranking.rankByPlayer[pid].id === t.id).length;
+          return (
+            <button key={t.id} onClick={() => setEditingTier(t)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, cursor: "pointer" }}>
+              {t.image ? <img src={t.image} alt="" style={{ width: 30, height: 30, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} /> : <span style={{ fontSize: 20, width: 30, textAlign: "center", flexShrink: 0 }}>{t.icon}</span>}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>{t.name}</div>
+                <div style={{ fontSize: 11, color: T.muted }}>{conditionLabel(t)}{countInTier > 0 ? ` · ${countInTier} คน` : ""}</div>
+              </div>
+              <ChevronRight size={16} color={T.muted} />
+            </button>
+          );
+        })}
+      </div>
+      <button onClick={() => setEditingTier({ id: uid(), name: "", order: Math.max(0, ...rc.rankTiers.map((t) => t.order || 0)) + 1, icon: "🔰", image: null, conditionType: "rp", rpMin: 0, winRateMin: 0, topPct: 100 })}
+        style={{ width: "100%", padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px dashed ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>+ เพิ่ม Rank</button>
+      <button onClick={() => setConfirmReset(true)} style={{ width: "100%", padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 14 }}>คืนค่า Rank เริ่มต้น</button>
+
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+
+      {editingTier && (
+        <RankTierEditSheet
+          tier={editingTier}
+          onSave={saveTier}
+          onDelete={rc.rankTiers.some((t) => t.id === editingTier.id) ? () => deleteTier(editingTier.id) : null}
+          onClose={() => setEditingTier(null)}
+        />
+      )}
+      {confirmReset && (
+        <Overlay onClose={() => setConfirmReset(false)}>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>คืนค่า Rank เริ่มต้น?</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
+            จะคืนค่ารายชื่อ/เงื่อนไข/รูป Rank ของก๊วน "{clubName}" กลับเป็นค่าเริ่มต้น (Bronze/Silver/Gold/Platinum/Diamond/Commander/Conqueror) — ประวัติการแข่งขันและ RP ที่คำนวณจากประวัติเดิมจะไม่หายไปหรือถูกเขียนทับ (Rank/RP เป็นค่าที่คำนวณสดเสมอ) การกระทำนี้ย้อนกลับไม่ได้
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setConfirmReset(false)} style={btnSecondary}>ยกเลิก</button>
+            <button onClick={() => { updateRankingConfig(clubName, { rankTiers: getDefaultRankTiers() }); setConfirmReset(false); }} style={{ ...btnPrimary, background: T.accent }}>คืนค่าเริ่มต้น</button>
+          </div>
+        </Overlay>
+      )}
+    </Overlay>
+  );
+}
+// Full condition editor for ONE Rank tier (spec sections 7/8) — name, order, 1-of-4 condition type + its
+// threshold(s), and image. Reuses the EXACT SAME ImageCropper/fileToDataURL pattern already used for
+// player/club/Tournament images (own local cropJob state — no new global plumbing needed).
+function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
+  const [draft, setDraft] = useState({ ...tier });
+  const [cropJob, setCropJob] = useState(null);
+  const fileRef = useRef();
+  const onImageFile = async (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; const raw = await fileToDataURL(f).catch(() => null); if (raw) setCropJob(raw); };
+  const canSave = draft.name.trim().length > 0;
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{onDelete ? "แก้ไข Rank" : "เพิ่ม Rank ใหม่"}</div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
+        <button onClick={() => fileRef.current.click()} style={{ position: "relative", width: 56, height: 56, borderRadius: 14, border: `1px solid ${T.border}`, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, padding: 0 }}>
+          {draft.image ? <img src={draft.image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 26 }}>{draft.icon}</span>}
+        </button>
+        <input ref={fileRef} type="file" accept="image/*" onChange={onImageFile} style={{ display: "none" }} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <button onClick={() => fileRef.current.click()} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>{draft.image ? "เปลี่ยนรูป" : "อัปโหลดรูป"}</button>
+          {draft.image && <button onClick={() => setDraft((d) => ({ ...d, image: null }))} style={{ padding: "6px 10px", borderRadius: 8, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบรูป (ใช้ไอคอนเริ่มต้น)</button>}
+        </div>
+      </div>
+      {cropJob && <ImageCropper src={cropJob} circleGuide={false} title="จัดตำแหน่งไอคอน Rank" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraft((d) => ({ ...d, image: data })); setCropJob(null); }} />}
+
+      <Label>ชื่อ Rank</Label>
+      <input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder="เช่น Diamond" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, color: T.text, marginBottom: 12, boxSizing: "border-box" }} />
+
+      <Label>ลำดับ (ตัวเลขสูง = อันดับสูงกว่า)</Label>
+      <input type="number" value={draft.order} onFocus={(e) => e.target.select()} onChange={(e) => setDraft((d) => ({ ...d, order: Number(e.target.value) || 1 }))} style={{ width: 80, padding: "8px 10px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, color: T.text, marginBottom: 12, textAlign: "center" }} />
+
+      <Label>เงื่อนไข</Label>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+        {[["rp", "RP ขั้นต่ำ"], ["winrate", "Win Rate"], ["top", "Top %"], ["rp_top", "RP + Top %"]].map(([key, label]) => (
+          <button key={key} onClick={() => setDraft((d) => ({ ...d, conditionType: key }))} style={{ padding: "7px 11px", borderRadius: 9, fontSize: 12, fontWeight: 700, border: `1px solid ${draft.conditionType === key ? T.green : T.border}`, background: draft.conditionType === key ? "#e2f5ec" : T.surface2, color: draft.conditionType === key ? T.green : T.muted }}>{label}</button>
+        ))}
+      </div>
+      {(draft.conditionType === "rp" || draft.conditionType === "rp_top") && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>RP ≥</span>
+          <input type="number" min={0} value={draft.rpMin} onFocus={(e) => e.target.select()} onChange={(e) => setDraft((d) => ({ ...d, rpMin: Math.max(0, Number(e.target.value) || 0) }))} style={{ width: 80, padding: "7px 9px", borderRadius: 9, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800 }} />
+        </div>
+      )}
+      {draft.conditionType === "winrate" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>Win Rate ≥</span>
+          <input type="number" min={0} max={100} value={draft.winRateMin} onFocus={(e) => e.target.select()} onChange={(e) => setDraft((d) => ({ ...d, winRateMin: Math.max(0, Math.min(100, Number(e.target.value) || 0)) }))} style={{ width: 80, padding: "7px 9px", borderRadius: 9, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800 }} />
+          <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>%</span>
+        </div>
+      )}
+      {(draft.conditionType === "top" || draft.conditionType === "rp_top") && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>Top</span>
+          <input type="number" min={1} max={100} value={draft.topPct} onFocus={(e) => e.target.select()} onChange={(e) => setDraft((d) => ({ ...d, topPct: Math.max(1, Math.min(100, Number(e.target.value) || 100)) }))} style={{ width: 80, padding: "7px 9px", borderRadius: 9, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800 }} />
+          <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>%</span>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+        {onDelete && <button onClick={onDelete} style={{ padding: "11px 14px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, color: T.accent, fontSize: 13, fontWeight: 800 }}>ลบ</button>}
+        <button onClick={onClose} style={{ ...btnSecondary, flex: 1 }}>ยกเลิก</button>
+        <button onClick={() => canSave && onSave(draft)} disabled={!canSave} style={{ ...btnPrimary, flex: 1, opacity: canSave ? 1 : 0.5 }}>บันทึก</button>
+      </div>
     </Overlay>
   );
 }
@@ -10591,7 +11218,7 @@ function GlobalRewardHistory({ rewardHistory }) {
     </>
   );
 }
-function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint }) {
+function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
   const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
@@ -10599,6 +11226,11 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [openBackupSettings, setOpenBackupSettings] = useState(false);
   const [openRewardHistory, setOpenRewardHistory] = useState(false); // v1.11.34 (spec 5A) — collapsed by default so this page doesn't get longer for organizers who never used the wheel
+  // v1.11.68 (Ranking System, section 12): ONE additional entry point inside this EXISTING History area —
+  // no new bottom-nav tab. Same club-picker-first flow as the Settings entry (reuses RankingClubPickerSheet).
+  const [rankingPickerOpen, setRankingPickerOpen] = useState(false);
+  const [rankingShowcaseClub, setRankingShowcaseClub] = useState(null);
+  const allPlayers = useMemo(() => Object.values(playersById || {}), [playersById]);
   const th = tournamentHistory || [];
 
   const list = useMemo(() => {
@@ -10641,6 +11273,29 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
           <GlobalRewardHistory rewardHistory={rewardHistory} />
         </div>
+      )}
+
+      {/* v1.11.68 (Ranking System, section 12): ONE additional Ranking entry inside this existing History
+          area — tapping first shows the club picker, then the visual Ranking Showcase for that club. */}
+      <button onClick={() => setRankingPickerOpen(true)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>
+        🏆 Ranking Showcase
+        <ChevronRight size={17} color={T.muted} style={{ marginLeft: "auto" }} />
+      </button>
+      {rankingPickerOpen && (
+        <RankingClubPickerSheet
+          sessionHistory={sessionHistory}
+          onPick={(name) => { setRankingPickerOpen(false); setRankingShowcaseClub(name); }}
+          onClose={() => setRankingPickerOpen(false)}
+        />
+      )}
+      {rankingShowcaseClub && (
+        <RankingShowcaseSheet
+          clubName={rankingShowcaseClub}
+          players={allPlayers}
+          sessionHistory={sessionHistory}
+          rankingConfig={getRankingConfigFor(rankingConfigs, rankingShowcaseClub)}
+          onClose={() => setRankingShowcaseClub(null)}
+        />
       )}
 
       <div style={{ position: "relative", marginBottom: 10 }}>
@@ -11479,6 +12134,174 @@ function PrintBracket({ divisions, teamsById, peopleById }) {
     </div>
   );
 }
+// ===== RANKING SHOWCASE + PDF EXPORT (v1.11.68) — spec sections 12-15 =====
+// Single source of truth for BOTH the on-screen Showcase and the printable PDF poster (mirrors how
+// TournamentPrintView/the live dashboard both read from the SAME podium computation) — so the two can
+// never show different standings.
+function buildRankingShowcaseReport(clubName, players, sessionHistory, rankingConfig) {
+  const playersById = {};
+  (players || []).forEach((pl) => { playersById[pl.id] = pl; });
+  const result = computeClubRanking(clubName, players, sessionHistory, rankingConfig);
+  const tiers = rankTierSortDesc(result.rankTiers);
+  const groups = tiers
+    .map((tier) => ({
+      tier,
+      players: result.qualifiedOrder
+        .filter((pid) => result.rankByPlayer[pid] && result.rankByPlayer[pid].id === tier.id)
+        .map((pid) => ({ player: playersById[pid] || { id: pid, name: "?" }, stats: result.stats[pid] })),
+    }))
+    .filter((g) => g.players.length > 0);
+  const unqualified = result.unqualified.map((u) => ({ player: playersById[u.playerId] || { id: u.playerId, name: "?" }, gamesPlayed: u.gamesPlayed, minGames: u.minGames }));
+  return { clubName, result, groups, unqualified, playersById };
+}
+function rankingShareText(report) {
+  const lines = [`🏆 Ranking — ${report.clubName}`, `อัปเดตล่าสุด ${todayLocalISO()}`, ""];
+  report.groups.forEach((g) => {
+    lines.push(`${g.tier.icon} ${g.tier.name}`);
+    g.players.forEach((row) => lines.push(`  ${row.player.name} — RP ${row.stats.rp}`));
+    lines.push("");
+  });
+  lines.push("สร้างโดย BadQ 🏸");
+  return lines.join("\n");
+}
+function rankingPdfFilename(clubName) {
+  return `BadQ_Ranking_${String(clubName || "quan").replace(/[^\p{L}\p{N}]+/gu, "_")}_${todayLocalISO()}.pdf`;
+}
+// Visual hierarchy per spec section 13: higher Rank = larger emblem/photo, decreasing tier by tier, never
+// so small the lower tiers become hard to read (floor 34px) — same idea as Tournament's podium sizing,
+// applied across however many tiers a club actually has players in (not hardcoded to exactly 3 places).
+const RANKING_SHOWCASE_AVATAR_SIZES = [56, 48, 44, 40, 38, 36, 34];
+function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig, onClose }) {
+  const [printOpen, setPrintOpen] = useState(false);
+  const report = useMemo(() => buildRankingShowcaseReport(clubName, players, sessionHistory, rankingConfig), [clubName, players, sessionHistory, rankingConfig]);
+  if (!rankingConfig.enabled) {
+    return (
+      <Overlay onClose={onClose}>
+        <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>🏆 Ranking — {clubName}</div>
+        <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>ก๊วนนี้ยังไม่ได้เปิดใช้งาน Ranking — เปิดได้ที่ ⚙️ ตั้งค่า (หน้าผู้เล่น) → 🏆 ตั้งค่า Rank</div>
+        <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      </Overlay>
+    );
+  }
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🏆 Ranking Showcase</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>{clubName} · อัปเดตล่าสุด {fmtThaiDateFull(todayLocalISO())}</div>
+
+      {report.groups.length === 0 && report.unqualified.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: T.muted, textAlign: "center", padding: "24px 0" }}>ยังไม่มีข้อมูลการแข่งขันในก๊วนนี้</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 16 }}>
+          {report.groups.map((g, gi) => {
+            const size = RANKING_SHOWCASE_AVATAR_SIZES[Math.min(gi, RANKING_SHOWCASE_AVATAR_SIZES.length - 1)];
+            return (
+              <div key={g.tier.id}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                  {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "cover" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
+                  <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{g.tier.name.toUpperCase()}</span>
+                  <span style={{ fontSize: 11, color: T.muted }}>{g.players.length} คน</span>
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+                  {g.players.map((row) => (
+                    <div key={row.player.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", width: size + 16 }}>
+                      <Avatar p={row.player} size={size} />
+                      <div style={{ fontSize: Math.max(10.5, size * 0.22), fontWeight: 700, color: T.text, marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: size + 20 }}>{row.player.name}</div>
+                      <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700 }}>RP {row.stats.rp}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {report.unqualified.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>🔒 ยังไม่มี Rank</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+            {report.unqualified.map((row) => (
+              <div key={row.player.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 50 }}>
+                <Avatar p={row.player} size={32} />
+                <div style={{ fontSize: 10, fontWeight: 700, color: T.text, marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 54 }}>{row.player.name}</div>
+                <div style={{ fontSize: 9.5, color: T.muted }}>{row.gamesPlayed}/{row.minGames} เกม</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        <button onClick={() => shareSummary(rankingShareText(report))} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}>📤 แชร์ Ranking</button>
+        <button onClick={() => setPrintOpen(true)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>🖨️ Export PDF</button>
+      </div>
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+
+      {printOpen && <RankingPrintView report={report} onClose={() => setPrintOpen(false)} />}
+    </Overlay>
+  );
+}
+// Printable poster — same window.print()-to-PDF approach as TournamentPrintView (sticky non-print header,
+// @media print page rules) so both features stay consistent and reliable across the same set of browsers.
+function RankingPrintView({ report, onClose }) {
+  useEffect(() => {
+    const original = document.title;
+    document.title = rankingPdfFilename(report.clubName);
+    return () => { document.title = original; };
+  }, []);
+  return (
+    <div style={{ background: "#fff", color: "#16241d", minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui, sans-serif" }}>
+      <style>{`
+        @media print {
+          @page { size: A4 portrait; margin: 14mm; }
+          html, body { background: #fff !important; }
+          .rpv-noprint { display: none !important; }
+          .rpv-page { padding: 0 !important; }
+          .rpv-avoidbreak { break-inside: avoid; }
+          * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+        }
+      `}</style>
+      <div className="rpv-noprint" style={{ position: "sticky", top: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#16241d", color: "#fff", zIndex: 5 }}>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 14, fontWeight: 700 }}>‹ ปิด</button>
+        <button onClick={() => window.print()} style={{ background: "#fff", color: "#16241d", border: "none", borderRadius: 20, padding: "8px 16px", fontSize: 13.5, fontWeight: 800 }}>🖨️ พิมพ์ / บันทึกเป็น PDF</button>
+      </div>
+      <div className="rpv-page" style={{ maxWidth: 780, margin: "0 auto", padding: "20px 18px 60px", boxSizing: "border-box" }}>
+        <div className="rpv-avoidbreak" style={{ textAlign: "center", marginBottom: 20 }}>
+          <div style={{ fontSize: 20, fontWeight: 800, color: "#12986a" }}>BadQ</div>
+          <div style={{ fontSize: 16, fontWeight: 800, marginTop: 4 }}>{report.clubName} · Ranking</div>
+          <div style={{ fontSize: 12, color: "#6b7d74", marginTop: 3 }}>อัปเดตล่าสุด {fmtThaiDateFull(todayLocalISO())}</div>
+        </div>
+        {report.groups.length === 0 ? (
+          <div style={{ textAlign: "center", fontSize: 12.5, color: "#6b7d74", padding: "20px 0" }}>ยังไม่มีผู้เล่นที่มี Rank</div>
+        ) : report.groups.map((g, gi) => (
+          <div key={g.tier.id} className="rpv-avoidbreak" style={{ marginBottom: 20 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, borderBottom: "1px solid #dde5e1", paddingBottom: 6 }}>
+              {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "cover" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
+              <span style={{ fontSize: 14, fontWeight: 800 }}>{g.tier.name.toUpperCase()}</span>
+              <span style={{ fontSize: 11, color: "#6b7d74" }}>{g.players.length} คน</span>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
+              {g.players.map((row) => {
+                const size = gi === 0 ? 52 : gi === 1 ? 46 : gi === 2 ? 42 : 38;
+                return (
+                  <div key={row.player.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", width: size + 18 }}>
+                    <Avatar p={row.player} size={size} />
+                    <div style={{ fontSize: 10.5, fontWeight: 700, marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: size + 22 }}>{row.player.name}</div>
+                    <div style={{ fontSize: 9.5, color: "#6b7d74" }}>RP {row.stats.rp}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+        <div style={{ textAlign: "center", fontSize: 10.5, color: "#6b7d74", marginTop: 24, borderTop: "1px solid #dde5e1", paddingTop: 10 }}>
+          สร้างจาก BadQ · {fmtGeneratedAt(Date.now())}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TournamentPrintView({ report, onClose }) {
   const { t, teamsById, peopleById, divisions, totals, playerStats, podium, isCompleted } = report;
   // best-effort filename hint for "Save as PDF" — most browsers title the suggested PDF file after
