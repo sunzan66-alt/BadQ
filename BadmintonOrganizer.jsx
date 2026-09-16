@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.65";
+const APP_VERSION = "1.11.66";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -203,6 +203,22 @@ function useIsWide() {
     return () => { if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange); };
   }, []);
   return isWide;
+}
+// v1.11.66 (Match Table Responsive Layout): a second, higher breakpoint — "genuinely spacious" (iPad
+// landscape and up), distinct from useIsWide()'s 700px ("has SOME extra room" — iPad portrait, phone
+// landscape). Needed because the match table's ทีม A/ทีม B columns should get MORE width specifically at
+// this tier (per spec: "iPad แนวนอนควรเป็น layout ที่เห็นข้อมูลได้ดีที่สุด"), not just the same modest bump
+// every ≥700px screen gets — same live-on-rotate/resize pattern as useIsWide().
+function useIsExtraWide() {
+  const [isExtraWide, setIsExtraWide] = useState(() => (typeof window !== "undefined" ? window.matchMedia("(min-width: 1000px)").matches : false));
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(min-width: 1000px)");
+    const onChange = () => setIsExtraWide(mq.matches);
+    if (mq.addEventListener) mq.addEventListener("change", onChange); else mq.addListener(onChange);
+    return () => { if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange); };
+  }, []);
+  return isExtraWide;
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
 // v1.11.56 (Fix Game Ordering Logic): a genuine monotonic per-match creation-order stamp — NEVER court
@@ -3610,6 +3626,14 @@ export default function App() {
   }, []);
   const isWide = useIsWide(); // landscape phone / tablet — widen the shell so it doesn't look squeezed into a narrow column
   const [tab, setTab] = useState("members");
+  // v1.11.66 (Match Table Responsive Layout): every OTHER tab (ผู้เล่น/การเงิน/ประวัติ) keeps the exact
+  // existing 860/520 cap — untouched, out of this patch's scope. Only the "เกม" page's shell (which holds
+  // SessionTab's match table) is allowed to grow past 860px, and only on genuinely spacious viewports
+  // (iPad landscape and up) where that cap was leaving a large unused margin on both sides while the match
+  // table's player cards were still squeezed into the same fixed widths as a narrow phone. max(860px, …)
+  // guarantees this is never NARROWER than today's existing cap at any width — a phone in portrait/
+  // landscape or an iPad in portrait all land on exactly 860 or 520 here, identical to before.
+  const gameShellMaxWidth = tab === "session" && isWide ? "max(860px, min(96vw, 1400px))" : (isWide ? 860 : 520);
   const [players, setPlayers] = useState([]);
   const [history, setHistory] = useState([]);
   const [current, setCurrent] = useState([]);
@@ -5852,7 +5876,7 @@ export default function App() {
           onConfirm={(data) => { cropJob.onDone(data); setCropJob(null); }}
         />
       )}
-      <div style={{ maxWidth: isWide ? 860 : 520, margin: "0 auto", padding: "16px 14px calc(92px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
+      <div style={{ maxWidth: gameShellMaxWidth, margin: "0 auto", padding: "16px 14px calc(92px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 16 }}>
           <img src="data:image/png;base64,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" alt="BadQ" style={{ width: 32, height: 32, borderRadius: 9, objectFit: "cover", flexShrink: 0 }} />
           <div><div style={{ fontWeight: 800, fontSize: 18, letterSpacing: -0.3 }}>BadQ</div><div style={{ fontSize: 11, color: T.muted }}>v{APP_VERSION}</div></div>
@@ -5902,7 +5926,7 @@ export default function App() {
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
-        <div style={{ maxWidth: isWide ? 860 : 520, margin: "0 auto", display: "flex" }}>
+        <div style={{ maxWidth: gameShellMaxWidth, margin: "0 auto", display: "flex" }}>
           <TabBtn active={tab === "members"} onClick={() => setTab("members")} label="ผู้เล่น"><User size={20} strokeWidth={tab === "members" ? 2.4 : 1.8} /></TabBtn>
           {/* v1.11.61: bottom nav simplified from 5 items to 4 — "วันนี้" renamed to "เกม" (same 🏸 icon,
               already badminton-appropriate, no change needed there) and the old standalone "สรุป" item is
@@ -7191,7 +7215,22 @@ function SessionTab(props) {
   // v1.11.24: fixed pixel column widths (NOT flex:1) so the table never squeezes to fit the screen —
   // it scrolls horizontally instead (explicit request: "ตารางไม่ต้องบีบให้พอดีจอ ถ้าไม่พอ ให้สามารถ
   // เลื่อนไปดูด้านซ้ายได้"). The scroll container itself is the div wrapping the header + all rows below.
-  const COLW = { no: 26, court: 92, team: 232, result: 66, shuttle: 34, status: 122, actions: 72 }; // v1.11.36: widened for the new delete-game icon (was 50, fit only 2 icons); v1.11.55: added compact "ลูก" (shuttle used) column between ผล and สถานะ — kept narrow (1-2 digit width) since mobile table space is already tight, per spec constraint
+  // v1.11.66 (Match Table Responsive Layout): COLW is now tiered by viewport instead of one fixed set of
+  // widths for every screen — the reported bug ("ทีม A/ทีม B ถูกบีบจนชื่อกลายเป็น Phoo...") happened because
+  // ทีม A/ทีม B stayed pinned at the SAME 232px on a tablet as on a phone, no matter how much extra room
+  // the device actually had. Per the explicit priority order (ทีม A/ทีม B ก่อน, then สถานะ, ผล, สนาม, ลูก,
+  // NO), ทีม A/ทีม B gets first claim on any extra width at each wider tier; สนาม/ลูก/สถานะ give back a
+  // little of their own (unnecessary) padding to help, ผล and NO stay untouched (ผล's own width/box design
+  // was just finalized in v1.11.65 — see that column's own comment — and NO is already minimal). isWide
+  // (≥700px: iPad portrait, phone landscape) and isExtraWide (≥1000px: iPad landscape and up, the roomiest
+  // case — "iPad แนวนอนควรเป็น layout ที่เห็นข้อมูลได้ดีที่สุด") are additive tiers checked most-specific-first.
+  const isWide = useIsWide();
+  const isExtraWide = useIsExtraWide();
+  const COLW = isExtraWide
+    ? { no: 24, court: 80, team: 340, result: 66, shuttle: 30, status: 112, actions: 72 }
+    : isWide
+    ? { no: 24, court: 80, team: 270, result: 66, shuttle: 30, status: 112, actions: 72 }
+    : { no: 26, court: 92, team: 232, result: 66, shuttle: 34, status: 122, actions: 72 }; // unchanged — v1.11.36: widened for the new delete-game icon (was 50, fit only 2 icons); v1.11.55: added compact "ลูก" (shuttle used) column between ผล and สถานะ — kept narrow (1-2 digit width) since mobile table space is already tight, per spec constraint
   const TABLE_MIN_WIDTH = COLW.no + COLW.court + COLW.team * 2 + COLW.result + COLW.shuttle + COLW.status + COLW.actions + 8 * 6 + 22; // columns + gaps + row padding
 
   // ONE unified row for every match — whether it's permanently archived (history[]) or still a live
@@ -12388,20 +12427,22 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
                 />
               )}
             </span>
-            {isWide ? (
-              // wide screens have room to spare — name + level + มือ stay on one line, ellipsis only as a rare safety net
-              <span style={{ minWidth: 0, lineHeight: 1.2, display: "block", overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }}>
-                <span style={{ fontWeight: 700, fontSize: nameFs }}>{p.name}</span>{" "}
-                <span style={{ fontSize: lvlFs, fontWeight: 800, color: levelColor(p.skillIndex) }}>({p.level})</span>{" "}
-                <span style={{ fontSize: lvlFs - 1, fontWeight: 800, color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span>
-              </span>
-            ) : (
-              // narrow phone in portrait: never truncate/split the name — stack it above the level+มือ badges instead
-              <span style={{ minWidth: 0, lineHeight: 1.25 }}>
-                <span style={{ display: "block", fontWeight: 700, fontSize: nameFs, whiteSpace: "nowrap" }}>{p.name}</span>
-                <span style={{ display: "block", fontSize: lvlFs, fontWeight: 800, color: levelColor(p.skillIndex) }}>({p.level}) <span style={{ color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span></span>
-              </span>
-            )}
+            {/* v1.11.66 (Match Table Responsive Layout): this used to branch on isWide — wide screens (≥700px,
+                which includes iPad portrait, iPad landscape, and phone landscape) got a single-line "name
+                (level) มือ" with ellipsis "as a rare safety net". In practice that safety net fired constantly:
+                the column's actual pixel width (COLW.team) never grew to match, so almost any real name got
+                cut to "Phoo…"/"Sav…"/"Ne…" — exactly the reported regression, and on the very devices (iPad)
+                that have the MOST room to show it properly. Per spec, name+level+มือ must outrank card width,
+                and truncation is only acceptable when space is genuinely insufficient — so every screen size
+                now uses the SAME reliable stacked layout already proven on phone portrait (the explicit
+                reference/baseline this task must not make worse): name on its own line, (level) + มือ below,
+                never ellipsized. Wider tiers still get a bigger avatar (avatarSize above) and more column
+                width (COLW.team in SessionTab) — the extra room goes into readability, not into a riskier
+                single-line format. */}
+            <span style={{ minWidth: 0, lineHeight: 1.25 }}>
+              <span style={{ display: "block", fontWeight: 700, fontSize: nameFs, whiteSpace: "nowrap" }}>{p.name}</span>
+              <span style={{ display: "block", fontSize: lvlFs, fontWeight: 800, color: levelColor(p.skillIndex) }}>({p.level}) <span style={{ color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span></span>
+            </span>
             {editable && (
               <button onClick={toggle} title="เปลี่ยนผู้เล่น" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }} />
             )}
