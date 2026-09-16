@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.66";
+const APP_VERSION = "1.11.67";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -189,7 +189,18 @@ const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "a
   // v1.11.17: timestamp a player entered the Waiting List — drives queue position (#1/#2/#3), null once
   // they're moved off "waiting" (promoted, or marked absent). Missing on every pre-existing player/backup
   // -> null, meaning nobody is ever silently treated as already-waiting on upgrade.
-  waitlistedAt: p.waitlistedAt || null });
+  waitlistedAt: p.waitlistedAt || null,
+  // v1.11.67 (Membership Fee & Status, section S): PERMANENT player data, same back-compat category as
+  // memberType/isLocked above. CRITICAL backward-compat rule — any value other than an explicit `false`
+  // (i.e. true, or simply absent on every pre-existing player/backup) reads as "not owing an entrance
+  // fee". This is what guarantees existing members never get silently flagged as owing a historical
+  // entrance fee the moment Entrance Fee is enabled — only players added AFTER that point get an explicit
+  // `false` from addPlayer. `membershipExpiry` absent/null = never enrolled in recurring membership yet
+  // (see getMembershipStatus) — enabling Recurring Membership club-wide can never retroactively produce
+  // an "expired" alert for someone who simply has no membership on record.
+  entranceFeePaid: p.entranceFeePaid === false ? false : true,
+  entranceFeePaidAt: p.entranceFeePaidAt || null,
+  membershipExpiry: p.membershipExpiry || null });
 
 // true once the viewport is wide enough to benefit from a landscape/tablet layout (multi-column court
 // cards, wider content column) — re-evaluated live on rotate/resize, no page reload needed.
@@ -1570,6 +1581,70 @@ function todayYm() { const d = new Date(); return `${d.getFullYear()}-${String(d
 // the same correct approach already used by periodRange's iso() helper and todayYm() above.
 function todayLocalISO() { const d = new Date(); const pad = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 
+// ===================== MEMBERSHIP FEE & STATUS (v1.11.67) =====================
+// All date math below follows the EXACT SAME local-calendar convention as todayLocalISO() above
+// (Date getters: getFullYear/getMonth/getDate — never .toISOString(), which converts to UTC first and
+// mis-files anything near midnight in Thailand/UTC+7). `parseLocalDateStr`/`formatLocalDateObj` are the
+// only two primitives; every other helper here is built from them so there is exactly one place a future
+// date-math bug could hide, not one per call site.
+function parseLocalDateStr(dateStr) { const [y, m, d] = String(dateStr || "").split("-").map(Number); return new Date(y || 1970, (m || 1) - 1, d || 1); }
+function formatLocalDateObj(d) { const pad = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
+function addMonthsLocalISO(dateStr, months) { const d = parseLocalDateStr(dateStr); d.setMonth(d.getMonth() + (Number(months) || 0)); return formatLocalDateObj(d); }
+function addYearsLocalISO(dateStr, years) { const d = parseLocalDateStr(dateStr); d.setFullYear(d.getFullYear() + (Number(years) || 0)); return formatLocalDateObj(d); }
+function addDaysLocalISO(dateStr, days) { const d = parseLocalDateStr(dateStr); d.setDate(d.getDate() + (Number(days) || 0)); return formatLocalDateObj(d); }
+// whole calendar days from `fromStr` to `toStr` (toStr - fromStr), local dates only — used for the
+// "days remaining until expiry" count shown in the near-expiry alert (section G/R).
+function daysBetweenLocalISO(fromStr, toStr) { return Math.round((parseLocalDateStr(toStr) - parseLocalDateStr(fromStr)) / 86400000); }
+// v1.11.67 default membership config — independently-toggleable Entrance Fee / Recurring Membership
+// (section B: NOT mutually exclusive, all 4 combinations — neither/entrance-only/membership-only/both —
+// must work), plus the expiry-warning lead time (owner-editable, default 7 days per section B).
+const DEFAULT_MEMBERSHIP_SETTINGS = {
+  entranceFee: { enabled: false, amount: 0 },
+  recurring: { enabled: false, monthlyFee: 0, annualFee: 0 },
+  expiryWarningDays: 7,
+};
+// THE single authoritative membership-status function (section P/Q) — both the current Owner-facing
+// player-list alert AND any future online-notification system must call this SAME function so their
+// behavior can never drift apart. Returns exactly one of:
+//   "entrance_fee_due" | "expired" | "expiring_soon" | "active" | "not_applicable"
+// Priority is enforced purely by early-return order (section H): a player who owes an unpaid entrance
+// fee NEVER also shows an expiry alert, even if their recurring membership is separately expired.
+// - Entrance fee: only ever "due" when settings.entranceFee.enabled AND player.entranceFeePaid === false.
+//   Any other value (true, or simply missing/undefined on a pre-existing player — see normPlayer) counts
+//   as "not owing", per section S's backward-compatible default (existing members are never silently
+//   assumed to owe a historical entrance fee).
+// - Recurring: only ever evaluated once a player has an actual `membershipExpiry` on record (i.e. they
+//   have made at least one real recurring payment — see payMembership). A player who has never enrolled
+//   (membershipExpiry null/undefined) always reads "not_applicable" here, never "expired" — enabling
+//   Recurring Membership club-wide must never retroactively flag existing members as overdue (section S).
+// - Expiry date is valid THROUGH its entire calendar day (section R): remainingDays === 0 on the expiry
+//   date itself is still "active"/"expiring_soon" (whichever the warning window says), only
+//   remainingDays < 0 (the day AFTER expiry) is "expired".
+function getMembershipStatus(player, membershipSettings, todayISO) {
+  const ms = membershipSettings || DEFAULT_MEMBERSHIP_SETTINGS;
+  const entranceOn = !!(ms.entranceFee && ms.entranceFee.enabled);
+  const recurringOn = !!(ms.recurring && ms.recurring.enabled);
+  if (!entranceOn && !recurringOn) return "not_applicable";
+  if (entranceOn && player && player.entranceFeePaid === false) return "entrance_fee_due";
+  if (recurringOn && player && player.membershipExpiry) {
+    const today = todayISO || todayLocalISO();
+    const remainingDays = daysBetweenLocalISO(today, player.membershipExpiry);
+    const warnDays = Number(ms.expiryWarningDays) > 0 ? Number(ms.expiryWarningDays) : 7;
+    if (remainingDays < 0) return "expired";
+    if (remainingDays <= warnDays) return "expiring_soon"; // remainingDays>=0 guaranteed by the check above
+    return "active";
+  }
+  return "not_applicable";
+}
+// convenience wrapper for UI: status + remainingDays (only meaningful for expiring_soon), computed once
+// so list rows and the profile sheet never recompute (or risk re-deriving slightly differently).
+function membershipAlertInfo(player, membershipSettings, todayISO) {
+  const today = todayISO || todayLocalISO();
+  const status = getMembershipStatus(player, membershipSettings, today);
+  const remainingDays = (status === "expiring_soon" && player && player.membershipExpiry) ? daysBetweenLocalISO(today, player.membershipExpiry) : null;
+  return { status, remainingDays };
+}
+
 // ===================== FINANCE PERIOD AGGREGATION (v1.9.6) =====================
 // Single financial calculation source for the whole Finance page — รายวัน/รายเดือน/ภาพรวม all read through
 // these instead of each computing its own totals, per the redesign's IMPLEMENTATION PRINCIPLE. Every function
@@ -1594,6 +1669,11 @@ function computeFinanceForRange(range, sessionHistory, generalExpenses, otherInc
   // collected/receivable reporting stays exactly as before; only overall revenue/profit include it.
   const shuttlecockRevenueTotal = sessionsInRange.reduce((sum, s) => sum + sessionShuttlecockRevenue(s), 0);
   const otherIncomeTotal = otherIncInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+  // v1.11.67: membership payments are stored as `otherIncome` entries tagged sourceType:"membership" (see
+  // payEntranceFee/payMembership) — already included in otherIncomeTotal/revenue/collected above (so
+  // overall Finance totals need no change at all), but broken out here as its own figure so the ภาพรวม
+  // P&L can show a distinct "รายได้ค่าสมาชิก" line (section L) instead of hiding it inside "รายได้อื่น".
+  const membershipIncomeTotal = otherIncInRange.filter((e) => e.sourceType === "membership").reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   const genExpenseTotal = genExpInRange.reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
   // entryFee only ever counts PAID teams and manual finance.income is logged when actually received (no
   // separate paid/unpaid tracking like session bills have) — so, unlike session revenue, ALL Tournament
@@ -1619,7 +1699,7 @@ function computeFinanceForRange(range, sessionHistory, generalExpenses, otherInc
   const catTotals = {};
   EXPENSE_CATEGORY_ORDER.forEach((k) => { if (rawCatTotals[k] != null) catTotals[k] = rawCatTotals[k]; });
   Object.keys(rawCatTotals).forEach((k) => { if (!(k in catTotals)) catTotals[k] = rawCatTotals[k]; });
-  return { range, sessionsInRange, genExpInRange, otherIncInRange, tournamentsInRange, sessionRevenueTotal, sessionCollectedTotal, shuttlecockRevenueTotal, otherIncomeTotal, genExpenseTotal, tournamentIncomeTotal, tournamentExpenseTotal, revenue, collected, expense, profit, catTotals };
+  return { range, sessionsInRange, genExpInRange, otherIncInRange, tournamentsInRange, sessionRevenueTotal, sessionCollectedTotal, shuttlecockRevenueTotal, otherIncomeTotal, membershipIncomeTotal, genExpenseTotal, tournamentIncomeTotal, tournamentExpenseTotal, revenue, collected, expense, profit, catTotals };
 }
 function getFinanceForDate(dateStr, sessionHistory, generalExpenses, otherIncome, tournamentHistory = []) {
   return computeFinanceForRange({ from: dateStr, to: dateStr }, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
@@ -1792,7 +1872,10 @@ function buildTransactionDetail(f) {
     if (shuttleRev > 0) rows.push({ date: s.date, type: "revenue", category: "รายได้ค่าลูกแบด", description: s.name || "ก๊วนไม่มีชื่อ", session: s.name || "-", amount: shuttleRev });
     sessionExpenseList(s).forEach((e) => rows.push({ date: e.date || s.date, type: "expense", category: e.category || "อื่น ๆ", description: e.description || e.category || "รายการ", session: s.name || "-", amount: Number(e.amount) || 0 }));
   });
-  f.otherIncInRange.forEach((e) => rows.push({ date: e.date, type: "revenue", category: "รายได้อื่น", description: e.description || "รายได้อื่น", session: "-", amount: Number(e.amount) || 0 }));
+  // v1.11.67: membership payments are otherIncome entries tagged sourceType:"membership" — shown under
+  // their own "รายได้ค่าสมาชิก" category in the line-item export (section L: distinguish where useful)
+  // instead of the generic "รายได้อื่น" every other otherIncome entry uses.
+  f.otherIncInRange.forEach((e) => rows.push({ date: e.date, type: "revenue", category: e.sourceType === "membership" ? "รายได้ค่าสมาชิก" : "รายได้อื่น", description: e.description || "รายได้อื่น", session: "-", amount: Number(e.amount) || 0 }));
   f.genExpInRange.forEach((e) => rows.push({ date: e.date, type: "expense", category: e.category || "อื่น ๆ", description: e.description || e.category || "รายการ", session: "-", amount: Number(e.amount) || 0 }));
   // v1.11.1: completed Tournaments' own transactions (entry-fee income, sponsor/other income, expenses)
   // shown at line-item level too, same as ก๊วน sessions above — keeps the export/print detail table
@@ -1835,7 +1918,11 @@ function buildFinancialReport(period, ctx) {
     period,
     generatedAt: Date.now(),
     summary: { revenue: f.revenue, collected: f.collected, receivable: f.revenue - f.collected, expense: f.expense, profit: f.profit },
-    pnl: { groupRevenue: f.sessionRevenueTotal, shuttlecockRevenue: f.shuttlecockRevenueTotal, otherIncome: f.otherIncomeTotal, tournamentIncome: f.tournamentIncomeTotal, tournamentExpense: f.tournamentExpenseTotal, totalRevenue: f.revenue, expenseByCategory: f.catTotals, totalExpense: f.expense, netProfit: f.profit },
+    // v1.11.67: otherIncome here is now GENERAL-only (membership payments split out into their own
+    // membershipIncome figure) so every consumer of report.pnl (text/xlsx/on-screen exports below) shows
+    // "รายได้อื่น" and "รายได้ค่าสมาชิก" as two distinct lines, matching FinancePL's on-screen breakdown —
+    // totalRevenue (f.revenue) is unaffected, it already included membership income all along.
+    pnl: { groupRevenue: f.sessionRevenueTotal, shuttlecockRevenue: f.shuttlecockRevenueTotal, otherIncome: f.otherIncomeTotal - f.membershipIncomeTotal, membershipIncome: f.membershipIncomeTotal, tournamentIncome: f.tournamentIncomeTotal, tournamentExpense: f.tournamentExpenseTotal, totalRevenue: f.revenue, expenseByCategory: f.catTotals, totalExpense: f.expense, netProfit: f.profit },
     sessions,
     transactions: buildTransactionDetail(f),
     outstandingPayments: outstandingPaymentsForSessions(f.sessionsInRange),
@@ -1906,6 +1993,7 @@ function buildFinancialReportTxt(report) {
   L.push("กำไรขาดทุน"); L.push("");
   L.push(padTxtRow("รายได้จากการจัดก๊วน", formatCurrency(report.pnl.groupRevenue)));
   if (report.pnl.tournamentIncome > 0) L.push(padTxtRow("รายได้จากการจัด Tournament", formatCurrency(report.pnl.tournamentIncome)));
+  if (report.pnl.membershipIncome > 0) L.push(padTxtRow("รายได้ค่าสมาชิก", formatCurrency(report.pnl.membershipIncome)));
   L.push(padTxtRow("รายได้อื่น", formatCurrency(report.pnl.otherIncome)));
   L.push(padTxtRow("รายได้รวม", formatCurrency(report.pnl.totalRevenue)));
   L.push(""); L.push("ค่าใช้จ่าย");
@@ -2150,6 +2238,7 @@ function buildFinancialXlsxSummarySheet(report) {
   pushRow("สรุปกำไรขาดทุน", null, XLSX_STYLE.boldText);
   pushRow("รายได้จากการจัดก๊วน", report.pnl.groupRevenue);
   if (report.pnl.tournamentIncome > 0) pushRow("รายได้จากการจัด Tournament", report.pnl.tournamentIncome);
+  if (report.pnl.membershipIncome > 0) pushRow("รายได้ค่าสมาชิก", report.pnl.membershipIncome);
   pushRow("รายได้อื่น", report.pnl.otherIncome);
   pushRow("รายได้รวม", report.pnl.totalRevenue, XLSX_STYLE.boldText, XLSX_STYLE.boldMoney);
   Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0).forEach(([cat, amt]) => pushRow(cat, amt));
@@ -2525,6 +2614,15 @@ function getDefaultSettings() {
     // v1.11.34: "ไม่ได้มานานเกิน [N] เดือน" threshold used by the ผู้เล่น tab's "ไม่ได้มานาน" filter — never
     // auto-deletes anyone, purely changes who shows up under that filter. Default 6 per spec.
     inactiveMonths: 6,
+    // v1.11.67: Membership Fee & Status (section B) — per-group config, lives inside `settings` on
+    // purpose so it rides the EXISTING groupDefaults save/apply + backup/restore/boot-load plumbing for
+    // free (see saveGroupDefault/applyGroupDefaultsFor/applyPersistedState) instead of a new parallel
+    // storage path. Inlined literally (matching every other default sub-object in this function, e.g.
+    // shuttleEco/courtCost above — NOT a reference to the separate DEFAULT_MEMBERSHIP_SETTINGS constant,
+    // which exists purely as a safe fallback for getMembershipStatus/UI call sites when membershipSettings
+    // is null/undefined at render time; keeping these independent avoids a cross-file-region dependency
+    // that would break tools which extract getDefaultSettings() in isolation).
+    membership: { entranceFee: { enabled: false, amount: 0 }, recurring: { enabled: false, monthlyFee: 0, annualFee: 0 }, expiryWarningDays: 7 },
   };
 }
 // v1.11.7 (Part M) / v1.11.12: backward-compatible settings defaults — old saved settings objects predate
@@ -2564,6 +2662,7 @@ function normSettings(s) {
   // produce NaN/negative pricing or crash a later .map()/.reduce() over otherExpenses.
   const cCost = base.courtCost && typeof base.courtCost === "object" ? base.courtCost : {};
   const cCostOverrideNum = Number(cCost.manualOverrideTotal);
+  const bMembership = base.membership && typeof base.membership === "object" ? base.membership : {};
   return {
     ...getDefaultSettings(),
     ...base,
@@ -2591,6 +2690,21 @@ function normSettings(s) {
     roundingMode: ["none", "round5", "round10"].includes(base.roundingMode) ? base.roundingMode : "none",
     maxPlayers: Number(base.maxPlayers) > 0 ? Number(base.maxPlayers) : null,
     inactiveMonths: Number(base.inactiveMonths) > 0 ? Number(base.inactiveMonths) : 6,
+    // v1.11.67: same field-by-field backfill discipline as shuttleEco/courtCost above — a missing/partial
+    // membership object (any pre-v1.11.67 backup, or a hand-edited/corrupted import) must never produce
+    // NaN pricing or a crash in getMembershipStatus/payMembership.
+    membership: {
+      entranceFee: {
+        enabled: !!(bMembership.entranceFee && bMembership.entranceFee.enabled),
+        amount: Math.max(0, Number(bMembership.entranceFee && bMembership.entranceFee.amount) || 0),
+      },
+      recurring: {
+        enabled: !!(bMembership.recurring && bMembership.recurring.enabled),
+        monthlyFee: Math.max(0, Number(bMembership.recurring && bMembership.recurring.monthlyFee) || 0),
+        annualFee: Math.max(0, Number(bMembership.recurring && bMembership.recurring.annualFee) || 0),
+      },
+      expiryWarningDays: Number(base.membership && base.membership.expiryWarningDays) > 0 ? Number(base.membership.expiryWarningDays) : 7,
+    },
   };
 }
 // v1.11.34: migrates settings.wheelPrizes into the new reward model — decouples Probability from
@@ -4297,7 +4411,12 @@ export default function App() {
       const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
       const comingCount = prev.filter((p) => p.status === "registered" || p.status === "ready").length;
       const initialStatus = cap > 0 && comingCount >= cap ? "waiting" : "ready";
-      return [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null, isLocked: false }];
+      // v1.11.67 (section S): a BRAND NEW player only ever owes an entrance fee if Entrance Fee is
+      // enabled for this group AT THE MOMENT they're added — this is the one and only place a player is
+      // ever created with entranceFeePaid:false. membershipExpiry always starts null (never enrolled) —
+      // recurring membership only ever begins once a real payment is recorded (payMembership).
+      const entranceFeeOn = !!(settings.membership && settings.membership.entranceFee && settings.membership.entranceFee.enabled);
+      return [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null, isLocked: false, entranceFeePaid: !entranceFeeOn, entranceFeePaidAt: null, membershipExpiry: null }];
     });
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
@@ -5416,6 +5535,55 @@ export default function App() {
   const addOtherIncome = (item) => setOtherIncome((prev) => [{ id: uid(), description: item.description || "", amount: Number(item.amount) || 0, date: item.date || todayLocalISO(), sourceType: "general" }, ...prev]);
   const updateOtherIncome = (id, patch) => setOtherIncome((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch, amount: patch.amount != null ? Number(patch.amount) || 0 : e.amount } : e)));
   const removeOtherIncome = (id) => setOtherIncome((prev) => prev.filter((e) => e.id !== id));
+  // ===== MEMBERSHIP FEE PAYMENTS (v1.11.67) =====
+  // Both functions below record a REAL transaction into the EXISTING `otherIncome` ledger (tagged
+  // sourceType:"membership") rather than a new parallel array — section L explicitly wants membership
+  // income flowing into overall Finance without creating a duplicate source of truth, and `otherIncome`
+  // is already exactly "income not tied to any one ก๊วน session" (see its own declaration comment above).
+  // computeFinanceForRange derives a separate membershipIncomeTotal by filtering on sourceType, so it
+  // still shows as its own "รายได้ค่าสมาชิก" line in ภาพรวม without double-counting against "รายได้อื่น".
+  // Recognized on the actual payment date (todayLocalISO, cash-basis) per section M — never spread.
+  const payEntranceFee = (playerId) => {
+    const p = players.find((pl) => pl.id === playerId);
+    // idempotent guard (section T: "guard against accidental duplicate payment-transaction creation where
+    // practical") — a player who is already marked paid can never file a second entrance-fee transaction
+    // through this function, regardless of how many times the UI button is tapped.
+    if (!p || p.entranceFeePaid !== false) return;
+    const dateStr = todayLocalISO();
+    const amount = Math.max(0, Number(settings.membership?.entranceFee?.amount) || 0);
+    setOtherIncome((prev) => [{ id: uid(), description: `ค่าแรกเข้า - ${p.name}`, amount, date: dateStr, sourceType: "membership", playerId, playerName: p.name, membershipType: "entrance" }, ...prev]);
+    setPlayers((prev) => prev.map((pl) => (pl.id === playerId ? { ...pl, entranceFeePaid: true, entranceFeePaidAt: dateStr } : pl)));
+  };
+  // months: 1|3|6|12|custom number of months (section D); annual: true selects the explicit Annual
+  // Package price instead (section F — NEVER computed as monthlyFee × 12). Extension always starts AFTER
+  // the current expiry when still active, or from today when expired/never-enrolled (section E) — computed
+  // ONCE here so the stored payment's own coverage period can never drift from what actually got applied
+  // to the player record.
+  const payMembership = (playerId, { months, annual } = {}) => {
+    const p = players.find((pl) => pl.id === playerId);
+    if (!p) return;
+    const today = todayLocalISO();
+    const rec = settings.membership?.recurring || {};
+    const stillActive = !!(p.membershipExpiry && p.membershipExpiry >= today);
+    const base = stillActive ? p.membershipExpiry : today;
+    // coverage starts the day AFTER the current expiry when extending an active membership (never
+    // discarding remaining time — section E), otherwise starts today — purely descriptive, for
+    // payment-history display only; the actual new expiry is always computed from `base` below.
+    const coverageFrom = stillActive ? addDaysLocalISO(base, 1) : today;
+    let amount, newExpiry, monthsUsed;
+    if (annual) {
+      amount = Math.max(0, Number(rec.annualFee) || 0);
+      newExpiry = addYearsLocalISO(base, 1);
+      monthsUsed = null;
+    } else {
+      monthsUsed = Math.max(1, Math.round(Number(months)) || 1);
+      amount = Math.max(0, Number(rec.monthlyFee) || 0) * monthsUsed;
+      newExpiry = addMonthsLocalISO(base, monthsUsed);
+    }
+    const description = annual ? `ค่าสมาชิกเหมารายปี - ${p.name}` : `ค่าสมาชิก ${monthsUsed} เดือน - ${p.name}`;
+    setOtherIncome((prev) => [{ id: uid(), description, amount, date: today, sourceType: "membership", playerId, playerName: p.name, membershipType: "recurring", annual: !!annual, months: monthsUsed, coverageFrom, coverageTo: newExpiry }, ...prev]);
+    setPlayers((prev) => prev.map((pl) => (pl.id === playerId ? { ...pl, membershipExpiry: newExpiry } : pl)));
+  };
 
   // ---- Tournament ----
   // Tournament objects are assembled fully-formed by TournamentWizard (which calls the pure engine
@@ -5916,7 +6084,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership }} />}
         {tab === "session" && <GameTab
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }}
           summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
@@ -5950,7 +6118,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
@@ -5960,6 +6128,8 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
   const [profilePlayerId, setProfilePlayerId] = useState(null); // v1.11.5: id of player shown in the new Player Profile sheet, or null
   const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false); // v1.11.5: the new ⚙️ ตั้งค่า (general settings, replaces the old skill-only sheet trigger)
+  const [membershipSettingsOpen, setMembershipSettingsOpen] = useState(false); // v1.11.67: "ค่าสมาชิก" — see MembershipSettingsSheet
+  const todayISO = todayLocalISO(); // v1.11.67: computed once per render for every membership-status check on this page (list badges + the sheet)
   // v1.11.34: "ไม่ได้มานาน" filter (spec section 2) — kept as its own toggle chip alongside "เฉพาะที่มา"
   // rather than a new UI row, per spec. Bulk-select mode ("จัดการหลายคน") is likewise an extra state on
   // the SAME list, not a separate screen — selectedIds only has any effect while bulkMode is on.
@@ -6083,8 +6253,20 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         <button onClick={() => setOnlyPresent((v) => !v)} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${onlyPresent ? T.green : T.border}`, background: onlyPresent ? "#e2f5ec" : T.surface, color: onlyPresent ? T.green : T.muted, whiteSpace: "nowrap" }}>เฉพาะที่มา</button>
         <button onClick={() => setOnlyInactive((v) => !v)} title={`ไม่มีประวัติมาร่วมก๊วนเกิน ${settings.inactiveMonths || 6} เดือน (ตั้งค่าได้ที่ ⚙️ ตั้งค่า)`} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${onlyInactive ? T.accent : T.border}`, background: onlyInactive ? "#fdecea" : T.surface, color: onlyInactive ? T.accent : T.muted, whiteSpace: "nowrap" }}>ไม่ได้มานาน</button>
         <button onClick={() => { setBulkMode((v) => !v); setSelectedIds(new Set()); setBulkArchiveResult(null); }} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${bulkMode ? T.green : T.border}`, background: bulkMode ? "#e2f5ec" : T.surface, color: bulkMode ? T.green : T.muted, whiteSpace: "nowrap" }}>{bulkMode ? "เสร็จสิ้น" : "จัดการหลายคน"}</button>
+        {/* v1.11.67 (section A): compact "ค่าสมาชิก" entry point — placed immediately BEFORE ⚙️ ตั้งค่า per
+            spec, same compact chip visual language, so it never clutters the main player screen. */}
+        <button onClick={() => setMembershipSettingsOpen(true)} title="ค่าสมาชิก" style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text, whiteSpace: "nowrap" }}>💳 ค่าสมาชิก</button>
         <button onClick={() => setGeneralSettingsOpen(true)} title="ตั้งค่า" style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text, whiteSpace: "nowrap" }}>⚙️ ตั้งค่า</button>
       </div>
+      {membershipSettingsOpen && (
+        <MembershipSettingsSheet
+          settings={settings} setSettings={setSettings}
+          players={players} otherIncome={otherIncome}
+          payEntranceFee={payEntranceFee} payMembership={payMembership}
+          onOpenProfile={(id) => { setMembershipSettingsOpen(false); setProfilePlayerId(id); }}
+          onClose={() => setMembershipSettingsOpen(false)}
+        />
+      )}
       {bulkMode && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 11px" }}>
           <span style={{ flex: 1, fontSize: 12, fontWeight: 700, color: T.muted }}>เลือกแล้ว {selectedIds.size} คน</span>
@@ -6203,6 +6385,13 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
                 {/* v1.11.5: Member/Guest badge — order is Skill → Hand → Type per spec, informational
                     only (never read by matchmaking/skill/attendance/tournament logic). */}
                 <span style={{ background: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].bg, color: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].label}</span>
+                {/* v1.11.67 (sections G/H): membership alert — shown ONLY for a real exception, and NEVER
+                    more than one at once (getMembershipStatus already enforces the entrance>expired>
+                    expiring_soon priority via early return, so this is a single non-branching lookup, not
+                    re-implemented priority logic). memberType/badge above is completely untouched either
+                    way (section I) — this is purely an ADDITIONAL small chip, never a row-height change
+                    beyond an occasional wrap, same treatment as the existing customWindow chip nearby. */}
+                <MembershipAlertBadge player={p} membershipSettings={settings.membership} todayISO={todayISO} />
                 {/* v1.11.34: small lock indicator — purely visual, so a locked player is recognizable
                     without opening แก้ไขสมาชิก; the actual guard lives in delPlayer/archivePlayer/bulkArchivePlayers. */}
                 {p.isLocked && <span title="ล็อกสมาชิกอยู่" style={{ display: "flex", alignItems: "center", color: "#7c3aed" }}><Lock size={12} /></span>}
@@ -6286,6 +6475,10 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           sessionHistory={sessionHistory}
           tournamentHistory={tournamentHistory}
           session={session}
+          settings={settings}
+          otherIncome={otherIncome}
+          payEntranceFee={payEntranceFee}
+          payMembership={payMembership}
           onEdit={() => { setEditPlayerId(profilePlayerId); setProfilePlayerId(null); }}
           onClose={() => setProfilePlayerId(null)}
         />
@@ -6509,13 +6702,156 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
   );
 }
 
+// v1.11.67 — small "exception only" chip for the main player list (section G/H). A single lookup into
+// the ONE authoritative getMembershipStatus/membershipAlertInfo helper — never re-implements priority
+// logic in JSX, and returns null (no chip at all) for active/not_applicable so healthy or paid-up
+// members, or players in a group with membership tracking off entirely, never get a badge.
+function MembershipAlertBadge({ player, membershipSettings, todayISO }) {
+  const { status, remainingDays } = membershipAlertInfo(player, membershipSettings, todayISO);
+  if (status === "entrance_fee_due") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#c0392b", whiteSpace: "nowrap" }}>🔴 ยังไม่ชำระค่าแรกเข้า</span>;
+  if (status === "expired") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#c0392b", whiteSpace: "nowrap" }}>🔴 สมาชิกหมดอายุ</span>;
+  if (status === "expiring_soon") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#b8720a", whiteSpace: "nowrap" }}>🟠 สมาชิกใกล้หมดอายุ{remainingDays != null ? ` · เหลือ ${remainingDays} วัน` : ""}</span>;
+  return null;
+}
+// v1.11.67 — records ONE real transaction (section J/T: never a bare flag flip, guarded against
+// duplicate submission by disabling every action the instant one is tapped). Reused from both
+// MembershipSettingsSheet's exception list and PlayerProfileSheet's membership block (section K: the
+// EXISTING detail/action flow), so there is exactly one payment UI in the whole app, not two.
+function MembershipPaymentSheet({ player, membershipSettings, payEntranceFee, payMembership, onClose }) {
+  const ms = membershipSettings || DEFAULT_MEMBERSHIP_SETTINGS;
+  const [submitting, setSubmitting] = useState(false);
+  // v1.11.67 (section T): a plain useState flag is NOT enough to guard against a genuine rapid
+  // double-tap — two click handlers fired in the same synchronous tick both close over the SAME
+  // `submitting === false` value from this render (React state updates are asynchronous/batched), so
+  // both would pass a `if (submitting) return` check before either re-render lands. A ref updates
+  // synchronously and is shared across both calls immediately, so it actually stops the second tap.
+  const submittingRef = useRef(false);
+  const [customMonths, setCustomMonths] = useState("");
+  const owesEntrance = !!(ms.entranceFee.enabled && player.entranceFeePaid === false);
+  const recurringOn = !!ms.recurring.enabled;
+  const guard = (fn) => { if (submittingRef.current) return; submittingRef.current = true; setSubmitting(true); fn(); onClose(); };
+  const chipBtn = { padding: "10px 8px", borderRadius: 11, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 12.5, fontWeight: 800, flex: "1 1 76px" };
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 4 }}>บันทึกชำระเงิน</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>{player.name}</div>
+      {owesEntrance && (
+        <>
+          <Label>ค่าแรกเข้า</Label>
+          <button disabled={submitting} onClick={() => guard(() => payEntranceFee(player.id))} style={{ ...btnPrimary, width: "100%", marginBottom: 18, opacity: submitting ? 0.6 : 1 }}>
+            ชำระค่าแรกเข้า ({formatCurrency(ms.entranceFee.amount)})
+          </button>
+        </>
+      )}
+      {recurringOn && (
+        <>
+          <Label>ค่าสมาชิก (ต่ออายุจากวันหมดอายุปัจจุบัน ถ้ายังไม่หมดอายุ)</Label>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+            {[1, 3, 6, 12].map((n) => (
+              <button key={n} disabled={submitting} onClick={() => guard(() => payMembership(player.id, { months: n }))} style={{ ...chipBtn, opacity: submitting ? 0.6 : 1 }}>
+                {n} เดือน<br /><span style={{ fontWeight: 700, color: T.muted, fontSize: 11 }}>{formatCurrency((Number(ms.recurring.monthlyFee) || 0) * n)}</span>
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <input type="number" min="1" value={customMonths} onChange={(e) => setCustomMonths(e.target.value)} placeholder="กำหนดเอง (จำนวนเดือน)" style={{ flex: 1, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, boxSizing: "border-box" }} />
+            <button disabled={submitting || !(Math.round(Number(customMonths)) > 0)} onClick={() => guard(() => payMembership(player.id, { months: Math.round(Number(customMonths)) }))} style={{ padding: "0 16px", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontWeight: 800, fontSize: 13, opacity: submitting || !(Math.round(Number(customMonths)) > 0) ? 0.5 : 1 }}>ชำระ</button>
+          </div>
+          <button disabled={submitting} onClick={() => guard(() => payMembership(player.id, { annual: true }))} style={{ width: "100%", padding: "11px 0", borderRadius: 11, border: `1.5px solid ${T.green}`, background: "#e2f5ec", color: T.green, fontWeight: 800, fontSize: 13.5, marginBottom: 18, opacity: submitting ? 0.6 : 1 }}>
+            เหมารายปี ({formatCurrency(ms.recurring.annualFee)})
+          </button>
+        </>
+      )}
+      {!owesEntrance && !recurringOn && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "14px 0" }}>ไม่มีรายการที่ต้องชำระ</div>}
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+    </Overlay>
+  );
+}
+// v1.11.67 (section A/B/C/D/G/K) — the "ค่าสมาชิก" entry point on the ผู้เล่น page: club-wide config
+// (Entrance Fee / Recurring Membership, independently toggleable per section B) plus an "exceptions only"
+// list (same priority/definition as the main list's chip — never re-implemented here) with a one-tap
+// route into MembershipPaymentSheet. Config lives inside `settings.membership`, so it is automatically
+// per-group (saveGroupDefault/applyGroupDefaultsFor already bundle the whole `settings` object — section N).
+function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFee, payMembership, onOpenProfile, onClose }) {
+  const ms = settings.membership || DEFAULT_MEMBERSHIP_SETTINGS;
+  const todayISO = todayLocalISO();
+  const [payFor, setPayFor] = useState(null);
+  const patchMembership = (patch) => setSettings((s) => ({ ...s, membership: { ...(s.membership || DEFAULT_MEMBERSHIP_SETTINGS), ...patch } }));
+  const patchEntrance = (patch) => patchMembership({ entranceFee: { ...ms.entranceFee, ...patch } });
+  const patchRecurring = (patch) => patchMembership({ recurring: { ...ms.recurring, ...patch } });
+  const toggleBtn = (on) => ({ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: on ? "#e2f5ec" : T.surface, border: `1.5px solid ${on ? T.green : T.border}`, color: on ? T.green : T.text, fontSize: 13, fontWeight: 800, marginBottom: 10 });
+  const numInput = { width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, boxSizing: "border-box", marginBottom: 14 };
+  const rows = useMemo(() => (players || []).map((p) => ({ p, ...membershipAlertInfo(p, ms, todayISO) })), [players, ms, todayISO]);
+  const exceptions = rows.filter((r) => r.status === "entrance_fee_due" || r.status === "expired" || r.status === "expiring_soon");
+  const payTarget = payFor && (players || []).find((p) => p.id === payFor);
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>💳 ค่าสมาชิก</div>
+
+      <Label>ค่าแรกเข้า (Entrance Fee)</Label>
+      <button onClick={() => patchEntrance({ enabled: !ms.entranceFee.enabled })} style={toggleBtn(ms.entranceFee.enabled)}>{ms.entranceFee.enabled ? "✓ เปิดใช้งาน" : "ปิดใช้งาน (แตะเพื่อเปิด)"}</button>
+      {ms.entranceFee.enabled && (
+        <input type="number" min="0" value={ms.entranceFee.amount} onChange={(e) => patchEntrance({ amount: Math.max(0, Number(e.target.value) || 0) })} placeholder="จำนวนเงิน (฿/คน)" style={numInput} />
+      )}
+
+      <Label>ค่าสมาชิกรายเดือน/รายปี (Recurring Membership)</Label>
+      <button onClick={() => patchRecurring({ enabled: !ms.recurring.enabled })} style={toggleBtn(ms.recurring.enabled)}>{ms.recurring.enabled ? "✓ เปิดใช้งาน" : "ปิดใช้งาน (แตะเพื่อเปิด)"}</button>
+      {ms.recurring.enabled && (
+        <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 5 }}>รายเดือน (฿/เดือน)</div>
+              <input type="number" min="0" value={ms.recurring.monthlyFee} onChange={(e) => patchRecurring({ monthlyFee: Math.max(0, Number(e.target.value) || 0) })} style={{ ...numInput, marginBottom: 0 }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 5 }}>รายปี (฿/ปี, ราคาเหมา)</div>
+              <input type="number" min="0" value={ms.recurring.annualFee} onChange={(e) => patchRecurring({ annualFee: Math.max(0, Number(e.target.value) || 0) })} style={{ ...numInput, marginBottom: 0 }} />
+            </div>
+          </div>
+        </>
+      )}
+
+      <Label>เตือนล่วงหน้าก่อนหมดอายุ (วัน)</Label>
+      <input type="number" min="1" value={ms.expiryWarningDays} onChange={(e) => patchMembership({ expiryWarningDays: Math.max(1, Number(e.target.value) || 7) })} style={numInput} />
+
+      {(ms.entranceFee.enabled || ms.recurring.enabled) && (
+        <>
+          <SectionHead title="สมาชิกที่ต้องดำเนินการ" sub={`${exceptions.length} คน`} />
+          {exceptions.length === 0 ? (
+            <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "16px 0", marginBottom: 8 }}>ไม่มีสมาชิกที่ต้องดำเนินการ</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
+              {exceptions.map(({ p, status, remainingDays }) => (
+                <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}` }}>
+                  <Avatar p={p} size={36} />
+                  <button onClick={() => onOpenProfile(p.id)} style={{ flex: 1, minWidth: 0, textAlign: "left", border: "none", background: "none", padding: 0, cursor: "pointer" }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.text }}>{p.name}</div>
+                    <MembershipAlertBadge player={p} membershipSettings={ms} todayISO={todayISO} />
+                  </button>
+                  <button onClick={() => setPayFor(p.id)} style={{ flexShrink: 0, padding: "7px 11px", borderRadius: 10, background: T.green, border: "none", color: "#fff", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" }}>บันทึกชำระเงิน</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+
+      {payTarget && (
+        <MembershipPaymentSheet player={payTarget} membershipSettings={ms} payEntranceFee={payEntranceFee} payMembership={payMembership} onClose={() => setPayFor(null)} />
+      )}
+    </Overlay>
+  );
+}
+
 // v1.11.5: read-only Player Profile — opened by tapping a member's name on the main list (replacing the
 // old direct-to-edit behavior; "แก้ไข" here reopens the exact same EditPlayerModal, unchanged). Stats are
 // ALL-TIME (unlike SummaryTab's per-player detail drill-down, which is scoped to just today's session) —
 // reuses the existing playerStats/tournamentStatsForPlayer functions rather than reinventing counting
 // logic, so the "no-result matches never distort Win Rate" rule already built into playerStats (decided
 // = win+loss, noScore/draw excluded) is inherited for free.
-function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory, tournamentHistory, session, onEdit, onClose }) {
+function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory, tournamentHistory, session, settings, otherIncome, payEntranceFee, payMembership, onEdit, onClose }) {
   const [showPhoto, setShowPhoto] = useState(false);
   const [showHistory, setShowHistory] = useState(false); // v1.11.8: "ดูประวัติการเล่น" drill-down sheet
   // all-time casual matches this player could appear in: today's completed matches (history + any
@@ -6562,6 +6898,15 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
   }).length, [sessionHistory, p.id]);
   const hand = p.handedness === "left" ? "left" : "right";
   const mtype = p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member";
+  // v1.11.67 (section K): membership info/history reached from this EXISTING detail sheet — no new
+  // per-row control on the main list. Single source of truth (getMembershipStatus via membershipAlertInfo)
+  // and the SAME MembershipPaymentSheet used from MembershipSettingsSheet, so there is one payment UI.
+  const [showMembershipPay, setShowMembershipPay] = useState(false);
+  const ms = settings?.membership || DEFAULT_MEMBERSHIP_SETTINGS;
+  const todayISO = todayLocalISO();
+  const { status: mStatus, remainingDays: mRemainingDays } = membershipAlertInfo(p, ms, todayISO);
+  const membershipTrackingOn = ms.entranceFee.enabled || ms.recurring.enabled;
+  const paymentHistory = useMemo(() => (otherIncome || []).filter((e) => e.sourceType === "membership" && e.playerId === p.id).sort((a, b) => (b.date || "").localeCompare(a.date || "")), [otherIncome, p.id]);
   return (
     <Overlay onClose={onClose}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
@@ -6581,6 +6926,46 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
         </div>
         <button onClick={onEdit} title="แก้ไขสมาชิก" style={{ flexShrink: 0, padding: "7px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>✎ แก้ไข</button>
       </div>
+
+      {membershipTrackingOn && (
+        <>
+          <SectionHead icon={<span style={{ fontSize: 15 }}>💳</span>} title="ค่าสมาชิก" />
+          <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, marginBottom: 6 }}>
+              <span style={{ color: T.muted }}>ค่าแรกเข้า</span>
+              <span style={{ fontWeight: 800, color: ms.entranceFee.enabled && p.entranceFeePaid === false ? "#c0392b" : T.green }}>
+                {!ms.entranceFee.enabled ? "ไม่ใช้งาน" : p.entranceFeePaid === false ? "ยังไม่ชำระ" : `ชำระแล้ว${p.entranceFeePaidAt ? ` (${p.entranceFeePaidAt})` : ""}`}
+              </span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5 }}>
+              <span style={{ color: T.muted }}>สถานะสมาชิก</span>
+              <span style={{ fontWeight: 800, color: mStatus === "expired" || mStatus === "entrance_fee_due" ? "#c0392b" : mStatus === "expiring_soon" ? "#b8720a" : T.green }}>
+                {!ms.recurring.enabled ? "ไม่ใช้งาน"
+                  : !p.membershipExpiry ? "ยังไม่ได้สมัครสมาชิก"
+                  : mStatus === "expired" ? `หมดอายุแล้ว (${p.membershipExpiry})`
+                  : mStatus === "expiring_soon" ? `ใกล้หมดอายุ · เหลือ ${mRemainingDays} วัน (${p.membershipExpiry})`
+                  : `ใช้งานถึง ${p.membershipExpiry}`}
+              </span>
+            </div>
+            {(mStatus === "entrance_fee_due" || mStatus === "expired" || mStatus === "expiring_soon" || ms.recurring.enabled) && (
+              <button onClick={() => setShowMembershipPay(true)} style={{ width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 10, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>บันทึกชำระเงิน</button>
+            )}
+            {paymentHistory.length > 0 && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 6 }}>ประวัติการชำระ</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                  {paymentHistory.map((e) => (
+                    <div key={e.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
+                      <span style={{ color: T.muted }}>{e.date} · {e.description}</span>
+                      <span style={{ fontWeight: 700 }}>{formatCurrency(e.amount)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
 
       <SectionHead icon={<ClipboardList size={16} color={T.green} />} title="สถิติผู้เล่น" />
       <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
@@ -6622,6 +7007,15 @@ function PlayerProfileSheet({ player: p, getP, history, current, sessionHistory,
           partnerRecord={cs.partnerRecord}
           getP={getP}
           onClose={() => setShowHistory(false)}
+        />
+      )}
+      {showMembershipPay && (
+        <MembershipPaymentSheet
+          player={p}
+          membershipSettings={ms}
+          payEntranceFee={payEntranceFee}
+          payMembership={payMembership}
+          onClose={() => setShowMembershipPay(false)}
         />
       )}
     </Overlay>
@@ -10640,7 +11034,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
                 <DayChipRow dates={datesInDayYm} selected={effectiveDate} onSelect={setSelectedDate} />
                 <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>{fmtThaiDateFull(effectiveDate)}</div>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinanceGroupsList title="ก๊วนในวันนี้" sessions={f.sessionsInRange} onOpen={setOpenId} />
                 {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในวันนี้" tournaments={f.tournamentsInRange} />}
@@ -10665,7 +11059,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
             return (
               <>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinancePerformanceList title="ผลประกอบการรายวัน" rows={days.map((d) => ({ key: d.date, label: fmtThaiMonthDay(d.date), count: d.sessionCount, profit: d.profit }))} onPick={goDay} />
                 {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในเดือนนี้" tournaments={f.tournamentsInRange} />}
@@ -10692,7 +11086,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
             return (
               <>
                 <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
                 {discountRow}
                 <FinancePerformanceList title="ผลประกอบการรายเดือน" rows={months.map((m) => ({ key: m.ym, label: fmtThaiMonthLabel(m.ym), count: null, profit: m.profit }))} onPick={goMonth} />
                 {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในช่วงนี้" tournaments={f.tournamentsInRange} />}
@@ -10912,6 +11306,7 @@ function FinancePrintView({ report, onClose }) {
           rows={[
             ["รายได้จากการจัดก๊วน", <span style={{ color: "#12986a" }}>{formatCurrency(report.pnl.groupRevenue)}</span>],
             ...(report.pnl.tournamentIncome > 0 ? [["รายได้จากการจัด Tournament", <span style={{ color: "#12986a" }}>{formatCurrency(report.pnl.tournamentIncome)}</span>]] : []),
+            ...(report.pnl.membershipIncome > 0 ? [["รายได้ค่าสมาชิก", <span style={{ color: "#12986a" }}>{formatCurrency(report.pnl.membershipIncome)}</span>]] : []),
             ["รายได้อื่น", <span style={{ color: "#12986a" }}>{formatCurrency(report.pnl.otherIncome)}</span>],
             ["รายได้รวม", <span style={{ color: "#12986a", fontWeight: 800 }}>{formatCurrency(report.pnl.totalRevenue)}</span>],
             ...expenseRows.map(([cat, amt]) => [cat, <span style={{ color: "#ef5a44" }}>{formatCurrency(amt)}</span>]),
@@ -11230,7 +11625,7 @@ function FinanceSummaryCard({ revenue, expense, profit }) {
 }
 
 // สรุปกำไรขาดทุน — same P&L shape at every period level (Requirement 5/7/10), one shared renderer
-function FinancePL({ sessionRevenueTotal, otherIncomeTotal, tournamentIncomeTotal, shuttlecockRevenueTotal, catTotals, expense, profit }) {
+function FinancePL({ sessionRevenueTotal, otherIncomeTotal, membershipIncomeTotal, tournamentIncomeTotal, shuttlecockRevenueTotal, catTotals, expense, profit }) {
   // v1.11.41: the "ค่าลูกแบต" expense category already flows through catTotals below (same category string
   // the legacy shuttleCalc line always used — see computeCostModelExpenses) — reused here (not re-summed
   // separately) so this ONE number always matches what's shown/exported in the expense breakdown too.
@@ -11250,7 +11645,11 @@ function FinancePL({ sessionRevenueTotal, otherIncomeTotal, tournamentIncomeTota
         {/* v1.11.41: ต้นทุน/ราคาขายลูกแบดต่อลูก — a NEW, separate revenue line (never folded into "ค่าก๊วน"
             or the flat ค่าลูก/เกม player charge above it) per explicit organizer decision. */}
         {shuttlecockRevenueTotal > 0 && <BillRow label="รายได้ค่าลูกแบด" v={shuttlecockRevenueTotal} kind="revenue" />}
-        <BillRow label="รายได้อื่น" v={otherIncomeTotal} kind="revenue" />
+        {/* v1.11.67: membership payments already flow into otherIncomeTotal (below) exactly like before —
+            this is purely a DISPLAY split so a group using the new Membership Fee feature can see it as
+            its own line instead of it disappearing into "รายได้อื่น" (section L). */}
+        {(membershipIncomeTotal || 0) > 0 && <BillRow label="รายได้ค่าสมาชิก" v={membershipIncomeTotal} kind="revenue" />}
+        <BillRow label="รายได้อื่น" v={otherIncomeTotal - (membershipIncomeTotal || 0)} kind="revenue" />
         <div style={{ height: 4 }} />
         {Object.keys(catTotals).length === 0
           ? <div style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>ไม่มีค่าใช้จ่ายในช่วงนี้</div>
