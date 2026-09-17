@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.71";
+const APP_VERSION = "1.11.72";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -996,7 +996,12 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
   const minGamesPerPerson = Number(settings && settings.minGamesPerPerson) > 0 ? Number(settings.minGamesPerPerson) : 4;
   // v1.11.12: per-match time = เวลาเฉลี่ยต่อ 1 เซต (the ONE user-facing setting) × the expected number of sets
   // for the group's EXISTING จำนวนเซต format (settings.rounds) — never a second, duplicate "sets/game" field.
-  const averageSetMinutes = Number(settings && settings.averageSetMinutes) > 0 ? Number(settings.averageSetMinutes) : 15;
+  // v1.11.72: the FALLBACK used before the organizer ever customizes this field is now mode-aware instead of
+  // a single flat 15 min/set for both — 21-point doubles rallies run longer (more court to cover per point)
+  // than singles, so a flat number understated doubles duration and understated how many courts were really
+  // needed. Once the organizer sets their own averageSetMinutes it always wins, same as before.
+  const defaultSetMinutes = matchMode === "singles" ? 20.5 : 22.5; // 18-23 singles / 20-25 doubles per set
+  const averageSetMinutes = Number(settings && settings.averageSetMinutes) > 0 ? Number(settings.averageSetMinutes) : defaultSetMinutes;
   const configuredMinutes = averageSetMinutes * expectedSetsFor(settings && settings.rounds);
   // still prefer this group's own real historical average match duration once enough reliable samples
   // exist (unchanged from v1.11.7 Part L) — the setting above is both the fallback AND stays fully in the
@@ -1037,34 +1042,85 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
     const gamesPerCourt = avgMatchMinutes > 0 ? effectiveMinutes / avgMatchMinutes : 0;
     const cap = physicalMaxCourts(active, playersPerCourt);
     let courts;
+    let minCourts; // v1.11.72: the min_games-only answer, kept separate from `courts` for the "ขั้นต่ำ/แนะนำ" UI
     if (goal === "min_games") {
       // this bucket's share of demand = sum of each present player's (total target ÷ their own attendance
       // duration) × this bucket's length — NOT `minGamesPerPerson × active` (that was the bug).
       const demand = activeEntries.reduce((s, a) => s + a.minGamesRate * bucketMinutes, 0);
       const capacityPerCourt = gamesPerCourt * playersPerCourt;
       const needed = capacityPerCourt > 0 ? Math.ceil(demand / capacityPerCourt) : 0;
-      courts = cap === 0 ? 0 : Math.max(1, Math.min(needed, cap));
+      minCourts = cap === 0 ? 0 : Math.max(1, Math.min(needed, cap));
+      // v1.11.72: "เล่นอย่างน้อย X เกม/คน" alone can be satisfied by a court count so small that most
+      // registered players are standing around at once (e.g. games/person clears on paper at 3 courts while
+      // 18 of 30 players wait simultaneously) — mathematically correct, poor real experience. `courts` is now
+      // the LARGER of (a) the games/person answer above and (b) the courts needed to keep this bucket's
+      // expected wait within the EXISTING settings.maxWaitMinutes ceiling (no new setting — this field
+      // already exists, already defaults to 30 min) — so it never recommends FEWER courts than the
+      // games/person target requires, only possibly more when waiting would otherwise be excessive.
+      const waitCourts = cap === 0 ? 0 : courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, maxWaitMinutes);
+      courts = cap === 0 ? 0 : Math.max(minCourts, Math.min(waitCourts, cap));
     } else {
       courts = cap === 0 ? 0 : Math.min(courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, maxWaitMinutes), cap);
+      minCourts = courts;
     }
     const playerGameSlots = gamesPerCourt * playersPerCourt * courts;
     const expectedGamesPerPlayer = active > 0 ? playerGameSlots / active : 0;
     const playing = playersPerCourt * courts;
     const waiting = Math.max(0, active - playing);
     const estimatedWaitMinutes = playing > 0 ? (waiting / playing) * (avgMatchMinutes / COURT_UTILIZATION) : null;
-    buckets.push({ start: bStart, end: bEnd, active, courts, expectedGamesPerPlayer, estimatedWaitMinutes });
+    buckets.push({ start: bStart, end: bEnd, active, courts, minCourts, expectedGamesPerPlayer, estimatedWaitMinutes });
   }
   const merged = [];
   for (const b of buckets) {
     const last = merged[merged.length - 1];
     if (last && last.courts === b.courts) {
       last.end = b.end; last.active = Math.max(last.active, b.active);
+      last.minCourts = Math.max(last.minCourts, b.minCourts);
       last.expectedGamesPerPlayer = (last.expectedGamesPerPlayer + b.expectedGamesPerPlayer) / 2;
       last.estimatedWaitMinutes = last.estimatedWaitMinutes == null ? b.estimatedWaitMinutes : (b.estimatedWaitMinutes == null ? last.estimatedWaitMinutes : (last.estimatedWaitMinutes + b.estimatedWaitMinutes) / 2);
     } else merged.push({ ...b });
   }
   const courtHoursTotal = buckets.reduce((s, b) => s + (b.courts * (b.end - b.start)) / 60, 0);
   return { totalRegistered, buckets, merged, goal, maxWaitMinutes, minGamesPerPerson, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal, startMin, endMin, playersPerCourt };
+}
+// v1.11.72: pure helper for the detail-sheet "เทียบจำนวนสนาม" comparison table — for a small range of
+// candidate court counts around the busiest period, estimates players playing/waiting simultaneously,
+// expected games/person, and expected wait, so the organizer can see the actual trade-off instead of only
+// the single recommended number. Uses the busiest MERGED bucket (`peakBucket`, largest `active`) as the
+// representative period — this keeps the table meaningful even when attendance ramps up/down over the
+// session, and mirrors how the spec's own worked examples reason "court by court". Decision support only —
+// never writes to courtCount. Pure/no side effects; returns [] when there's no peak period to compare.
+function courtRecommendationCandidates(peakBucket, playersPerCourt, avgMatchMinutes, minGamesPerPerson, maxWaitMinutes) {
+  if (!peakBucket || !(peakBucket.active > 0) || !(avgMatchMinutes > 0)) return [];
+  const active = peakBucket.active;
+  const bucketMinutes = Math.max(0, peakBucket.end - peakBucket.start);
+  const effectiveMinutes = bucketMinutes * COURT_UTILIZATION;
+  const cap = physicalMaxCourts(active, playersPerCourt);
+  if (cap === 0) return [];
+  const gamesPerCourt = avgMatchMinutes > 0 ? effectiveMinutes / avgMatchMinutes : 0;
+  const all = [];
+  for (let courts = 1; courts <= cap; courts++) {
+    const playing = Math.min(active, playersPerCourt * courts);
+    const waiting = Math.max(0, active - playing);
+    const expectedGamesPerPlayer = active > 0 ? (gamesPerCourt * playersPerCourt * courts) / active : 0;
+    const estimatedWaitMinutes = playing > 0 ? (waiting / playing) * (avgMatchMinutes / COURT_UTILIZATION) : 0;
+    all.push({ courts, playing, waiting, expectedGamesPerPlayer, estimatedWaitMinutes });
+  }
+  // smallest court count that clears the games/person bar — shown to the organizer as "ขั้นต่ำ", distinct
+  // from the LARGER "แนะนำ" value the main engine already computes (which also accounts for waiting).
+  const minFeasible = (all.find((c) => c.expectedGamesPerPlayer >= minGamesPerPerson - 0.05) || all[all.length - 1]).courts;
+  // only show courts >= minFeasible (every displayed row already clears the games/person bar, so the table's
+  // "≥N เกม/คน" column can show the one constant target rather than each row's own exact achieved number —
+  // matches the spec mockup, where every row repeats the same "≥4 เกม/คน" text), capped to a few rows.
+  const hi = Math.min(cap, minFeasible + 3);
+  return all.filter((c) => c.courts >= minFeasible && c.courts <= hi).map((c) => {
+    let waitLabel;
+    if (c.waiting === 0 || c.estimatedWaitMinutes <= maxWaitMinutes * 0.25) waitLabel = "รอน้อย";
+    else if (c.estimatedWaitMinutes <= maxWaitMinutes * 0.6) waitLabel = "เหมาะสม";
+    else if (c.estimatedWaitMinutes <= maxWaitMinutes) waitLabel = "ปานกลาง";
+    else waitLabel = "รอนาน";
+    return { ...c, minFeasible, meetsMinGames: c.courts >= minFeasible, waitLabel };
+  });
 }
 // ===================== CURRENCY (v1.9.1) =====================
 // single source of truth for every money display in the app (Finance/Payment/Historical/Discount Credits)
@@ -10158,6 +10214,18 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
   const [editCourtLabels, setEditCourtLabels] = useState(false);
   const [showCourtRecDetail, setShowCourtRecDetail] = useState(false); // v1.11.7 (Part I/J)
   const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
+  // v1.11.72: busiest merged period (largest `active`) — used to surface a one-line games/wait summary on
+  // the compact card itself (per spec mockup: "ประมาณ 4-5 เกม/คน · รอเฉลี่ย ~XX นาที"), and as the
+  // representative period for the detail sheet's candidate comparison table below.
+  const peakBucket = useMemo(() => courtRec.merged.reduce((best, b) => (!best || b.active > best.active ? b : best), null), [courtRec.merged]);
+  // v1.11.72: the per-bucket expectedGamesPerPlayer above is only that 30-min slice's own share (pre-existing
+  // v1.11.12 behavior, unchanged) — for the compact card's whole-attendance-window summary we want the
+  // candidate table's whole-period estimate for the SAME court count BadQ is recommending for this period.
+  const peakCandidate = useMemo(() => {
+    if (courtRec.goal !== "min_games" || !peakBucket) return null;
+    const list = courtRecommendationCandidates(peakBucket, courtRec.playersPerCourt, courtRec.avgMatchMinutes, courtRec.minGamesPerPerson, courtRec.maxWaitMinutes);
+    return list.find((c) => c.courts === peakBucket.courts) || null;
+  }, [courtRec, peakBucket]);
   // v1.11.36: the lock/avoid pair editor's dropdowns must only offer people actually here THIS session, not
   // the full permanent member list (see isSessionAttendee) — computed here, once, and threaded down as a
   // separate `attendees` prop so LockPairEditor's own existing-rule display (which must still resolve/show
@@ -10248,6 +10316,13 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
                     </div>
                   ))}
                 </div>
+                {courtRec.goal === "min_games" && peakBucket && peakBucket.courts > 0 && peakCandidate && (
+                  <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 6 }}>
+                    ประมาณ {Math.max(courtRec.minGamesPerPerson, Math.floor(peakCandidate.expectedGamesPerPlayer))}–{Math.max(courtRec.minGamesPerPerson, Math.ceil(peakCandidate.expectedGamesPerPlayer))} เกม/คน
+                    {` · รอเฉลี่ย ~${Math.round(peakCandidate.estimatedWaitMinutes)} นาที`}
+                    {peakBucket.minCourts < peakBucket.courts && ` · ขั้นต่ำ ${peakBucket.minCourts} สนาม / แนะนำ ${peakBucket.courts} สนาม`}
+                  </div>
+                )}
                 <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 10 }}>รวม {Math.round(courtRec.courtHoursTotal * 10) / 10} Court-hours (ประมาณการ)</div>
               </>
             )}
@@ -10303,6 +10378,12 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
 function CourtRecommendationDetailSheet({ players, session, settings, setSettings, sessionHistory, courtCount, mode, onClose }) {
   const [showCalcSettings, setShowCalcSettings] = useState(false);
   const rec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
+  // v1.11.72: busiest merged period, used as the representative period for the candidate comparison table.
+  const peakBucket = useMemo(() => rec.merged.reduce((best, b) => (!best || b.active > best.active ? b : best), null), [rec.merged]);
+  const candidates = useMemo(
+    () => (rec.goal === "min_games" ? courtRecommendationCandidates(peakBucket, rec.playersPerCourt, rec.avgMatchMinutes, rec.minGamesPerPerson, rec.maxWaitMinutes) : []),
+    [rec, peakBucket]
+  );
   const sessionMinutes = Math.max(0, (rec.endMin || 0) - (rec.startMin || 0));
   const actualCourtHours = (courtCount * sessionMinutes) / 60;
   const diffCourtHours = Math.round((actualCourtHours - rec.courtHoursTotal) * 10) / 10;
@@ -10376,6 +10457,32 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
       )}
 
       <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>รวม {Math.round(rec.courtHoursTotal * 10) / 10} Court-hours (ประมาณการ)</div>
+
+      {/* v1.11.72: "เล่นอย่างน้อย X เกม/คน" alone can pick a court count so small that many players wait at
+          once — this table shows the actual trade-off (≥ games/person is already guaranteed on every row
+          shown; what changes is how much waiting) for the busiest period, so "ขั้นต่ำ" (smallest court count
+          that clears the games/person bar) and "แนะนำ" (BadQ's own pick, which also limits waiting) are
+          visibly two different, calculated — never hardcoded — numbers. Decision support only. */}
+      {candidates.length > 0 && (
+        <>
+          <SectionHead icon={<span style={{ fontSize: 14 }}>⚖️</span>} title="เทียบจำนวนสนาม (ช่วงที่คนเยอะที่สุด)" />
+          <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+            {candidates.map((c) => {
+              const isRecommended = peakBucket && c.courts === peakBucket.courts;
+              return (
+                <div key={c.courts} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: isRecommended ? T.surface2 : "transparent", border: `1px solid ${isRecommended ? T.border : "transparent"}`, borderRadius: 9, padding: "6px 10px", fontSize: 12.5 }}>
+                  <span style={{ fontWeight: 700 }}>{c.courts} สนาม</span>
+                  <span style={{ color: T.muted }}>≥{rec.minGamesPerPerson} เกม/คน</span>
+                  <span style={{ fontWeight: 700 }}>{c.waitLabel}{isRecommended ? " ⭐" : ""}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 16 }}>
+            ขั้นต่ำ {candidates[0].minFeasible} สนาม (พอครบเกม/คนขั้นต่ำ) / แนะนำ {peakBucket ? peakBucket.courts : candidates[0].minFeasible} สนาม (ครบเกม/คน และลดเวลารอ)
+          </div>
+        </>
+      )}
 
       <SectionHead icon={<span style={{ fontSize: 14 }}>📋</span>} title="จองจริง เทียบกับ BadQ แนะนำ" />
       <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: 12, marginBottom: 16, fontSize: 12.5 }}>
