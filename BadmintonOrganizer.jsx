@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.68";
+const APP_VERSION = "1.11.69";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -363,6 +363,96 @@ function courtLabelFor(labels, idx) {
 function rectOf(el) {
   const r = el.getBoundingClientRect();
   return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, width: r.width };
+}
+// v1.11.69 (Score Popup Mobile Overflow Fix): the ใส่ผล popover used to anchor its horizontal position
+// straight off the tapped button's own on-screen rect (`right: window.innerWidth - rect.right`) — fine
+// while that button happens to sit near the table's right edge, but the unified match table scrolls
+// horizontally on mobile, so the SAME button can end up anywhere across the screen depending on scroll
+// position. Once the button lands far enough left, that anchor math pushes the (fixed 270px-wide) popup's
+// LEFT edge past x=0 — clipped off-screen with no way to reach it (the exact bug reported). Root cause:
+// the popup's horizontal placement was tied to the table's scroll-dependent anchor instead of the actual
+// visible viewport.
+//
+// Fix: measure the popup's own rendered size after mount, then clamp its position so it always sits fully
+// inside the CURRENT visible viewport with a safe margin. On narrow screens it's centered on the viewport
+// itself, completely ignoring the anchor/table-scroll position (so scrolling the table left/right can never
+// drag the popup along with it); on wider screens it keeps the familiar "hangs off the tapped row" placement,
+// just clamped instead of trusted blindly. Also tracks window.visualViewport (where supported) so the
+// on-screen iOS keyboard shrinking the visible area re-clamps the popup instead of letting part of it drift
+// under/behind the keyboard. Pure positioning wrapper — everything inside (ScoreEditor's own draft/commit
+// logic, incl. the v1.11.64 keyboard/focus fix) is untouched.
+const SCORE_POPOVER_MARGIN = 12;
+const SCORE_POPOVER_BOTTOM_SAFE_PAD = 8; // extra cushion for the iOS home-indicator safe area
+const SCORE_POPOVER_NARROW_BREAKPOINT = 640;
+const SCORE_POPOVER_WIDTH = 270;
+function ScorePopover({ anchorRect, children }) {
+  const elRef = useRef(null);
+  const [style, setStyle] = useState({ position: "fixed", top: anchorRect.bottom + 4, left: SCORE_POPOVER_MARGIN, visibility: "hidden" });
+
+  useLayoutEffect(() => {
+    const reposition = () => {
+      const el = elRef.current;
+      if (!el) return;
+      const vv = window.visualViewport;
+      const vw = vv ? vv.width : window.innerWidth;
+      const vh = vv ? vv.height : window.innerHeight;
+      const voX = vv ? vv.offsetLeft : 0;
+      const voY = vv ? vv.offsetTop : 0;
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      const narrow = vw < SCORE_POPOVER_NARROW_BREAKPOINT;
+
+      // Horizontal: centered on the viewport when narrow (never anchored to the scrollable table), else
+      // clamped near the tapped row's own right edge.
+      let left = narrow ? voX + (vw - w) / 2 : anchorRect.right - w;
+      left = Math.max(voX + SCORE_POPOVER_MARGIN, Math.min(left, voX + vw - w - SCORE_POPOVER_MARGIN));
+
+      // Vertical: prefer just under the row; flip above it if there's no room below; otherwise clamp so it
+      // still lands fully on-screen (e.g. once the iOS keyboard has eaten most of the visible height).
+      let top = anchorRect.bottom + 4;
+      const bottomLimit = voY + vh - h - SCORE_POPOVER_MARGIN - SCORE_POPOVER_BOTTOM_SAFE_PAD;
+      if (top > bottomLimit) {
+        const above = anchorRect.top - 4 - h;
+        top = above >= voY + SCORE_POPOVER_MARGIN ? above : bottomLimit;
+      }
+      top = Math.max(voY + SCORE_POPOVER_MARGIN, top);
+
+      setStyle({
+        position: "fixed", top, left,
+        width: narrow ? vw - SCORE_POPOVER_MARGIN * 2 : SCORE_POPOVER_WIDTH,
+        maxWidth: SCORE_POPOVER_WIDTH,
+        maxHeight: vh - SCORE_POPOVER_MARGIN * 2,
+        overflowY: "auto",
+        visibility: "visible",
+      });
+    };
+    reposition();
+    window.addEventListener("resize", reposition);
+    window.addEventListener("orientationchange", reposition);
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", reposition);
+      window.visualViewport.addEventListener("scroll", reposition);
+    }
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("orientationchange", reposition);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", reposition);
+        window.visualViewport.removeEventListener("scroll", reposition);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <div
+      ref={elRef}
+      onClick={(e) => e.stopPropagation()}
+      style={{ ...style, zIndex: 200, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.2)", padding: 10 }}
+    >
+      {children}
+    </div>
+  );
 }
 // backward-compat for Tournament objects saved before per-court labels existed (or missing/short arrays)
 // v1.10.0: renamed from ensureTournamentCourtLabels (kept doing exactly what it did, court-label sync,
@@ -8396,9 +8486,9 @@ function SessionTab(props) {
             {scoreOpen && scoreOpen.mid === m.id && ReactDOM.createPortal(
               <>
                 <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
-                <div onClick={(e) => e.stopPropagation()} style={{ position: "fixed", top: scoreOpen.rect.bottom + 4, right: Math.max(6, window.innerWidth - scoreOpen.rect.right), zIndex: 200, width: 270, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.2)", padding: 10 }}>
+                <ScorePopover anchorRect={scoreOpen.rect}>
                   <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} />
-                </div>
+                </ScorePopover>
               </>,
               document.body
             )}
