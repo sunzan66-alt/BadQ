@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.70";
+const APP_VERSION = "1.11.71";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5901,6 +5901,28 @@ export default function App() {
     if (Array.isArray(bundle.courtLabels)) setCourtLabelsRaw(syncCourtLabels(bundle.courtLabels, bundle.courtCount || bundle.courtLabels.length));
     setSession((s) => ({ ...s, sessionStartTime: bundle.sessionStartTime || s.sessionStartTime, sessionEndTime: bundle.sessionEndTime || s.sessionEndTime }));
   };
+  // v1.11.71 (Per-Group Latest Settings): mirror buildGroupDefaultBundle() into groupDefaults[session.name]
+  // automatically whenever any setting it captures actually changes — the pre-existing saveGroupDefault()
+  // above required the organizer to remember to press "บันทึกเป็นค่าเริ่มต้นของก๊วนนี้" first, but the spec
+  // ("the NEXT session should default to the just-changed fee", "no extra setup step should be required")
+  // asks for that to just happen. Deliberately excludes session.name ITSELF from the dependency list — the
+  // ชื่อก๊วน field is a live-typed <input onChange>, so keying this off it too would spam a brand-new
+  // groupDefaults entry per keystroke while the organizer is still typing a new group's name; the name is
+  // only READ here (its current, momentary value), never watched. saveGroupDefault() still exists and still
+  // works exactly as before — this effect just means the organizer no longer has to remember to use it.
+  useEffect(() => {
+    const name = (session.name || "").trim();
+    if (!name) return;
+    setGroupDefaults((prev) => {
+      const next = buildGroupDefaultBundle();
+      const existing = prev[name];
+      // skip the write when nothing but the timestamp would differ — avoids bumping "บันทึกล่าสุด" (and the
+      // app-wide autosave that watches groupDefaults) on a render where nothing group-relevant changed.
+      if (existing && JSON.stringify({ ...existing, savedAt: 0 }) === JSON.stringify({ ...next, savedAt: 0 })) return prev;
+      return { ...prev, [name]: next };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, mode, courtCount, courtLabels, session.sessionStartTime, session.sessionEndTime]);
   // toggle payment status inside an archived session (independent of the current session's players/paid state)
   const toggleHistoricalPaid = (sessId, playerId) => {
     setSessionHistory((prev) => prev.map((s) => (s.id !== sessId ? s : { ...s, bill: s.bill.map((b) => (b.id === playerId ? { ...b, paid: !b.paid } : b)) })));
@@ -10252,9 +10274,12 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
         </div>
       )}
 
-      {/* v1.11.17 (spec section 1): explicit "save as group default" action — never automatic. Always
-          visible at the bottom of the sheet regardless of which accordion is open, per the spec's
-          requirement that changing a session's settings must never silently change the group's Default. */}
+      {/* v1.11.17 (spec section 1) originally made this an explicit, never-automatic action. v1.11.71
+          (Per-Group Latest Settings) reverses that by explicit new request: settings changes now sync into
+          groupDefaults[session.name] automatically (see the useEffect next to saveGroupDefault/
+          applyGroupDefaultsFor above) so the organizer never has to remember this button — it's kept as a
+          harmless manual "sync now" affordance, always visible at the bottom of the sheet regardless of
+          which accordion is open. */}
       {(session.name || "").trim() && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${T.border}` }}>
           <button onClick={saveGroupDefault} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 800 }}>
@@ -10262,7 +10287,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           </button>
           <div style={{ fontSize: 10.5, color: T.muted, textAlign: "center", marginTop: 6 }}>
             {groupDefaults[session.name]
-              ? `บันทึกล่าสุด: ${new Date(groupDefaults[session.name].savedAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}`
+              ? `บันทึกล่าสุด: ${new Date(groupDefaults[session.name].savedAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })} (ระบบบันทึกให้อัตโนมัติทุกครั้งที่แก้ไข)`
               : "ยังไม่เคยบันทึกค่าเริ่มต้นของก๊วนนี้"}
           </div>
         </div>
