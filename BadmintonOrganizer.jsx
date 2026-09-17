@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.69";
+const APP_VERSION = "1.11.70";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -68,6 +68,14 @@ const T = {
 // the existing skill-level colors, handedness colors, or the "selected" highlight (#e2f5ec) — those are
 // left completely untouched; only the neutral card background itself changes.
 const TEAM_BG = { A: "#eaf2fb", B: "#eaf8f0" };
+// v1.11.70 (Completed Match Team Card Colors): จบแล้ว rows already tint the whole row a light red/coral
+// (see rowBg's "#FFF4F2" in MatchRow, v1.11.57) but the player cards inside kept the same blue/green as an
+// active or upcoming game — so a finished match still LOOKED like it was still live at a glance. These two
+// shades are only ever swapped in for a card whose match is จบแล้ว (`done`, i.e. it's landed in `history` —
+// see orderedMatches), replacing TEAM_BG[team] one-for-one; every other bit of card styling (avatar, name,
+// skill-level color, handedness color, border, the "selected" highlight) is untouched, and every
+// not-yet-finished status (เกมต่อไป/กำลังเล่น/พักเกม) keeps using TEAM_BG exactly as before.
+const TEAM_BG_DONE = { A: "#F6E3E6", B: "#F8E8E2" }; // A: soft rose/pink-red, B: soft coral/warm-red — same pale-red family as the finished-row tint, distinguishable from each other without reading as an error/loss color
 const STATUS = {
   next: { label: "เกมต่อไป", color: "#2563eb", bg: "#e7effd" },
   playing: { label: "กำลังเล่น", color: "#12986a", bg: "#e2f5ec" },
@@ -8448,10 +8456,10 @@ function SessionTab(props) {
             ))}
           </select>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} />
+            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} />
           </div>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} />
+            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} />
           </div>
           <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
             {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
@@ -13658,7 +13666,7 @@ function MatchTeams({ m, getP, editable, tapSlot, isSel, replaceSlot, bench, big
 
 // v1.11.34: see the "subtle, ONE-TIME-EVER hint" comment inside TeamSide below.
 let _avatarHintClaimed = false;
-function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now }) {
+function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done }) {
   const isWide = useIsWide(); // iPad / landscape phone (≥700px) — only the photo scales up further here; text stays the same size on every screen
   const compact = arr.length > 1; // doubles: tighten padding so both teams fit on one line
   const avatarSize = isWide
@@ -13721,7 +13729,7 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
           // v1.11.40: unselected cards now tint by team (TEAM_BG.A/B) instead of a flat T.surface2 — the
           // "selected" highlight (#e2f5ec, an existing unrelated state) still fully overrides it, and every
           // other bit of card styling (avatar, skill-level color, handedness color, border) is untouched.
-          <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: compact ? 6 : 7, padding: compact ? "6px 7px" : "7px 8px", borderRadius: 10, background: selected ? "#e2f5ec" : TEAM_BG[team], border: `1.5px solid ${selected ? T.green : "transparent"}`, minHeight: 46 }}>
+          <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: compact ? 6 : 7, padding: compact ? "6px 7px" : "7px 8px", borderRadius: 10, background: selected ? "#e2f5ec" : (done ? TEAM_BG_DONE[team] : TEAM_BG[team]), border: `1.5px solid ${selected ? T.green : "transparent"}`, minHeight: 46 }}>
             <span style={{ position: "relative", display: "inline-flex", flexShrink: 0, width: avatarSize, height: avatarSize }}>
               <Avatar p={p} size={avatarSize} />
               {editable && p.photo && (
