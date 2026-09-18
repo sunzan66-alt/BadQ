@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.72";
+const APP_VERSION = "1.11.73";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -994,6 +994,12 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
   const goal = ["max_wait", "min_games"].includes(settings && settings.courtRecommendationGoal) ? settings.courtRecommendationGoal : "max_wait";
   const maxWaitMinutes = Number(settings && settings.maxWaitMinutes) > 0 ? Number(settings.maxWaitMinutes) : 30;
   const minGamesPerPerson = Number(settings && settings.minGamesPerPerson) > 0 ? Number(settings.minGamesPerPerson) : 4;
+  // v1.11.73: เวลารอเป้าหมาย — a dedicated, GROUP-specific setting for how long players should approximately
+  // wait between games under the "min_games" goal (replaces that goal's v1.11.72 stopgap of reusing
+  // maxWaitMinutes, which actually belongs to the OTHER goal's own strict ceiling). No new required field —
+  // defaults to 15 min (a reasonable balance) via normSettings/getDefaultSettings, same as every other
+  // court-recommendation input.
+  const targetWaitMinutes = Number(settings && settings.targetWaitMinutes) > 0 ? Number(settings.targetWaitMinutes) : 15;
   // v1.11.12: per-match time = เวลาเฉลี่ยต่อ 1 เซต (the ONE user-facing setting) × the expected number of sets
   // for the group's EXISTING จำนวนเซต format (settings.rounds) — never a second, duplicate "sets/game" field.
   // v1.11.72: the FALLBACK used before the organizer ever customizes this field is now mode-aware instead of
@@ -1014,7 +1020,7 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
   const registered = (players || []).filter((p) => !p.archived && ["registered", "ready", "playing", "resting"].includes(p.status));
   const totalRegistered = registered.length;
   if (!(endMin > startMin) || totalRegistered === 0) {
-    return { totalRegistered, buckets: [], merged: [], goal, maxWaitMinutes, minGamesPerPerson, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal: 0, startMin, endMin, playersPerCourt };
+    return { totalRegistered, buckets: [], merged: [], goal, maxWaitMinutes, minGamesPerPerson, targetWaitMinutes, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal: 0, startMin, endMin, playersPerCourt };
   }
   // v1.11.13 BUG FIX: "เล่นอย่างน้อย X เกม/คน" is a target over each player's WHOLE attendance window, not a
   // target to hit fresh inside every independent 30-min bucket (the old courtsForMinGames() bug — it asked
@@ -1050,14 +1056,16 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
       const capacityPerCourt = gamesPerCourt * playersPerCourt;
       const needed = capacityPerCourt > 0 ? Math.ceil(demand / capacityPerCourt) : 0;
       minCourts = cap === 0 ? 0 : Math.max(1, Math.min(needed, cap));
-      // v1.11.72: "เล่นอย่างน้อย X เกม/คน" alone can be satisfied by a court count so small that most
-      // registered players are standing around at once (e.g. games/person clears on paper at 3 courts while
-      // 18 of 30 players wait simultaneously) — mathematically correct, poor real experience. `courts` is now
-      // the LARGER of (a) the games/person answer above and (b) the courts needed to keep this bucket's
-      // expected wait within the EXISTING settings.maxWaitMinutes ceiling (no new setting — this field
-      // already exists, already defaults to 30 min) — so it never recommends FEWER courts than the
-      // games/person target requires, only possibly more when waiting would otherwise be excessive.
-      const waitCourts = cap === 0 ? 0 : courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, maxWaitMinutes);
+      // v1.11.72 (refined v1.11.73): "เล่นอย่างน้อย X เกม/คน" alone can be satisfied by a court count so small
+      // that most registered players are standing around at once (e.g. games/person clears on paper at 3
+      // courts while 18 of 30 players wait simultaneously) — mathematically correct, poor real experience.
+      // `courts` is now the LARGER of (a) the games/person answer above and (b) the courts needed to keep
+      // this bucket's expected wait within the organizer's own targetWaitMinutes (a dedicated, group-specific
+      // setting — see above; v1.11.72 originally reused maxWaitMinutes here as a stopgap, but that setting
+      // belongs to the OTHER goal's strict ceiling, not this one's soft balance target) — so it never
+      // recommends FEWER courts than the games/person target requires, only possibly more when waiting would
+      // otherwise exceed the target.
+      const waitCourts = cap === 0 ? 0 : courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, targetWaitMinutes);
       courts = cap === 0 ? 0 : Math.max(minCourts, Math.min(waitCourts, cap));
     } else {
       courts = cap === 0 ? 0 : Math.min(courtsForMaxWait(active, playersPerCourt, avgMatchMinutes, maxWaitMinutes), cap);
@@ -1081,7 +1089,7 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
     } else merged.push({ ...b });
   }
   const courtHoursTotal = buckets.reduce((s, b) => s + (b.courts * (b.end - b.start)) / 60, 0);
-  return { totalRegistered, buckets, merged, goal, maxWaitMinutes, minGamesPerPerson, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal, startMin, endMin, playersPerCourt };
+  return { totalRegistered, buckets, merged, goal, maxWaitMinutes, minGamesPerPerson, targetWaitMinutes, avgMatchMinutes, avgSource: avgEstimate.source, courtHoursTotal, startMin, endMin, playersPerCourt };
 }
 // v1.11.72: pure helper for the detail-sheet "เทียบจำนวนสนาม" comparison table — for a small range of
 // candidate court counts around the busiest period, estimates players playing/waiting simultaneously,
@@ -1090,7 +1098,7 @@ function buildCourtRecommendation(players, session, settings, sessionHistory, ma
 // representative period — this keeps the table meaningful even when attendance ramps up/down over the
 // session, and mirrors how the spec's own worked examples reason "court by court". Decision support only —
 // never writes to courtCount. Pure/no side effects; returns [] when there's no peak period to compare.
-function courtRecommendationCandidates(peakBucket, playersPerCourt, avgMatchMinutes, minGamesPerPerson, maxWaitMinutes) {
+function courtRecommendationCandidates(peakBucket, playersPerCourt, avgMatchMinutes, minGamesPerPerson, targetWaitMinutes) {
   if (!peakBucket || !(peakBucket.active > 0) || !(avgMatchMinutes > 0)) return [];
   const active = peakBucket.active;
   const bucketMinutes = Math.max(0, peakBucket.end - peakBucket.start);
@@ -1113,11 +1121,16 @@ function courtRecommendationCandidates(peakBucket, playersPerCourt, avgMatchMinu
   // "≥N เกม/คน" column can show the one constant target rather than each row's own exact achieved number —
   // matches the spec mockup, where every row repeats the same "≥4 เกม/คน" text), capped to a few rows.
   const hi = Math.min(cap, minFeasible + 3);
+  // v1.11.73: label thresholds are now relative to the organizer's own targetWaitMinutes (เวลารอเป้าหมาย —
+  // a dedicated setting, see buildCourtRecommendation) instead of the unrelated maxWaitMinutes ceiling —
+  // "เหมาะสม" means at/under the target, "ปานกลาง" somewhat over it, "รอนาน" well over it, "รอน้อย" well
+  // under it. The actual estimated minutes (c.estimatedWaitMinutes) are shown as the primary number in the
+  // UI; this label is a secondary, at-a-glance category.
   return all.filter((c) => c.courts >= minFeasible && c.courts <= hi).map((c) => {
     let waitLabel;
-    if (c.waiting === 0 || c.estimatedWaitMinutes <= maxWaitMinutes * 0.25) waitLabel = "รอน้อย";
-    else if (c.estimatedWaitMinutes <= maxWaitMinutes * 0.6) waitLabel = "เหมาะสม";
-    else if (c.estimatedWaitMinutes <= maxWaitMinutes) waitLabel = "ปานกลาง";
+    if (c.waiting === 0 || c.estimatedWaitMinutes <= targetWaitMinutes * 0.5) waitLabel = "รอน้อย";
+    else if (c.estimatedWaitMinutes <= targetWaitMinutes) waitLabel = "เหมาะสม";
+    else if (c.estimatedWaitMinutes <= targetWaitMinutes * 1.5) waitLabel = "ปานกลาง";
     else waitLabel = "รอนาน";
     return { ...c, minFeasible, meetsMinGames: c.courts >= minFeasible, waitLabel };
   });
@@ -3057,6 +3070,11 @@ function getDefaultSettings() {
     courtRecommendationGoal: "max_wait", // v1.11.12: "max_wait" (รอไม่เกิน X นาที) | "min_games" (เล่นอย่างน้อย X เกม/คน)
     maxWaitMinutes: 30,
     minGamesPerPerson: 4,
+    // v1.11.73: เวลารอเป้าหมาย — used ONLY by the "min_games" goal's joint games/wait balance (replaces that
+    // goal's previous reuse of maxWaitMinutes, a setting that actually belongs to the OTHER goal). A
+    // GROUP-specific preference (lives inside `settings` on purpose, same reasoning as membership above — it
+    // rides the existing groupDefaults save/apply/auto-mirror + backup/restore/boot-load plumbing for free).
+    targetWaitMinutes: 15,
     // v1.11.17: จำนวนผู้เล่น — null/0 = ไม่จำกัด. Once registered/ready headcount reaches this cap, any
     // NEW check-in goes to the Waiting List instead (see setStatus) until the organizer promotes someone.
     maxPlayers: null,
@@ -3083,6 +3101,7 @@ function normSettings(s) {
   const asm = Number(base.averageSetMinutes);
   const mwm = Number(base.maxWaitMinutes);
   const mgp = Number(base.minGamesPerPerson);
+  const twm = Number(base.targetWaitMinutes);
   const se = base.splitExpenses && typeof base.splitExpenses === "object" ? base.splitExpenses : {};
   // v1.11.41: old (pre-v1.11.41) saved settings have no `shuttleEco` at all — backfill field-by-field
   // (not just via the top-level {...getDefaultSettings(), ...base} spread above, which would keep a
@@ -3135,6 +3154,7 @@ function normSettings(s) {
     courtRecommendationGoal: ["max_wait", "min_games"].includes(base.courtRecommendationGoal) ? base.courtRecommendationGoal : "max_wait",
     maxWaitMinutes: mwm > 0 ? mwm : 30,
     minGamesPerPerson: mgp > 0 ? mgp : 4,
+    targetWaitMinutes: twm > 0 ? twm : 15,
     splitExpenses: { court: Number(se.court) || 0, shuttle: Number(se.shuttle) || 0, water: Number(se.water) || 0, other: Number(se.other) || 0 },
     roundingMode: ["none", "round5", "round10"].includes(base.roundingMode) ? base.roundingMode : "none",
     maxPlayers: Number(base.maxPlayers) > 0 ? Number(base.maxPlayers) : null,
@@ -10223,7 +10243,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
   // candidate table's whole-period estimate for the SAME court count BadQ is recommending for this period.
   const peakCandidate = useMemo(() => {
     if (courtRec.goal !== "min_games" || !peakBucket) return null;
-    const list = courtRecommendationCandidates(peakBucket, courtRec.playersPerCourt, courtRec.avgMatchMinutes, courtRec.minGamesPerPerson, courtRec.maxWaitMinutes);
+    const list = courtRecommendationCandidates(peakBucket, courtRec.playersPerCourt, courtRec.avgMatchMinutes, courtRec.minGamesPerPerson, courtRec.targetWaitMinutes);
     return list.find((c) => c.courts === peakBucket.courts) || null;
   }, [courtRec, peakBucket]);
   // v1.11.36: the lock/avoid pair editor's dropdowns must only offer people actually here THIS session, not
@@ -10306,7 +10326,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
             ) : (
               <>
                 <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>
-                  ลงทะเบียน {courtRec.totalRegistered} คน · เป้าหมาย: {courtRec.goal === "min_games" ? `อย่างน้อย ${courtRec.minGamesPerPerson} เกม/คน ตลอดช่วงเวลาที่แต่ละคนมาเล่น` : `รอไม่เกิน ${courtRec.maxWaitMinutes} นาที`}
+                  ลงทะเบียน {courtRec.totalRegistered} คน · เป้าหมาย: {courtRec.goal === "min_games" ? `อย่างน้อย ${courtRec.minGamesPerPerson} เกม/คน · รอเป้าหมาย ~${courtRec.targetWaitMinutes} นาที` : `รอไม่เกิน ${courtRec.maxWaitMinutes} นาที`}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
                   {courtRec.merged.map((b, i) => (
@@ -10381,7 +10401,7 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
   // v1.11.72: busiest merged period, used as the representative period for the candidate comparison table.
   const peakBucket = useMemo(() => rec.merged.reduce((best, b) => (!best || b.active > best.active ? b : best), null), [rec.merged]);
   const candidates = useMemo(
-    () => (rec.goal === "min_games" ? courtRecommendationCandidates(peakBucket, rec.playersPerCourt, rec.avgMatchMinutes, rec.minGamesPerPerson, rec.maxWaitMinutes) : []),
+    () => (rec.goal === "min_games" ? courtRecommendationCandidates(peakBucket, rec.playersPerCourt, rec.avgMatchMinutes, rec.minGamesPerPerson, rec.targetWaitMinutes) : []),
     [rec, peakBucket]
   );
   const sessionMinutes = Math.max(0, (rec.endMin || 0) - (rec.startMin || 0));
@@ -10425,11 +10445,24 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
           <NumField label="รอไม่เกิน (นาที)" value={rec.maxWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, maxWaitMinutes: Math.max(1, v) }))} />
         )}
       </div>
+      {/* v1.11.73: เวลารอเป้าหมาย — organizer-facing control for the "min_games" goal's joint games/wait
+          balance (see buildCourtRecommendation). Quick picks cover the common cases; the NumField below
+          accepts any custom value, and is a GROUP-specific setting like every other field here — it rides
+          the same groupDefaults auto-save (see the useEffect near saveGroupDefault) with zero extra code. */}
+      {rec.goal === "min_games" && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เวลารอเป้าหมาย (นาที)</div>
+          <div style={{ marginBottom: 8 }}>
+            <Seg options={[[10, "10"], [15, "15"], [20, "20"], [30, "30"]]} value={rec.targetWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, targetWaitMinutes: v }))} />
+          </div>
+          <NumField label="กำหนดเอง (นาที)" value={rec.targetWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, targetWaitMinutes: Math.max(1, v) }))} />
+        </div>
+      )}
       {/* v1.11.13: the target is per player's WHOLE attendance window, never re-applied fresh inside every
           time block below — make that explicit so the per-block numbers are never mistaken for separate
           per-block targets (bug report: this ambiguity is exactly what the old formula got wrong). */}
       <div style={{ fontSize: 11, color: T.muted, marginBottom: 16 }}>
-        {rec.goal === "min_games" ? `เป้าหมาย: อย่างน้อย ${rec.minGamesPerPerson} เกม/คน ตลอดช่วงเวลาที่แต่ละคนมาเล่น (ไม่ใช่ต่อช่วงเวลาย่อยด้านล่าง)` : `เป้าหมาย: รอไม่เกิน ${rec.maxWaitMinutes} นาที ในแต่ละช่วงเวลา`}
+        {rec.goal === "min_games" ? `เป้าหมาย: อย่างน้อย ${rec.minGamesPerPerson} เกม/คน ตลอดช่วงเวลาที่แต่ละคนมาเล่น (ไม่ใช่ต่อช่วงเวลาย่อยด้านล่าง) · รอเป้าหมาย ~${rec.targetWaitMinutes} นาที (ระบบจะเพิ่มสนามให้เกินขั้นต่ำถ้าจำเป็น เพื่อลดเวลารอให้เข้าใกล้เป้านี้)` : `เป้าหมาย: รอไม่เกิน ${rec.maxWaitMinutes} นาที ในแต่ละช่วงเวลา`}
       </div>
 
       <SectionHead icon={<span style={{ fontSize: 14 }}>🕐</span>} title="จำนวนคนที่คาดว่าจะอยู่เล่น ตามช่วงเวลา" />
@@ -10458,22 +10491,29 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
 
       <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>รวม {Math.round(rec.courtHoursTotal * 10) / 10} Court-hours (ประมาณการ)</div>
 
-      {/* v1.11.72: "เล่นอย่างน้อย X เกม/คน" alone can pick a court count so small that many players wait at
-          once — this table shows the actual trade-off (≥ games/person is already guaranteed on every row
-          shown; what changes is how much waiting) for the busiest period, so "ขั้นต่ำ" (smallest court count
-          that clears the games/person bar) and "แนะนำ" (BadQ's own pick, which also limits waiting) are
-          visibly two different, calculated — never hardcoded — numbers. Decision support only. */}
+      {/* v1.11.72 (minutes shown directly since v1.11.73): "เล่นอย่างน้อย X เกม/คน" alone can pick a court
+          count so small that many players wait at once — this table shows the actual trade-off (≥
+          games/person is already guaranteed on every row shown; what changes is how much waiting) for the
+          busiest period, so "ขั้นต่ำ" (smallest court count that clears the games/person bar) and "แนะนำ"
+          (BadQ's own pick, which also keeps waiting near targetWaitMinutes) are visibly two different,
+          calculated — never hardcoded — numbers. The actual estimated wait in minutes is now the primary
+          figure per row (spec: "prefer actual estimated wait instead of vague labels only"), with the
+          รอน้อย/ปานกลาง/รอนาน category kept as a small secondary label. Decision support only. */}
       {candidates.length > 0 && (
         <>
           <SectionHead icon={<span style={{ fontSize: 14 }}>⚖️</span>} title="เทียบจำนวนสนาม (ช่วงที่คนเยอะที่สุด)" />
           <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 6 }}>
             {candidates.map((c) => {
               const isRecommended = peakBucket && c.courts === peakBucket.courts;
+              const mins = Math.round(c.estimatedWaitMinutes);
               return (
                 <div key={c.courts} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: isRecommended ? T.surface2 : "transparent", border: `1px solid ${isRecommended ? T.border : "transparent"}`, borderRadius: 9, padding: "6px 10px", fontSize: 12.5 }}>
                   <span style={{ fontWeight: 700 }}>{c.courts} สนาม</span>
                   <span style={{ color: T.muted }}>≥{rec.minGamesPerPerson} เกม/คน</span>
-                  <span style={{ fontWeight: 700 }}>{c.waitLabel}{isRecommended ? " ⭐" : ""}</span>
+                  <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
+                    <span style={{ fontWeight: 800 }}>~{mins} นาที{c.waitLabel === "รอนาน" ? " ⚠️" : ""}{isRecommended ? " ⭐" : ""}</span>
+                    <span style={{ fontSize: 10, color: T.muted }}>{c.waitLabel}</span>
+                  </span>
                 </div>
               );
             })}
@@ -14995,7 +15035,52 @@ function NumField({ label, value, onChange }) {
   // v1.11.17 fix: select-all on focus so tapping a field showing "0" and typing "1" replaces it (giving
   // "1"), instead of the browser inserting before the existing digit (giving "10"). Applies uniformly to
   // every NumField consumer (court/shuttle fees, min games, max wait, hourly/per-court rates, etc).
-  return <div style={{ flex: 1 }}><div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{label}</div><input type="number" value={value} onChange={(e) => onChange(Number(e.target.value) || 0)} onFocus={(e) => e.target.select()} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 15, fontWeight: 700, outline: "none", boxSizing: "border-box" }} /></div>;
+  //
+  // v1.11.73 BUG FIX (reported on iPhone: "type a number, it appears, then reverts/compounds"): this used
+  // to be a fully controlled input bound DIRECTLY to `value`, committing on every keystroke via
+  // onChange(Number(e.target.value) || 0) — so clearing the field to blank didn't leave it blank, it
+  // instantly round-tripped through onChange with e.target.value="" -> Number("")||0 = 0 -> the caller's own
+  // clamp (many call sites do `Math.max(1, v)`) snapped it straight back to a nonzero floor (confirmed
+  // empirically with a Playwright DOM-value trace: clearing "4" reappeared as "1" before the next keystroke
+  // even landed). Every further keystroke then landed AFTER that phantom digit instead of replacing it —
+  // clear "15", see "1" pop back, type "1" -> "11", type "0" -> "110" instead of the intended "10". This is
+  // the exact "0 -> typing 1 becomes 10" bug from the report, and it applies to every NumField consumer
+  // since they all share this one component.
+  // Fix: buffer keystrokes in local `draft` STRING state — onChange only ever updates `draft`, so the field
+  // can sit genuinely blank mid-edit and nothing outside NumField re-renders while typing (same "buffer
+  // locally, commit once" principle as the v1.11.64 Score Input fix, applied here via onBlur/Enter instead
+  // of onUnmount since this is a persistent field, not a popup). `draft` is synced FROM the external `value`
+  // prop only while the field is NOT focused, so switching group/session or another part of the UI
+  // recomputing this same value still updates the field normally when the organizer isn't actively editing
+  // it, but an in-flight edit is never fought by a parent re-render. On blur/Enter: validate, normalize
+  // (revert to the last committed value if left blank/invalid — never force 0 or NaN), commit to the real
+  // setting (which persists + triggers recalculation through the existing setSettings pipeline), and let the
+  // field re-sync to whatever the caller's own clamp settled on.
+  const [draft, setDraft] = useState(() => (value == null ? "" : String(value)));
+  const focusedRef = useRef(false);
+  useEffect(() => {
+    if (!focusedRef.current) setDraft(value == null ? "" : String(value));
+  }, [value]);
+  const commit = () => {
+    const trimmed = draft.trim();
+    const n = Number(trimmed);
+    if (trimmed === "" || !Number.isFinite(n)) { setDraft(value == null ? "" : String(value)); return; } // blank/invalid reverts to last committed value, never forces 0/NaN
+    onChange(n);
+  };
+  return (
+    <div style={{ flex: 1 }}>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{label}</div>
+      <input
+        type="number"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={(e) => { focusedRef.current = true; e.target.select(); }}
+        onBlur={() => { focusedRef.current = false; commit(); }}
+        onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+        style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 15, fontWeight: 700, outline: "none", boxSizing: "border-box" }}
+      />
+    </div>
+  );
 }
 const btnPrimary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 800 };
 const btnSecondary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700 };
