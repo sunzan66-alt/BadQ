@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.11.73";
+      var CURRENT_VERSION = "1.11.74";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.11.73";
+const APP_VERSION = "1.11.74";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3311,6 +3311,10 @@ function getDefaultRankTiers() {
     topPct: 10
   }];
 }
+// v1.11.74 — built-in icon choices for the Rank icon picker (spec section 13). Organizer picks ONE of
+// these into a tier's existing `icon` field (no new schema — `icon`/`image` already existed per-tier, this
+// just adds the missing UI to CHANGE `icon`, which previously could only be set once at tier-creation time).
+const RANK_ICON_CHOICES = ["🛡️", "⭐", "🌟", "💎", "👑", "🏆", "🔥", "⚡", "✨", "🪽", "🔰", "🎖️", "🏅", "🚀", "🏸"];
 // Fallback only (mirrors DEFAULT_MEMBERSHIP_SETTINGS's role) — the real per-club config lives in the new
 // top-level `rankingConfigs` state (keyed by club/group name), NOT inside `settings`, because section 9
 // requires picking ANY club from a list and editing its Rank settings directly — independent of whichever
@@ -4737,6 +4741,22 @@ async function resizePhoto(file) {
   }
 }
 
+// v1.11.74 — samples the drawn canvas for any real translucent pixel (alpha < 255). Used by ImageCropper's
+// confirm() to decide PNG (preserve transparency) vs JPEG (smaller file, no alpha needed) on a per-upload
+// basis, instead of always flattening to JPEG. A stride > 1 would speed this up on very large canvases, but
+// at the app's fixed 640x640 crop output a full scan is cheap (~400k pixels, runs in a few ms) and a full
+// scan is the only way to guarantee a single translucent corner pixel of a logo/emblem isn't missed.
+function canvasHasTransparency(ctx, w, h) {
+  try {
+    const data = ctx.getImageData(0, 0, w, h).data;
+    for (let i = 3; i < data.length; i += 4) {
+      if (data[i] < 255) return true;
+    }
+    return false;
+  } catch (e) {
+    return false;
+  } // e.g. a tainted canvas from a cross-origin source — fall back to JPEG, never crash the upload
+}
 // v1.9.13: interactive "move & scale" crop step, shared by every photo-upload flow (player profile photo,
 // ก๊วน photo, QR code) — lets the organizer drag to pan and pinch/slide to zoom a fixed square frame over
 // the picked image before it's saved, instead of always auto-centering. Always exports a SQUARE image (the
@@ -4744,6 +4764,9 @@ async function resizePhoto(file) {
 // output is needed) — circleGuide only changes the on-screen preview mask, not the underlying crop math or
 // the exported result. Pure presentation/input step: does not touch how/where the result is ultimately saved
 // (each caller's onConfirm decides that, exactly as before this existed).
+// v1.11.74: exports PNG instead of JPEG when the cropped result actually contains transparency (see
+// canvasHasTransparency + confirm() below) — preserves real alpha for uploaded Rank/Group/Tournament PNG
+// artwork instead of flattening it onto black. Ordinary opaque photos are unaffected (still JPEG).
 function ImageCropper({
   src,
   circleGuide,
@@ -4875,8 +4898,18 @@ function ImageCropper({
     const cv = document.createElement("canvas");
     cv.width = OUT;
     cv.height = OUT;
-    cv.getContext("2d").drawImage(imgElRef.current, sx, sy, sw, sh, 0, 0, OUT, OUT);
-    onConfirm(cv.toDataURL("image/jpeg", 0.88));
+    const ctx = cv.getContext("2d");
+    ctx.drawImage(imgElRef.current, sx, sy, sw, sh, 0, 0, OUT, OUT);
+    // v1.11.74 — root cause of the black-background bug: this shared crop step (player photo, ก๊วน/Group
+    // photo, Rank tier image, Tournament logo — every upload flow funnels through here) used to ALWAYS
+    // export via toDataURL("image/jpeg", ...). JPEG has no alpha channel, so any transparent source pixel
+    // (e.g. a transparent PNG rank emblem or group logo) got silently flattened onto solid black — the
+    // canvas's own default fill for a translucent pixel once it's forced into a non-alpha format. Ordinary
+    // opaque photos never hit this path (fully opaque canvas -> no visual difference either way), so the
+    // fix only needs to change format when real transparency is actually present, keeping JPEG's smaller
+    // file size for the common case. See canvasHasTransparency below.
+    const hasAlpha = canvasHasTransparency(ctx, OUT, OUT);
+    onConfirm(hasAlpha ? cv.toDataURL("image/png") : cv.toDataURL("image/jpeg", 0.88));
   };
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -13657,7 +13690,7 @@ function PlayerRankingClubCard({
       width: 16,
       height: 16,
       borderRadius: 4,
-      objectFit: "cover"
+      objectFit: "contain"
     }
   }) : /*#__PURE__*/React.createElement("span", {
     style: {
@@ -14751,7 +14784,7 @@ function RankingSettingsSheet({
         width: 30,
         height: 30,
         borderRadius: 8,
-        objectFit: "cover",
+        objectFit: "contain",
         flexShrink: 0
       }
     }) : /*#__PURE__*/React.createElement("span", {
@@ -14874,6 +14907,7 @@ function RankTierEditSheet({
     ...tier
   });
   const [cropJob, setCropJob] = useState(null);
+  const [iconPickerOpen, setIconPickerOpen] = useState(false); // v1.11.74 (section 13)
   const fileRef = useRef();
   const onImageFile = async e => {
     const f = e.target.files?.[0];
@@ -14920,7 +14954,7 @@ function RankTierEditSheet({
     style: {
       width: "100%",
       height: "100%",
-      objectFit: "cover"
+      objectFit: "contain"
     }
   }) : /*#__PURE__*/React.createElement("span", {
     style: {
@@ -14951,7 +14985,18 @@ function RankTierEditSheet({
       fontSize: 11.5,
       fontWeight: 700
     }
-  }, draft.image ? "เปลี่ยนรูป" : "อัปโหลดรูป"), draft.image && /*#__PURE__*/React.createElement("button", {
+  }, draft.image ? "เปลี่ยนรูป" : "อัปโหลดรูป"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setIconPickerOpen(true),
+    style: {
+      padding: "6px 10px",
+      borderRadius: 8,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 11.5,
+      fontWeight: 700
+    }
+  }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E44\u0E2D\u0E04\u0E2D\u0E19"), draft.image && /*#__PURE__*/React.createElement("button", {
     onClick: () => setDraft(d => ({
       ...d,
       image: null
@@ -15172,7 +15217,54 @@ function RankTierEditSheet({
       flex: 1,
       opacity: canSave ? 1 : 0.5
     }
-  }, "\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01")));
+  }, "\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01")), iconPickerOpen &&
+  /*#__PURE__*/
+  // v1.11.74 (sections 12/13) — built-in icon picker. Selecting an icon only ever writes `draft.icon`,
+  // never touches `draft.image`/name/conditions/order (section 14: switching visuals must not disturb
+  // anything else). If a custom image is currently set it still wins in the priority-render used
+  // everywhere (image ? <img/> : icon), exactly as before — the newly picked icon becomes visible the
+  // moment the image is removed via "ลบรูป", with no further action needed. Rendered LAST (after every
+  // other sibling in this sheet) so it stacks on top within the shared z-index:40 Overlay context —
+  // ImageCropper doesn't need this trick because it uses a higher explicit z-index (90).
+  React.createElement(Overlay, {
+    onClose: () => setIconPickerOpen(false)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 12
+    }
+  }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E44\u0E2D\u0E04\u0E2D\u0E19 Rank"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 10,
+      marginBottom: 14
+    }
+  }, RANK_ICON_CHOICES.map(ic => /*#__PURE__*/React.createElement("button", {
+    key: ic,
+    onClick: () => {
+      setDraft(d => ({
+        ...d,
+        icon: ic
+      }));
+      setIconPickerOpen(false);
+    },
+    style: {
+      width: 52,
+      height: 52,
+      borderRadius: 12,
+      border: `1px solid ${draft.icon === ic ? T.green : T.border}`,
+      background: draft.icon === ic ? "#e2f5ec" : T.surface2,
+      fontSize: 24,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center"
+    }
+  }, ic))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setIconPickerOpen(false),
+    style: btnSecondary
+  }, "\u0E1B\u0E34\u0E14")));
 }
 
 // ===== MEMBER PORTAL (BETA) — v1.11.35, Phase 1: Firebase Foundation ONLY =====
@@ -26677,7 +26769,7 @@ function RankingShowcaseSheet({
         width: 22,
         height: 22,
         borderRadius: 6,
-        objectFit: "cover"
+        objectFit: "contain"
       }
     }) : /*#__PURE__*/React.createElement("span", {
       style: {
@@ -26936,7 +27028,7 @@ function RankingPrintView({
       width: 22,
       height: 22,
       borderRadius: 6,
-      objectFit: "cover"
+      objectFit: "contain"
     }
   }) : /*#__PURE__*/React.createElement("span", {
     style: {

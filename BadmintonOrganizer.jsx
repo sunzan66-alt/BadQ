@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.73";
+const APP_VERSION = "1.11.74";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1856,6 +1856,10 @@ function getDefaultRankTiers() {
     { id: "conqueror", name: "Conqueror", order: 7, icon: "👑", image: null, conditionType: "rp_top", rpMin: 300, winRateMin: 0, topPct: 10 },
   ];
 }
+// v1.11.74 — built-in icon choices for the Rank icon picker (spec section 13). Organizer picks ONE of
+// these into a tier's existing `icon` field (no new schema — `icon`/`image` already existed per-tier, this
+// just adds the missing UI to CHANGE `icon`, which previously could only be set once at tier-creation time).
+const RANK_ICON_CHOICES = ["🛡️", "⭐", "🌟", "💎", "👑", "🏆", "🔥", "⚡", "✨", "🪽", "🔰", "🎖️", "🏅", "🚀", "🏸"];
 // Fallback only (mirrors DEFAULT_MEMBERSHIP_SETTINGS's role) — the real per-club config lives in the new
 // top-level `rankingConfigs` state (keyed by club/group name), NOT inside `settings`, because section 9
 // requires picking ANY club from a list and editing its Rank settings directly — independent of whichever
@@ -2879,6 +2883,18 @@ async function resizePhoto(file) {
   } catch (e) { return dataUrl; }
 }
 
+// v1.11.74 — samples the drawn canvas for any real translucent pixel (alpha < 255). Used by ImageCropper's
+// confirm() to decide PNG (preserve transparency) vs JPEG (smaller file, no alpha needed) on a per-upload
+// basis, instead of always flattening to JPEG. A stride > 1 would speed this up on very large canvases, but
+// at the app's fixed 640x640 crop output a full scan is cheap (~400k pixels, runs in a few ms) and a full
+// scan is the only way to guarantee a single translucent corner pixel of a logo/emblem isn't missed.
+function canvasHasTransparency(ctx, w, h) {
+  try {
+    const data = ctx.getImageData(0, 0, w, h).data;
+    for (let i = 3; i < data.length; i += 4) { if (data[i] < 255) return true; }
+    return false;
+  } catch (e) { return false; } // e.g. a tainted canvas from a cross-origin source — fall back to JPEG, never crash the upload
+}
 // v1.9.13: interactive "move & scale" crop step, shared by every photo-upload flow (player profile photo,
 // ก๊วน photo, QR code) — lets the organizer drag to pan and pinch/slide to zoom a fixed square frame over
 // the picked image before it's saved, instead of always auto-centering. Always exports a SQUARE image (the
@@ -2886,6 +2902,9 @@ async function resizePhoto(file) {
 // output is needed) — circleGuide only changes the on-screen preview mask, not the underlying crop math or
 // the exported result. Pure presentation/input step: does not touch how/where the result is ultimately saved
 // (each caller's onConfirm decides that, exactly as before this existed).
+// v1.11.74: exports PNG instead of JPEG when the cropped result actually contains transparency (see
+// canvasHasTransparency + confirm() below) — preserves real alpha for uploaded Rank/Group/Tournament PNG
+// artwork instead of flattening it onto black. Ordinary opaque photos are unaffected (still JPEG).
 function ImageCropper({ src, circleGuide, title, onCancel, onConfirm }) {
   const FRAME = 300;
   const MAX_ZOOM = 4;
@@ -2958,8 +2977,18 @@ function ImageCropper({ src, circleGuide, title, onCancel, onConfirm }) {
     const OUT = 640;
     const sx = -offset.x / scale, sy = -offset.y / scale, sw = FRAME / scale, sh = FRAME / scale;
     const cv = document.createElement("canvas"); cv.width = OUT; cv.height = OUT;
-    cv.getContext("2d").drawImage(imgElRef.current, sx, sy, sw, sh, 0, 0, OUT, OUT);
-    onConfirm(cv.toDataURL("image/jpeg", 0.88));
+    const ctx = cv.getContext("2d");
+    ctx.drawImage(imgElRef.current, sx, sy, sw, sh, 0, 0, OUT, OUT);
+    // v1.11.74 — root cause of the black-background bug: this shared crop step (player photo, ก๊วน/Group
+    // photo, Rank tier image, Tournament logo — every upload flow funnels through here) used to ALWAYS
+    // export via toDataURL("image/jpeg", ...). JPEG has no alpha channel, so any transparent source pixel
+    // (e.g. a transparent PNG rank emblem or group logo) got silently flattened onto solid black — the
+    // canvas's own default fill for a translucent pixel once it's forced into a non-alpha format. Ordinary
+    // opaque photos never hit this path (fully opaque canvas -> no visual difference either way), so the
+    // fix only needs to change format when real transparency is actually present, keeping JPEG's smaller
+    // file size for the common case. See canvasHasTransparency below.
+    const hasAlpha = canvasHasTransparency(ctx, OUT, OUT);
+    onConfirm(hasAlpha ? cv.toDataURL("image/png") : cv.toDataURL("image/jpeg", 0.88));
   };
 
   return (
@@ -7581,7 +7610,7 @@ function PlayerRankingClubCard({ clubName, playerId, skillIndex, result }) {
         <div style={{ fontSize: 13, fontWeight: 800, color: T.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{clubName}</div>
         {tier ? (
           <div style={{ display: "flex", alignItems: "center", gap: 4, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "3px 9px" }}>
-            {tier.image ? <img src={tier.image} alt="" style={{ width: 16, height: 16, borderRadius: 4, objectFit: "cover" }} /> : <span style={{ fontSize: 13 }}>{tier.icon}</span>}
+            {tier.image ? <img src={tier.image} alt="" style={{ width: 16, height: 16, borderRadius: 4, objectFit: "contain" }} /> : <span style={{ fontSize: 13 }}>{tier.icon}</span>}
             <span style={{ fontSize: 11.5, fontWeight: 800, color: T.text }}>{tier.name}</span>
           </div>
         ) : (
@@ -7980,7 +8009,7 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
           const countInTier = Object.keys(ranking.rankByPlayer).filter((pid) => ranking.rankByPlayer[pid] && ranking.rankByPlayer[pid].id === t.id).length;
           return (
             <button key={t.id} onClick={() => setEditingTier(t)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, cursor: "pointer" }}>
-              {t.image ? <img src={t.image} alt="" style={{ width: 30, height: 30, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} /> : <span style={{ fontSize: 20, width: 30, textAlign: "center", flexShrink: 0 }}>{t.icon}</span>}
+              {t.image ? <img src={t.image} alt="" style={{ width: 30, height: 30, borderRadius: 8, objectFit: "contain", flexShrink: 0 }} /> : <span style={{ fontSize: 20, width: 30, textAlign: "center", flexShrink: 0 }}>{t.icon}</span>}
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>{t.name}</div>
                 <div style={{ fontSize: 11, color: T.muted }}>{conditionLabel(t)}{countInTier > 0 ? ` · ${countInTier} คน` : ""}</div>
@@ -8025,6 +8054,7 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
 function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
   const [draft, setDraft] = useState({ ...tier });
   const [cropJob, setCropJob] = useState(null);
+  const [iconPickerOpen, setIconPickerOpen] = useState(false); // v1.11.74 (section 13)
   const fileRef = useRef();
   const onImageFile = async (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; const raw = await fileToDataURL(f).catch(() => null); if (raw) setCropJob(raw); };
   const canSave = draft.name.trim().length > 0;
@@ -8034,11 +8064,12 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
 
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <button onClick={() => fileRef.current.click()} style={{ position: "relative", width: 56, height: 56, borderRadius: 14, border: `1px solid ${T.border}`, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, padding: 0 }}>
-          {draft.image ? <img src={draft.image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 26 }}>{draft.icon}</span>}
+          {draft.image ? <img src={draft.image} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 26 }}>{draft.icon}</span>}
         </button>
         <input ref={fileRef} type="file" accept="image/*" onChange={onImageFile} style={{ display: "none" }} />
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <button onClick={() => fileRef.current.click()} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>{draft.image ? "เปลี่ยนรูป" : "อัปโหลดรูป"}</button>
+          <button onClick={() => setIconPickerOpen(true)} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>เลือกไอคอน</button>
           {draft.image && <button onClick={() => setDraft((d) => ({ ...d, image: null }))} style={{ padding: "6px 10px", borderRadius: 8, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบรูป (ใช้ไอคอนเริ่มต้น)</button>}
         </div>
       </div>
@@ -8082,6 +8113,24 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
         <button onClick={onClose} style={{ ...btnSecondary, flex: 1 }}>ยกเลิก</button>
         <button onClick={() => canSave && onSave(draft)} disabled={!canSave} style={{ ...btnPrimary, flex: 1, opacity: canSave ? 1 : 0.5 }}>บันทึก</button>
       </div>
+      {iconPickerOpen && (
+        // v1.11.74 (sections 12/13) — built-in icon picker. Selecting an icon only ever writes `draft.icon`,
+        // never touches `draft.image`/name/conditions/order (section 14: switching visuals must not disturb
+        // anything else). If a custom image is currently set it still wins in the priority-render used
+        // everywhere (image ? <img/> : icon), exactly as before — the newly picked icon becomes visible the
+        // moment the image is removed via "ลบรูป", with no further action needed. Rendered LAST (after every
+        // other sibling in this sheet) so it stacks on top within the shared z-index:40 Overlay context —
+        // ImageCropper doesn't need this trick because it uses a higher explicit z-index (90).
+        <Overlay onClose={() => setIconPickerOpen(false)}>
+          <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 12 }}>เลือกไอคอน Rank</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+            {RANK_ICON_CHOICES.map((ic) => (
+              <button key={ic} onClick={() => { setDraft((d) => ({ ...d, icon: ic })); setIconPickerOpen(false); }} style={{ width: 52, height: 52, borderRadius: 12, border: `1px solid ${draft.icon === ic ? T.green : T.border}`, background: draft.icon === ic ? "#e2f5ec" : T.surface2, fontSize: 24, display: "flex", alignItems: "center", justifyContent: "center" }}>{ic}</button>
+            ))}
+          </div>
+          <button onClick={() => setIconPickerOpen(false)} style={btnSecondary}>ปิด</button>
+        </Overlay>
+      )}
     </Overlay>
   );
 }
@@ -12467,7 +12516,7 @@ function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig
             return (
               <div key={g.tier.id}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                  {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "cover" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
+                  {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "contain" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
                   <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{g.tier.name.toUpperCase()}</span>
                   <span style={{ fontSize: 11, color: T.muted }}>{g.players.length} คน</span>
                 </div>
@@ -12546,7 +12595,7 @@ function RankingPrintView({ report, onClose }) {
         ) : report.groups.map((g, gi) => (
           <div key={g.tier.id} className="rpv-avoidbreak" style={{ marginBottom: 20 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, borderBottom: "1px solid #dde5e1", paddingBottom: 6 }}>
-              {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "cover" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
+              {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "contain" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
               <span style={{ fontSize: 14, fontWeight: 800 }}>{g.tier.name.toUpperCase()}</span>
               <span style={{ fontSize: 11, color: "#6b7d74" }}>{g.players.length} คน</span>
             </div>
