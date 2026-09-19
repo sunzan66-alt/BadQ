@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.11.77";
+      var CURRENT_VERSION = "1.11.78";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.11.77";
+const APP_VERSION = "1.11.78";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -3390,6 +3390,51 @@ function getDefaultRankTiers() {
     winRateMin: 0,
     topPct: 10
   }];
+}
+// v1.11.78 — the shared Rank tier badge renderer the comment above has referenced by name since v1.11.68
+// ("see RankTierImage below") but that was never actually created: every render site (player profile
+// club card, Rank Settings tier list, Ranking Showcase on-screen + printable) instead hand-copied its own
+// `tier.image ? <img .../> : <span>{tier.icon}</span>` ternary independently. That duplication is exactly
+// how one location can silently drift from a shared fix like v1.11.74's alpha-aware PNG export (canvasHas
+// Transparency/ImageCropper.confirm) while another stays correct — nothing enforced they render the exact
+// same way. Centralizing it here guarantees every current call site (and any future one) stays byte-for-
+// byte consistent with the already-correct behavior: renders the stored data URI directly with no canvas/
+// re-processing step (so it can never re-introduce a flattened/black background), always `object-fit:
+// contain` (never crops non-square artwork into a circle/square), and falls back to the plain built-in
+// emoji exactly as before when no custom image is set. `size`/`radius`/`fontSize` let each call site keep
+// its own EXACT pre-existing dimensions — this is a pure de-duplication, not a visual change. `compact`
+// reproduces the one call site (Rank Settings tier list row) that also pinned the emoji span's width/
+// text-align and gave both variants `flexShrink: 0`.
+function RankTierImage({
+  tier,
+  size,
+  radius,
+  fontSize,
+  compact
+}) {
+  if (!tier) return null;
+  return tier.image ? /*#__PURE__*/React.createElement("img", {
+    src: tier.image,
+    alt: "",
+    style: {
+      width: size,
+      height: size,
+      borderRadius: radius,
+      objectFit: "contain",
+      ...(compact ? {
+        flexShrink: 0
+      } : null)
+    }
+  }) : /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize,
+      ...(compact ? {
+        width: size,
+        textAlign: "center",
+        flexShrink: 0
+      } : null)
+    }
+  }, tier.icon);
 }
 // v1.11.74 — built-in icon choices for the Rank icon picker (spec section 13). Organizer picks ONE of
 // these into a tier's existing `icon` field (no new schema — `icon`/`image` already existed per-tier, this
@@ -14012,20 +14057,12 @@ function PlayerRankingClubCard({
       borderRadius: 20,
       padding: "3px 9px"
     }
-  }, tier.image ? /*#__PURE__*/React.createElement("img", {
-    src: tier.image,
-    alt: "",
-    style: {
-      width: 16,
-      height: 16,
-      borderRadius: 4,
-      objectFit: "contain"
-    }
-  }) : /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 13
-    }
-  }, tier.icon), /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(RankTierImage, {
+    tier: tier,
+    size: 16,
+    radius: 4,
+    fontSize: 13
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 11.5,
       fontWeight: 800,
@@ -15106,24 +15143,13 @@ function RankingSettingsSheet({
         border: `1px solid ${T.border}`,
         cursor: "pointer"
       }
-    }, t.image ? /*#__PURE__*/React.createElement("img", {
-      src: t.image,
-      alt: "",
-      style: {
-        width: 30,
-        height: 30,
-        borderRadius: 8,
-        objectFit: "contain",
-        flexShrink: 0
-      }
-    }) : /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 20,
-        width: 30,
-        textAlign: "center",
-        flexShrink: 0
-      }
-    }, t.icon), /*#__PURE__*/React.createElement("div", {
+    }, /*#__PURE__*/React.createElement(RankTierImage, {
+      tier: t,
+      size: 30,
+      radius: 8,
+      fontSize: 20,
+      compact: true
+    }), /*#__PURE__*/React.createElement("div", {
       style: {
         flex: 1,
         minWidth: 0
@@ -27102,20 +27128,12 @@ function RankingShowcaseSheet({
         gap: 8,
         marginBottom: 10
       }
-    }, g.tier.image ? /*#__PURE__*/React.createElement("img", {
-      src: g.tier.image,
-      alt: "",
-      style: {
-        width: 22,
-        height: 22,
-        borderRadius: 6,
-        objectFit: "contain"
-      }
-    }) : /*#__PURE__*/React.createElement("span", {
-      style: {
-        fontSize: 18
-      }
-    }, g.tier.icon), /*#__PURE__*/React.createElement("span", {
+    }, /*#__PURE__*/React.createElement(RankTierImage, {
+      tier: g.tier,
+      size: 22,
+      radius: 6,
+      fontSize: 18
+    }), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 14,
         fontWeight: 800,
@@ -27361,20 +27379,12 @@ function RankingPrintView({
       borderBottom: "1px solid #dde5e1",
       paddingBottom: 6
     }
-  }, g.tier.image ? /*#__PURE__*/React.createElement("img", {
-    src: g.tier.image,
-    alt: "",
-    style: {
-      width: 22,
-      height: 22,
-      borderRadius: 6,
-      objectFit: "contain"
-    }
-  }) : /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 18
-    }
-  }, g.tier.icon), /*#__PURE__*/React.createElement("span", {
+  }, /*#__PURE__*/React.createElement(RankTierImage, {
+    tier: g.tier,
+    size: 22,
+    radius: 6,
+    fontSize: 18
+  }), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 14,
       fontWeight: 800

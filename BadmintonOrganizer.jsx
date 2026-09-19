@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.77";
+const APP_VERSION = "1.11.78";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1924,6 +1924,28 @@ function getDefaultRankTiers() {
     { id: "commander", name: "Commander", order: 6, icon: "🛡️", image: null, conditionType: "rp_top", rpMin: 300, winRateMin: 0, topPct: 20 },
     { id: "conqueror", name: "Conqueror", order: 7, icon: "👑", image: null, conditionType: "rp_top", rpMin: 300, winRateMin: 0, topPct: 10 },
   ];
+}
+// v1.11.78 — the shared Rank tier badge renderer the comment above has referenced by name since v1.11.68
+// ("see RankTierImage below") but that was never actually created: every render site (player profile
+// club card, Rank Settings tier list, Ranking Showcase on-screen + printable) instead hand-copied its own
+// `tier.image ? <img .../> : <span>{tier.icon}</span>` ternary independently. That duplication is exactly
+// how one location can silently drift from a shared fix like v1.11.74's alpha-aware PNG export (canvasHas
+// Transparency/ImageCropper.confirm) while another stays correct — nothing enforced they render the exact
+// same way. Centralizing it here guarantees every current call site (and any future one) stays byte-for-
+// byte consistent with the already-correct behavior: renders the stored data URI directly with no canvas/
+// re-processing step (so it can never re-introduce a flattened/black background), always `object-fit:
+// contain` (never crops non-square artwork into a circle/square), and falls back to the plain built-in
+// emoji exactly as before when no custom image is set. `size`/`radius`/`fontSize` let each call site keep
+// its own EXACT pre-existing dimensions — this is a pure de-duplication, not a visual change. `compact`
+// reproduces the one call site (Rank Settings tier list row) that also pinned the emoji span's width/
+// text-align and gave both variants `flexShrink: 0`.
+function RankTierImage({ tier, size, radius, fontSize, compact }) {
+  if (!tier) return null;
+  return tier.image ? (
+    <img src={tier.image} alt="" style={{ width: size, height: size, borderRadius: radius, objectFit: "contain", ...(compact ? { flexShrink: 0 } : null) }} />
+  ) : (
+    <span style={{ fontSize, ...(compact ? { width: size, textAlign: "center", flexShrink: 0 } : null) }}>{tier.icon}</span>
+  );
 }
 // v1.11.74 — built-in icon choices for the Rank icon picker (spec section 13). Organizer picks ONE of
 // these into a tier's existing `icon` field (no new schema — `icon`/`image` already existed per-tier, this
@@ -7853,7 +7875,7 @@ function PlayerRankingClubCard({ clubName, playerId, skillIndex, result }) {
         <div style={{ fontSize: 13, fontWeight: 800, color: T.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{clubName}</div>
         {tier ? (
           <div style={{ display: "flex", alignItems: "center", gap: 4, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "3px 9px" }}>
-            {tier.image ? <img src={tier.image} alt="" style={{ width: 16, height: 16, borderRadius: 4, objectFit: "contain" }} /> : <span style={{ fontSize: 13 }}>{tier.icon}</span>}
+            <RankTierImage tier={tier} size={16} radius={4} fontSize={13} />
             <span style={{ fontSize: 11.5, fontWeight: 800, color: T.text }}>{tier.name}</span>
           </div>
         ) : (
@@ -8252,7 +8274,7 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
           const countInTier = Object.keys(ranking.rankByPlayer).filter((pid) => ranking.rankByPlayer[pid] && ranking.rankByPlayer[pid].id === t.id).length;
           return (
             <button key={t.id} onClick={() => setEditingTier(t)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, cursor: "pointer" }}>
-              {t.image ? <img src={t.image} alt="" style={{ width: 30, height: 30, borderRadius: 8, objectFit: "contain", flexShrink: 0 }} /> : <span style={{ fontSize: 20, width: 30, textAlign: "center", flexShrink: 0 }}>{t.icon}</span>}
+              <RankTierImage tier={t} size={30} radius={8} fontSize={20} compact />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>{t.name}</div>
                 <div style={{ fontSize: 11, color: T.muted }}>{conditionLabel(t)}{countInTier > 0 ? ` · ${countInTier} คน` : ""}</div>
@@ -12762,7 +12784,7 @@ function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig
             return (
               <div key={g.tier.id}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                  {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "contain" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
+                  <RankTierImage tier={g.tier} size={22} radius={6} fontSize={18} />
                   <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{g.tier.name.toUpperCase()}</span>
                   <span style={{ fontSize: 11, color: T.muted }}>{g.players.length} คน</span>
                 </div>
@@ -12841,7 +12863,7 @@ function RankingPrintView({ report, onClose }) {
         ) : report.groups.map((g, gi) => (
           <div key={g.tier.id} className="rpv-avoidbreak" style={{ marginBottom: 20 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, borderBottom: "1px solid #dde5e1", paddingBottom: 6 }}>
-              {g.tier.image ? <img src={g.tier.image} alt="" style={{ width: 22, height: 22, borderRadius: 6, objectFit: "contain" }} /> : <span style={{ fontSize: 18 }}>{g.tier.icon}</span>}
+              <RankTierImage tier={g.tier} size={22} radius={6} fontSize={18} />
               <span style={{ fontSize: 14, fontWeight: 800 }}>{g.tier.name.toUpperCase()}</span>
               <span style={{ fontSize: 11, color: "#6b7d74" }}>{g.players.length} คน</span>
             </div>
