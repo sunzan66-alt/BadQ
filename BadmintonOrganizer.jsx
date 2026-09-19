@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.6";
+const APP_VERSION = "1.12.7";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -29,9 +29,14 @@ const SKILL_DESC = {
   10: "แข่งขัน — ระดับแข่งขันจริงจัง",
   11: "ระดับสูง — ฝีมือสูงสุด เล่นแข่งขันระดับสูง",
 };
+// v1.12.7 (fix 2): reordered so "Bad Web / กลาง" is first — it is now the true default preset (see
+// getDefaultSettings() and the levelPresetId migration further below) — and LevelPresetEditor's preset
+// cards render directly off this array's order (plus "กำหนดเอง" appended last), so no other change is
+// needed to reorder the visual cards to Bad Web/กลาง → อีสาน → เหนือ/เชียงใหม่ → กำหนดเอง. Every existing
+// preset's id/name/levels/Skill-Index-1-11 mapping is completely unchanged — only array position moved.
 const LEVEL_PRESETS = [
-  { id: "isan", name: "อีสาน", description: "ใช้ลำดับ: R → BG1 → BG2 → BG3 → S- → S → N- → N → P- → P → C", levels: ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"] },
   { id: "badweb-central", name: "Bad Web / กลาง", description: "ใช้ลำดับ: BG → BG+ → NB → N- → N → NS → S → P- → P → P+ → C", levels: ["BG", "BG+", "NB", "N-", "N", "NS", "S", "P-", "P", "P+", "C"] },
+  { id: "isan", name: "อีสาน", description: "ใช้ลำดับ: R → BG1 → BG2 → BG3 → S- → S → N- → N → P- → P → C", levels: ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"] },
   { id: "north", name: "เหนือ / เชียงใหม่", description: "ใช้ลำดับ: มือหัดตี → Beginner → ตีโต้ → N → N+ → S → S+ → P- → P → Open → Open+", levels: ["มือหัดตี", "Beginner", "ตีโต้", "N", "N+", "S", "S+", "P-", "P", "Open", "Open+"] },
 ];
 function getPresetMeta(id) {
@@ -41,7 +46,12 @@ function getPresetMeta(id) {
 // display label for a given skillIndex, resolved against whichever preset is currently active (incl. custom)
 function displayLevelFor(skillIndex, settings) {
   const idx = Math.max(1, Math.min(11, skillIndex || 1));
-  const presetId = (settings && settings.levelPresetId) || "isan";
+  // v1.12.7 (fix 2): "no preset ever explicitly chosen" now falls back to badweb-central (the new true
+  // default — see getDefaultSettings() and the levelPresetId migration below), not isan. Any settings
+  // object that already has an explicit levelPresetId (every existing group, since it's always been set by
+  // getDefaultSettings/migration since long before this patch) is completely unaffected — this only changes
+  // what happens when the field is truly absent.
+  const presetId = (settings && settings.levelPresetId) || "badweb-central";
   if (presetId === "custom") {
     const found = ((settings && settings.customLevels) || []).find((l) => l.skillIndex === idx);
     return found ? found.name : ("Skill " + idx);
@@ -51,7 +61,7 @@ function displayLevelFor(skillIndex, settings) {
 }
 // { skillIndex, label } options for level <select> dropdowns, reflecting the active preset
 function activeLevelOptions(settings) {
-  const presetId = (settings && settings.levelPresetId) || "isan";
+  const presetId = (settings && settings.levelPresetId) || "badweb-central"; // v1.12.7 (fix 2): see displayLevelFor's comment above
   if (presetId === "custom") {
     return ((settings && settings.customLevels) || []).slice().sort((a, b) => a.skillIndex - b.skillIndex).map((l) => ({ skillIndex: l.skillIndex, label: l.name }));
   }
@@ -3003,7 +3013,7 @@ function fmtMode(settings, mode) {
 // session config so organizers don't have to open the sheet just to check it.
 function quanSettingsSummary(settings, mode, courtCount) {
   const modeLabel = mode === "singles" ? "1v1" : "2v2";
-  const levelLabel = getPresetMeta(settings.levelPresetId || "isan").name;
+  const levelLabel = getPresetMeta(settings.levelPresetId || "badweb-central").name;
   return `${modeLabel} · ${courtCount} สนาม · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
 }
 // dynamic subtitle for the "💵 การชำระเงินและต้นทุน" compact entry point on the ชำระเงิน tab
@@ -3226,7 +3236,11 @@ function getDefaultSettings() {
     // pairingMode, "auto" or "manual") are untouched, and every `settings.pairingMode === "manual"` check
     // elsewhere in the app is unchanged, so legacy data keeps behaving exactly as before.
     court: 65, shuttle: 25, other: 0, rounds: 1, winScore: 21, deuce: true, qr: null, bank: "", pairingMode: "manual",
-    levelPresetId: "isan",
+    // v1.12.7 (fix 2): brand-new groups/settings now default to "badweb-central" (Bad Web / กลาง) instead of
+    // "isan" — this ONLY affects settings objects built fresh from scratch here (new group, first install).
+    // An existing group's already-saved levelPresetId (isan/north/badweb-central/custom) is loaded from its
+    // own stored settings and never passes through this function, so it is never migrated/overwritten.
+    levelPresetId: "badweb-central",
     customLevels: [],
     // ===== FLEXIBLE COST MODEL (v1.9.4) — "รูปแบบคิดค่าใช้จ่าย" =====
     // "simple" is the untouched original ค่าคอร์ท/ค่าลูก/ค่าใช้จ่ายอื่น model above (default — zero behavior
@@ -3686,7 +3700,12 @@ function migrateBackupData(parsed) {
   data.courtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
   data.mode = data.mode || "doubles";
   data.settings = { ...getDefaultSettings(), ...(data.settings || {}) };
-  if (!data.settings.levelPresetId) data.settings.levelPresetId = "isan"; // e.g. no levelPresetId -> isan
+  // v1.12.7 (fix 2): the spread above (getDefaultSettings() as base, then data.settings on top) already
+  // makes a genuinely-missing levelPresetId key resolve to getDefaultSettings()'s new "badweb-central"
+  // default; this explicit check is the secondary safety net for an old backup that stored the key as an
+  // empty/falsy value rather than omitting it outright — same new default, same "only when truly unset"
+  // guarantee, never overwrites an existing group's real saved preset (isan/north/badweb-central/custom).
+  if (!data.settings.levelPresetId) data.settings.levelPresetId = "badweb-central";
   if (!Array.isArray(data.settings.customLevels)) data.settings.customLevels = [];
   if (!Array.isArray(data.settings.wheelPrizes) || data.settings.wheelPrizes.length === 0) data.settings.wheelPrizes = getDefaultSettings().wheelPrizes;
   else data.settings.wheelPrizes = normWheelPrizes(data.settings.wheelPrizes); // v1.11.34: old qty-only prizes -> new probability/value/wheelOrder model
@@ -6231,7 +6250,7 @@ export default function App() {
       endedAt: Date.now(),
       courtCount, mode,
       settings: { ...settings },
-      levelPresetId: settings.levelPresetId || "isan", // freeze which preset was active — historical display must never change later
+      levelPresetId: settings.levelPresetId || "badweb-central", // freeze which preset was active — historical display must never change later
       // v1.11.45 (History attendee filter): freeze only players who ACTUALLY ATTENDED this session (see
       // attendedPlayers above), never the whole master roster — so the frozen player list and the frozen
       // payment list (`bill`, already attendee-only via computeBill) can never disagree about who was
@@ -7077,7 +7096,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef }} />}
         {tab === "session" && <GameTab
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members") }}
           summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
@@ -7115,7 +7134,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
@@ -7318,6 +7337,10 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
         resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
         groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
+        /* v1.12.7 (fix 1): threaded through purely so QuanSettingsSheet can embed the EXISTING
+           FinanceSettingsBody (การชำระเงินและต้นทุน) as a new accordion — same props FinanceSettingsSheet
+           already receives from App() at the ชำระเงิน tab, nothing new is created. */
+        qrRef={qrRef} history={history} current={current}
       />
       {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
 
@@ -8368,7 +8391,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
   const [wipedNotice, setWipedNotice] = useState(false);
-  const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
+  const currentPreset = getPresetMeta(settings.levelPresetId || "badweb-central");
 
   const NavRow = ({ children, onClick }) => (
     <button onClick={onClick} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer" }}>{children}</button>
@@ -8987,7 +9010,7 @@ function Fairness({ sA, sB }) {
 // openSessionPhoto, applyGroupDefaultsFor, QuanSettingsSheet and all its props, fmtMode,
 // quanSettingsSummary) — nothing duplicated, just relocated, plus one small addition (the "🔒 ล็อคคู่ N คู่"
 // line the new mockup calls for, computed directly off the existing lockPairs array).
-function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessionPhoto, sessionHistory, applyGroupDefaultsFor, settings, setSettings, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault }) {
+function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessionPhoto, sessionHistory, applyGroupDefaultsFor, settings, setSettings, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current }) {
   const [showNameDropdown, setShowNameDropdown] = useState(false);
   const [openQuanSettings, setOpenQuanSettings] = useState(false);
   // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
@@ -9084,10 +9107,13 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
       {openQuanSettings && (
         <QuanSettingsSheet
           mode={mode} setMode={setMode} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} setCourtLabel={setCourtLabel}
-          settings={settings} setSettings={setSettings} session={session} sessionHistory={sessionHistory}
+          settings={settings} setSettings={setSettings} session={session} setSession={setSession} sessionHistory={sessionHistory}
           players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
           resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
           groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
+          /* v1.12.7 (fix 1): same purpose as the comment on GroupSessionHeader's own qrRef/history/current
+             props above — reused unchanged by the new "💵 การชำระเงินและต้นทุน" accordion below. */
+          qrRef={qrRef} history={history} current={current}
           onClose={() => setOpenQuanSettings(false)}
         />
       )}
@@ -10956,10 +10982,15 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
   );
 }
 
-function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, session, sessionHistory, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, onClose }) {
+function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, session, setSession, sessionHistory, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current, onClose }) {
   // v1.8.4: ค่าใช้จ่าย (💳) and รางวัล (🏆) moved out of this sheet into FinanceSettingsSheet, opened from the
   // ชำระเงิน tab instead — Today/ตั้งค่าก๊วน is now Game Operations only, money settings live with money UI.
-  const [open, setOpen] = useState("play"); // "play" | "level" | null — one section open at a time
+  // v1.12.7 (ตั้งค่าก๊วน accordion follow-up, fix 1): reversed — a "💵 การชำระเงินและต้นทุน" accordion is back
+  // here too (BETWEEN 🎮 การเล่น and 🏸 ระดับฝีมือ), but it does NOT reintroduce a second payment/cost system:
+  // it renders <FinanceSettingsBody> inline, the exact same component/state/handlers/persistence/
+  // calculations FinanceSettingsSheet (opened from the ชำระเงิน tab) already uses — see that component's own
+  // comment. Finance > ชำระเงิน, Finance Overview, and all calculations are completely untouched.
+  const [open, setOpen] = useState("play"); // "play" | "payment" | "level" | null — one section open at a time
   const [editCourtLabels, setEditCourtLabels] = useState(false);
   const [showCourtRecDetail, setShowCourtRecDetail] = useState(false); // v1.11.7 (Part I/J)
   const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
@@ -11104,9 +11135,24 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
         </div>
       )}
 
+      {/* 💵 การชำระเงินและต้นทุน — v1.12.7 fix 1: renders FinanceSettingsBody, the EXISTING payment/cost
+          settings UI (รายได้/ต้นทุน/ประมาณการก๊วน, QR, bank info — everything FinanceSettingsSheet already
+          shows from the ชำระเงิน tab), reusing its exact same settings/setSettings state, handlers, and
+          calculations. No new payment/cost system, no duplicated state — editing here and editing from
+          ชำระเงิน both read/write the SAME settings object. */}
+      <button onClick={() => toggle("payment")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "payment" ? 0 : 8 }}>
+        <Wallet size={15} color={T.muted} /> 💵 การชำระเงินและต้นทุน
+        <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "payment" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
+      </button>
+      {open === "payment" && (
+        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
+          <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
+        </div>
+      )}
+
       {/* 🏸 ระดับฝีมือ */}
       <button onClick={() => toggle("level")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "level" ? 0 : 4 }}>
-        <ClipboardList size={15} color={T.muted} /> 🏸 ระดับฝีมือ ({getPresetMeta(settings.levelPresetId || "isan").name})
+        <ClipboardList size={15} color={T.muted} /> 🏸 ระดับฝีมือ ({getPresetMeta(settings.levelPresetId || "badweb-central").name})
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "level" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "level" && (
@@ -11708,7 +11754,14 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
     </div>
   );
 }
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, onClose }) {
+// v1.12.7 (ตั้งค่าก๊วน accordion follow-up, fix 1): split into a body (all state/handlers/JSX below, byte-
+// for-byte unchanged) and a thin standalone-sheet wrapper (FinanceSettingsSheet, further below), so the
+// EXACT SAME component/state/handlers/persistence/calculations can now ALSO be embedded inline as an
+// accordion panel inside QuanSettingsSheet's new "💵 การชำระเงินและต้นทุน" section — no second nested
+// Overlay/backdrop, no duplicated payment/cost system. FinanceSettingsSheet (the existing standalone modal
+// opened from the ชำระเงิน tab) keeps its exact same props/call site/behavior; it is now just
+// <Overlay><heading/><FinanceSettingsBody/></Overlay>.
+function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | null — v1.12.1: "prize" moved to RewardSettingsSheet (Advanced Settings)
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.52 (spec C): "จำนวนลูกที่ใช้"'s AUTO baseline — the SAME live completed-match definition already
@@ -11736,9 +11789,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
   const updateCustomRow = (id, patch) => setSettings((s) => ({ ...s, customCostRows: (s.customCostRows || []).map((r) => (r.id === id ? { ...r, ...patch } : r)) }));
   const removeCustomRow = (id) => setSettings((s) => ({ ...s, customCostRows: (s.customCostRows || []).filter((r) => r.id !== id) }));
   return (
-    <Overlay onClose={onClose}>
-      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>💵 การชำระเงินและต้นทุน</div>
-
+    <>
       {/* v1.11.50 (Financial Setup Enhancement, spec A): explicitly split into 💳 รายได้ (this section — what's
           billed to players, Revenue side of computeBill) vs 💸 ต้นทุนก๊วน (below — the organizer's own real
           out-of-pocket costs, configured HERE now instead of only after the fact in the การเงิน tab). */}
@@ -11869,6 +11920,18 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
           wheelShowSoldOut, WheelPrizeEditor) verbatim, just relocated — Reward is an optional Advanced
           Feature now, not part of normal payment/cost setup. No reward data/logic was touched or
           duplicated; see RewardSettingsSheet below WheelPrizeEditor. */}
+    </>
+  );
+}
+
+// v1.12.7: thin standalone-sheet wrapper around FinanceSettingsBody (see comment above it) — same props,
+// same Overlay/heading/onClose behavior as before this patch, used unchanged by its one existing call site
+// (the ชำระเงิน tab's "การชำระเงินและต้นทุน" button).
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, onClose }) {
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>💵 การชำระเงินและต้นทุน</div>
+      <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
     </Overlay>
   );
 }
@@ -15333,7 +15396,7 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
 // Switching preset only ever rewrites each player's cached DISPLAY label (via changeLevelPreset,
 // defined in App()) — skillIndex (matchmaking source of truth) never changes.
 function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels }) {
-  const currentId = settings.levelPresetId || "isan";
+  const currentId = settings.levelPresetId || "badweb-central";
   const [pendingPreset, setPendingPreset] = useState(null); // preset id awaiting confirm, or null
   const [showSkillInfo, setShowSkillInfo] = useState(false);
   const allPresets = [...LEVEL_PRESETS, getPresetMeta("custom")];

@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.6";
+      var CURRENT_VERSION = "1.12.7";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.12.6";
+const APP_VERSION = "1.12.7";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -776,16 +776,21 @@ const SKILL_DESC = {
   10: "แข่งขัน — ระดับแข่งขันจริงจัง",
   11: "ระดับสูง — ฝีมือสูงสุด เล่นแข่งขันระดับสูง"
 };
+// v1.12.7 (fix 2): reordered so "Bad Web / กลาง" is first — it is now the true default preset (see
+// getDefaultSettings() and the levelPresetId migration further below) — and LevelPresetEditor's preset
+// cards render directly off this array's order (plus "กำหนดเอง" appended last), so no other change is
+// needed to reorder the visual cards to Bad Web/กลาง → อีสาน → เหนือ/เชียงใหม่ → กำหนดเอง. Every existing
+// preset's id/name/levels/Skill-Index-1-11 mapping is completely unchanged — only array position moved.
 const LEVEL_PRESETS = [{
-  id: "isan",
-  name: "อีสาน",
-  description: "ใช้ลำดับ: R → BG1 → BG2 → BG3 → S- → S → N- → N → P- → P → C",
-  levels: ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"]
-}, {
   id: "badweb-central",
   name: "Bad Web / กลาง",
   description: "ใช้ลำดับ: BG → BG+ → NB → N- → N → NS → S → P- → P → P+ → C",
   levels: ["BG", "BG+", "NB", "N-", "N", "NS", "S", "P-", "P", "P+", "C"]
+}, {
+  id: "isan",
+  name: "อีสาน",
+  description: "ใช้ลำดับ: R → BG1 → BG2 → BG3 → S- → S → N- → N → P- → P → C",
+  levels: ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"]
 }, {
   id: "north",
   name: "เหนือ / เชียงใหม่",
@@ -803,7 +808,12 @@ function getPresetMeta(id) {
 // display label for a given skillIndex, resolved against whichever preset is currently active (incl. custom)
 function displayLevelFor(skillIndex, settings) {
   const idx = Math.max(1, Math.min(11, skillIndex || 1));
-  const presetId = settings && settings.levelPresetId || "isan";
+  // v1.12.7 (fix 2): "no preset ever explicitly chosen" now falls back to badweb-central (the new true
+  // default — see getDefaultSettings() and the levelPresetId migration below), not isan. Any settings
+  // object that already has an explicit levelPresetId (every existing group, since it's always been set by
+  // getDefaultSettings/migration since long before this patch) is completely unaffected — this only changes
+  // what happens when the field is truly absent.
+  const presetId = settings && settings.levelPresetId || "badweb-central";
   if (presetId === "custom") {
     const found = (settings && settings.customLevels || []).find(l => l.skillIndex === idx);
     return found ? found.name : "Skill " + idx;
@@ -813,7 +823,7 @@ function displayLevelFor(skillIndex, settings) {
 }
 // { skillIndex, label } options for level <select> dropdowns, reflecting the active preset
 function activeLevelOptions(settings) {
-  const presetId = settings && settings.levelPresetId || "isan";
+  const presetId = settings && settings.levelPresetId || "badweb-central"; // v1.12.7 (fix 2): see displayLevelFor's comment above
   if (presetId === "custom") {
     return (settings && settings.customLevels || []).slice().sort((a, b) => a.skillIndex - b.skillIndex).map(l => ({
       skillIndex: l.skillIndex,
@@ -4926,7 +4936,7 @@ function fmtMode(settings, mode) {
 // session config so organizers don't have to open the sheet just to check it.
 function quanSettingsSummary(settings, mode, courtCount) {
   const modeLabel = mode === "singles" ? "1v1" : "2v2";
-  const levelLabel = getPresetMeta(settings.levelPresetId || "isan").name;
+  const levelLabel = getPresetMeta(settings.levelPresetId || "badweb-central").name;
   return `${modeLabel} · ${courtCount} สนาม · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
 }
 // dynamic subtitle for the "💵 การชำระเงินและต้นทุน" compact entry point on the ชำระเงิน tab
@@ -5332,7 +5342,11 @@ function getDefaultSettings() {
     qr: null,
     bank: "",
     pairingMode: "manual",
-    levelPresetId: "isan",
+    // v1.12.7 (fix 2): brand-new groups/settings now default to "badweb-central" (Bad Web / กลาง) instead of
+    // "isan" — this ONLY affects settings objects built fresh from scratch here (new group, first install).
+    // An existing group's already-saved levelPresetId (isan/north/badweb-central/custom) is loaded from its
+    // own stored settings and never passes through this function, so it is never migrated/overwritten.
+    levelPresetId: "badweb-central",
     customLevels: [],
     // ===== FLEXIBLE COST MODEL (v1.9.4) — "รูปแบบคิดค่าใช้จ่าย" =====
     // "simple" is the untouched original ค่าคอร์ท/ค่าลูก/ค่าใช้จ่ายอื่น model above (default — zero behavior
@@ -5983,7 +5997,12 @@ function migrateBackupData(parsed) {
     ...getDefaultSettings(),
     ...(data.settings || {})
   };
-  if (!data.settings.levelPresetId) data.settings.levelPresetId = "isan"; // e.g. no levelPresetId -> isan
+  // v1.12.7 (fix 2): the spread above (getDefaultSettings() as base, then data.settings on top) already
+  // makes a genuinely-missing levelPresetId key resolve to getDefaultSettings()'s new "badweb-central"
+  // default; this explicit check is the secondary safety net for an old backup that stored the key as an
+  // empty/falsy value rather than omitting it outright — same new default, same "only when truly unset"
+  // guarantee, never overwrites an existing group's real saved preset (isan/north/badweb-central/custom).
+  if (!data.settings.levelPresetId) data.settings.levelPresetId = "badweb-central";
   if (!Array.isArray(data.settings.customLevels)) data.settings.customLevels = [];
   if (!Array.isArray(data.settings.wheelPrizes) || data.settings.wheelPrizes.length === 0) data.settings.wheelPrizes = getDefaultSettings().wheelPrizes;else data.settings.wheelPrizes = normWheelPrizes(data.settings.wheelPrizes); // v1.11.34: old qty-only prizes -> new probability/value/wheelOrder model
   data.session = data.session && typeof data.session === "object" ? data.session : {
@@ -9910,7 +9929,7 @@ function App() {
       settings: {
         ...settings
       },
-      levelPresetId: settings.levelPresetId || "isan",
+      levelPresetId: settings.levelPresetId || "badweb-central",
       // freeze which preset was active — historical display must never change later
       // v1.11.45 (History attendee filter): freeze only players who ACTUALLY ATTENDED this session (see
       // attendedPlayers above), never the whole master roster — so the frozen player list and the frozen
@@ -11598,7 +11617,8 @@ function App() {
     addLockPair,
     removeLockPair,
     setHandPref,
-    resetGames
+    resetGames,
+    qrRef
   }), tab === "session" && /*#__PURE__*/React.createElement(GameTab, {
     sessionTabProps: {
       players: activePlayers,
@@ -11924,7 +11944,8 @@ function MembersTab({
   addLockPair,
   removeLockPair,
   setHandPref,
-  resetGames
+  resetGames,
+  qrRef
 }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
@@ -12230,6 +12251,12 @@ function MembersTab({
     setCustomLevels: setCustomLevels,
     groupDefaults: groupDefaults,
     saveGroupDefault: saveGroupDefault
+    /* v1.12.7 (fix 1): threaded through purely so QuanSettingsSheet can embed the EXISTING
+       FinanceSettingsBody (การชำระเงินและต้นทุน) as a new accordion — same props FinanceSettingsSheet
+       already receives from App() at the ชำระเงิน tab, nothing new is created. */,
+    qrRef: qrRef,
+    history: history,
+    current: current
   }), cropJob && /*#__PURE__*/React.createElement(ImageCropper, {
     src: cropJob,
     circleGuide: true,
@@ -15003,7 +15030,7 @@ function GeneralSettingsSheet({
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
   const [wipedNotice, setWipedNotice] = useState(false);
-  const currentPreset = getPresetMeta(settings.levelPresetId || "isan");
+  const currentPreset = getPresetMeta(settings.levelPresetId || "badweb-central");
   const NavRow = ({
     children,
     onClick
@@ -16833,7 +16860,10 @@ function GroupSessionHeader({
   changeLevelPreset,
   setCustomLevels,
   groupDefaults,
-  saveGroupDefault
+  saveGroupDefault,
+  qrRef,
+  history,
+  current
 }) {
   const [showNameDropdown, setShowNameDropdown] = useState(false);
   const [openQuanSettings, setOpenQuanSettings] = useState(false);
@@ -17200,6 +17230,7 @@ function GroupSessionHeader({
     settings: settings,
     setSettings: setSettings,
     session: session,
+    setSession: setSession,
     sessionHistory: sessionHistory,
     players: players,
     lockPairs: lockPairs,
@@ -17211,7 +17242,12 @@ function GroupSessionHeader({
     changeLevelPreset: changeLevelPreset,
     setCustomLevels: setCustomLevels,
     groupDefaults: groupDefaults,
-    saveGroupDefault: saveGroupDefault,
+    saveGroupDefault: saveGroupDefault
+    /* v1.12.7 (fix 1): same purpose as the comment on GroupSessionHeader's own qrRef/history/current
+       props above — reused unchanged by the new "💵 การชำระเงินและต้นทุน" accordion below. */,
+    qrRef: qrRef,
+    history: history,
+    current: current,
     onClose: () => setOpenQuanSettings(false)
   }));
 }
@@ -22045,6 +22081,7 @@ function QuanSettingsSheet({
   settings,
   setSettings,
   session,
+  setSession,
   sessionHistory,
   players,
   lockPairs,
@@ -22057,11 +22094,19 @@ function QuanSettingsSheet({
   setCustomLevels,
   groupDefaults,
   saveGroupDefault,
+  qrRef,
+  history,
+  current,
   onClose
 }) {
   // v1.8.4: ค่าใช้จ่าย (💳) and รางวัล (🏆) moved out of this sheet into FinanceSettingsSheet, opened from the
   // ชำระเงิน tab instead — Today/ตั้งค่าก๊วน is now Game Operations only, money settings live with money UI.
-  const [open, setOpen] = useState("play"); // "play" | "level" | null — one section open at a time
+  // v1.12.7 (ตั้งค่าก๊วน accordion follow-up, fix 1): reversed — a "💵 การชำระเงินและต้นทุน" accordion is back
+  // here too (BETWEEN 🎮 การเล่น and 🏸 ระดับฝีมือ), but it does NOT reintroduce a second payment/cost system:
+  // it renders <FinanceSettingsBody> inline, the exact same component/state/handlers/persistence/
+  // calculations FinanceSettingsSheet (opened from the ชำระเงิน tab) already uses — see that component's own
+  // comment. Finance > ชำระเงิน, Finance Overview, and all calculations are completely untouched.
+  const [open, setOpen] = useState("play"); // "play" | "payment" | "level" | null — one section open at a time
   const [editCourtLabels, setEditCourtLabels] = useState(false);
   const [showCourtRecDetail, setShowCourtRecDetail] = useState(false); // v1.11.7 (Part I/J)
   const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
@@ -22422,6 +22467,55 @@ function QuanSettingsSheet({
   }, /*#__PURE__*/React.createElement(RotateCcw, {
     size: 14
   }), " \u0E23\u0E35\u0E40\u0E0B\u0E47\u0E15\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => toggle("payment"),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      padding: "11px 14px",
+      borderRadius: 12,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 13.5,
+      fontWeight: 700,
+      marginBottom: open === "payment" ? 0 : 8
+    }
+  }, /*#__PURE__*/React.createElement(Wallet, {
+    size: 15,
+    color: T.muted
+  }), " \uD83D\uDCB5 \u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19\u0E41\u0E25\u0E30\u0E15\u0E49\u0E19\u0E17\u0E38\u0E19", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 17,
+    color: T.muted,
+    style: {
+      marginLeft: "auto",
+      transform: open === "payment" ? "rotate(180deg)" : "none",
+      transition: "transform .15s"
+    }
+  })), open === "payment" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderTop: "none",
+      borderRadius: "0 0 12px 12px",
+      padding: 14,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement(FinanceSettingsBody, {
+    settings,
+    setSettings,
+    qrRef,
+    courtCount,
+    courtLabels,
+    players,
+    session,
+    setSession,
+    history,
+    current,
+    mode,
+    sessionHistory
+  })), /*#__PURE__*/React.createElement("button", {
     onClick: () => toggle("level"),
     style: {
       width: "100%",
@@ -22440,7 +22534,7 @@ function QuanSettingsSheet({
   }, /*#__PURE__*/React.createElement(ClipboardList, {
     size: 15,
     color: T.muted
-  }), " \uD83C\uDFF8 \u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D (", getPresetMeta(settings.levelPresetId || "isan").name, ")", /*#__PURE__*/React.createElement(ChevronDown, {
+  }), " \uD83C\uDFF8 \u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D (", getPresetMeta(settings.levelPresetId || "badweb-central").name, ")", /*#__PURE__*/React.createElement(ChevronDown, {
     size: 17,
     color: T.muted,
     style: {
@@ -23990,7 +24084,14 @@ function FinancialEstimatePanel({
     }
   }, formatCurrency(Math.abs(profitEstimate))))));
 }
-function FinanceSettingsSheet({
+// v1.12.7 (ตั้งค่าก๊วน accordion follow-up, fix 1): split into a body (all state/handlers/JSX below, byte-
+// for-byte unchanged) and a thin standalone-sheet wrapper (FinanceSettingsSheet, further below), so the
+// EXACT SAME component/state/handlers/persistence/calculations can now ALSO be embedded inline as an
+// accordion panel inside QuanSettingsSheet's new "💵 การชำระเงินและต้นทุน" section — no second nested
+// Overlay/backdrop, no duplicated payment/cost system. FinanceSettingsSheet (the existing standalone modal
+// opened from the ชำระเงิน tab) keeps its exact same props/call site/behavior; it is now just
+// <Overlay><heading/><FinanceSettingsBody/></Overlay>.
+function FinanceSettingsBody({
   settings,
   setSettings,
   qrRef,
@@ -24002,8 +24103,7 @@ function FinanceSettingsSheet({
   history,
   current,
   mode,
-  sessionHistory,
-  onClose
+  sessionHistory
 }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | null — v1.12.1: "prize" moved to RewardSettingsSheet (Advanced Settings)
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
@@ -24052,15 +24152,7 @@ function FinanceSettingsSheet({
     ...s,
     customCostRows: (s.customCostRows || []).filter(r => r.id !== id)
   }));
-  return /*#__PURE__*/React.createElement(Overlay, {
-    onClose: onClose
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 17,
-      fontWeight: 800,
-      marginBottom: 14
-    }
-  }, "\uD83D\uDCB5 \u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19\u0E41\u0E25\u0E30\u0E15\u0E49\u0E19\u0E17\u0E38\u0E19"), /*#__PURE__*/React.createElement("button", {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     onClick: () => toggle("payment"),
     style: {
       width: "100%",
@@ -24517,6 +24609,48 @@ function FinanceSettingsSheet({
     mode: mode,
     openingBalance: shuttleOpeningResolved
   })));
+}
+
+// v1.12.7: thin standalone-sheet wrapper around FinanceSettingsBody (see comment above it) — same props,
+// same Overlay/heading/onClose behavior as before this patch, used unchanged by its one existing call site
+// (the ชำระเงิน tab's "การชำระเงินและต้นทุน" button).
+function FinanceSettingsSheet({
+  settings,
+  setSettings,
+  qrRef,
+  courtCount,
+  courtLabels,
+  players,
+  session,
+  setSession,
+  history,
+  current,
+  mode,
+  sessionHistory,
+  onClose
+}) {
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 17,
+      fontWeight: 800,
+      marginBottom: 14
+    }
+  }, "\uD83D\uDCB5 \u0E01\u0E32\u0E23\u0E0A\u0E33\u0E23\u0E30\u0E40\u0E07\u0E34\u0E19\u0E41\u0E25\u0E30\u0E15\u0E49\u0E19\u0E17\u0E38\u0E19"), /*#__PURE__*/React.createElement(FinanceSettingsBody, {
+    settings,
+    setSettings,
+    qrRef,
+    courtCount,
+    courtLabels,
+    players,
+    session,
+    setSession,
+    history,
+    current,
+    mode,
+    sessionHistory
+  }));
 }
 function Seg({
   options,
@@ -33489,7 +33623,7 @@ function LevelPresetEditor({
   changeLevelPreset,
   setCustomLevels
 }) {
-  const currentId = settings.levelPresetId || "isan";
+  const currentId = settings.levelPresetId || "badweb-central";
   const [pendingPreset, setPendingPreset] = useState(null); // preset id awaiting confirm, or null
   const [showSkillInfo, setShowSkillInfo] = useState(false);
   const allPresets = [...LEVEL_PRESETS, getPresetMeta("custom")];
