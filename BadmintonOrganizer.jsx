@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.74";
+const APP_VERSION = "1.11.76";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -271,6 +271,19 @@ function migrateLockPairs(raw) {
 }
 // find the (at most one) active rule between two specific players, order-independent
 function ruleBetween(lockPairs, a, b) { return (lockPairs || []).find((r) => (r.a === a && r.b === b) || (r.a === b && r.b === a)) || null; }
+// v1.9.17: "อยากคู่/ไม่อยากคู่กับมือถนัดซ้าย" — a SOFT preference, never a hard filter (unlike lockOk in
+// buildMatch below). Nudges the score for a candidate partnership x+y up/down; if NO split satisfies
+// anyone's preference the match still forms normally, just picking whichever split scores lowest overall.
+// v1.11.75: hoisted from inside buildMatch to module scope (identical logic, `players` now an explicit
+// param instead of a closure variable) so the new manual single-slot recommender (rankManualSlotCandidates)
+// can reuse the EXACT SAME nudge instead of duplicating it — per explicit instruction not to build a second
+// independent matchmaking algorithm.
+function handPrefNudge(x, y, players) {
+  const px = players.find((pp) => pp.id === x), py = players.find((pp) => pp.id === y);
+  if (!px || !py) return 0;
+  const of = (pref, partner) => (pref === "preferLeft" ? (partner.handedness === "left" ? -HAND_PREF_WEIGHT : 0) : pref === "avoidLeft" ? (partner.handedness === "left" ? HAND_PREF_WEIGHT : 0) : 0);
+  return of(px.handPref, py) + of(py.handPref, px);
+}
 
 // court/field DISPLAY labels — decoupled from the internal court INDEX (1..courtCount) that all
 // match/slot logic (occupied-sets, tapSlot, tStartMatch, etc.) still keys off unchanged. A venue may
@@ -605,15 +618,8 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
     }
     return true;
   };
-  // v1.9.17: "อยากคู่/ไม่อยากคู่กับมือถนัดซ้าย" — a SOFT preference, never a hard filter (unlike lockOk
-  // above). Nudges the score for a candidate partnership x+y up/down; if NO split satisfies anyone's
-  // preference the match still forms normally, just picking whichever split scores lowest overall.
-  const handPrefNudge = (x, y) => {
-    const px = players.find((pp) => pp.id === x), py = players.find((pp) => pp.id === y);
-    if (!px || !py) return 0;
-    const of = (pref, partner) => (pref === "preferLeft" ? (partner.handedness === "left" ? -HAND_PREF_WEIGHT : 0) : pref === "avoidLeft" ? (partner.handedness === "left" ? HAND_PREF_WEIGHT : 0) : 0);
-    return of(px.handPref, py) + of(py.handPref, px);
-  };
+  // v1.11.75: handPrefNudge is now a module-level function (hoisted above, right after ruleBetween) — see
+  // its own comment there.
   let best = null;
   for (const trio of kcomb(others, 3)) {
     const four = [anchor, ...trio];
@@ -631,7 +637,7 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
       const pRep = pc(A[0], A[1]) + pc(B[0], B[1]);
       const oRep = oc(A[0], B[0]) + oc(A[0], B[1]) + oc(A[1], B[0]) + oc(A[1], B[1]);
       const waitPen = idxOf(trio[0]) + idxOf(trio[1]) + idxOf(trio[2]);
-      const handPen = handPrefNudge(A[0], A[1]) + handPrefNudge(B[0], B[1]);
+      const handPen = handPrefNudge(A[0], A[1], players) + handPrefNudge(B[0], B[1], players);
       // v1.11.40: teammate-repeat penalty (intra-team pairs) unchanged from v1.11.36; opponent-repeat is the
       // NEW part — checked across all 4 cross-team pairs, same as how oRep above sums the aggregate version.
       const latestPen = latestTeammatePen(A[0], A[1]) + latestTeammatePen(B[0], B[1])
@@ -641,6 +647,69 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
     }
   }
   return best;
+}
+
+// v1.11.75 — Manual Matchmaking Smart Suggestion (spec sections 1-3). Reorders/flags the candidate list
+// PlayerPicker shows when the Organizer is hand-filling a slot, using the SAME scoring ingredients as the
+// automatic buildMatch() engine above (skill balance, partner/opponent repeat counts via `stats`, the
+// hand-pref soft nudge, the owner-last preference, the "don't repeat the latest game's teammate/opponent"
+// soft penalty, and queue-priority via SORT) — explicitly reusing existing logic rather than inventing a
+// second algorithm. It differs from buildMatch only in shape: buildMatch picks a whole foursome from
+// scratch, while this scores ONE candidate against whichever teammate/opponent slots are ALREADY filled in
+// the specific match being edited.
+// Never hides or blocks anyone: a candidate who conflicts with an already-placed player via an
+// "avoidPartner"/"avoidOpponent"/"avoidBoth" lockPairs rule is annotated with `_conflict` and sorted to the
+// BOTTOM (still fully selectable) instead of being excluded — see spec section 2/4 ("Organizer always has
+// final control"). `teammateIds`/`opponentIds` should be empty arrays when nobody else has been placed in
+// the match yet (the very first slot) — the caller is expected to skip calling this in that case so the
+// list keeps its original wait-priority order untouched, exactly as before this feature existed.
+function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lockPairs, stats, latestMap) {
+  const pool = bench || [];
+  if (pool.length === 0) return pool;
+  const plist = players || [];
+  const rules = lockPairs || [];
+  const st = stats || {};
+  const partnerStats = st.partner || {};
+  const oppStats = st.opp || {};
+  const partnerOf = (latestMap && latestMap.partnerOf) || {};
+  const opponentsOf = (latestMap && latestMap.opponentsOf) || {};
+  const w = (id) => plist.find((p) => p.id === id)?.skillIndex || 0;
+  const isOwner = (id) => plist.find((p) => p.id === id)?.memberType === "owner";
+  const pc = (a, b) => partnerStats[keyOf(a, b)] || 0;
+  const oc = (a, b) => oppStats[keyOf(a, b)] || 0;
+  const latestTeammatePen = (a, b) => (partnerOf[a] === b || partnerOf[b] === a) ? LATEST_TEAMMATE_PENALTY : 0;
+  const latestOpponentPen = (a, b) => ((opponentsOf[a] || []).includes(b) || (opponentsOf[b] || []).includes(a)) ? LATEST_OPPONENT_PENALTY : 0;
+  // same fairness/queue-priority ordering the automatic engine itself sorts its pool by (see every
+  // buildMatch caller: `order = ...sort(SORT)`) — used here only as a small tiebreaker (weight 0.4, matching
+  // buildMatch's own waitPen*0.4), never as the dominant factor.
+  const priorityOrder = [...pool].sort(SORT);
+  const priorityIdx = (id) => priorityOrder.findIndex((p) => p.id === id);
+
+  const scored = pool.map((p) => {
+    let conflict = null; // { label, withName } | null — surfaced, never hidden/blocked
+    let score = (isOwner(p.id) ? OWNER_PENALTY : 0) + priorityIdx(p.id) * 0.4;
+    for (const tid of teammateIds) {
+      const r = ruleBetween(rules, p.id, tid);
+      if (r && (r.type === "avoidPartner" || r.type === "avoidBoth") && !conflict) {
+        const other = plist.find((pp) => pp.id === tid);
+        conflict = { label: "ไม่อยากคู่กับ", withName: (other && other.name) || "" };
+      }
+      score += Math.abs(w(p.id) - w(tid)) * 2 + pc(p.id, tid) * 3 + latestTeammatePen(p.id, tid) + handPrefNudge(p.id, tid, plist);
+    }
+    for (const oid of opponentIds) {
+      const r = ruleBetween(rules, p.id, oid);
+      if (r && (r.type === "avoidOpponent" || r.type === "avoidBoth") && !conflict) {
+        const other = plist.find((pp) => pp.id === oid);
+        conflict = { label: "ไม่อยากเจอ", withName: (other && other.name) || "" };
+      }
+      score += Math.abs(w(p.id) - w(oid)) * 1 + oc(p.id, oid) * 1.2 + latestOpponentPen(p.id, oid);
+    }
+    return { player: p, score, conflict };
+  });
+
+  const normal = scored.filter((s) => !s.conflict).sort((a, b) => a.score - b.score);
+  const conflicted = scored.filter((s) => s.conflict).sort((a, b) => a.score - b.score);
+  return [...normal, ...conflicted].map((s) => (s.conflict ? { ...s.player, _conflict: s.conflict } : s.player));
 }
 
 function genRound(localPlayers, mode, courtCount, lockPairs, stats, roundIndex, reserved) {
@@ -3559,6 +3628,31 @@ function chooseBootCandidate(primaryCandidate, mirrorCandidate) {
   if (mirrorCandidate) return { finalState: mirrorCandidate, recoverySource: "mirror", chosenReason: "mirror-only-valid" };
   return { finalState: null, recoverySource: "new-install", chosenReason: null };
 }
+// v1.11.76 (P0 CROSS-INSTANCE DATA-LOSS GUARD): confirmed via reproducible e2e test that a raw savedAt
+// comparison alone cannot tell "genuinely newer data" apart from "a stale, forgotten same-origin tab that
+// happens to save later" — refreshFromStorageIfNewer's own `storedSavedAt > lastKnownSavedAtRef.current`
+// check has no way to know WHOSE data is actually more complete, only whose Date.now() is bigger. Real
+// failure confirmed live: Instance A (idle, holding an old snapshot) edits something completely unrelated
+// (e.g. adds a player) → its own full-state resave carries a fresh timestamp → silently overwrites a more
+// complete Instance B (e.g. one that just finished a Replace-All restore) purely because A saved last.
+//
+// This checks whether ACCEPTING `incoming` would make the current instance LOSE a finished match/session/
+// Tournament record it already holds live. Deliberately id-presence-based, never a raw length/count
+// comparison (spec: "IDs/state transitions matter" — two snapshots can coincidentally have equal counts
+// with different content) and deliberately NOT array-merging (spec: "do not solve this by blindly merging
+// arrays" — this only ever decides accept-or-reject, it never combines two arrays together).
+// `current`/`future` are intentionally excluded: they legitimately shrink every time a match finishes
+// (moves into `history`) or gets cleared, so a smaller current/future is completely normal, not a sign of
+// data loss — only `history`/`sessionHistory`/`tournamentHistory` are treated as monotonic archives that
+// normal operation (finishAndAdvance/endSession/Tournament completion) only ever appends to.
+function wouldRegressProgress(liveState, incomingData) {
+  const idsOf = (arr) => new Set((Array.isArray(arr) ? arr : []).map((x) => x && x.id).filter(Boolean));
+  const liveHistory = idsOf(liveState.history), liveSessionHistory = idsOf(liveState.sessionHistory), liveTournamentHistory = idsOf(liveState.tournamentHistory);
+  if (liveHistory.size === 0 && liveSessionHistory.size === 0 && liveTournamentHistory.size === 0) return false; // nothing live yet worth protecting (e.g. fresh boot, brand-new session)
+  const incHistory = idsOf(incomingData.history), incSessionHistory = idsOf(incomingData.sessionHistory), incTournamentHistory = idsOf(incomingData.tournamentHistory);
+  const missesAny = (liveSet, incSet) => { for (const id of liveSet) if (!incSet.has(id)) return true; return false; };
+  return missesAny(liveHistory, incHistory) || missesAny(liveSessionHistory, incSessionHistory) || missesAny(liveTournamentHistory, incTournamentHistory);
+}
 // v1.11.0 PERSISTENCE REWRITE — recovery helpers shared by the boot-sequence waterfall (primary /
 // mirror / Last-Known-Good / Auto-Backup). Both funnel through the EXACT SAME migrate+validate pipeline
 // already used for manual backup-file restores above (migrateBackupData/validateBackupIntegrity),
@@ -4418,8 +4512,37 @@ export default function App() {
   const applyUpdateNow = async () => {
     try {
       const savedAt = Date.now();
-      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt });
+      // v1.11.76: pageInstanceId tags every "bg-v11" write so refreshFromStorageIfNewer can tell "another
+      // tab/session wrote this" from "this is my own earlier write" — see wouldRegressProgress.
+      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
       latestStateJsonRef.current = json;
+      // v1.11.76: same final pre-write conflict guard as the main save effect (see its comment) — this is
+      // the exact "organizer swipes/kills the PWA to update" path implicated in the original incident, so
+      // it must not be allowed to persist a stale in-memory snapshot over another instance's newer,
+      // more-complete data either.
+      let blockedByConflict = false;
+      try {
+        const preWriteRead = await window.storage.get("bg-v11");
+        if (preWriteRead?.value) {
+          const onDisk = JSON.parse(preWriteRead.value);
+          if (
+            onDisk.pageInstanceId &&
+            onDisk.pageInstanceId !== window.__pageInstanceId &&
+            wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory })
+          ) {
+            blockedByConflict = true;
+            pushBootLog({
+              event: "conflict-blocked-prewrite-update",
+              fromSavedAt: lastKnownSavedAtRef.current,
+              toSavedAt: onDisk.savedAt,
+              incomingPageInstanceId: onDisk.pageInstanceId,
+              playerCount: Array.isArray(onDisk.players) ? onDisk.players.length : 0,
+              sessionHistoryCount: Array.isArray(onDisk.sessionHistory) ? onDisk.sessionHistory.length : 0,
+            });
+          }
+        }
+      } catch (e) {}
+      if (blockedByConflict) throw new Error("bg-v11 write blocked: stale snapshot would regress another instance's progress");
       try { localStorage.setItem("bg:bg-v11", json); } catch (e) {} // (1) Mirror — synchronous, best-effort
       try { await window.storage.set("bg-v11", json); } catch (e) {} // (2) Primary
       try { await window.storage.set(LKG_KEY, json); } catch (e) {} // (3) LKG checkpoint
@@ -4549,6 +4672,18 @@ export default function App() {
       const s = JSON.parse(r.value);
       const storedSavedAt = typeof s.savedAt === "number" ? s.savedAt : 0;
       if (storedSavedAt > lastKnownSavedAtRef.current) {
+        // v1.11.76 (P0 cross-instance data-loss guard): only block when (a) this record is tagged with a
+        // DIFFERENT instance's id — our own later writes are never blocked against ourselves — and (b)
+        // accepting it would make us lose a finished match/session/Tournament record we already hold live
+        // (see wouldRegressProgress). A record with no pageInstanceId at all (anything saved before this
+        // version) skips this check entirely and keeps the exact original accept-if-newer behavior —
+        // backward compatible by construction. A legitimate newer write (superset, or from elsewhere with
+        // nothing of ours to lose) is never blocked — this is a targeted conflict guard, not a blanket
+        // "ignore other tabs" rule.
+        if (s.pageInstanceId && s.pageInstanceId !== window.__pageInstanceId && wouldRegressProgress({ history, sessionHistory, tournamentHistory }, s)) {
+          pushBootLog({ event: "conflict-blocked", fromSavedAt: lastKnownSavedAtRef.current, toSavedAt: storedSavedAt, incomingPageInstanceId: s.pageInstanceId, playerCount: Array.isArray(s.players) ? s.players.length : 0, sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0 });
+          return false;
+        }
         const prevKnownSavedAt = lastKnownSavedAtRef.current;
         applyPersistedState(s);
         pushBootLog({ event: "heal", fromSavedAt: prevKnownSavedAt, toSavedAt: storedSavedAt, playerCount: Array.isArray(s.players) ? s.players.length : 0, sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0 });
@@ -4655,7 +4790,7 @@ export default function App() {
         recoveryAction = recoverySource !== "primary" ? (recoveryAction === "none" ? ("rebuilt-from-" + recoverySource) : recoveryAction) : "resynced-mirror";
         try {
           const rebuiltAt = Date.now();
-          const rebuiltJson = JSON.stringify({ ...finalState, savedAt: rebuiltAt });
+          const rebuiltJson = JSON.stringify({ ...finalState, savedAt: rebuiltAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
           await window.storage.set("bg-v11", rebuiltJson);
           await window.storage.set(LKG_KEY, rebuiltJson);
           lastKnownSavedAtRef.current = rebuiltAt;
@@ -4798,7 +4933,8 @@ export default function App() {
         if (saveGenerationRef.current !== mySaveGeneration) return;
         const savedAt = Date.now();
         try { window.__pushDiag && window.__pushDiag("beforeStorageSerialize", { gen: mySaveGeneration }); } catch (e) {}
-        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt });
+        // v1.11.76: pageInstanceId tags every "bg-v11" write — see the same note on applyUpdateNow's write.
+        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
         try { window.__pushDiag && window.__pushDiag("afterStorageSerialize", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
@@ -4806,6 +4942,46 @@ export default function App() {
         // caused "ended session missing from History": without it, an older run delayed by IndexedDB
         // latency could still complete its write after a newer, correct run's write).
         if (saveGenerationRef.current !== mySaveGeneration) return;
+        // v1.11.76 (P0 cross-instance data-loss fix, final guard): re-read storage ONE more time,
+        // immediately before the actual write, and compare what's ALREADY persisted against what THIS
+        // write is about to put there — id-presence, not savedAt. This is deliberately independent of
+        // refreshFromStorageIfNewer() above: that check only catches the case where THIS instance's own
+        // lastKnownSavedAtRef already trails storage, but a stale idle tab (e.g. Instance A in the
+        // reproduced incident) can reach this point never having perceived storage as "newer" at all —
+        // its own unrelated edit just re-persists its own long-held stale snapshot with a fresh
+        // Date.now(). Checking id-presence right here, against whatever instance last wrote storage,
+        // closes that gap regardless of timestamps. Only engages for a DIFFERENT pageInstanceId (never
+        // blocks a tab's own sequential writes) and is absent-safe (requirement 7: no pageInstanceId on
+        // disk -> skip, exactly the pre-v1.11.76 behavior).
+        try {
+          const preWriteRead = await window.storage.get("bg-v11");
+          // v1.11.44 pattern applied again here: this guard's own read is itself async, which reopens the
+          // exact "a newer run started while we awaited" window the checks above already closed once — so
+          // re-check the generation the instant the await resolves, before evaluating/acting on the result.
+          if (saveGenerationRef.current !== mySaveGeneration) return;
+          if (preWriteRead?.value) {
+            const onDisk = JSON.parse(preWriteRead.value);
+            if (
+              onDisk.pageInstanceId &&
+              onDisk.pageInstanceId !== window.__pageInstanceId &&
+              wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory })
+            ) {
+              pushBootLog({
+                event: "conflict-blocked-prewrite",
+                fromSavedAt: lastKnownSavedAtRef.current,
+                toSavedAt: onDisk.savedAt,
+                incomingPageInstanceId: onDisk.pageInstanceId,
+                playerCount: Array.isArray(onDisk.players) ? onDisk.players.length : 0,
+                sessionHistoryCount: Array.isArray(onDisk.sessionHistory) ? onDisk.sessionHistory.length : 0,
+              });
+              // Our own about-to-be-written snapshot is the stale one — do not overwrite the more-complete
+              // record another instance already persisted; adopt it instead so this instance stops trying
+              // to clobber it on every subsequent edit.
+              if (saveGenerationRef.current === mySaveGeneration) applyPersistedState(onDisk);
+              return;
+            }
+          }
+        } catch (e) {}
         try { window.__pushDiag && window.__pushDiag("beforeIDBWrite", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
         const result = await window.storage.set("bg-v11", json);
         try { window.__pushDiag && window.__pushDiag("afterIDBWrite", { gen: mySaveGeneration, primaryOk: result?.primaryOk, mirrorOk: result?.mirrorOk }); } catch (e) {}
@@ -6447,27 +6623,69 @@ export default function App() {
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
       } catch (e) {}
-      setPlayers(data.players.map(normPlayer));
-      setHistory(data.history);
-      setCurrent(data.current);
-      setFuture(data.future);
+      // v1.11.76 (P0 fix, req 5/6): normalize into local consts ONCE — these are both what gets set into
+      // React state below AND what gets persisted+verified immediately after, so the two can never diverge.
+      const rPlayers = data.players.map(normPlayer);
+      const rHistory = data.history, rCurrent = data.current, rFuture = data.future;
+      const rSettings = normSettings(data.settings), rSession = normSession(data.session);
+      const rSessionHistory = data.sessionHistory, rTournamentHistory = data.tournamentHistory || [];
+      const rGeneralExpenses = data.generalExpenses || [], rOtherIncome = data.otherIncome || [];
+      const rDiscountCredits = (data.discountCredits || []).map(normDiscountCredit);
+      const rRewardHistory = data.rewardHistory || [];
+      const rGroupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {};
+      const rRankingConfigs = normRankingConfigs(data.rankingConfigs);
+      const rCloudClub = normCloudClub(data.cloudClub);
+      const rCourtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
+      const rActiveTournament = normTournament(data.activeTournament) || null;
+      setPlayers(rPlayers);
+      setHistory(rHistory);
+      setCurrent(rCurrent);
+      setFuture(rFuture);
       setRoundNo(data.roundNo);
       setCourtCount(data.courtCount);
-      setCourtLabelsRaw(syncCourtLabels(data.courtLabels, data.courtCount));
+      setCourtLabelsRaw(rCourtLabels);
       setMode(data.mode);
-      setSettings(normSettings(data.settings));
-      setSession(normSession(data.session));
+      setSettings(rSettings);
+      setSession(rSession);
       setLockPairs(data.lockPairs);
-      setSessionHistory(data.sessionHistory);
-      setActiveTournament(normTournament(data.activeTournament) || null);
-      setTournamentHistory(data.tournamentHistory || []);
-      setGeneralExpenses(data.generalExpenses || []);
-      setOtherIncome(data.otherIncome || []);
-      setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
-      setRewardHistory(data.rewardHistory || []); // v1.11.34
-      setGroupDefaults(data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {});
-      setRankingConfigs(normRankingConfigs(data.rankingConfigs)); // v1.11.68
-      setCloudClub(normCloudClub(data.cloudClub)); // v1.11.35
+      setSessionHistory(rSessionHistory);
+      setActiveTournament(rActiveTournament);
+      setTournamentHistory(rTournamentHistory);
+      setGeneralExpenses(rGeneralExpenses);
+      setOtherIncome(rOtherIncome);
+      setDiscountCredits(rDiscountCredits);
+      setRewardHistory(rRewardHistory); // v1.11.34
+      setGroupDefaults(rGroupDefaults);
+      setRankingConfigs(rRankingConfigs); // v1.11.68
+      setCloudClub(rCloudClub); // v1.11.35
+      // v1.11.76 (P0 fix, req 5): establish this restore as the current authoritative generation RIGHT NOW
+      // — bumping lastKnownSavedAtRef synchronously means no stale record already sitting in storage (or
+      // written moments from now by another instance) can ever look "newer" than what we just restored,
+      // closing the exact race the diagnostic traced. Then persist it directly (do not just wait for the
+      // ambient save effect to eventually get to it) and verify the write actually landed before reporting
+      // success (req 6) — never trust "the setters ran" as proof the data survived.
+      const restoredSavedAt = Date.now();
+      lastKnownSavedAtRef.current = restoredSavedAt;
+      const restoredJson = JSON.stringify({
+        players: rPlayers, history: rHistory, current: rCurrent, future: rFuture, roundNo: data.roundNo,
+        courtCount: data.courtCount, courtLabels: rCourtLabels, mode: data.mode, settings: rSettings, session: rSession,
+        lockPairs: data.lockPairs, sessionHistory: rSessionHistory, generalExpenses: rGeneralExpenses, otherIncome: rOtherIncome,
+        discountCredits: rDiscountCredits, rewardHistory: rRewardHistory, activeTournament: rActiveTournament,
+        tournamentHistory: rTournamentHistory, groupDefaults: rGroupDefaults, rankingConfigs: rRankingConfigs, cloudClub: rCloudClub,
+        savedAt: restoredSavedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null,
+      });
+      let verified = false, verifyReason = "write-failed";
+      try {
+        await window.storage.set("bg-v11", restoredJson);
+        const readBack = await window.storage.get("bg-v11");
+        const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
+        const expect = { history: rHistory.length, current: rCurrent.length, future: rFuture.length, sessionHistory: rSessionHistory.length, tournamentHistory: rTournamentHistory.length, players: rPlayers.length };
+        const got = persisted ? { history: (persisted.history||[]).length, current: (persisted.current||[]).length, future: (persisted.future||[]).length, sessionHistory: (persisted.sessionHistory||[]).length, tournamentHistory: (persisted.tournamentHistory||[]).length, players: (persisted.players||[]).length } : null;
+        verified = !!got && Object.keys(expect).every((k) => expect[k] === got[k]);
+        if (!verified) verifyReason = got ? "count-mismatch" : "read-back-empty";
+        pushBootLog({ event: verified ? "restore-verified" : "restore-verify-failed", fromSavedAt: null, toSavedAt: restoredSavedAt, playerCount: expect.players, sessionHistoryCount: expect.sessionHistory });
+      } catch (e) { verifyReason = "exception: " + (e?.message || e); }
+      return { ok: verified, reason: verified ? null : verifyReason };
     } else if (restoreMode === "mergeHistory") {
       setSessionHistory((prev) => {
         const existing = new Set(prev.map((s) => s.id));
@@ -6491,7 +6709,11 @@ export default function App() {
         const toAdd = (data.rewardHistory || []).filter((r) => !existing.has(r.id));
         return [...prev, ...toAdd];
       });
+      // v1.11.76: mergeHistory only ever appends (functional updaters, stable-id deduped) — it can't
+      // regress existing data by construction, so it keeps returning a plain success unchanged.
+      return { ok: true, reason: null };
     }
+    return { ok: true, reason: null };
   };
   // v1.11.5: "ล้างข้อมูลทั้งหมด" (Settings → ความเป็นส่วนตัวและข้อมูล) — full factory reset. Reuses the
   // EXISTING applyRestore("replace", ...) path instead of a new deletion code path, so this destructive
@@ -8470,6 +8692,9 @@ function SessionTab(props) {
   // to render the non-blocking ⚠️ warning badge below (MatchRow), the actual soft-pairing nudge lives in
   // buildMatch itself.
   const latestMap = useMemo(() => buildLatestPartnerMap(history, current), [history, current]);
+  // v1.11.75 (Manual Matchmaking Smart Suggestion): partner/opponent co-occurrence counts, reused by
+  // rankManualSlotCandidates exactly the way buildMatch already reuses them everywhere else.
+  const stats = useMemo(() => counts([...history, ...current]), [history, current]);
   const finishedOrdered = orderedMatches.filter((x) => x.done);
   const liveOrdered = orderedMatches.filter((x) => !x.done);
   // same cap the old ประวัติแมตช์ accordion used (HISTORY_PAGE) — keeps a long day's match log from
@@ -8603,10 +8828,10 @@ function SessionTab(props) {
             ))}
           </select>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} />
+            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} />
           </div>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} />
+            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} />
           </div>
           <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
             {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
@@ -13887,7 +14112,7 @@ function MatchTeams({ m, getP, editable, tapSlot, isSel, replaceSlot, bench, big
 
 // v1.11.34: see the "subtle, ONE-TIME-EVER hint" comment inside TeamSide below.
 let _avatarHintClaimed = false;
-function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done }) {
+function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done, lockPairs = [], players = [], stats, latestMap }) {
   const isWide = useIsWide(); // iPad / landscape phone (≥700px) — only the photo scales up further here; text stays the same size on every screen
   const compact = arr.length > 1; // doubles: tighten padding so both teams fit on one line
   const avatarSize = isWide
@@ -13943,6 +14168,18 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         // positions itself from this, so it never gets clipped by the table's horizontal-scroll container.
         const toggle = (e) => setOpenSlot(isOpen ? null : { team, idx, rect: rectOf(e.currentTarget) });
         const pick = (newId) => { replaceSlot && replaceSlot(m.id, team, idx, newId); setOpenSlot(null); };
+        // v1.11.75 (Manual Matchmaking Smart Suggestion, spec sections 1-3): once at least one other slot
+        // in this match is already filled, reorder/flag this slot's bench using the same scoring engine
+        // buildMatch uses — teammates = already-placed players on THIS side (excluding this slot itself),
+        // opponents = already-placed players on the OTHER side. Recomputed fresh on every render, so
+        // selecting P2 immediately re-ranks P3's candidates, and so on (spec section 3). Left untouched
+        // (original wait-priority order) when nobody else has been placed yet, so the very first pick's
+        // behavior is byte-for-byte unchanged from before this feature existed.
+        const teammateIds = arr.filter((pid, i) => i !== idx && pid);
+        const opponentIds = ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean);
+        const rankedBench = (teammateIds.length + opponentIds.length) > 0
+          ? rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap)
+          : (bench || []);
         const nameLong = p && p.name.length > 7;
         const nameFs = nameLong ? (compact ? 12.5 : 13) : (compact ? 14 : 15);
         const lvlFs = nameLong ? 11 : (compact ? 12 : 13);
@@ -13987,14 +14224,14 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
             {editable && (
               <button onClick={toggle} title="เปลี่ยนผู้เล่น" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }} />
             )}
-            {isOpen && <PlayerPicker bench={bench || []} allowClear align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
+            {isOpen && <PlayerPicker bench={rankedBench} allowClear align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
           </div>
         ) : (
           <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", padding: "7px 8px", borderRadius: 10, border: `1.5px dashed ${editable ? T.green : T.border}`, color: editable ? T.green : T.muted, fontSize: 13, minHeight: 46, display: "flex", alignItems: "center", justifyContent: "center" }}>
             {editable ? (
               <button onClick={toggle} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", color: T.green, fontSize: 13, fontWeight: 700, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{compact ? "+ เลือก" : "+ เลือกคน"}</button>
             ) : "ว่าง"}
-            {isOpen && <PlayerPicker bench={bench || []} align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
+            {isOpen && <PlayerPicker bench={rankedBench} align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
           </div>
         );
       })}
@@ -14055,11 +14292,20 @@ function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRe
         {bench.length === 0 ? (
           <div style={{ padding: "12px 11px", fontSize: 12.5, color: T.muted, textAlign: "center" }}>ไม่มีคนรอเปลี่ยน</div>
         ) : bench.map((b) => (
+          // v1.11.75 (Manual Matchmaking Smart Suggestion, spec section 2): a candidate flagged by
+          // rankManualSlotCandidates with an "ไม่อยากคู่/ไม่อยากเจอ" conflict against someone already placed
+          // in this match is still fully tappable (onPick unchanged) — only shown in red, at the bottom
+          // (rankManualSlotCandidates already sorted it there), with a short reason line instead of the
+          // normal wait/games-played hint.
           <button key={b.id} onClick={() => onPick(b.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: "none", border: "none", borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
             <Avatar p={b} size={26} />
             <span style={{ flex: 1, minWidth: 0 }}>
-              <span style={{ display: "block", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>
-              {typeof now === "number" && (
+              <span style={{ display: "block", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: b._conflict ? "#c0392b" : undefined }}>{b._conflict ? "🔴 " : ""}{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>
+              {b._conflict ? (
+                <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#c0392b", marginTop: 1 }}>
+                  {b._conflict.label} {b._conflict.withName}
+                </span>
+              ) : typeof now === "number" && (
                 <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: T.muted, marginTop: 1 }}>
                   รอ {Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000))} นาที · เล่น {b.games || 0} เกม
                 </span>
@@ -14527,8 +14773,15 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
   const confirmDoRestore = async () => {
     setConfirmRestore(false); setBusy(true);
     const stats = backupStats(preview.data);
-    await applyRestore(restoreMode, preview);
+    const result = await applyRestore(restoreMode, preview);
     setBusy(false);
+    // v1.11.76 (P0 fix, req 6): never claim success if applyRestore's own persisted-count verification
+    // failed — surface a clear error instead so the organizer knows to try again / not trust the screen.
+    if (result && result.ok === false) {
+      setSuccessMsg(null);
+      setImportError("__verify_failed__:นำเข้าข้อมูลไม่สำเร็จสมบูรณ์ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง (" + (result.reason || "unknown") + ")");
+      return;
+    }
     setSuccessMsg({ kind: "import", stats });
     setPreview(null);
   };
@@ -14563,7 +14816,15 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
           {successMsg.kind === "undo" && <>ย้อนกลับข้อมูลก่อนนำเข้าเรียบร้อย</>}
         </div>
       )}
-      {importError && (
+      {importError && importError.startsWith("__verify_failed__:") && (
+        // v1.11.76 (P0 fix, req 6): distinct banner for "applyRestore ran but the persisted-count
+        // verification failed" — kept fully separate from the pre-existing "not a valid backup file"
+        // banner below so that unrelated message's copy/behavior stays untouched.
+        <div style={{ background: "#fdecea", border: `1px solid ${T.accent}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.accent, marginBottom: 8, lineHeight: 1.7 }}>
+          {importError.slice("__verify_failed__:".length)}
+        </div>
+      )}
+      {importError && !importError.startsWith("__verify_failed__:") && (
         <div style={{ background: "#fdecea", border: `1px solid ${T.accent}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.accent, marginBottom: 8, lineHeight: 1.7 }}>
           ไม่สามารถนำเข้าข้อมูลได้<br />ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ
         </div>
