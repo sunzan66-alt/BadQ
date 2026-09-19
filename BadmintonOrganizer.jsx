@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.79";
+const APP_VERSION = "1.11.80";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -8913,7 +8913,7 @@ function SessionTab(props) {
               <>
                 <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
                 <ScorePopover anchorRect={scoreOpen.rect}>
-                  <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} />
+                  <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} winScore={settings.winScore} deuce={settings.deuce} />
                 </ScorePopover>
               </>,
               document.body
@@ -10221,7 +10221,7 @@ function TournamentDashboard(props) {
                 <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 2 }}>{tags.a || "?"} <span style={{ fontWeight: 400 }}>vs</span> {tags.b || "?"}</div>
               ); })()}
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{tMatchLabel(m, teamsById, peopleById).a} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {tMatchLabel(m, teamsById, peopleById).b}</div>
-              <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} />
+              <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} winScore={settings.winScore} deuce={settings.deuce} />
               <button onClick={() => tFinishMatch(m.id)} disabled={!hasScore(m) || !matchWinner(m)} style={{ ...btnPrimary, marginTop: 8, opacity: (!hasScore(m) || !matchWinner(m)) ? 0.5 : 1 }}><Check size={16} /> จบแมตช์</button>
             </div>
           ))}
@@ -10317,7 +10317,7 @@ function TournamentDashboard(props) {
               {matchScoreText(m) && <div style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{matchScoreText(m)}</div>}
               {editingMatch === m.id ? (
                 <div>
-                  <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} />
+                  <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} winScore={settings.winScore} deuce={settings.deuce} />
                   <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
                     <button onClick={() => { if (tEditAffectsDownstream(m.id)) setPendingCascade(m.id); else { tUndoMatch(m.id, false); tFinishMatch(m.id); } setEditingMatch(null); }} style={btnPrimary}>บันทึกผลใหม่</button>
                     <button onClick={() => setEditingMatch(null)} style={btnSecondary}>ยกเลิก</button>
@@ -11549,7 +11549,25 @@ function WinLoseSelect({ state, onPick, locked }) {
     </select>
   );
 }
-function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
+// v1.11.80 (Score Input Validation): the ONE place numeric scores enter the app (ScoreEditor below, shared
+// by both casual matches and the Tournament module) checks a pair of set-scores against the group's
+// configured "เล่นถึง" (winScore) and "ดิว" (deuce) settings, so a mistyped score never gets saved. Rules
+// (per spec): negative is always invalid; without deuce, neither side may exceed winScore; with deuce, a
+// side may only exceed winScore once genuine deuce has actually been reached (both sides at winScore-1,
+// e.g. 20-20 for a 21-point game) — matching real badminton — and once either side is at/above winScore in
+// that state the winning margin must be exactly 2 (e.g. 20-22, 23-25). Returns a short Thai reason string,
+// or null when the pair is fine (including "still mid-entry", i.e. either side not filled in yet).
+function scorePairIssue(aNum, bNum, winScore, deuceOn) {
+  if ((aNum != null && aNum < 0) || (bNum != null && bNum < 0)) return "ห้ามติดลบ";
+  if (aNum == null || bNum == null) return null; // one side still empty -- nothing to compare yet
+  if (!deuceOn) return aNum > winScore || bNum > winScore ? `เกิน ${winScore} แต้ม` : null;
+  const hi = Math.max(aNum, bNum), lo = Math.min(aNum, bNum);
+  if (lo < winScore - 1) return hi > winScore ? `เกิน ${winScore} แต้ม (ยังไม่ดิว)` : null; // deuce not reached yet
+  return hi >= winScore && hi - lo !== 2 ? "ช่วงดิวต้องห่างกัน 2 แต้ม" : null; // genuine deuce zone -- must win by 2
+}
+function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce }) {
+  const wsc = winScore || 21;
+  const deuceOn = deuce !== false;
   // `rounds` here is "sets needed to win" (see maxSetsFor/visibleSetCount) — best-of-3 for 2, best-of-5
   // for 3.
   const maxSets = maxSetsFor(rounds || 1);
@@ -11590,6 +11608,11 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
     return () => {
       const finalDraft = draftRef.current, finalM = mRef.current;
       finalDraft.forEach((row, ri) => {
+        // v1.11.80: an invalid pair (negative, exceeds winScore, or breaks the deuce win-by-2 rule) is never
+        // persisted here — the popover simply reverts to the last-committed value the next time it's
+        // opened, instead of silently saving a score the organizer almost certainly mistyped.
+        const aNum = row.a === "" ? null : Number(row.a), bNum = row.b === "" ? null : Number(row.b);
+        if (scorePairIssue(aNum, bNum, wsc, deuceOn)) return;
         ["a", "b"].forEach((side) => {
           const val = row[side];
           const committedRaw = finalM.scores && finalM.scores[ri] ? finalM.scores[ri][side] : null;
@@ -11648,16 +11671,25 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore }) {
           else setWin(m.id, ri, null);
         };
         const d = draftRow(ri);
+        // v1.11.80: live validation against this group's winScore/deuce settings, recomputed from the DRAFT
+        // (not just the last-committed value) so the error/red-highlight appears and clears immediately as
+        // the organizer types — same "reflect the draft live" principle already used for `auto`/`visible`
+        // above. `issue` is null while either side is still empty, so an in-progress entry never shows red.
+        const issue = scorePairIssue(r.a, r.b, wsc, deuceOn);
+        const badInput = { ...scoreInput, border: `1px solid ${T.accent}`, background: "#fdecea" };
         return (
-          <div key={ri} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: ri < visible - 1 ? 8 : 0 }}>
-            {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
-            {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} />}
-            <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
-            <input type="number" value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={scoreInput} />
-            <span style={{ color: T.muted, fontWeight: 800 }}>–</span>
-            <input type="number" value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={scoreInput} />
-            <span style={{ fontSize: 11.5, fontWeight: 700, color: T.blue }}>B</span>
-            {setWin && <WinLoseSelect state={stateFor("B")} onPick={pick("B")} locked={locked} />}
+          <div key={ri} style={{ marginBottom: ri < visible - 1 ? 8 : 0 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
+              {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} />}
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
+              <input type="number" min={0} value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={issue ? badInput : scoreInput} />
+              <span style={{ color: T.muted, fontWeight: 800 }}>–</span>
+              <input type="number" min={0} value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={issue ? badInput : scoreInput} />
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: T.blue }}>B</span>
+              {setWin && <WinLoseSelect state={stateFor("B")} onPick={pick("B")} locked={locked} />}
+            </div>
+            {issue && <div style={{ fontSize: 10.5, color: T.accent, fontWeight: 700, marginTop: 3, paddingLeft: visible > 1 ? 46 : 0 }}>⚠️ {issue} — คะแนนนี้จะไม่ถูกบันทึก</div>}
           </div>
         );
       })}

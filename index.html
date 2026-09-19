@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.11.79";
+      var CURRENT_VERSION = "1.11.80";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.11.79";
+const APP_VERSION = "1.11.80";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -16732,7 +16732,9 @@ function SessionTab(props) {
       rounds: rounds,
       setScore: setScore,
       setWin: setWin,
-      clearScore: clearScore
+      clearScore: clearScore,
+      winScore: settings.winScore,
+      deuce: settings.deuce
     }))), document.body)), /*#__PURE__*/React.createElement("div", {
       style: {
         width: COLW.shuttle,
@@ -20265,7 +20267,9 @@ function TournamentDashboard(props) {
     rounds: tournamentRoundsFor(settings.rounds),
     setScore: tSetScore,
     setWin: tSetWin,
-    clearScore: tClearScore
+    clearScore: tClearScore,
+    winScore: settings.winScore,
+    deuce: settings.deuce
   }), /*#__PURE__*/React.createElement("button", {
     onClick: () => tFinishMatch(m.id),
     disabled: !hasScore(m) || !matchWinner(m),
@@ -20501,7 +20505,9 @@ function TournamentDashboard(props) {
     rounds: tournamentRoundsFor(settings.rounds),
     setScore: tSetScore,
     setWin: tSetWin,
-    clearScore: tClearScore
+    clearScore: tClearScore,
+    winScore: settings.winScore,
+    deuce: settings.deuce
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -24026,13 +24032,34 @@ function WinLoseSelect({
     value: "lose"
   }, "แพ้"));
 }
+// v1.11.80 (Score Input Validation): the ONE place numeric scores enter the app (ScoreEditor below, shared
+// by both casual matches and the Tournament module) checks a pair of set-scores against the group's
+// configured "เล่นถึง" (winScore) and "ดิว" (deuce) settings, so a mistyped score never gets saved. Rules
+// (per spec): negative is always invalid; without deuce, neither side may exceed winScore; with deuce, a
+// side may only exceed winScore once genuine deuce has actually been reached (both sides at winScore-1,
+// e.g. 20-20 for a 21-point game) — matching real badminton — and once either side is at/above winScore in
+// that state the winning margin must be exactly 2 (e.g. 20-22, 23-25). Returns a short Thai reason string,
+// or null when the pair is fine (including "still mid-entry", i.e. either side not filled in yet).
+function scorePairIssue(aNum, bNum, winScore, deuceOn) {
+  if (aNum != null && aNum < 0 || bNum != null && bNum < 0) return "ห้ามติดลบ";
+  if (aNum == null || bNum == null) return null; // one side still empty -- nothing to compare yet
+  if (!deuceOn) return aNum > winScore || bNum > winScore ? `เกิน ${winScore} แต้ม` : null;
+  const hi = Math.max(aNum, bNum),
+    lo = Math.min(aNum, bNum);
+  if (lo < winScore - 1) return hi > winScore ? `เกิน ${winScore} แต้ม (ยังไม่ดิว)` : null; // deuce not reached yet
+  return hi >= winScore && hi - lo !== 2 ? "ช่วงดิวต้องห่างกัน 2 แต้ม" : null; // genuine deuce zone -- must win by 2
+}
 function ScoreEditor({
   m,
   rounds,
   setScore,
   setWin,
-  clearScore
+  clearScore,
+  winScore,
+  deuce
 }) {
+  const wsc = winScore || 21;
+  const deuceOn = deuce !== false;
   // `rounds` here is "sets needed to win" (see maxSetsFor/visibleSetCount) — best-of-3 for 2, best-of-5
   // for 3.
   const maxSets = maxSetsFor(rounds || 1);
@@ -24083,6 +24110,12 @@ function ScoreEditor({
       const finalDraft = draftRef.current,
         finalM = mRef.current;
       finalDraft.forEach((row, ri) => {
+        // v1.11.80: an invalid pair (negative, exceeds winScore, or breaks the deuce win-by-2 rule) is never
+        // persisted here — the popover simply reverts to the last-committed value the next time it's
+        // opened, instead of silently saving a score the organizer almost certainly mistyped.
+        const aNum = row.a === "" ? null : Number(row.a),
+          bNum = row.b === "" ? null : Number(row.b);
+        if (scorePairIssue(aNum, bNum, wsc, deuceOn)) return;
         ["a", "b"].forEach(side => {
           const val = row[side];
           const committedRaw = finalM.scores && finalM.scores[ri] ? finalM.scores[ri][side] : null;
@@ -24173,13 +24206,26 @@ function ScoreEditor({
       if (v === "win") setWin(m.id, ri, side);else if (v === "lose") setWin(m.id, ri, side === "A" ? "B" : "A");else setWin(m.id, ri, null);
     };
     const d = draftRow(ri);
+    // v1.11.80: live validation against this group's winScore/deuce settings, recomputed from the DRAFT
+    // (not just the last-committed value) so the error/red-highlight appears and clears immediately as
+    // the organizer types — same "reflect the draft live" principle already used for `auto`/`visible`
+    // above. `issue` is null while either side is still empty, so an in-progress entry never shows red.
+    const issue = scorePairIssue(r.a, r.b, wsc, deuceOn);
+    const badInput = {
+      ...scoreInput,
+      border: `1px solid ${T.accent}`,
+      background: "#fdecea"
+    };
     return /*#__PURE__*/React.createElement("div", {
       key: ri,
       style: {
+        marginBottom: ri < visible - 1 ? 8 : 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
         display: "flex",
         alignItems: "center",
-        gap: 6,
-        marginBottom: ri < visible - 1 ? 8 : 0
+        gap: 6
       }
     }, visible > 1 && /*#__PURE__*/React.createElement("span", {
       style: {
@@ -24200,13 +24246,14 @@ function ScoreEditor({
       }
     }, "A"), /*#__PURE__*/React.createElement("input", {
       type: "number",
+      min: 0,
       value: d.a,
       onChange: e => setDraftVal(ri, "a", e.target.value),
       onKeyDown: e => {
         if (e.key === "Enter") e.currentTarget.blur();
       },
       onFocus: e => e.target.select(),
-      style: scoreInput
+      style: issue ? badInput : scoreInput
     }), /*#__PURE__*/React.createElement("span", {
       style: {
         color: T.muted,
@@ -24214,13 +24261,14 @@ function ScoreEditor({
       }
     }, "–"), /*#__PURE__*/React.createElement("input", {
       type: "number",
+      min: 0,
       value: d.b,
       onChange: e => setDraftVal(ri, "b", e.target.value),
       onKeyDown: e => {
         if (e.key === "Enter") e.currentTarget.blur();
       },
       onFocus: e => e.target.select(),
-      style: scoreInput
+      style: issue ? badInput : scoreInput
     }), /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 11.5,
@@ -24231,7 +24279,15 @@ function ScoreEditor({
       state: stateFor("B"),
       onPick: pick("B"),
       locked: locked
-    }));
+    })), issue && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10.5,
+        color: T.accent,
+        fontWeight: 700,
+        marginTop: 3,
+        paddingLeft: visible > 1 ? 46 : 0
+      }
+    }, "⚠️ ", issue, " — คะแนนนี้จะไม่ถูกบันทึก"));
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
