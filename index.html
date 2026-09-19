@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.5";
+      var CURRENT_VERSION = "1.12.6";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.12.5";
+const APP_VERSION = "1.12.6";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -22127,17 +22127,31 @@ function QuanSettingsSheet({
       padding: 14,
       marginBottom: 8
     }
-  }, /*#__PURE__*/React.createElement(Label, null, "\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A\u0E01\u0E32\u0E23\u0E40\u0E25\u0E48\u0E19"), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14
+      }
+    }, "\uD83C\uDFF8"),
+    title: "\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A\u0E01\u0E32\u0E23\u0E40\u0E25\u0E48\u0E19"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 12
+      marginBottom: 18
     }
   }, /*#__PURE__*/React.createElement(Seg, {
     options: [["doubles", "ตีคู่ (2v2)"], ["singles", "ตีเดี่ยว (1v1)"]],
     value: mode,
     onChange: setMode
-  })), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14
+      }
+    }, "\uD83C\uDFAF"),
+    title: "\u0E23\u0E39\u0E1B\u0E41\u0E1A\u0E1A\u0E01\u0E32\u0E23\u0E40\u0E01\u0E47\u0E1A\u0E04\u0E30\u0E41\u0E19\u0E19"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 8
+      marginBottom: 10
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -22154,24 +22168,18 @@ function QuanSettingsSheet({
     }))
   })), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 8
+      marginBottom: 10
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      color: T.muted,
-      marginBottom: 5
-    }
-  }, "\u0E40\u0E25\u0E48\u0E19\u0E16\u0E36\u0E07"), /*#__PURE__*/React.createElement(Seg, {
-    options: [[9, "9"], [15, "15"], [21, "21"]],
+  }, /*#__PURE__*/React.createElement(NumField, {
+    label: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E41\u0E15\u0E49\u0E21",
     value: settings.winScore || 21,
     onChange: v => setSettings(s => ({
       ...s,
-      winScore: v
+      winScore: Math.max(1, Math.round(v))
     }))
   })), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 16
+      marginBottom: 18
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -22180,32 +22188,40 @@ function QuanSettingsSheet({
       marginBottom: 5
     }
   }, "\u0E14\u0E34\u0E27"), /*#__PURE__*/React.createElement(Seg, {
-    options: [[true, "มีดิว"], [false, "ไม่มีดิว"]],
+    options: [[true, "มี"], [false, "ไม่มี"]],
     value: !!settings.deuce,
     onChange: v => setSettings(s => ({
       ...s,
       deuce: v
     }))
-  })), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14
+      }
+    }, "\uD83D\uDD00"),
+    title: "\u0E42\u0E2B\u0E21\u0E14\u0E08\u0E31\u0E1A\u0E04\u0E39\u0E48"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 16
+      marginBottom: 18
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      color: T.muted,
-      marginBottom: 5
-    }
-  }, "\u0E42\u0E2B\u0E21\u0E14\u0E08\u0E31\u0E14\u0E04\u0E39\u0E48"), /*#__PURE__*/React.createElement(Seg, {
+  }, /*#__PURE__*/React.createElement(Seg, {
     options: [["auto", "สุ่มอัตโนมัติ"], ["manual", "เลือกเอง (Manual)"]],
     value: settings.pairingMode || "auto",
     onChange: v => setSettings(s => ({
       ...s,
       pairingMode: v
     }))
-  })), /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14
+      }
+    }, "\uD83C\uDFDF\uFE0F"),
+    title: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E41\u0E25\u0E30\u0E2A\u0E19\u0E32\u0E21"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 16
+      marginBottom: 14
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -22232,11 +22248,17 @@ function QuanSettingsSheet({
     })),
     min: 1,
     max: 200
-  }))), /*#__PURE__*/React.createElement(Label, null, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E2A\u0E19\u0E32\u0E21"), /*#__PURE__*/React.createElement("div", {
+  }))), /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10
     }
-  }, /*#__PURE__*/React.createElement(Stepper, {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      marginBottom: 5
+    }
+  }, "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E2A\u0E19\u0E32\u0E21"), /*#__PURE__*/React.createElement(Stepper, {
     value: courtCount,
     setValue: setCourtCount,
     min: 1,
@@ -22253,7 +22275,7 @@ function QuanSettingsSheet({
       color: T.muted,
       fontSize: 12,
       fontWeight: 700,
-      marginBottom: 16,
+      marginBottom: 14,
       display: "flex",
       alignItems: "center",
       gap: 6
@@ -22273,7 +22295,7 @@ function QuanSettingsSheet({
       display: "flex",
       flexWrap: "wrap",
       gap: 8,
-      marginBottom: 16,
+      marginBottom: 14,
       padding: "10px 11px",
       borderRadius: 10,
       background: T.surface2,
@@ -22313,7 +22335,7 @@ function QuanSettingsSheet({
     }
   })))), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginBottom: 16,
+      marginBottom: 18,
       padding: 12,
       borderRadius: 12,
       background: T.surface2,
@@ -22328,51 +22350,16 @@ function QuanSettingsSheet({
   }, "\uD83C\uDFF8 \u0E04\u0E33\u0E41\u0E19\u0E30\u0E19\u0E33\u0E01\u0E32\u0E23\u0E08\u0E2D\u0E07\u0E2A\u0E19\u0E32\u0E21"), courtRec.totalRegistered === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
-      color: T.muted
-    }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E19\u0E25\u0E07\u0E17\u0E30\u0E40\u0E1A\u0E35\u0E22\u0E19\u0E01\u0E4A\u0E27\u0E19\u0E19\u0E35\u0E49 \u2014 \u0E44\u0E1B\u0E17\u0E35\u0E48\u0E41\u0E17\u0E47\u0E1A\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E01\u0E48\u0E2D\u0E19") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: T.muted,
-      marginBottom: 6
-    }
-  }, "\u0E25\u0E07\u0E17\u0E30\u0E40\u0E1A\u0E35\u0E22\u0E19 ", courtRec.totalRegistered, " \u0E04\u0E19 \xB7 \u0E40\u0E1B\u0E49\u0E32\u0E2B\u0E21\u0E32\u0E22: ", courtRec.goal === "min_games" ? `อย่างน้อย ${courtRec.minGamesPerPerson} เกม/คน · รอเป้าหมาย ~${courtRec.targetWaitMinutes} นาที` : `รอไม่เกิน ${courtRec.maxWaitMinutes} นาที`), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexDirection: "column",
-      gap: 3,
-      marginBottom: 8
-    }
-  }, courtRec.merged.map((b, i) => /*#__PURE__*/React.createElement("div", {
-    key: i,
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      fontSize: 12.5
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: T.text,
-      fontWeight: 600
-    }
-  }, minutesToTimeStr(b.start), "\u2013", minutesToTimeStr(b.end)), /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontWeight: 800,
-      color: b.courts > 0 ? T.green : T.muted
-    }
-  }, b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น")))), courtRec.goal === "min_games" && peakBucket && peakBucket.courts > 0 && peakCandidate && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      color: T.muted,
-      marginBottom: 6
-    }
-  }, "\u0E1B\u0E23\u0E30\u0E21\u0E32\u0E13 ", Math.max(courtRec.minGamesPerPerson, Math.floor(peakCandidate.expectedGamesPerPlayer)), "\u2013", Math.max(courtRec.minGamesPerPerson, Math.ceil(peakCandidate.expectedGamesPerPlayer)), " \u0E40\u0E01\u0E21/\u0E04\u0E19", ` · รอเฉลี่ย ~${Math.round(peakCandidate.estimatedWaitMinutes)} นาที`, peakBucket.minCourts < peakBucket.courts && ` · ขั้นต่ำ ${peakBucket.minCourts} สนาม / แนะนำ ${peakBucket.courts} สนาม`), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
       color: T.muted,
       marginBottom: 10
     }
-  }, "\u0E23\u0E27\u0E21 ", Math.round(courtRec.courtHoursTotal * 10) / 10, " Court-hours (\u0E1B\u0E23\u0E30\u0E21\u0E32\u0E13\u0E01\u0E32\u0E23)")), /*#__PURE__*/React.createElement("button", {
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E19\u0E25\u0E07\u0E17\u0E30\u0E40\u0E1A\u0E35\u0E22\u0E19\u0E01\u0E4A\u0E27\u0E19\u0E19\u0E35\u0E49 \u2014 \u0E44\u0E1B\u0E17\u0E35\u0E48\u0E41\u0E17\u0E47\u0E1A\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E01\u0E48\u0E2D\u0E19") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: T.muted,
+      marginBottom: 10
+    }
+  }, "\u0E25\u0E07\u0E17\u0E30\u0E40\u0E1A\u0E35\u0E22\u0E19 ", courtRec.totalRegistered, " \u0E04\u0E19 \xB7 \u0E41\u0E19\u0E30\u0E19\u0E33\u0E2A\u0E39\u0E07\u0E2A\u0E38\u0E14 ", peakBucket ? `${peakBucket.courts} สนาม` : "-", " \xB7 \u0E23\u0E27\u0E21 ", Math.round(courtRec.courtHoursTotal * 10) / 10, " Court-hours"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowCourtRecDetail(true),
     style: {
       width: "100%",
@@ -22394,7 +22381,20 @@ function QuanSettingsSheet({
     courtCount: courtCount,
     mode: mode,
     onClose: () => setShowCourtRecDetail(false)
-  }), /*#__PURE__*/React.createElement(Label, null, "\u0E25\u0E47\u0E2D\u0E04\u0E04\u0E39\u0E48 / \u0E40\u0E25\u0E35\u0E48\u0E22\u0E07\u0E04\u0E39\u0E48 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48 \u0E22\u0E01\u0E40\u0E27\u0E49\u0E19 \"\u0E44\u0E21\u0E48\u0E2D\u0E22\u0E32\u0E01\u0E2A\u0E39\u0E49/\u0E44\u0E21\u0E48\u0E2D\u0E22\u0E32\u0E01\u0E40\u0E08\u0E2D\u0E40\u0E25\u0E22\" \u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E31\u0E49\u0E07\u0E40\u0E14\u0E35\u0E48\u0E22\u0E27-\u0E04\u0E39\u0E48)"), /*#__PURE__*/React.createElement(LockPairEditor, {
+  }), /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 14
+      }
+    }, "\uD83E\uDD1D"),
+    title: "\u0E04\u0E27\u0E32\u0E21\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E32\u0E23\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginBottom: 8
+    }
+  }, "\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E42\u0E2B\u0E21\u0E14\u0E15\u0E35\u0E04\u0E39\u0E48 \u0E22\u0E01\u0E40\u0E27\u0E49\u0E19 \"\u0E44\u0E21\u0E48\u0E2D\u0E22\u0E32\u0E01\u0E2A\u0E39\u0E49/\u0E44\u0E21\u0E48\u0E2D\u0E22\u0E32\u0E01\u0E40\u0E08\u0E2D\u0E40\u0E25\u0E22\" \u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E31\u0E49\u0E07\u0E40\u0E14\u0E35\u0E48\u0E22\u0E27-\u0E04\u0E39\u0E48"), /*#__PURE__*/React.createElement(LockPairEditor, {
     players,
     attendees: attendeePlayers,
     lockPairs,
@@ -32605,6 +32605,12 @@ function LockPairEditor({
   const [a, setA] = useState("");
   const [b, setB] = useState("");
   const [type, setType] = useState("lock");
+  // v1.12.6 (Simplify การเล่น section, spec 5): progressive disclosure — the add-new-constraint controls
+  // (Player A/B + relationship type) start collapsed behind a single "+ เพิ่มความต้องการผู้เล่น" button;
+  // tapping it reveals the SAME existing selects/add() below (no new data model, no new logic). Local to
+  // this component instance, so it naturally re-collapses whenever the parent accordion section this lives
+  // in is closed and reopened (QuanSettingsSheet unmounts this component while collapsed).
+  const [showAddForm, setShowAddForm] = useState(false);
   const sty = {
     flex: 1,
     padding: "9px 8px",
@@ -32716,7 +32722,7 @@ function LockPairEditor({
     }, /*#__PURE__*/React.createElement(X, {
       size: 15
     })));
-  })), /*#__PURE__*/React.createElement("div", {
+  })), showAddForm ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 6,
@@ -32780,7 +32786,25 @@ function LockPairEditor({
     }
   }, /*#__PURE__*/React.createElement(Plus, {
     size: 17
-  }))));
+  })))) : /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowAddForm(true),
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "10px 0",
+      borderRadius: 10,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      color: T.text,
+      fontSize: 12.5,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement(Plus, {
+    size: 15
+  }), " \u0E40\u0E1E\u0E34\u0E48\u0E21\u0E04\u0E27\u0E32\u0E21\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E32\u0E23\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19"));
 }
 const WHEEL_TYPE_LABEL = {
   now: "ใช้ทันที",

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.5";
+const APP_VERSION = "1.12.6";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -10993,30 +10993,56 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
       </button>
       {open === "play" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <Label>รูปแบบการเล่น</Label>
-          <div style={{ marginBottom: 12 }}>
+          {/* v1.12.6 (Simplify Player Status... er, Player การเล่น UI): regrouped into 5 clear logical
+              sections per spec — รูปแบบการเล่น / รูปแบบการเก็บคะแนน / โหมดจับคู่ / จำนวนผู้เล่นและสนาม /
+              ความต้องการผู้เล่น. Every control below reuses the EXACT SAME state/handler it always used
+              (mode/setMode, settings.rounds/winScore/deuce/pairingMode/maxPlayers, courtCount/courtLabels,
+              lockPairs/addLockPair/removeLockPair/setHandPref) — this is a pure layout/label restructuring,
+              zero calculation or persistence changes. */}
+
+          {/* 1) รูปแบบการเล่น */}
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🏸</span>} title="รูปแบบการเล่น" />
+          <div style={{ marginBottom: 18 }}>
             <Seg options={[["doubles", "ตีคู่ (2v2)"], ["singles", "ตีเดี่ยว (1v1)"]]} value={mode} onChange={setMode} />
           </div>
-          <div style={{ marginBottom: 8 }}>
+
+          {/* 2) รูปแบบการเก็บคะแนน — จำนวนเซต/จำนวนแต้ม/ดิว now visually grouped as one compact block. */}
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🎯</span>} title="รูปแบบการเก็บคะแนน" />
+          <div style={{ marginBottom: 10 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนเซต</div>
+            {/* kept as the existing 3-way Seg (1 / 2fixed / 2-ใน-3), NOT a linear +/- stepper — "2 เซต"
+                (always play exactly 2, no decider) and "2 ใน 3 เซต" (best-of-3) are qualitatively different
+                match formats, not adjacent counts, so a numeric stepper can't represent them without
+                inventing new logic. Same settings.rounds state/values as before. */}
             <Seg options={[[1, "1 เซต"], ["2fixed", "2 เซต"], [2, "2 ใน 3 เซต"]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
           </div>
-          <div style={{ marginBottom: 8 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เล่นถึง</div>
-            <Seg options={[[9, "9"], [15, "15"], [21, "21"]]} value={settings.winScore || 21} onChange={(v) => setSettings((s) => ({ ...s, winScore: v }))} />
+          <div style={{ marginBottom: 10 }}>
+            {/* v1.12.6: จำนวนแต้ม is now a free numeric field (was fixed 9/15/21 buttons) via the project's
+                existing safe-draft NumField (buffers keystrokes locally, commits on blur/Enter, reverts to
+                the last committed value if left blank — the same fix already proven for every other numeric
+                setting, avoiding the known 0->10 compounding bug). `settings.winScore || 21` is ONLY a
+                display fallback for legacy data missing the field (identical to the old Seg's own fallback)
+                — it never writes 21 into an existing session; getDefaultSettings() already seeds new
+                groups/sessions with winScore: 21, so that default is untouched by this patch. */}
+            <NumField label="จำนวนแต้ม" value={settings.winScore || 21} onChange={(v) => setSettings((s) => ({ ...s, winScore: Math.max(1, Math.round(v)) }))} />
           </div>
-          <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 18 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>ดิว</div>
-            <Seg options={[[true, "มีดิว"], [false, "ไม่มีดิว"]]} value={!!settings.deuce} onChange={(v) => setSettings((s) => ({ ...s, deuce: v }))} />
+            <Seg options={[[true, "มี"], [false, "ไม่มี"]]} value={!!settings.deuce} onChange={(v) => setSettings((s) => ({ ...s, deuce: v }))} />
           </div>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>โหมดจัดคู่</div>
+
+          {/* 3) โหมดจับคู่ — label renamed from "โหมดจัดคู่" per spec; options/values/algorithm untouched. */}
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🔀</span>} title="โหมดจับคู่" />
+          <div style={{ marginBottom: 18 }}>
             <Seg options={[["auto", "สุ่มอัตโนมัติ"], ["manual", "เลือกเอง (Manual)"]]} value={settings.pairingMode || "auto"} onChange={(v) => setSettings((s) => ({ ...s, pairingMode: v }))} />
           </div>
+
+          {/* 4) จำนวนผู้เล่นและสนาม — player cap + court count/labels + court recommendation grouped together. */}
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🏟️</span>} title="จำนวนผู้เล่นและสนาม" />
           {/* v1.11.17 (spec section 3): จำนวนผู้เล่น cap — null/0 = ไม่จำกัด. When จำกัดจำนวน is picked, a
               new check-in past the cap is redirected to the Waiting List (see setStatus) instead of
               being blocked outright, so the organizer never loses the ability to register someone. */}
-          <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 14 }}>
             <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนผู้เล่น</div>
             <Seg options={[[false, "ไม่จำกัด"], [true, "จำกัดจำนวน"]]} value={!!settings.maxPlayers} onChange={(v) => setSettings((s) => ({ ...s, maxPlayers: v ? (s.maxPlayers || 24) : null }))} />
             {!!settings.maxPlayers && (
@@ -11025,13 +11051,15 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
               </div>
             )}
           </div>
-          <Label>จำนวนสนาม</Label>
-          <div style={{ marginBottom: 10 }}><Stepper value={courtCount} setValue={setCourtCount} min={1} max={12} /></div>
-          <button onClick={() => setEditCourtLabels((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "8px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 16, display: "flex", alignItems: "center", gap: 6 }}>
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนสนาม</div>
+            <Stepper value={courtCount} setValue={setCourtCount} min={1} max={12} />
+          </div>
+          <button onClick={() => setEditCourtLabels((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "8px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 12 }}>🔢</span> แก้ไขเลขสนาม (เช่น มี 3 สนาม แต่เป็นเบอร์ 1, 3, 5)<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtLabels ? "rotate(180deg)" : "none" }} />
           </button>
           {editCourtLabels && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
               {Array.from({ length: courtCount }, (_, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 5 }}>
                   <span style={{ fontSize: 11, color: T.muted, fontWeight: 700 }}>สนามที่ {i + 1}:</span>
@@ -11046,34 +11074,19 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
             </div>
           )}
 
-          {/* v1.11.7 (Part I) / v1.11.12 (goal-based rewrite): compact Court Recommendation card, placed
-              right below จำนวนสนาม per spec. DECISION SUPPORT ONLY — never writes to courtCount/setCourtCount. */}
-          <div style={{ marginBottom: 16, padding: 12, borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}` }}>
+          {/* v1.11.7 (Part I) / v1.11.12 (goal-based rewrite) / v1.12.6 (compacted default presentation per
+              spec 4 — the full per-time-block breakdown below moved exclusively into
+              CourtRecommendationDetailSheet, which already rendered its own equivalent breakdown, so nothing
+              is lost, just no longer duplicated on the compact card). DECISION SUPPORT ONLY — never writes
+              to courtCount/setCourtCount; algorithm/calculation itself is completely unchanged. */}
+          <div style={{ marginBottom: 18, padding: 12, borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}` }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 6 }}>🏸 คำแนะนำการจองสนาม</div>
             {courtRec.totalRegistered === 0 ? (
-              <div style={{ fontSize: 12, color: T.muted }}>ยังไม่มีคนลงทะเบียนก๊วนนี้ — ไปที่แท็บผู้เล่นก่อน</div>
+              <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>ยังไม่มีคนลงทะเบียนก๊วนนี้ — ไปที่แท็บผู้เล่นก่อน</div>
             ) : (
-              <>
-                <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>
-                  ลงทะเบียน {courtRec.totalRegistered} คน · เป้าหมาย: {courtRec.goal === "min_games" ? `อย่างน้อย ${courtRec.minGamesPerPerson} เกม/คน · รอเป้าหมาย ~${courtRec.targetWaitMinutes} นาที` : `รอไม่เกิน ${courtRec.maxWaitMinutes} นาที`}
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 3, marginBottom: 8 }}>
-                  {courtRec.merged.map((b, i) => (
-                    <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
-                      <span style={{ color: T.text, fontWeight: 600 }}>{minutesToTimeStr(b.start)}–{minutesToTimeStr(b.end)}</span>
-                      <span style={{ fontWeight: 800, color: b.courts > 0 ? T.green : T.muted }}>{b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น"}</span>
-                    </div>
-                  ))}
-                </div>
-                {courtRec.goal === "min_games" && peakBucket && peakBucket.courts > 0 && peakCandidate && (
-                  <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 6 }}>
-                    ประมาณ {Math.max(courtRec.minGamesPerPerson, Math.floor(peakCandidate.expectedGamesPerPlayer))}–{Math.max(courtRec.minGamesPerPerson, Math.ceil(peakCandidate.expectedGamesPerPlayer))} เกม/คน
-                    {` · รอเฉลี่ย ~${Math.round(peakCandidate.estimatedWaitMinutes)} นาที`}
-                    {peakBucket.minCourts < peakBucket.courts && ` · ขั้นต่ำ ${peakBucket.minCourts} สนาม / แนะนำ ${peakBucket.courts} สนาม`}
-                  </div>
-                )}
-                <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 10 }}>รวม {Math.round(courtRec.courtHoursTotal * 10) / 10} Court-hours (ประมาณการ)</div>
-              </>
+              <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>
+                ลงทะเบียน {courtRec.totalRegistered} คน · แนะนำสูงสุด {peakBucket ? `${peakBucket.courts} สนาม` : "-"} · รวม {Math.round(courtRec.courtHoursTotal * 10) / 10} Court-hours
+              </div>
             )}
             <button onClick={() => setShowCourtRecDetail(true)} style={{ width: "100%", textAlign: "center", padding: "8px 0", borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>ดูรายละเอียด</button>
           </div>
@@ -11081,8 +11094,12 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
             <CourtRecommendationDetailSheet players={players} session={session} settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} courtCount={courtCount} mode={mode} onClose={() => setShowCourtRecDetail(false)} />
           )}
 
-          <Label>ล็อคคู่ / เลี่ยงคู่ (เฉพาะโหมดตีคู่ ยกเว้น "ไม่อยากสู้/ไม่อยากเจอเลย" ใช้ได้ทั้งเดี่ยว-คู่)</Label>
+          {/* 5) ความต้องการผู้เล่น — same lock/avoid constraint data model & matchmaking behavior as before;
+              only the entry form is now progressive disclosure (see LockPairEditor's showAddForm). */}
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🤝</span>} title="ความต้องการผู้เล่น" />
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 8 }}>เฉพาะโหมดตีคู่ ยกเว้น "ไม่อยากสู้/ไม่อยากเจอเลย" ใช้ได้ทั้งเดี่ยว-คู่</div>
           <LockPairEditor {...{ players, attendees: attendeePlayers, lockPairs, addLockPair, removeLockPair, setHandPref, getP }} />
+
           <button onClick={resetGames} style={{ marginTop: 14, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><RotateCcw size={14} /> รีเซ็ตจำนวนเกม</button>
         </div>
       )}
@@ -15003,6 +15020,12 @@ const HAND_PREF_META = {
 };
 function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLockPair, setHandPref, getP }) {
   const [a, setA] = useState(""); const [b, setB] = useState(""); const [type, setType] = useState("lock");
+  // v1.12.6 (Simplify การเล่น section, spec 5): progressive disclosure — the add-new-constraint controls
+  // (Player A/B + relationship type) start collapsed behind a single "+ เพิ่มความต้องการผู้เล่น" button;
+  // tapping it reveals the SAME existing selects/add() below (no new data model, no new logic). Local to
+  // this component instance, so it naturally re-collapses whenever the parent accordion section this lives
+  // in is closed and reopened (QuanSettingsSheet unmounts this component while collapsed).
+  const [showAddForm, setShowAddForm] = useState(false);
   const sty = { flex: 1, padding: "9px 8px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, minWidth: 0 };
   const isHandPrefType = type === "preferLeft" || type === "avoidLeft";
   const handPrefPlayers = players.filter((p) => p.handPref === "preferLeft" || p.handPref === "avoidLeft");
@@ -15043,20 +15066,28 @@ function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLock
           })}
         </div>
       )}
-      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-        <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-        {!isHandPrefType && <>
-          <span style={{ color: T.muted, fontWeight: 800 }}>+</span>
-          <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
-        </>}
-      </div>
-      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-        <select value={type} onChange={(e) => setType(e.target.value)} style={{ ...sty, flex: 1.6, fontWeight: 700 }}>
-          {Object.entries(PAIR_RULE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
-          {Object.entries(HAND_PREF_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
-        </select>
-        <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={17} /></button>
-      </div>
+      {showAddForm ? (
+        <>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+            <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+            {!isHandPrefType && <>
+              <span style={{ color: T.muted, fontWeight: 800 }}>+</span>
+              <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+            </>}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <select value={type} onChange={(e) => setType(e.target.value)} style={{ ...sty, flex: 1.6, fontWeight: 700 }}>
+              {Object.entries(PAIR_RULE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
+              {Object.entries(HAND_PREF_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
+            </select>
+            <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={17} /></button>
+          </div>
+        </>
+      ) : (
+        <button onClick={() => setShowAddForm(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 700 }}>
+          <Plus size={15} /> เพิ่มความต้องการผู้เล่น
+        </button>
+      )}
     </div>
   );
 }
