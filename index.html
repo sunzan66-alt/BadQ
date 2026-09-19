@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.2";
+      var CURRENT_VERSION = "1.12.3";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.12.2";
+const APP_VERSION = "1.12.3";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -15995,7 +15995,15 @@ function RankTierEditSheet({
       fontSize: 11.5,
       fontWeight: 700
     }
-  }, "\u0E25\u0E1A\u0E23\u0E39\u0E1B (\u0E43\u0E0A\u0E49\u0E44\u0E2D\u0E04\u0E2D\u0E19\u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19)"))), cropJob && /*#__PURE__*/React.createElement(ImageCropper, {
+  }, "\u0E25\u0E1A\u0E23\u0E39\u0E1B (\u0E43\u0E0A\u0E49\u0E44\u0E2D\u0E04\u0E2D\u0E19\u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19)"))), draft.image && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginBottom: 12,
+      marginTop: -4,
+      lineHeight: 1.5
+    }
+  }, "\u0E2B\u0E32\u0E01\u0E44\u0E2D\u0E04\u0E2D\u0E19\u0E19\u0E35\u0E49\u0E22\u0E31\u0E07\u0E41\u0E2A\u0E14\u0E07\u0E1E\u0E37\u0E49\u0E19\u0E2B\u0E25\u0E31\u0E07\u0E2A\u0E35\u0E14\u0E33\u0E43\u0E19 Ranking Showcase \u0E17\u0E31\u0E49\u0E07\u0E17\u0E35\u0E48\u0E44\u0E1F\u0E25\u0E4C\u0E15\u0E49\u0E19\u0E09\u0E1A\u0E31\u0E1A\u0E40\u0E1B\u0E47\u0E19 PNG \u0E42\u0E1B\u0E23\u0E48\u0E07\u0E43\u0E2A \u2014 \u0E44\u0E1F\u0E25\u0E4C\u0E19\u0E35\u0E49\u0E2D\u0E32\u0E08\u0E16\u0E39\u0E01\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49\u0E15\u0E31\u0E49\u0E07\u0E41\u0E15\u0E48\u0E01\u0E48\u0E2D\u0E19\u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E17\u0E35\u0E48\u0E41\u0E01\u0E49\u0E1B\u0E31\u0E0D\u0E2B\u0E32\u0E04\u0E27\u0E32\u0E21\u0E42\u0E1B\u0E23\u0E48\u0E07\u0E43\u0E2A (\u0E41\u0E2D\u0E1B\u0E44\u0E21\u0E48\u0E2A\u0E32\u0E21\u0E32\u0E23\u0E16\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19\u0E04\u0E27\u0E32\u0E21\u0E42\u0E1B\u0E23\u0E48\u0E07\u0E43\u0E2A\u0E02\u0E2D\u0E07\u0E23\u0E39\u0E1B\u0E17\u0E35\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E1B\u0E41\u0E25\u0E49\u0E27\u0E44\u0E14\u0E49\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34) \u0E25\u0E2D\u0E07\u0E01\u0E14 \"\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E23\u0E39\u0E1B\" \u0E41\u0E25\u0E49\u0E27\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E44\u0E1F\u0E25\u0E4C\u0E15\u0E49\u0E19\u0E09\u0E1A\u0E31\u0E1A\u0E40\u0E14\u0E34\u0E21\u0E2D\u0E31\u0E1B\u0E42\u0E2B\u0E25\u0E14\u0E0B\u0E49\u0E33\u0E2D\u0E35\u0E01\u0E04\u0E23\u0E31\u0E49\u0E07"), cropJob && /*#__PURE__*/React.createElement(ImageCropper, {
     src: cropJob,
     circleGuide: false,
     title: "\u0E08\u0E31\u0E14\u0E15\u0E33\u0E41\u0E2B\u0E19\u0E48\u0E07\u0E44\u0E2D\u0E04\u0E2D\u0E19 Rank",

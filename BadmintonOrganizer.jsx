@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.2";
+const APP_VERSION = "1.12.3";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -8697,6 +8697,19 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
           {draft.image && <button onClick={() => setDraft((d) => ({ ...d, image: null }))} style={{ padding: "6px 10px", borderRadius: 8, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบรูป (ใช้ไอคอนเริ่มต้น)</button>}
         </div>
       </div>
+      {/* v1.12.3: purely informational — no logic change, no pixel inspection/guessing. Root-cause
+          investigation (see project notes) confirmed the CURRENT crop/upload pipeline already preserves PNG
+          transparency correctly (real alpha survives upload → storage → Ranking Showcase render, verified
+          pixel-by-pixel). A rank image saved by an app version OLDER than that fix may have already been
+          flattened onto opaque black at the time it was saved — that is baked into the stored bytes and no
+          CSS/renderer change can recover it. The one real fix is re-running the ORIGINAL file (which itself
+          was never altered) through today's upload step. This note only appears when a tier already has an
+          image, and never touches its stored value. */}
+      {draft.image && (
+        <div style={{ fontSize: 11, color: T.muted, marginBottom: 12, marginTop: -4, lineHeight: 1.5 }}>
+          หากไอคอนนี้ยังแสดงพื้นหลังสีดำใน Ranking Showcase ทั้งที่ไฟล์ต้นฉบับเป็น PNG โปร่งใส — ไฟล์นี้อาจถูกบันทึกไว้ตั้งแต่ก่อนอัปเดตที่แก้ปัญหาความโปร่งใส (แอปไม่สามารถกู้คืนความโปร่งใสของรูปที่บันทึกไปแล้วได้อัตโนมัติ) ลองกด "เปลี่ยนรูป" แล้วเลือกไฟล์ต้นฉบับเดิมอัปโหลดซ้ำอีกครั้ง
+        </div>
+      )}
       {cropJob && <ImageCropper src={cropJob} circleGuide={false} title="จัดตำแหน่งไอคอน Rank" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraft((d) => ({ ...d, image: data })); setCropJob(null); }} />}
 
       <Label>ชื่อ Rank</Label>
