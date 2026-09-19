@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.76";
+const APP_VERSION = "1.11.77";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5844,8 +5844,9 @@ export default function App() {
       if (!dst) return prev;
       const dstArr = team === "A" ? dst.teamA : dst.teamB;
       if (dstArr[idx] === newPid) return prev;
+      let assigned = false;
       if (newPid) {
-        for (const m of next) {
+        outer: for (const m of next) {
           for (const tm of ["A", "B"]) {
             const arr = tm === "A" ? m.teamA : m.teamB;
             const srcIdx = arr.indexOf(newPid);
@@ -5853,12 +5854,32 @@ export default function App() {
               const old = dstArr[idx];
               arr[srcIdx] = old;
               dstArr[idx] = newPid;
-              return next;
+              assigned = true;
+              break outer;
             }
           }
         }
       }
-      dstArr[idx] = newPid || null;
+      if (!assigned) dstArr[idx] = newPid || null;
+      // v1.11.77 (Manual Matchmaking: Auto Lock-Pair) — when the just-assigned player has a "lock"
+      // rule (ล็อคคู่) with someone else, and that partner is currently free (present in waitQueue,
+      // the same eligibility pool this whole table already trusts — see `bench = waitQueue` above) and
+      // not already seated anywhere else in THIS match (either team), auto-fill the remaining empty
+      // slot on the SAME team (never the opponent side) with the locked partner. Never overwrites an
+      // already-filled teammate slot; the organizer can still freely change/remove it afterward via the
+      // exact same dropdown. Reuses lockPairs/ruleBetween's own {a,b,type} shape — no new pairing logic.
+      if (newPid) {
+        const rule = lockPairs.find((r) => r.type === "lock" && (r.a === newPid || r.b === newPid));
+        if (rule) {
+          const partnerId = rule.a === newPid ? rule.b : rule.a;
+          const alreadyInMatch = dst.teamA.includes(partnerId) || dst.teamB.includes(partnerId);
+          const available = !alreadyInMatch && waitQueue.some((p) => p.id === partnerId);
+          if (available) {
+            const emptyIdx = dstArr.findIndex((pid, i) => i !== idx && !pid);
+            if (emptyIdx !== -1) dstArr[emptyIdx] = partnerId;
+          }
+        }
+      }
       return next;
     });
   };
@@ -14297,7 +14318,13 @@ function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRe
           // in this match is still fully tappable (onPick unchanged) — only shown in red, at the bottom
           // (rankManualSlotCandidates already sorted it there), with a short reason line instead of the
           // normal wait/games-played hint.
-          <button key={b.id} onClick={() => onPick(b.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: "none", border: "none", borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
+          // v1.11.77 (Manual Matchmaking: Conflict Highlight): a conflicting candidate (already flagged
+          // red text + reason below, and already sorted to the bottom by rankManualSlotCandidates) now
+          // ALSO gets a pale-red row background — reuses the same "#fdecea" pale-red already used for
+          // error/warning banners elsewhere in this file (BackupSettingsEditor's import-error box), so
+          // this stays visually consistent instead of inventing a new color. Purely a background swap:
+          // still fully clickable/selectable (onPick unchanged), never disabled.
+          <button key={b.id} onClick={() => onPick(b.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: b._conflict ? "#fdecea" : "none", border: "none", borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
             <Avatar p={b} size={26} />
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={{ display: "block", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: b._conflict ? "#c0392b" : undefined }}>{b._conflict ? "🔴 " : ""}{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>

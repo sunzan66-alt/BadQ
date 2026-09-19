@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.11.76";
+      var CURRENT_VERSION = "1.11.77";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.11.76";
+const APP_VERSION = "1.11.77";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -9398,8 +9398,9 @@ function App() {
       if (!dst) return prev;
       const dstArr = team === "A" ? dst.teamA : dst.teamB;
       if (dstArr[idx] === newPid) return prev;
+      let assigned = false;
       if (newPid) {
-        for (const m of next) {
+        outer: for (const m of next) {
           for (const tm of ["A", "B"]) {
             const arr = tm === "A" ? m.teamA : m.teamB;
             const srcIdx = arr.indexOf(newPid);
@@ -9407,12 +9408,32 @@ function App() {
               const old = dstArr[idx];
               arr[srcIdx] = old;
               dstArr[idx] = newPid;
-              return next;
+              assigned = true;
+              break outer;
             }
           }
         }
       }
-      dstArr[idx] = newPid || null;
+      if (!assigned) dstArr[idx] = newPid || null;
+      // v1.11.77 (Manual Matchmaking: Auto Lock-Pair) — when the just-assigned player has a "lock"
+      // rule (ล็อคคู่) with someone else, and that partner is currently free (present in waitQueue,
+      // the same eligibility pool this whole table already trusts — see `bench = waitQueue` above) and
+      // not already seated anywhere else in THIS match (either team), auto-fill the remaining empty
+      // slot on the SAME team (never the opponent side) with the locked partner. Never overwrites an
+      // already-filled teammate slot; the organizer can still freely change/remove it afterward via the
+      // exact same dropdown. Reuses lockPairs/ruleBetween's own {a,b,type} shape — no new pairing logic.
+      if (newPid) {
+        const rule = lockPairs.find(r => r.type === "lock" && (r.a === newPid || r.b === newPid));
+        if (rule) {
+          const partnerId = rule.a === newPid ? rule.b : rule.a;
+          const alreadyInMatch = dst.teamA.includes(partnerId) || dst.teamB.includes(partnerId);
+          const available = !alreadyInMatch && waitQueue.some(p => p.id === partnerId);
+          if (available) {
+            const emptyIdx = dstArr.findIndex((pid, i) => i !== idx && !pid);
+            if (emptyIdx !== -1) dstArr[emptyIdx] = partnerId;
+          }
+        }
+      }
       return next;
     });
   };
@@ -31309,6 +31330,12 @@ function PlayerPicker({
   // in this match is still fully tappable (onPick unchanged) — only shown in red, at the bottom
   // (rankManualSlotCandidates already sorted it there), with a short reason line instead of the
   // normal wait/games-played hint.
+  // v1.11.77 (Manual Matchmaking: Conflict Highlight): a conflicting candidate (already flagged
+  // red text + reason below, and already sorted to the bottom by rankManualSlotCandidates) now
+  // ALSO gets a pale-red row background — reuses the same "#fdecea" pale-red already used for
+  // error/warning banners elsewhere in this file (BackupSettingsEditor's import-error box), so
+  // this stays visually consistent instead of inventing a new color. Purely a background swap:
+  // still fully clickable/selectable (onPick unchanged), never disabled.
   React.createElement("button", {
     key: b.id,
     onClick: () => onPick(b.id),
@@ -31318,7 +31345,7 @@ function PlayerPicker({
       alignItems: "center",
       gap: 9,
       padding: "9px 11px",
-      background: "none",
+      background: b._conflict ? "#fdecea" : "none",
       border: "none",
       borderBottom: `1px solid ${T.border}`,
       textAlign: "left"
