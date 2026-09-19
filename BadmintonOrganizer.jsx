@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.80";
+const APP_VERSION = "1.12.1";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -2904,7 +2904,7 @@ function quanSettingsSummary(settings, mode, courtCount) {
   const levelLabel = getPresetMeta(settings.levelPresetId || "isan").name;
   return `${modeLabel} · ${courtCount} สนาม · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
 }
-// dynamic subtitle for the "ตั้งค่าค่าก๊วนและรางวัล" compact entry point on the ชำระเงิน tab
+// dynamic subtitle for the "💵 การชำระเงินและต้นทุน" compact entry point on the ชำระเงิน tab
 const COST_MODEL_LABEL = { splitExpenses: "หารค่าใช้จ่าย", simple: "แบบง่าย", perCourt: "แยกรายสนาม", hourly: "รายชั่วโมง", perPerson: "รายคน", custom: "กำหนดเอง" };
 function financeSettingsSummary(settings) {
   const model = settings.costModel || "simple";
@@ -2912,7 +2912,8 @@ function financeSettingsSummary(settings) {
     ? [`ค่าสนาม ${formatCurrency(settings.court || 0)}/คน`, `ค่าลูก ${formatCurrency(settings.shuttle || 0)}/เกม`]
     : [`รูปแบบ: ${COST_MODEL_LABEL[model] || model}`];
   if (settings.other) parts.push(`อื่นๆ ${formatCurrency(settings.other)}`);
-  parts.push(settings.wheelEnabled !== false ? "รางวัลเปิด" : "ไม่มีรางวัล");
+  // v1.12.1 (UX restructure, spec 7): Reward moved out of this card entirely (now in Advanced Settings),
+  // so its "รางวัลเปิด/ไม่มีรางวัล" segment no longer belongs in this summary — do not re-add it here.
   return parts.join(" · ");
 }
 // FAIRNESS SCORING (v1.9.4) — combines real elapsed wait time with games-played into one weighted
@@ -3167,8 +3168,12 @@ function getDefaultSettings() {
     // app auto-splits by ผู้เล่นที่มาจริง (see computeSplitExpenseSummary) instead of a manually-set rate.
     splitExpenses: { court: 0, shuttle: 0, water: 0, other: 0 },
     roundingMode: "none", // "none" | "round5" | "round10" — how the per-person charge from splitExpenses is rounded
-    wheelEnabled: true,
-    wheelEnabled: true,
+    // v1.12.1 (UX restructure — Advanced Feature toggles): Reward defaults OFF for a brand-new settings
+    // object (was `true`, duplicated by mistake — this also fixes that dead duplicate key). This ONLY
+    // affects genuinely new/empty settings; an existing user's persisted `wheelEnabled` (or inferred value —
+    // see applyPersistedState) always wins via the `{...getDefaultSettings(), ...base}` spread in
+    // normSettings, so nobody who already uses Reward loses it.
+    wheelEnabled: false,
     // v1.9.19: when true, prizes that have run out (qty 0) still appear on the wheel — grayed out, purely
     // visual, never actually landable — instead of disappearing. Default false = unchanged prior behavior
     // (sold-out prizes simply vanish from the wheel).
@@ -3213,7 +3218,44 @@ function getDefaultSettings() {
     // is null/undefined at render time; keeping these independent avoids a cross-file-region dependency
     // that would break tools which extract getDefaultSettings() in isolation).
     membership: { entranceFee: { enabled: false, amount: 0 }, recurring: { enabled: false, monthlyFee: 0, annualFee: 0 }, expiryWarningDays: 7 },
+    // v1.12.1 (UX restructure — Advanced Feature toggles): Tournament defaults OFF for a brand-new settings
+    // object, same reasoning/safety as wheelEnabled above — an existing user's persisted/inferred value
+    // always wins (see applyPersistedState's inferredTournamentEnabled).
+    tournamentEnabled: false,
   };
+}
+// v1.12.1: true when `prizes` is exactly the pristine 3-prize seed from getDefaultSettings() (ignoring the
+// random `id` field) — used ONLY to detect "has this organizer ever actually customized Reward" for the
+// one-time Reward-enabled migration inference below. Any length change or any field difference counts as
+// customized; an absent/non-array value is treated as "not customized" (nothing to infer from).
+function isDefaultWheelPrizes(prizes) {
+  // v1.12.1 fix: an EMPTY array counts as "not yet configured" too, same as a completely absent field —
+  // consistent with migrateBackupData's own pre-existing wheelPrizes backfill (`|| wheelPrizes.length === 0
+  // -> use the default 3-item set`) a few lines below where this is used. Without this, an old/edge-case
+  // blob that happens to carry `wheelPrizes: []` (rather than omitting the field) would be misread as "the
+  // organizer deliberately emptied the wheel" and wrongly infer Reward as ON for a user who never touched it.
+  if (!Array.isArray(prizes) || prizes.length === 0) return true;
+  const def = getDefaultSettings().wheelPrizes;
+  if (prizes.length !== def.length) return false;
+  const sig = (p) => JSON.stringify({ label: p && p.label, type: p && p.type, amount: p && p.amount, qty: p && p.qty, totalQty: p && p.totalQty, probability: p && p.probability, value: p && p.value, wheelOrder: p && p.wheelOrder });
+  return prizes.every((p, i) => sig(p) === sig(def[i]));
+}
+// v1.12.1 (UX restructure — Advanced Feature migration): shared by BOTH normal boot (applyPersistedState)
+// AND backup restore (applyRestore's "replace" mode) so the two loading paths can never disagree on
+// whether Tournament/Reward should come back enabled. Once `rawSettings.tournamentEnabled`/`wheelEnabled`
+// is an explicit boolean, that stored choice always wins (never re-inferred, never auto-turned back on
+// just because historical data still exists). Otherwise, infer ON only from genuine prior use so an
+// existing user never silently loses a feature they were already using; a brand-new/empty settings object
+// has no history to infer from and correctly stays OFF (new-user default).
+function inferAdvancedFeatureFlags(rawSettings, rawActiveTournament, rawTournamentHistory, rawRewardHistory) {
+  const rs = rawSettings || {};
+  const tournamentEnabled = typeof rs.tournamentEnabled === "boolean"
+    ? rs.tournamentEnabled
+    : !!(normTournament(rawActiveTournament) || (Array.isArray(rawTournamentHistory) && rawTournamentHistory.length > 0));
+  const wheelEnabled = typeof rs.wheelEnabled === "boolean"
+    ? rs.wheelEnabled
+    : !!((Array.isArray(rawRewardHistory) && rawRewardHistory.length > 0) || !isDefaultWheelPrizes(rs.wheelPrizes));
+  return { tournamentEnabled, wheelEnabled };
 }
 // v1.11.7 (Part M) / v1.11.12: backward-compatible settings defaults — old saved settings objects predate
 // these fields; backfill them without touching any existing customized value.
@@ -3521,6 +3563,18 @@ function migrateBackupData(parsed) {
   data = { ...data };
   // while (schemaVersion < SCHEMA_VERSION) { data = MIGRATIONS[schemaVersion](data); schemaVersion++; }
   // (no steps needed yet — SCHEMA_VERSION is still 1; this is the extension point for future bumps)
+  // v1.12.1 (UX restructure — Advanced Feature migration, root-cause fix): capture whether
+  // tournamentEnabled/wheelEnabled were EXPLICITLY booleans in the RAW incoming data BEFORE the
+  // `{...getDefaultSettings(), ...data.settings}` backfill two lines below — that backfill unconditionally
+  // injects `tournamentEnabled: false`/`wheelEnabled: false` from getDefaultSettings() into any settings
+  // object that doesn't already have the field, which would otherwise make inferAdvancedFeatureFlags see an
+  // already-"explicit" false and never infer ON from a genuinely existing tournamentHistory/rewardHistory —
+  // this function is the ONE place (used by both the normal boot path via tryRecoverFlatState AND file
+  // restore via validateBackupFile) where that backfill happens, so this is the one place the true
+  // "was this explicitly set by the user" signal must be captured before it's lost.
+  const rawSettingsIn = data.settings && typeof data.settings === "object" ? data.settings : {};
+  const rawTournamentEnabledExplicit = typeof rawSettingsIn.tournamentEnabled === "boolean" ? rawSettingsIn.tournamentEnabled : null;
+  const rawWheelEnabledExplicit = typeof rawSettingsIn.wheelEnabled === "boolean" ? rawSettingsIn.wheelEnabled : null;
   data.players = Array.isArray(data.players) ? data.players.map(normPlayer) : [];
   data.history = Array.isArray(data.history) ? data.history : [];
   data.current = Array.isArray(data.current) ? data.current : [];
@@ -3547,6 +3601,18 @@ function migrateBackupData(parsed) {
   data.rankingConfigs = normRankingConfigs(data.rankingConfigs); // v1.11.68: no field at all (old backup) -> {} (no club has Ranking configured yet)
   data.rewardHistory = Array.isArray(data.rewardHistory) ? data.rewardHistory : []; // v1.11.34: no field at all (old backup) -> []
   data.cloudClub = normCloudClub(data.cloudClub); // v1.11.35: no field at all (old backup) -> disabled/local-only
+  // v1.12.1: now that activeTournament/tournamentHistory/rewardHistory are fully migrated, run the ONE
+  // canonical Advanced-Feature-flag inference using the PRE-backfill explicit values captured above (not
+  // data.settings.tournamentEnabled, which the getDefaultSettings() spread may have just set to false).
+  // Every downstream caller (applyPersistedState, applyRestore) still calls inferAdvancedFeatureFlags again
+  // on this already-resolved value — that's a safe, idempotent passthrough (typeof boolean is already
+  // true), not a second independent inference.
+  const advancedFlags = inferAdvancedFeatureFlags(
+    { tournamentEnabled: rawTournamentEnabledExplicit, wheelEnabled: rawWheelEnabledExplicit, wheelPrizes: rawSettingsIn.wheelPrizes },
+    data.activeTournament, data.tournamentHistory, data.rewardHistory
+  );
+  data.settings.tournamentEnabled = advancedFlags.tournamentEnabled;
+  data.settings.wheelEnabled = advancedFlags.wheelEnabled;
   return { ...parsed, schemaVersion: SCHEMA_VERSION, data };
 }
 // deeper integrity check AFTER migration — corrupted core structure rejects the whole restore;
@@ -4359,6 +4425,11 @@ export default function App() {
   }, []);
   const isWide = useIsWide(); // landscape phone / tablet — widen the shell so it doesn't look squeezed into a narrow column
   const [tab, setTab] = useState("members");
+  // v1.12.1 (UX restructure): ข้อมูลและการสำรอง moved from ประวัติ to ตั้งค่า (spec 12) — the corrupted-data
+  // recovery banner below used to jump straight to ประวัติ where Backup lived inline; it now needs to jump
+  // two levels (tab -> Settings card) so this one-shot flag tells SettingsTab which card to auto-open on
+  // arrival, exactly preserving the old "one tap to recovery" behavior for this critical safeguard.
+  const [settingsAutoOpen, setSettingsAutoOpen] = useState(null);
   // v1.11.66 (Match Table Responsive Layout): every OTHER tab (ผู้เล่น/การเงิน/ประวัติ) keeps the exact
   // existing 860/520 cap — untouched, out of this patch's scope. Only the "เกม" page's shell (which holds
   // SessionTab's match table) is allowed to grow past 860px, and only on genuinely spacious viewports
@@ -4615,7 +4686,20 @@ export default function App() {
     // v1.11.34: wheelPrizes always goes through normWheelPrizes here too (not just the file-import path)
     // — this is the NORMAL app-boot path, so an existing device's saved old-shape prizes must migrate the
     // very first time it opens the upgraded app, not only after an explicit backup restore.
-    s.settings && setSettings((d) => ({ ...d, ...s.settings, wheelPrizes: normWheelPrizes(s.settings.wheelPrizes && s.settings.wheelPrizes.length ? s.settings.wheelPrizes : d.wheelPrizes) }));
+    // v1.12.1 (UX restructure — Advanced Feature migration): Tournament/Reward are now OFF-by-default
+    // Advanced Features; inferAdvancedFeatureFlags (defined above, shared with applyRestore) preserves an
+    // existing user's already-enabled/already-used state while defaulting a genuinely new one to OFF. See
+    // that function's own comment for the full idempotency/one-way reasoning. Ranking needs no equivalent
+    // flag/inference: rankingConfigs[club].enabled already defaults false per-club and is untouched here.
+    if (s.settings) {
+      const inferred = inferAdvancedFeatureFlags(s.settings, s.activeTournament, s.tournamentHistory, s.rewardHistory);
+      setSettings((d) => ({
+        ...d, ...s.settings,
+        tournamentEnabled: inferred.tournamentEnabled,
+        wheelEnabled: inferred.wheelEnabled,
+        wheelPrizes: normWheelPrizes(s.settings.wheelPrizes && s.settings.wheelPrizes.length ? s.settings.wheelPrizes : d.wheelPrizes),
+      }));
+    }
     s.session && setSession(normSession(s.session)); // old saves have no `mode`/`id`/session times — default them, backward-compatible
     s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
     setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
@@ -6673,7 +6757,13 @@ export default function App() {
       // React state below AND what gets persisted+verified immediately after, so the two can never diverge.
       const rPlayers = data.players.map(normPlayer);
       const rHistory = data.history, rCurrent = data.current, rFuture = data.future;
-      const rSettings = normSettings(data.settings), rSession = normSession(data.session);
+      // v1.12.1 (UX restructure — Advanced Feature migration): a restored backup goes through the SAME
+      // inferAdvancedFeatureFlags logic as normal boot (applyPersistedState) — restoring an old backup that
+      // predates the Tournament/Reward toggles must not silently disable a feature that backup's own
+      // tournamentHistory/rewardHistory shows was actually in use.
+      const rFeatureFlags = inferAdvancedFeatureFlags(data.settings, data.activeTournament, data.tournamentHistory, data.rewardHistory);
+      const rSettings = normSettings({ ...data.settings, tournamentEnabled: rFeatureFlags.tournamentEnabled, wheelEnabled: rFeatureFlags.wheelEnabled });
+      const rSession = normSession(data.session);
       const rSessionHistory = data.sessionHistory, rTournamentHistory = data.tournamentHistory || [];
       const rGeneralExpenses = data.generalExpenses || [], rOtherIncome = data.otherIncome || [];
       const rDiscountCredits = (data.discountCredits || []).map(normDiscountCredit);
@@ -6856,9 +6946,9 @@ export default function App() {
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>⚠️</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12.5, fontWeight: 800 }}>ข้อมูลเดิมเสียหาย ระบบไม่บันทึกทับให้เพื่อกันข้อมูลหายซ้ำ</div>
-              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>น่าจะเกิดจากแอปถูกปิดกลางคันตอนกำลังบันทึก — ไปที่ "ประวัติ" แล้วเปิด "ข้อมูลและการสำรอง" เพื่อกู้คืนจากจุดสำรองอัตโนมัติ หรือไฟล์สำรองที่เคยเก็บไว้</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>น่าจะเกิดจากแอปถูกปิดกลางคันตอนกำลังบันทึก — ไปที่ "ตั้งค่า" แล้วเปิด "ข้อมูลและการสำรอง" เพื่อกู้คืนจากจุดสำรองอัตโนมัติ หรือไฟล์สำรองที่เคยเก็บไว้</div>
               <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
-                <button onClick={() => setTab("history")} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>ไปกู้คืนข้อมูล</button>
+                <button onClick={() => { setTab("settings"); setSettingsAutoOpen("backup"); }} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>ไปกู้คืนข้อมูล</button>
                 <button onClick={() => { setLoadCorrupted(false); setBootStatus("new-install"); }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>เริ่มต้นใหม่ (ไม่กู้คืน)</button>
               </div>
             </div>
@@ -6885,25 +6975,29 @@ export default function App() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames }} />}
         {tab === "session" && <GameTab
-          sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport }}
+          sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members") }}
           summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
         />}
-        {tab === "history" && <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, rankingConfigs }} />}
+        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null) }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
         <div style={{ maxWidth: gameShellMaxWidth, margin: "0 auto", display: "flex" }}>
-          <TabBtn active={tab === "members"} onClick={() => setTab("members")} label="ผู้เล่น"><User size={20} strokeWidth={tab === "members" ? 2.4 : 1.8} /></TabBtn>
+          {/* v1.12.1 (UX restructure, spec 1): icon switched from the lucide User glyph to the 👥 emoji to
+              match the new nav's exact spec (👥 ผู้เล่น | 🏸 เกม | 💰 การเงิน | ⚙️ ตั้งค่า) — label/behavior unchanged. */}
+          <TabBtn active={tab === "members"} onClick={() => setTab("members")} label="ผู้เล่น"><span style={{ fontSize: 19, lineHeight: "20px" }}>👥</span></TabBtn>
           {/* v1.11.61: bottom nav simplified from 5 items to 4 — "วันนี้" renamed to "เกม" (same 🏸 icon,
               already badminton-appropriate, no change needed there) and the old standalone "สรุป" item is
               retired; Summary now lives INSIDE this "เกม" page as a compact เกม/สรุป sub-tab (see GameTab
               below) rather than being deleted. */}
           <TabBtn active={tab === "session"} onClick={() => setTab("session")} label="เกม"><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
           <TabBtn active={tab === "finance"} onClick={() => setTab("finance")} label="การเงิน"><span style={{ fontSize: 19, lineHeight: "20px" }}>💰</span></TabBtn>
-          <TabBtn active={tab === "history"} onClick={() => setTab("history")} label="ประวัติ"><History size={20} strokeWidth={tab === "history" ? 2.4 : 1.8} /></TabBtn>
+          {/* v1.12.1 (UX restructure, spec 1): "ประวัติ" removed from the bottom nav — History itself is NOT
+              deleted, it moves under ⚙️ ตั้งค่า → ประวัติ (see SettingsTab) along with Backup/Advanced/General. */}
+          <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} label="ตั้งค่า"><span style={{ fontSize: 19, lineHeight: "20px" }}>⚙️</span></TabBtn>
         </div>
       </div>
     </div>
@@ -6919,25 +7013,42 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
   const [regTab, setRegTab] = useState("group"); // "group" | "tournament"
   const [attendanceTimeFor, setAttendanceTimeFor] = useState(null); // player id whose attendance-time sheet is open, or null
-  const [q, setQ] = useState(""); const [sort, setSort] = useState("levelDesc"); const [onlyPresent, setOnlyPresent] = useState(false);
+  const [q, setQ] = useState(""); const [sort, setSort] = useState("levelDesc");
+  // v1.12.1 (UX restructure, spec 3.1): the old single "เฉพาะที่มา" boolean (onlyPresent) is replaced by one
+  // 4-way quick filter — "all" | "come" | "coming" | "absent" — same underlying status predicates as
+  // before (see `list`'s filter below and `statusCounts`), just expressed as the new mockup's single
+  // ทั้งหมด/มา/กำลังมา/ไม่มา pill row instead of one toggle chip.
+  const [statusQuick, setStatusQuick] = useState("all");
   const [editPlayerId, setEditPlayerId] = useState(null); // v1.9.17: id of player shown in "แก้ไขสมาชิก", or null
   const [profilePlayerId, setProfilePlayerId] = useState(null); // v1.11.5: id of player shown in the new Player Profile sheet, or null
-  const [generalSettingsOpen, setGeneralSettingsOpen] = useState(false); // v1.11.5: the new ⚙️ ตั้งค่า (general settings, replaces the old skill-only sheet trigger)
-  const [membershipSettingsOpen, setMembershipSettingsOpen] = useState(false); // v1.11.67: "ค่าสมาชิก" — see MembershipSettingsSheet
+  // v1.12.1: the old always-visible "⚙️ ตั้งค่า" (general settings) chip on this page is retired —
+  // GeneralSettingsSheet now has exactly ONE entry point, ⚙️ ตั้งค่า (bottom nav) → ตั้งค่าทั่วไป (SettingsTab),
+  // per spec section 3's exact "always visible" list (no ⚙️ ตั้งค่า chip on ผู้เล่น) and spec 10 ("Do NOT put
+  // Ranking/Tournament/Reward inside General Settings" — implicitly, general app settings don't belong on
+  // this per-session/player page either). Nothing about GeneralSettingsSheet itself changed.
+  const [membershipSettingsOpen, setMembershipSettingsOpen] = useState(false); // v1.11.67: "ค่าสมาชิก" — see MembershipSettingsSheet, now opened from "จัดการ" (spec 3.3) instead of its own always-visible chip
   const todayISO = todayLocalISO(); // v1.11.67: computed once per render for every membership-status check on this page (list badges + the sheet)
-  // v1.11.34: "ไม่ได้มานาน" filter (spec section 2) — kept as its own toggle chip alongside "เฉพาะที่มา"
-  // rather than a new UI row, per spec. Bulk-select mode ("จัดการหลายคน") is likewise an extra state on
-  // the SAME list, not a separate screen — selectedIds only has any effect while bulkMode is on.
+  // v1.11.34: "ไม่ได้มานาน" filter — moved into the new "ตัวกรอง" sheet (spec 3.2) instead of its own
+  // always-visible chip; the underlying toggle/state/logic is completely unchanged. Bulk-select mode
+  // ("จัดการหลายคน") is likewise an extra state on the SAME list, not a separate screen — selectedIds only
+  // has any effect while bulkMode is on; it's now toggled from "จัดการ" (spec 3.3) instead of its own chip.
   const [onlyInactive, setOnlyInactive] = useState(false);
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(() => new Set());
   const [bulkArchiveResult, setBulkArchiveResult] = useState(null); // { archived, skipped } | null — brief confirmation after "Archive ที่เลือก"
+  // v1.12.1 (spec 3/3.2/3.3/5): new UI-only state for the simplified controls — none of this touches
+  // player/attendance/status business logic, it only decides what's visible/filtered.
+  const [addPlayerOpen, setAddPlayerOpen] = useState(false); // "+ เพิ่มผู้เล่น" now opens a compact modal instead of an always-visible inline row
+  const [filterSheetOpen, setFilterSheetOpen] = useState(false); // "ตัวกรอง ▾"
+  const [manageSheetOpen, setManageSheetOpen] = useState(false); // "จัดการ ▾"
+  const [memberTypeFilters, setMemberTypeFilters] = useState(() => new Set()); // subset of {member,guest,owner}; empty = no filter
+  const [handFilters, setHandFilters] = useState(() => new Set()); // subset of {left,right}; empty = no filter
   const levelOptions = activeLevelOptions(settings);
   const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
   const [name, setName] = useState(""); const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
@@ -6979,10 +7090,23 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   };
   const list = useMemo(() => {
     let l = players.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
-    // v1.9.17: "registered" hasn't actually arrived yet, so it doesn't count as "ที่มา" here either —
-    // same treatment as "absent" for this filter (everything else about "absent" logic is unchanged).
-    if (onlyPresent) l = l.filter((p) => p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
+    // v1.12.1 (spec 3.1): ทั้งหมด/มา/กำลังมา/ไม่มา — same status predicates the app already used
+    // (onlyPresent's old "come" predicate; PSTATUS_OPTS' registered/waiting bucketed as "coming"; absent
+    // stays "absent"), just switched from one boolean to a single 4-way selector.
+    if (statusQuick !== "all") {
+      l = l.filter((p) => {
+        const st = p.status || "absent";
+        if (statusQuick === "come") return st !== "absent" && st !== "registered" && st !== "waiting";
+        if (statusQuick === "coming") return st === "registered" || st === "waiting";
+        return st === "absent";
+      });
+    }
     if (onlyInactive) l = l.filter((p) => isInactive(p));
+    // v1.12.1 (spec 3.2): ตัวกรองเพิ่มเติม — Member/Guest/Owner and มือซ้าย/มือขวา, each an OR-within-group /
+    // AND-across-groups multi-select (an empty Set means that dimension isn't filtered at all, so a fresh
+    // install with default state shows every player exactly as before this patch).
+    if (memberTypeFilters.size > 0) l = l.filter((p) => memberTypeFilters.has(p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"));
+    if (handFilters.size > 0) l = l.filter((p) => handFilters.has(p.handedness === "left" ? "left" : "right"));
     return [...l].sort((a, b) => {
       if (sort === "levelDesc") return (b.skillIndex || 0) - (a.skillIndex || 0) || a.name.localeCompare(b.name);
       if (sort === "levelAsc") return (a.skillIndex || 0) - (b.skillIndex || 0) || a.name.localeCompare(b.name);
@@ -6996,7 +7120,66 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
       }
       return a.name.localeCompare(b.name);
     });
-  }, [players, q, sort, onlyPresent, onlyInactive, participation, inactiveCutoff]);
+  }, [players, q, sort, statusQuick, onlyInactive, memberTypeFilters, handFilters, participation, inactiveCutoff]);
+  // v1.12.1 (spec 3.1): live counts for the ทั้งหมด/มา/กำลังมา/ไม่มา pills — computed off the FULL players
+  // array (before search/other filters), matching the mockup's "ทั้งหมด 38 · มา 12 · กำลังมา 3 · ไม่มา 23".
+  const statusCounts = useMemo(() => {
+    let come = 0, coming = 0, absent = 0;
+    players.forEach((p) => {
+      const st = p.status || "absent";
+      if (st === "absent") absent++;
+      else if (st === "registered" || st === "waiting") coming++;
+      else come++;
+    });
+    return { all: players.length, come, coming, absent };
+  }, [players]);
+  // v1.12.1 (spec 3.2): "Only expose options supported by existing data" — a chip for a memberType/hand
+  // that literally no current player has is simply never rendered, so the sheet never shows a dead option.
+  const memberTypesPresent = useMemo(() => {
+    const set = new Set();
+    players.forEach((p) => set.add(p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"));
+    return set;
+  }, [players]);
+  const handsPresent = useMemo(() => {
+    const set = new Set();
+    players.forEach((p) => set.add(p.handedness === "left" ? "left" : "right"));
+    return set;
+  }, [players]);
+  const activeFilterCount = (onlyInactive ? 1 : 0) + memberTypeFilters.size + handFilters.size;
+  const toggleInSet = (setter, key) => setter((prev) => { const next = new Set(prev); next.has(key) ? next.delete(key) : next.add(key); return next; });
+  const clearAllFilters = () => { setOnlyInactive(false); setMemberTypeFilters(new Set()); setHandFilters(new Set()); setSort("name"); };
+  // v1.12.1 (spec 4): pagination — ALL PLAYERS -> search -> status/secondary filters -> sorting (all
+  // already applied inside `list` above) -> pagination (30/page), applied last so search/filter always run
+  // against the FULL matching set, never just the current page. `page` resets to 1 whenever the underlying
+  // filtered/sorted set could change shape, so the user is never stranded on a now-invalid/empty page.
+  const PAGE_SIZE = 30;
+  const [page, setPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+  useEffect(() => { setPage(1); }, [q, statusQuick, onlyInactive, memberTypeFilters, handFilters, sort]);
+  useEffect(() => { if (page > totalPages) setPage(totalPages); }, [page, totalPages]);
+  const pagedList = useMemo(() => list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE), [list, page]);
+  const PageNav = () => totalPages <= 1 ? null : (
+    <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 4, margin: "10px 0", flexWrap: "wrap" }}>
+      <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} style={{ width: 30, height: 30, borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, color: T.text, opacity: page === 1 ? 0.4 : 1 }}>‹</button>
+      {(() => {
+        const windowSize = 5;
+        let start = Math.max(1, page - Math.floor(windowSize / 2));
+        let end = Math.min(totalPages, start + windowSize - 1);
+        start = Math.max(1, end - windowSize + 1);
+        const nums = []; for (let i = start; i <= end; i++) nums.push(i);
+        return (
+          <>
+            {start > 1 && <span style={{ color: T.muted, fontSize: 12, padding: "0 2px" }}>…</span>}
+            {nums.map((p) => (
+              <button key={p} onClick={() => setPage(p)} style={{ width: 30, height: 30, borderRadius: 8, border: `1px solid ${p === page ? T.green : T.border}`, background: p === page ? "#e2f5ec" : T.surface, color: p === page ? T.green : T.text, fontWeight: p === page ? 800 : 600, fontSize: 12.5 }}>{p}</button>
+            ))}
+            {end < totalPages && <span style={{ color: T.muted, fontSize: 12, padding: "0 2px" }}>…</span>}
+          </>
+        );
+      })()}
+      <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages} style={{ width: 30, height: 30, borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface, color: T.text, opacity: page === totalPages ? 0.4 : 1 }}>›</button>
+    </div>
+  );
   const toggleSelected = (id) => setSelectedIds((prev) => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
   const runBulkArchive = () => {
     const result = bulkArchivePlayers(Array.from(selectedIds));
@@ -7028,37 +7211,128 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   const submit = () => { addPlayer(name, skillIndex, draftPhoto); setName(""); setDraftPhoto(null); };
   return (
     <div>
-      <div style={{ position: "relative", marginBottom: 10 }}>
-        <Search size={17} style={{ position: "absolute", left: 12, top: 12, color: T.muted }} />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อสมาชิก" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
-      </div>
-
-      {/* v1.11.5: the old always-visible "ระบบระดับฝีมือ: อีสาน ⚙️ ตั้งค่า" row was removed entirely (no
-          blank gap left behind) — the active skill preset no longer needs permanent screen space; it's
-          now reached via ⚙️ ตั้งค่า → ระดับฝีมือ below, which still opens the exact same, unmodified
-          LevelSettingsSheet/LevelPresetEditor. Filter row rebuilt into one line: ตัวกรอง / เฉพาะที่มา /
-          ⚙️ ตั้งค่า (now GENERAL settings, not skill-only) — kept on one row on iPhone via flex + minWidth:0. */}
+      {/* v1.12.1 (UX restructure, spec 2/6): group/session info + ตั้งค่าก๊วน now open this page (the new
+          "primary start page") instead of เกม — see GroupSessionHeader, defined just above GameTab. Reuses
+          the exact same session/setSession/openSessionPhoto/QuanSettingsSheet everything already used. */}
+      <GroupSessionHeader
+        session={session} setSession={setSession} openSessionPhoto={openSessionPhoto} clearSessionPhoto={clearSessionPhoto}
+        sessionHistory={sessionHistory} applyGroupDefaultsFor={applyGroupDefaultsFor}
+        settings={settings} setSettings={setSettings} mode={mode} setMode={setMode}
+        courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} setCourtLabel={setCourtLabel}
+        players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
+        resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
+        groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
+      />
       {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
 
-      {/* v1.11.34: "มาบ่อย"/"มาล่าสุด" folded into this SAME dropdown (spec: "integrate กับตัวกรองเดิม ไม่
-          สร้าง UI row ใหม่"); "ไม่ได้มานาน" + "จัดการหลายคน" are additional toggle chips on the SAME row,
-          which now wraps on very narrow screens instead of overflowing — the row stays visually identical
-          to before on any screen wide enough to fit it on one line (unchanged today). */}
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 12 }}>
-        <div style={{ position: "relative", flex: 1, minWidth: 132 }}>
-          <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ width: "100%", appearance: "none", padding: "9px 26px 9px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 600, boxSizing: "border-box" }}>
-            <option value="levelDesc">ตัวกรอง: เก่ง → เริ่มต้น</option><option value="levelAsc">ตัวกรอง: เริ่มต้น → เก่ง</option><option value="name">ตัวกรอง: ชื่อ (ก-ฮ)</option><option value="frequent">ตัวกรอง: มาบ่อย</option><option value="recent">ตัวกรอง: มาล่าสุด</option>
-          </select>
-          <ChevronDown size={15} style={{ position: "absolute", right: 8, top: 11, color: T.muted, pointerEvents: "none" }} />
-        </div>
-        <button onClick={() => setOnlyPresent((v) => !v)} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${onlyPresent ? T.green : T.border}`, background: onlyPresent ? "#e2f5ec" : T.surface, color: onlyPresent ? T.green : T.muted, whiteSpace: "nowrap" }}>เฉพาะที่มา</button>
-        <button onClick={() => setOnlyInactive((v) => !v)} title={`ไม่มีประวัติมาร่วมก๊วนเกิน ${settings.inactiveMonths || 6} เดือน (ตั้งค่าได้ที่ ⚙️ ตั้งค่า)`} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${onlyInactive ? T.accent : T.border}`, background: onlyInactive ? "#fdecea" : T.surface, color: onlyInactive ? T.accent : T.muted, whiteSpace: "nowrap" }}>ไม่ได้มานาน</button>
-        <button onClick={() => { setBulkMode((v) => !v); setSelectedIds(new Set()); setBulkArchiveResult(null); }} style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${bulkMode ? T.green : T.border}`, background: bulkMode ? "#e2f5ec" : T.surface, color: bulkMode ? T.green : T.muted, whiteSpace: "nowrap" }}>{bulkMode ? "เสร็จสิ้น" : "จัดการหลายคน"}</button>
-        {/* v1.11.67 (section A): compact "ค่าสมาชิก" entry point — placed immediately BEFORE ⚙️ ตั้งค่า per
-            spec, same compact chip visual language, so it never clutters the main player screen. */}
-        <button onClick={() => setMembershipSettingsOpen(true)} title="ค่าสมาชิก" style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text, whiteSpace: "nowrap" }}>💳 ค่าสมาชิก</button>
-        <button onClick={() => setGeneralSettingsOpen(true)} title="ตั้งค่า" style={{ flexShrink: 0, padding: "9px 10px", borderRadius: 10, fontSize: 12, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text, whiteSpace: "nowrap" }}>⚙️ ตั้งค่า</button>
+      {/* v1.12.1 (UX restructure, spec 3/5): simplified controls — "+ เพิ่มผู้เล่น" opens a compact modal
+          (same addPlayer/draftPhoto/cropJob logic as before, just relocated behind a button instead of an
+          always-visible inline row), then search, then the new ทั้งหมด/มา/กำลังมา/ไม่มา quick filter with
+          live counts, then ตัวกรอง ▾ (secondary filters/sorting) and จัดการ ▾ (bulk/membership actions). */}
+      <button onClick={() => setAddPlayerOpen(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 0", borderRadius: 12, background: T.accent, border: "none", color: "#fff", fontSize: 14, fontWeight: 800, marginBottom: 10 }}>
+        <Plus size={18} /> เพิ่มผู้เล่น
+      </button>
+      {addPlayerOpen && (
+        <Overlay onClose={() => setAddPlayerOpen(false)}>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>+ เพิ่มผู้เล่น</div>
+          {/* v1.9.11/v1.9.13 logic unchanged — only the surrounding chrome (always-visible row -> modal)
+              changed, per spec 5: "at minimum surface photo/avatar, name, skill" — handedness/Member-Guest-
+              Owner/phone/LINE/archive/delete all still live in EditPlayerModal, opened after creation via
+              the player's profile, exactly as before this patch. */}
+          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <input ref={newPlayerFileRef} type="file" accept="image/*" onChange={onDraftPhotoFile} style={{ display: "none" }} />
+            <button onClick={() => newPlayerFileRef.current.click()} title="เพิ่ม/ถ่ายรูปสมาชิกใหม่" style={{ position: "relative", border: `1px solid ${T.border}`, background: T.surface, borderRadius: 11, padding: 0, width: 46, height: 46, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+              {draftPhoto ? <img src={draftPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={18} color={T.muted} />}
+            </button>
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (submit(), setAddPlayerOpen(false))} placeholder="ชื่อผู้เล่น" style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ width: "100%", padding: "10px 8px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700 }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}</select>
+          </div>
+          <button onClick={() => { submit(); setAddPlayerOpen(false); }} disabled={!name.trim()} style={{ ...btnPrimary, width: "100%", opacity: name.trim() ? 1 : 0.5 }}><Plus size={16} /> เพิ่มผู้เล่น</button>
+        </Overlay>
+      )}
+
+      <div style={{ position: "relative", marginBottom: 10 }}>
+        <Search size={17} style={{ position: "absolute", left: 12, top: 12, color: T.muted }} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อผู้เล่น" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
       </div>
+
+      {/* v1.12.1 (spec 3.1): ทั้งหมด/มา/กำลังมา/ไม่มา — one-tap status quick filter with live counts,
+          replacing the old single "เฉพาะที่มา" toggle. Same status semantics as always (see `list`/
+          statusCounts above) — purely a UI relabel from boolean-toggle to 4-way selector. */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 8, overflowX: "auto" }}>
+        {[["all", "ทั้งหมด", statusCounts.all], ["come", "มา", statusCounts.come], ["coming", "กำลังมา", statusCounts.coming], ["absent", "ไม่มา", statusCounts.absent]].map(([key, label, count]) => (
+          <button key={key} onClick={() => setStatusQuick(key)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: `1px solid ${statusQuick === key ? T.green : T.border}`, background: statusQuick === key ? "#e2f5ec" : T.surface, color: statusQuick === key ? T.green : T.muted, whiteSpace: "nowrap" }}>{label} {count}</button>
+        ))}
+      </div>
+
+      {/* v1.12.1 (spec 3.2/3.3): ตัวกรอง (เรียงตาม + ตัวกรองเพิ่มเติม) and จัดการ (bulk/membership actions) —
+          everything that used to be its own always-visible chip on this row now lives behind these two. */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+        <button onClick={() => setFilterSheetOpen(true)} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "9px 10px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${activeFilterCount > 0 ? T.green : T.border}`, background: activeFilterCount > 0 ? "#e2f5ec" : T.surface, color: activeFilterCount > 0 ? T.green : T.text }}>
+          ตัวกรอง{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""} <ChevronDown size={14} />
+        </button>
+        <button onClick={() => setManageSheetOpen(true)} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "9px 10px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text }}>
+          จัดการ <ChevronDown size={14} />
+        </button>
+      </div>
+
+      {filterSheetOpen && (
+        <Overlay onClose={() => setFilterSheetOpen(false)}>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>ตัวกรอง</div>
+          <Label>เรียงตาม</Label>
+          <div style={{ position: "relative", marginBottom: 16 }}>
+            <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ width: "100%", appearance: "none", padding: "10px 26px 10px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 600, boxSizing: "border-box" }}>
+              <option value="name">ค่าเริ่มต้น</option>
+              <option value="levelDesc">เก่ง → เริ่มต้น</option>
+              <option value="levelAsc">เริ่มต้น → เก่ง</option>
+              <option value="frequent">มาบ่อย</option>
+              <option value="recent">มาล่าสุด</option>
+            </select>
+            <ChevronDown size={15} style={{ position: "absolute", right: 8, top: 12, color: T.muted, pointerEvents: "none" }} />
+          </div>
+          <Label>ตัวกรองเพิ่มเติม</Label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+            <button onClick={() => setOnlyInactive((v) => !v)} title={`ไม่มีประวัติมาร่วมก๊วนเกิน ${settings.inactiveMonths || 6} เดือน (ตั้งค่าได้ที่ ⚙️ ตั้งค่า → ตั้งค่าทั่วไป)`} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${onlyInactive ? T.accent : T.border}`, background: onlyInactive ? "#fdecea" : T.surface, color: onlyInactive ? T.accent : T.muted }}>ไม่ได้มานาน</button>
+            {memberTypesPresent.has("member") && (
+              <button onClick={() => toggleInSet(setMemberTypeFilters, "member")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("member") ? T.green : T.border}`, background: memberTypeFilters.has("member") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("member") ? T.green : T.muted }}>Member</button>
+            )}
+            {memberTypesPresent.has("guest") && (
+              <button onClick={() => toggleInSet(setMemberTypeFilters, "guest")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("guest") ? T.green : T.border}`, background: memberTypeFilters.has("guest") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("guest") ? T.green : T.muted }}>Guest</button>
+            )}
+            {memberTypesPresent.has("owner") && (
+              <button onClick={() => toggleInSet(setMemberTypeFilters, "owner")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("owner") ? T.green : T.border}`, background: memberTypeFilters.has("owner") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("owner") ? T.green : T.muted }}>Owner</button>
+            )}
+            {handsPresent.has("left") && (
+              <button onClick={() => toggleInSet(setHandFilters, "left")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${handFilters.has("left") ? T.green : T.border}`, background: handFilters.has("left") ? "#e2f5ec" : T.surface, color: handFilters.has("left") ? T.green : T.muted }}>มือซ้าย</button>
+            )}
+            {handsPresent.has("right") && (
+              <button onClick={() => toggleInSet(setHandFilters, "right")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${handFilters.has("right") ? T.green : T.border}`, background: handFilters.has("right") ? "#e2f5ec" : T.surface, color: handFilters.has("right") ? T.green : T.muted }}>มือขวา</button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={clearAllFilters} style={btnSecondary}>ล้างตัวกรอง</button>
+            <button onClick={() => setFilterSheetOpen(false)} style={btnPrimary}>แสดงผล</button>
+          </div>
+        </Overlay>
+      )}
+
+      {manageSheetOpen && (
+        <Overlay onClose={() => setManageSheetOpen(false)}>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>จัดการ</div>
+          <button onClick={() => { setBulkMode((v) => !v); setSelectedIds(new Set()); setBulkArchiveResult(null); setManageSheetOpen(false); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, textAlign: "left" }}>
+            <span style={{ fontSize: 17 }}>👥</span>
+            <span style={{ flex: 1, fontSize: 14, fontWeight: 800, color: T.text }}>{bulkMode ? "จบการจัดการหลายคน" : "จัดการหลายคน"}</span>
+          </button>
+          <button onClick={() => { setMembershipSettingsOpen(true); setManageSheetOpen(false); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, textAlign: "left" }}>
+            <span style={{ fontSize: 17 }}>💳</span>
+            <span style={{ flex: 1, fontSize: 14, fontWeight: 800, color: T.text }}>ค่าสมาชิก</span>
+          </button>
+          <button onClick={() => setManageSheetOpen(false)} style={{ ...btnSecondary, marginTop: 14 }}>ปิด</button>
+        </Overlay>
+      )}
+
       {membershipSettingsOpen && (
         <MembershipSettingsSheet
           settings={settings} setSettings={setSettings}
@@ -7083,40 +7357,22 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           เก็บสมาชิกแล้ว {bulkArchiveResult.archived} คน{bulkArchiveResult.skipped > 0 ? ` · ข้าม ${bulkArchiveResult.skipped} คนเพราะถูกล็อกไว้` : ""}
         </div>
       )}
-      {generalSettingsOpen && (
-        <GeneralSettingsSheet
-          settings={settings} setSettings={setSettings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
-          exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore}
-          lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
-          deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
-          archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
-          players={players} groupDefaults={groupDefaults} session={session}
-          cloudClub={cloudClub} setCloudClub={setCloudClub} updatePlayer={updatePlayer}
-          sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
-          onClose={() => setGeneralSettingsOpen(false)}
-        />
-      )}
-      {/* v1.9.11: Quick Add — photo button restored (snap/attach at creation time) + [ชื่อผู้เล่น][ระดับ][+]. Skill-index explanations still live in the ตั้งค่าระดับฝีมือ sheet above (unaffected). */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-        <input ref={newPlayerFileRef} type="file" accept="image/*" onChange={onDraftPhotoFile} style={{ display: "none" }} />
-        <button onClick={() => newPlayerFileRef.current.click()} title="เพิ่ม/ถ่ายรูปสมาชิกใหม่" style={{ position: "relative", border: `1px solid ${T.border}`, background: T.surface, borderRadius: 11, padding: 0, width: 42, height: 42, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
-          {draftPhoto ? <img src={draftPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={17} color={T.muted} />}
-        </button>
-        <input value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder="เพิ่มสมาชิกใหม่" style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
-        <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ padding: "0 8px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700 }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}</select>
-        <button onClick={submit} style={{ padding: "0 15px", borderRadius: 11, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={19} /></button>
-      </div>
 
       {/* v1.11.7 (Part B): [ 🏸 ก๊วน ][ 🏆 Tournament ] — same pill visual language as the existing
           Casual/Tournament ModeSelector on "วันนี้" (SessionTab), but this is an INDEPENDENT view toggle
           local to this screen. Switching it never touches session.mode, p.status, or activeTournament —
-          Group attendance and Tournament registration remain completely separate state (Part C/E). */}
+          Group attendance and Tournament registration remain completely separate state (Part C/E).
+          v1.12.1 (Tournament Feature Toggle): hidden entirely (no layout gap) when settings.tournamentEnabled
+          is off — see spec 13/17. The body below is guarded the same way so a stale regTab==="tournament"
+          left over from before the feature was disabled can never render the Tournament view either. */}
+      {settings.tournamentEnabled && (
       <div style={{ display: "flex", gap: 6, background: T.surface2, borderRadius: 12, padding: 4, marginBottom: 12 }}>
         <button onClick={() => setRegTab("group")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "group" ? T.surface : "none", color: regTab === "group" ? T.text : T.muted, boxShadow: regTab === "group" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏸 ก๊วน</button>
         <button onClick={() => setRegTab("tournament")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "tournament" ? T.surface : "none", color: regTab === "tournament" ? T.text : T.muted, boxShadow: regTab === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 Tournament</button>
       </div>
+      )}
 
-      {regTab === "group" && (
+      {(regTab === "group" || !settings.tournamentEnabled) && (
       <>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.muted, marginBottom: 8 }}>
         <span>สมาชิก {players.length} คน</span>
@@ -7149,8 +7405,10 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         </div>
       )}
       {list.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>{players.length === 0 ? "ยังไม่มีสมาชิก" : "ไม่พบสมาชิก"}</div>}
+      {/* v1.12.1 (spec 4): pagination shown above AND below the list once it exceeds one page (30/page) */}
+      <PageNav />
       <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-        {list.map((p) => {
+        {pagedList.map((p) => {
           const isComing = p.status && p.status !== "absent";
           // v1.11.7 (Part D): full-session attendance (the common case) needs no label at all; only show
           // the compact secondary time label when it actually differs from the full session window.
@@ -7236,6 +7494,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           );
         })}
       </div>
+      <PageNav />
       {attendanceTimeFor && players.find((p) => p.id === attendanceTimeFor) && (
         <AttendanceTimeSheet
           player={players.find((p) => p.id === attendanceTimeFor)}
@@ -7247,7 +7506,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
       </>
       )}
 
-      {regTab === "tournament" && (
+      {regTab === "tournament" && settings.tournamentEnabled && (
         <TournamentRegistrationList
           players={list}
           activeTournament={activeTournament}
@@ -8618,6 +8877,117 @@ function Fairness({ sA, sB }) {
 // SessionTab/SummaryTab already did individually before this change. `current`/`history`/`session` (the
 // actual game/session state) live in the App component's own state regardless of which sub-tab is showing,
 // so switching เกม<->สรุป, or navigating away and back, never loses or duplicates session state.
+// v1.12.1 (UX restructure, spec 2/6): the full editable group/session card — photo, name (+ "ชื่อก๊วนที่เคย
+// ใช้" dropdown), date, start/end time, format badge, lock-pair count, and the single "ตั้งค่าก๊วน" entry
+// point — used to live inline at the very top of SessionTab (เกม). It now lives at the TOP of MembersTab
+// (ผู้เล่น) instead, per the new Players-page mockup — SessionTab keeps only a compact read-only context
+// line in its place (see SessionTab's own comment, right below where this card used to render). Every
+// field/handler/piece of state here is the exact same one SessionTab always used (session/setSession,
+// openSessionPhoto, applyGroupDefaultsFor, QuanSettingsSheet and all its props, fmtMode,
+// quanSettingsSummary) — nothing duplicated, just relocated, plus one small addition (the "🔒 ล็อคคู่ N คู่"
+// line the new mockup calls for, computed directly off the existing lockPairs array).
+function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessionPhoto, sessionHistory, applyGroupDefaultsFor, settings, setSettings, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault }) {
+  const [showNameDropdown, setShowNameDropdown] = useState(false);
+  const [openQuanSettings, setOpenQuanSettings] = useState(false);
+  // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
+  // newest-first, so the first occurrence of a name is also its most recent photo) — identical logic to
+  // what SessionTab always computed here.
+  const pastQuans = useMemo(() => {
+    const seen = new Set(), out = [];
+    (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push({ name: s.name, photo: s.photo || null }); } });
+    return out;
+  }, [sessionHistory]);
+  const lockPairCount = (lockPairs || []).length;
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 12, marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <button onClick={openSessionPhoto} title="แตะเพื่อเปลี่ยนรูปก๊วน" style={{ position: "relative", flexShrink: 0, border: "none", background: "none", padding: 0, width: 32, height: 32 }}>
+            {session.photo ? (
+              <img src={session.photo} alt="" style={{ width: 32, height: 32, borderRadius: 9, objectFit: "cover" }} />
+            ) : (
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🏸</div>
+            )}
+            <span style={{ position: "absolute", right: -3, bottom: -3, width: 15, height: 15, borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={8} color={T.muted} /></span>
+          </button>
+          <input value={session.name} onChange={(e) => setSession((s) => ({ ...s, name: e.target.value }))} placeholder="ชื่อก๊วน เช่น ก๊วนวันอาทิตย์" style={{ flex: 1, minWidth: 0, border: "none", outline: "none", fontSize: 16, fontWeight: 800, background: "transparent", color: T.text, boxSizing: "border-box" }} />
+          {pastQuans.length > 0 && (
+            <div style={{ position: "relative", flexShrink: 0 }}>
+              <button onClick={() => setShowNameDropdown((v) => !v)} title="เลือกชื่อก๊วนที่เคยใช้" style={{ width: 28, height: 28, borderRadius: 8, background: T.surface2, color: T.muted, border: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <ChevronDown size={16} />
+              </button>
+              {showNameDropdown && (
+                <>
+                  <div onClick={() => setShowNameDropdown(false)} style={{ position: "fixed", inset: 0, zIndex: 39 }} />
+                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 40, minWidth: 190, maxHeight: 260, overflowY: "auto", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6 }}>
+                    <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, padding: "6px 8px 4px" }}>ชื่อก๊วนที่เคยใช้</div>
+                    {pastQuans.map((q) => (
+                      <button
+                        key={q.name}
+                        onClick={() => { setSession((s) => ({ ...s, name: q.name, photo: q.photo })); applyGroupDefaultsFor(q.name); setShowNameDropdown(false); }}
+                        style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: 9, background: "none", border: "none", textAlign: "left" }}
+                      >
+                        {q.photo ? (
+                          <img src={q.photo} alt="" style={{ width: 26, height: 26, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+                        ) : (
+                          <div style={{ width: 26, height: 26, borderRadius: 8, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>🏸</div>
+                        )}
+                        <span style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.name}</span>
+                        {session.name === q.name && <Check size={14} color={T.green} style={{ marginLeft: "auto", flexShrink: 0 }} />}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: T.muted }}>
+          <Calendar size={15} />
+          <input type="date" value={session.date} onChange={(e) => setSession((s) => ({ ...s, date: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
+          {session.photo && <button onClick={clearSessionPhoto} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700 }}>ลบรูปก๊วน</button>}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, color: T.muted }}>
+          <Clock size={15} />
+          <input type="time" value={session.sessionStartTime || "19:00"} onChange={(e) => setSession((s) => ({ ...s, sessionStartTime: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
+          <span style={{ fontSize: 13 }}>–</span>
+          <input type="time" value={session.sessionEndTime || "23:00"} onChange={(e) => setSession((s) => ({ ...s, sessionEndTime: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
+        </div>
+      </div>
+
+      {/* compact format badge — same fmtMode() every other page already used for this exact string */}
+      <div style={{ textAlign: "center", fontSize: 12.5, color: T.muted, fontWeight: 600, marginBottom: lockPairCount > 0 ? 4 : 12 }}>{fmtMode(settings, mode)}</div>
+      {/* v1.12.1 (spec 2's mockup): "🔒 ล็อคคู่ N คู่" summary — purely a display of lockPairs.length, the
+          pair-lock ENGINE itself is untouched and still fully configured inside ตั้งค่าก๊วน below. */}
+      {lockPairCount > 0 && (
+        <div style={{ textAlign: "center", fontSize: 12, color: "#7c3aed", fontWeight: 700, marginBottom: 12 }}>🔒 ล็อคคู่ {lockPairCount} คู่</div>
+      )}
+
+      {/* SETTINGS ENTRY POINT — the 4 separate accordions that used to live here (เกม/จ่ายเงิน/รางวัล/
+          ระดับฝีมือ) now live inside one "ตั้งค่าก๊วน" sheet. Same fields, same state, same logic — just moved
+          (first to this sheet in an earlier release, now to the top of ผู้เล่น per this release's spec 2.1). */}
+      <button onClick={() => setOpenQuanSettings(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}` }}>
+        <span style={{ fontSize: 17 }}>🏸</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>ตั้งค่าก๊วน</span>
+          <span style={{ display: "block", fontSize: 12, color: T.muted, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{quanSettingsSummary(settings, mode, courtCount)}</span>
+        </span>
+        <ChevronRight size={18} color={T.muted} />
+      </button>
+      {openQuanSettings && (
+        <QuanSettingsSheet
+          mode={mode} setMode={setMode} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} setCourtLabel={setCourtLabel}
+          settings={settings} setSettings={setSettings} session={session} sessionHistory={sessionHistory}
+          players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
+          resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
+          groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
+          onClose={() => setOpenQuanSettings(false)}
+        />
+      )}
+    </div>
+  );
+}
+
 function GameTab({ sessionTabProps, summaryTabProps }) {
   const [sub, setSub] = useState("game"); // "game" | "summary" — default "เกม" per spec
   return (
@@ -8633,16 +9003,9 @@ function GameTab({ sessionTabProps, summaryTabProps }) {
 /* ============ SESSION ============ */
 function SessionTab(props) {
   const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
-    activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint } = props;
-  const [openQuanSettings, setOpenQuanSettings] = useState(false); // single "ตั้งค่าก๊วน" sheet — replaces the old 4 separate Today-tab accordions
-  const [showNameDropdown, setShowNameDropdown] = useState(false); // custom dropdown (not a native <select>) so each option can show its quan photo
-  // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
-  // newest-first, so the first occurrence of a name is also its most recent photo)
-  const pastQuans = useMemo(() => {
-    const seen = new Set(), out = [];
-    (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push({ name: s.name, photo: s.photo || null }); } });
-    return out;
-  }, [sessionHistory]);
+    activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint, onGoToMembers } = props;
+  // v1.12.1: openQuanSettings/showNameDropdown/pastQuans (the editable group-card's own local state) moved
+  // out to GroupSessionHeader along with the card itself — see that component, defined just above GameTab.
   const [historyShowAll, setHistoryShowAll] = useState(false); // v1.9.9: cap the expanded match-history list so it never outweighs active courts/queue (Phase 2)
   const HISTORY_PAGE = 8;
   const [scoreOpen, setScoreOpen] = useState(null); // v1.11.26: { mid, rect } | null — which match's score editor is open (rect anchors the portal-rendered popover, see PlayerPicker's same pattern)
@@ -9061,7 +9424,10 @@ function SessionTab(props) {
       <button onClick={() => setSession((s) => ({ ...s, mode: "tournament" }))} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: session.mode === "tournament" ? T.surface : "none", color: session.mode === "tournament" ? T.text : T.muted, boxShadow: session.mode === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 Tournament</button>
     </div>
   );
-  if (session.mode === "tournament") {
+  {/* v1.12.1 (Tournament Feature Toggle): when settings.tournamentEnabled is off, the mode is always
+      treated as "casual" regardless of any stale session.mode="tournament" left over from before the
+      feature was disabled — see spec 13/17. When on, behavior is 100% unchanged from before this patch. */}
+  if (settings.tournamentEnabled && session.mode === "tournament") {
     return (
       <div>
         {ModeSelector}
@@ -9072,89 +9438,24 @@ function SessionTab(props) {
 
   return (
     <div>
-      {ModeSelector}
-      <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 12, marginBottom: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <button onClick={openSessionPhoto} title="แตะเพื่อเปลี่ยนรูปก๊วน" style={{ position: "relative", flexShrink: 0, border: "none", background: "none", padding: 0, width: 32, height: 32 }}>
-            {session.photo ? (
-              <img src={session.photo} alt="" style={{ width: 32, height: 32, borderRadius: 9, objectFit: "cover" }} />
-            ) : (
-              <div style={{ width: 32, height: 32, borderRadius: 9, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>🏸</div>
-            )}
-            <span style={{ position: "absolute", right: -3, bottom: -3, width: 15, height: 15, borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={8} color={T.muted} /></span>
-          </button>
-          <input value={session.name} onChange={(e) => setSession((s) => ({ ...s, name: e.target.value }))} placeholder="ชื่อก๊วน เช่น ก๊วนวันอาทิตย์" style={{ flex: 1, minWidth: 0, border: "none", outline: "none", fontSize: 16, fontWeight: 800, background: "transparent", color: T.text, boxSizing: "border-box" }} />
-          {pastQuans.length > 0 && (
-            <div style={{ position: "relative", flexShrink: 0 }}>
-              <button onClick={() => setShowNameDropdown((v) => !v)} title="เลือกชื่อก๊วนที่เคยใช้" style={{ width: 28, height: 28, borderRadius: 8, background: T.surface2, color: T.muted, border: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <ChevronDown size={16} />
-              </button>
-              {showNameDropdown && (
-                <>
-                  <div onClick={() => setShowNameDropdown(false)} style={{ position: "fixed", inset: 0, zIndex: 39 }} />
-                  <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 40, minWidth: 190, maxHeight: 260, overflowY: "auto", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6 }}>
-                    <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, padding: "6px 8px 4px" }}>ชื่อก๊วนที่เคยใช้</div>
-                    {pastQuans.map((q) => (
-                      <button
-                        key={q.name}
-                        onClick={() => { setSession((s) => ({ ...s, name: q.name, photo: q.photo })); applyGroupDefaultsFor(q.name); setShowNameDropdown(false); }}
-                        style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: 9, background: "none", border: "none", textAlign: "left" }}
-                      >
-                        {q.photo ? (
-                          <img src={q.photo} alt="" style={{ width: 26, height: 26, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
-                        ) : (
-                          <div style={{ width: 26, height: 26, borderRadius: 8, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>🏸</div>
-                        )}
-                        <span style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.name}</span>
-                        {session.name === q.name && <Check size={14} color={T.green} style={{ marginLeft: "auto", flexShrink: 0 }} />}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-        </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: T.muted }}>
-          <Calendar size={15} />
-          <input type="date" value={session.date} onChange={(e) => setSession((s) => ({ ...s, date: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
-          {session.photo && <button onClick={clearSessionPhoto} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700 }}>ลบรูปก๊วน</button>}
-        </div>
-        {/* v1.11.7 (Part D/F): เวลาเริ่ม-จบก๊วน — this IS session.sessionStartTime/sessionEndTime, the
-            same field the attendance-time defaulting (มาตลอด) and the Court Recommendation engine both
-            read. Editing it here just corrects "today's actual hours"; it never touches courtCount. */}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, color: T.muted }}>
-          <Clock size={15} />
-          <input type="time" value={session.sessionStartTime || "19:00"} onChange={(e) => setSession((s) => ({ ...s, sessionStartTime: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
-          <span style={{ fontSize: 13 }}>–</span>
-          <input type="time" value={session.sessionEndTime || "23:00"} onChange={(e) => setSession((s) => ({ ...s, sessionEndTime: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
-        </div>
-      </div>
-
-      {/* compact format badge */}
-      <div style={{ textAlign: "center", fontSize: 12.5, color: T.muted, fontWeight: 600, marginBottom: 12 }}>{fmtMode(settings, mode)}</div>
-
-      {/* SETTINGS ENTRY POINT — the 4 separate accordions that used to live here (เกม/จ่ายเงิน/รางวัล/
-          ระดับฝีมือ) now live inside one "ตั้งค่าก๊วน" sheet, so Today stays focused on Play (courts /
-          matches / queue) instead of Setup. All the same fields, same state, same logic — just moved. */}
-      <button onClick={() => setOpenQuanSettings(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 16 }}>
-        <span style={{ fontSize: 17 }}>⚙️</span>
-        <span style={{ flex: 1, minWidth: 0 }}>
-          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>ตั้งค่าก๊วน</span>
-          <span style={{ display: "block", fontSize: 12, color: T.muted, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{quanSettingsSummary(settings, mode, courtCount)}</span>
+      {settings.tournamentEnabled && ModeSelector}
+      {/* v1.12.1 (UX restructure, spec 2/6): the full editable group/session card (photo/name/date/time +
+          ตั้งค่าก๊วน) moved to the TOP of ผู้เล่น (MembersTab) — see GroupSessionHeader, defined just above
+          GameTab. เกม now shows only this compact, READ-ONLY context line so the organizer always knows
+          which ก๊วน/day they're looking at while playing, without duplicating the editable session-setup UI
+          the spec says no longer belongs here. Tapping it is a quick shortcut over to ผู้เล่น (no state of
+          its own, no new business logic — just setTab, wired in from App()). */}
+      <button onClick={onGoToMembers} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "9px 12px", marginBottom: 12, textAlign: "left" }}>
+        {session.photo ? (
+          <img src={session.photo} alt="" style={{ width: 26, height: 26, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />
+        ) : (
+          <div style={{ width: 26, height: 26, borderRadius: 8, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>🏸</div>
+        )}
+        <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12.5, fontWeight: 700, color: T.text }}>
+          {session.name || "ก๊วนไม่มีชื่อ"} <span style={{ color: T.muted, fontWeight: 600 }}>· {fmtThaiDate(session.date)} · {fmtMode(settings, mode)}</span>
         </span>
-        <ChevronRight size={18} color={T.muted} />
+        <ChevronRight size={16} color={T.muted} style={{ flexShrink: 0 }} />
       </button>
-      {openQuanSettings && (
-        <QuanSettingsSheet
-          mode={mode} setMode={setMode} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} setCourtLabel={setCourtLabel}
-          settings={settings} setSettings={setSettings} session={session} sessionHistory={sessionHistory}
-          players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
-          resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
-          groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
-          onClose={() => setOpenQuanSettings(false)}
-        />
-      )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <button onClick={() => (started ? setConfirmRegenAll(true) : genStart())} style={{ flex: 1, padding: "13px 0", borderRadius: 13, background: T.green, color: "#fff", border: "none", fontSize: 15, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
@@ -11283,7 +11584,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
   );
 }
 function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, onClose }) {
-  const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | "prize" | null
+  const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | null — v1.12.1: "prize" moved to RewardSettingsSheet (Advanced Settings)
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.52 (spec C): "จำนวนลูกที่ใช้"'s AUTO baseline — the SAME live completed-match definition already
   // used by FinancialEstimatePanel (history + current matches with status "done"; playing/paused/upcoming
@@ -11311,7 +11612,7 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
   const removeCustomRow = (id) => setSettings((s) => ({ ...s, customCostRows: (s.customCostRows || []).filter((r) => r.id !== id) }));
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>⚙️ ตั้งค่าค่าก๊วนและรางวัล</div>
+      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>💵 การชำระเงินและต้นทุน</div>
 
       {/* v1.11.50 (Financial Setup Enhancement, spec A): explicitly split into 💳 รายได้ (this section — what's
           billed to players, Revenue side of computeBill) vs 💸 ต้นทุนก๊วน (below — the organizer's own real
@@ -11438,34 +11739,11 @@ function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtL
         </div>
       )}
 
-      {/* 🎁 รางวัล */}
-      <button onClick={() => toggle("prize")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "prize" ? 0 : 4 }}>
-        <Trophy size={15} color={T.muted} /> 🎁 รางวัล
-        <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "prize" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
-      </button>
-      {open === "prize" && (
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>เปิดใช้งานวงล้อรางวัล</div>
-            <Seg options={[[true, "เปิด"], [false, "ปิด"]]} value={settings.wheelEnabled !== false} onChange={(v) => setSettings((s) => ({ ...s, wheelEnabled: v }))} />
-          </div>
-          {settings.wheelEnabled !== false && (<>
-            {/* v1.9.19: sold-out prizes are excluded from the wheel by default (unchanged behavior) —
-                this lets the organizer opt into showing them anyway, purely so players still see the
-                wheel as fully stocked for the suspense. v1.9.21: when shown, they're drawn IDENTICAL to
-                a live slice (no gray, no "(หมด)" marker) — a spinning player can't tell they're gone.
-                Never affects actual odds: see SpinWheel — sold-out slices are excluded from the
-                random-selection pool regardless of how they're drawn. */}
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-              <div style={{ fontSize: 13, fontWeight: 700 }}>รางวัลที่หมดแล้วในวงล้อ</div>
-              <Seg options={[[false, "แค่ที่เหลือ"], [true, "แสดงทั้งหมด"]]} value={!!settings.wheelShowSoldOut} onChange={(v) => setSettings((s) => ({ ...s, wheelShowSoldOut: v }))} />
-            </div>
-            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14 }}>"แสดงทั้งหมด" = วงล้อยังโชว์ครบเหมือนของเดิม (ผู้เล่นไม่รู้ว่าหมดแล้ว) แต่หมุนไม่มีทางออกจริง</div>
-            <Label>🎡 วงล้อรางวัล — กำหนดรางวัลและโอกาสออก</Label>
-            <WheelPrizeEditor prizes={settings.wheelPrizes || []} setPrizes={(updater) => setSettings((s) => ({ ...s, wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater }))} />
-          </>)}
-        </div>
-      )}
+      {/* v1.12.1 (UX restructure, spec 7/9): the 🎁 รางวัล section that used to live here moved to
+          ตั้งค่าขั้นสูง (Advanced Settings) -> RewardSettingsSheet, reusing this EXACT JSX/logic (toggle,
+          wheelShowSoldOut, WheelPrizeEditor) verbatim, just relocated — Reward is an optional Advanced
+          Feature now, not part of normal payment/cost setup. No reward data/logic was touched or
+          duplicated; see RewardSettingsSheet below WheelPrizeEditor. */}
     </Overlay>
   );
 }
@@ -11840,14 +12118,19 @@ function GlobalRewardHistory({ rewardHistory }) {
     </>
   );
 }
-function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs }) {
+function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
   const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
   const [openTId, setOpenTId] = useState(null); // id of a tournamentHistory snapshot shown in read-only detail overlay
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
-  const [openBackupSettings, setOpenBackupSettings] = useState(false);
   const [openRewardHistory, setOpenRewardHistory] = useState(false); // v1.11.34 (spec 5A) — collapsed by default so this page doesn't get longer for organizers who never used the wheel
+  // v1.12.1 (UX restructure, spec 11/14/15): ข้อมูลและการสำรอง moved to its own ตั้งค่า -> "💾 ข้อมูลและ
+  // การสำรอง" card (SettingsTab), so it's no longer duplicated here. Reward History / Ranking Showcase stay
+  // in History (per spec 11) but are hidden when their feature is OFF — never deletes rewardHistory/
+  // rankingConfigs, purely visibility (spec 14/15: "hide Ranking Showcase from History nav when OFF").
+  const rankingEnabledSomewhere = Object.values(rankingConfigs || {}).some((rc) => rc && rc.enabled);
+  const rewardFeatureOn = !!settings && settings.wheelEnabled !== false;
   // v1.11.68 (Ranking System, section 12): ONE additional entry point inside this EXISTING History area —
   // no new bottom-nav tab. Same club-picker-first flow as the Settings entry (reuses RankingClubPickerSheet).
   const [rankingPickerOpen, setRankingPickerOpen] = useState(false);
@@ -11873,37 +12156,33 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 
   return (
     <div>
-      {/* BACKUP / RESTORE */}
-      <button onClick={() => setOpenBackupSettings((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: openBackupSettings ? 0 : 12 }}>
-        <Download size={15} color={T.muted} /> ข้อมูลและการสำรอง
-        <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: openBackupSettings ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
-      </button>
-      {openBackupSettings && (
-        <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
-          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} />
-        </div>
-      )}
-
       {/* v1.11.34 (spec 5A): reward history combined across every ก๊วน — collapsed behind its own toggle,
-          same pattern as "ข้อมูลและการสำรอง" above, so the main History page never gets longer for organizers
-          who don't use the wheel. */}
+          so the main History page never gets longer for organizers who don't use the wheel.
+          v1.12.1: hidden entirely (spec 15) when the Reward Advanced Feature is off — the ledger itself
+          (rewardHistory) is untouched and reappears the instant Reward is turned back on. */}
+      {rewardFeatureOn && (
       <button onClick={() => setOpenRewardHistory((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: openRewardHistory ? 0 : 12 }}>
         🎁 ประวัติผู้ที่ได้รางวัล
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: openRewardHistory ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
-      {openRewardHistory && (
+      )}
+      {rewardFeatureOn && openRewardHistory && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
           <GlobalRewardHistory rewardHistory={rewardHistory} />
         </div>
       )}
 
       {/* v1.11.68 (Ranking System, section 12): ONE additional Ranking entry inside this existing History
-          area — tapping first shows the club picker, then the visual Ranking Showcase for that club. */}
+          area — tapping first shows the club picker, then the visual Ranking Showcase for that club.
+          v1.12.1: hidden (spec 14) unless at least one club has Ranking enabled — rankingConfigs itself is
+          never touched, so turning Ranking back on for any club brings this entry straight back. */}
+      {rankingEnabledSomewhere && (
       <button onClick={() => setRankingPickerOpen(true)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: 12 }}>
         🏆 Ranking Showcase
         <ChevronRight size={17} color={T.muted} style={{ marginLeft: "auto" }} />
       </button>
-      {rankingPickerOpen && (
+      )}
+      {rankingEnabledSomewhere && rankingPickerOpen && (
         <RankingClubPickerSheet
           sessionHistory={sessionHistory}
           onPick={(name) => { setRankingPickerOpen(false); setRankingShowcaseClub(name); }}
@@ -12017,6 +12296,96 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
             </div>
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// v1.12.1 (UX restructure, spec 8/9/11/12): new 4th bottom-nav page. Pure navigation shell — every card
+// routes into an EXISTING component (HistoryTab, GeneralSettingsSheet, BackupSettingsEditor) or the new
+// AdvancedSettingsSheet (built in this same restructure, spec 9), so no settings/history/backup business
+// logic is duplicated here at all.
+function SettingsTab({
+  settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory,
+  changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData,
+  archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, updatePlayer,
+  tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory,
+  openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint,
+  exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog,
+  autoOpen, onAutoOpenConsumed,
+}) {
+  const [view, setView] = useState(null); // null | "advanced" | "general" | "history" | "backup"
+
+  // v1.12.1: one-shot deep-link support for the corrupted-data recovery banner (App(), spec 12) — jumps
+  // straight to "💾 ข้อมูลและการสำรอง" the instant this page mounts with autoOpen="backup" set, then
+  // immediately clears the flag so navigating away and back doesn't keep re-opening it.
+  useEffect(() => {
+    if (autoOpen) {
+      setView(autoOpen);
+      if (onAutoOpenConsumed) onAutoOpenConsumed();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoOpen]);
+
+  // "🕘 ประวัติ" opens HistoryTab full-screen in place (spec 3's mockup shows it as its own page, not a
+  // sheet-on-top-of-a-list) — everything else stays an Overlay sheet, matching how these components already
+  // behave everywhere else in the app.
+  if (view === "history") {
+    return (
+      <div>
+        <button onClick={() => setView(null)} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: T.muted, fontSize: 13, fontWeight: 700, padding: "2px 0 12px" }}>‹ ตั้งค่า</button>
+        <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }} />
+      </div>
+    );
+  }
+
+  const Row = ({ icon, title, sub, onClick }) => (
+    <button onClick={onClick} style={{ width: "100%", display: "flex", alignItems: "center", gap: 11, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "13px 14px", marginBottom: 8, textAlign: "left" }}>
+      <span style={{ fontSize: 19, flexShrink: 0, width: 24, textAlign: "center" }}>{icon}</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 800 }}>{title}</div>
+        {sub && <div style={{ fontSize: 11.5, color: T.muted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sub}</div>}
+      </div>
+      <ChevronRight size={17} color={T.muted} style={{ flexShrink: 0 }} />
+    </button>
+  );
+  const SectionLabel = ({ children }) => <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, margin: "16px 2px 8px" }}>{children}</div>;
+
+  return (
+    <div>
+      <SectionLabel>การตั้งค่า</SectionLabel>
+      <Row icon="🚀" title="ตั้งค่าขั้นสูง" sub="Ranking · Tournament · รางวัล" onClick={() => setView("advanced")} />
+      <Row icon="⚙️" title="ตั้งค่าทั่วไป" sub="ระดับฝีมือ · ความเป็นส่วนตัว · ภาษา" onClick={() => setView("general")} />
+      <SectionLabel>ประวัติ</SectionLabel>
+      <Row icon="🕘" title="ประวัติ" sub="ก๊วน · Tournament · Ranking · ผู้ได้รับรางวัล" onClick={() => setView("history")} />
+      <SectionLabel>ข้อมูล</SectionLabel>
+      <Row icon="💾" title="ข้อมูลและการสำรอง" sub="สำรอง · กู้คืน · นำเข้า/ส่งออก" onClick={() => setView("backup")} />
+
+      {view === "advanced" && (
+        <AdvancedSettingsSheet settings={settings} setSettings={setSettings} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig} players={players} sessionHistory={sessionHistory} onClose={() => setView(null)} />
+      )}
+      {view === "general" && (
+        <GeneralSettingsSheet
+          settings={settings} setSettings={setSettings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
+          exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore}
+          lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
+          deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
+          archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
+          players={players} groupDefaults={groupDefaults} session={session}
+          cloudClub={cloudClub} setCloudClub={setCloudClub} updatePlayer={updatePlayer}
+          sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
+          onClose={() => setView(null)}
+        />
+      )}
+      {view === "backup" && (
+        <Overlay onClose={() => setView(null)}>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>💾 ข้อมูลและการสำรอง</div>
+          <BackupSettingsEditor
+            exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore}
+            lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
+          />
+          <button onClick={() => setView(null)} style={{ ...btnSecondary, marginTop: 14 }}>ปิด</button>
+        </Overlay>
       )}
     </div>
   );
@@ -13706,12 +14075,18 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
 // (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
 function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
+  // v1.12.1 (Tournament Feature Toggle): hide the [🏸 ก๊วน][🏆 Tournament] sub-tab row entirely (no layout
+  // gap) when settings.tournamentEnabled is off, and always render the ก๊วน panel in that case regardless
+  // of a stale payerTab==="tournament" left over from before the feature was disabled — see spec 13/17.
+  const showTournamentTab = !!settings.tournamentEnabled;
   return (
     <div>
-      <div style={{ marginBottom: 12 }}>
-        <SegSecondary options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
-      </div>
-      {payerTab === "quan" ? (
+      {showTournamentTab && (
+        <div style={{ marginBottom: 12 }}>
+          <SegSecondary options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
+        </div>
+      )}
+      {payerTab === "quan" || !showTournamentTab ? (
         <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory }} />
       ) : (
         <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
@@ -13797,11 +14172,15 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
     <div>
       <SectionHead icon={<Wallet size={16} color={T.green} />} title="การชำระเงิน" sub="แตะเพื่อดู/รับเงิน" />
 
-      {/* FINANCE SETTINGS ENTRY POINT — ค่าคอร์ท/ค่าลูก/ค่าใช้จ่ายอื่น/QR/บัญชี/รางวัล ทั้งหมดย้ายมาที่นี่จาก Today */}
+      {/* FINANCE SETTINGS ENTRY POINT — ค่าคอร์ท/ค่าลูก/ค่าใช้จ่ายอื่น/QR/บัญชี ทั้งหมดย้ายมาที่นี่จาก Today.
+          v1.12.1 (spec 7): renamed from "ตั้งค่าค่าก๊วนและรางวัล" -> "💵 การชำระเงินและต้นทุน" (money icon,
+          not a gear) — Reward configuration moved out to ตั้งค่าขั้นสูง (Advanced Settings), it no longer
+          lives in normal payment/cost setup. The sheet this opens (FinanceSettingsSheet) itself no longer
+          has a Reward/prize section — see that component. */}
       <button onClick={() => setOpenFinanceSettings(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 12 }}>
-        <span style={{ fontSize: 17 }}>⚙️</span>
+        <span style={{ fontSize: 17 }}>💵</span>
         <span style={{ flex: 1, minWidth: 0 }}>
-          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>ตั้งค่าค่าก๊วนและรางวัล</span>
+          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>การชำระเงินและต้นทุน</span>
           <span style={{ display: "block", fontSize: 12, color: T.muted, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{financeSettingsSummary(settings)}</span>
         </span>
         <ChevronRight size={18} color={T.muted} />
@@ -13984,7 +14363,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
                 <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: "pre-wrap" }}>{settings.bank}</div>
               </div>
             )}
-            {!detailBill.isOwnerExempt && !settings.qr && !settings.bank && <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted, textAlign: "center" }}>เพิ่ม QR / เลขบัญชีได้ที่ ⚙️ ตั้งค่าค่าก๊วนและรางวัล ด้านบน</div>}
+            {!detailBill.isOwnerExempt && !settings.qr && !settings.bank && <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted, textAlign: "center" }}>เพิ่ม QR / เลขบัญชีได้ที่ 💵 การชำระเงินและต้นทุน ด้านบน</div>}
           </div>
         </Overlay>
       )}
@@ -14687,6 +15066,120 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
         {overLimit ? `⚠️ โอกาสรวมเกิน 100% (${probTotal}%) — กรุณาลดโอกาสของบางรางวัลก่อนใช้งานวงล้อ` : `โอกาสได้รางวัลรวม ${probTotal}% / ไม่ได้รางวัล ${noPrizePct}% / รวม 100% ✓`}
       </div>
     </div>
+  );
+}
+
+// v1.12.1 (UX restructure, spec 7/9/15): Reward's own detail screen, now reached from ตั้งค่าขั้นสูง
+// (Advanced Settings) instead of living inside normal payment/cost setup (FinanceSettingsSheet). This is
+// the EXACT toggle/wheelShowSoldOut/WheelPrizeEditor JSX that used to render inline in FinanceSettingsSheet's
+// "prize" accordion — moved verbatim, not reimplemented, so probability/quantity/prize-expense/wheel logic
+// is 100% unchanged (still reads/writes the same settings.wheelEnabled/wheelShowSoldOut/wheelPrizes fields,
+// same WheelPrizeEditor component). Follows the same "toggle lives inside the detail sheet" convention as
+// RankingSettingsSheet's own enable button, for visual/interaction consistency between the 3 Advanced
+// Feature detail screens.
+function RewardSettingsSheet({ settings, setSettings, onClose }) {
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>🎁 รางวัล (วงล้อ)</div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>เปิดใช้งานวงล้อรางวัล</div>
+        <Seg options={[[true, "เปิด"], [false, "ปิด"]]} value={settings.wheelEnabled !== false} onChange={(v) => setSettings((s) => ({ ...s, wheelEnabled: v }))} />
+      </div>
+      {settings.wheelEnabled !== false && (<>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>รางวัลที่หมดแล้วในวงล้อ</div>
+          <Seg options={[[false, "แค่ที่เหลือ"], [true, "แสดงทั้งหมด"]]} value={!!settings.wheelShowSoldOut} onChange={(v) => setSettings((s) => ({ ...s, wheelShowSoldOut: v }))} />
+        </div>
+        <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14 }}>"แสดงทั้งหมด" = วงล้อยังโชว์ครบเหมือนของเดิม (ผู้เล่นไม่รู้ว่าหมดแล้ว) แต่หมุนไม่มีทางออกจริง</div>
+        <Label>🎡 วงล้อรางวัล — กำหนดรางวัลและโอกาสออก</Label>
+        <WheelPrizeEditor prizes={settings.wheelPrizes || []} setPrizes={(updater) => setSettings((s) => ({ ...s, wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater }))} />
+      </>)}
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>ปิด</button>
+    </Overlay>
+  );
+}
+
+// v1.12.1 (UX restructure, spec 8/9): "ตั้งค่าขั้นสูง" — the 3 OPTIONAL/ADVANCED feature switches (Ranking,
+// Tournament, รางวัล), reached from the new ⚙️ ตั้งค่า bottom-nav page. Deliberately reuses every existing
+// screen/state behind each toggle instead of building new config UI:
+//  - Ranking: the SAME RankingClubPickerSheet -> RankingSettingsSheet flow already used elsewhere (its own
+//    enable toggle lives inside RankingSettingsSheet, per existing convention) — per spec 9, a single
+//    existing club skips the picker and jumps straight to that club's settings.
+//  - Tournament: a plain on/off bound to the new settings.tournamentEnabled flag (see
+//    inferAdvancedFeatureFlags) — there is no separate "Tournament config screen" to reuse; its existing
+//    workflow is simply the [ก๊วน|Tournament] selector on Players/Game/Finance, unlocked once ON.
+//  - รางวัล: opens RewardSettingsSheet (the exact JSX/logic moved out of FinanceSettingsSheet above).
+// OFF only hides the corresponding UI — no code path here ever deletes rankingConfigs/wheelPrizes/
+// rewardHistory/tournamentHistory/activeTournament.
+function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, onClose }) {
+  const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false);
+  const [rankingSettingsClub, setRankingSettingsClub] = useState(null);
+  const [rewardOpen, setRewardOpen] = useState(false);
+  const rankingClubs = useMemo(() => {
+    const seen = new Set(), out = [];
+    (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push(s.name); } });
+    return out;
+  }, [sessionHistory]);
+  const openRanking = () => {
+    if (rankingClubs.length === 1) setRankingSettingsClub(rankingClubs[0]); // spec 9: single group -> skip picker
+    else setRankingClubPickerOpen(true); // 0 clubs -> picker's own empty state; >1 -> real choice
+  };
+  // only shown when unambiguous (exactly one existing club) -- multi-club Ranking status isn't one flag
+  const singleClubRankingEnabled = rankingClubs.length === 1 ? getRankingConfigFor(rankingConfigs, rankingClubs[0]).enabled : null;
+
+  const AdvRow = ({ icon, title, sub, badge, onClick }) => (
+    <button onClick={onClick} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, cursor: "pointer" }}>
+      <span style={{ fontSize: 19, flexShrink: 0 }}>{icon}</span>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>{title}</span>
+        {sub && <span style={{ display: "block", fontSize: 11.5, color: T.muted, marginTop: 1 }}>{sub}</span>}
+      </span>
+      {badge != null && (
+        <span style={{ fontSize: 11, fontWeight: 800, color: badge ? T.green : T.muted, background: badge ? "#e2f5ec" : T.surface2, border: `1px solid ${badge ? T.green : T.border}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{badge ? "เปิด" : "ปิด"}</span>
+      )}
+      <ChevronRight size={17} color={T.muted} style={{ flexShrink: 0 }} />
+    </button>
+  );
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🚀 ตั้งค่าขั้นสูง</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>ระบบเสริม/ทางเลือก — ปิดไว้ไม่ลบข้อมูลใดๆ เปิดใหม่เมื่อไหร่ก็กลับมาเหมือนเดิม</div>
+
+      <AdvRow icon="🏅" title="Ranking" sub="จัดอันดับผู้เล่นตาม RP แยกรายก๊วน" badge={singleClubRankingEnabled} onClick={openRanking} />
+
+      <button onClick={() => setSettings((s) => ({ ...s, tournamentEnabled: !s.tournamentEnabled }))} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, cursor: "pointer" }}>
+        <span style={{ fontSize: 19, flexShrink: 0 }}>🏆</span>
+        <span style={{ flex: 1, minWidth: 0 }}>
+          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>Tournament</span>
+          <span style={{ display: "block", fontSize: 11.5, color: T.muted, marginTop: 1 }}>จัดการแข่งขันแบบแบ่งสาย/พบกันหมด</span>
+        </span>
+        <span style={{ fontSize: 11, fontWeight: 800, color: settings.tournamentEnabled ? T.green : T.muted, background: settings.tournamentEnabled ? "#e2f5ec" : T.surface2, border: `1px solid ${settings.tournamentEnabled ? T.green : T.border}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{settings.tournamentEnabled ? "เปิด" : "ปิด"}</span>
+      </button>
+
+      <AdvRow icon="🎁" title="รางวัล" sub="วงล้อรางวัลให้ผู้เล่นหลังจบก๊วน" badge={settings.wheelEnabled !== false} onClick={() => setRewardOpen(true)} />
+
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>ปิด</button>
+
+      {rankingClubPickerOpen && (
+        <RankingClubPickerSheet
+          sessionHistory={sessionHistory}
+          onPick={(name) => { setRankingClubPickerOpen(false); setRankingSettingsClub(name); }}
+          onClose={() => setRankingClubPickerOpen(false)}
+        />
+      )}
+      {rankingSettingsClub && (
+        <RankingSettingsSheet
+          clubName={rankingSettingsClub}
+          rankingConfig={getRankingConfigFor(rankingConfigs, rankingSettingsClub)}
+          updateRankingConfig={updateRankingConfig}
+          players={players}
+          sessionHistory={sessionHistory}
+          onClose={() => setRankingSettingsClub(null)}
+        />
+      )}
+      {rewardOpen && <RewardSettingsSheet settings={settings} setSettings={setSettings} onClose={() => setRewardOpen(false)} />}
+    </Overlay>
   );
 }
 
