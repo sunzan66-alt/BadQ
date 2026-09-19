@@ -715,6 +715,103 @@ function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lock
   return [...normal, ...conflicted].map((s) => (s.conflict ? { ...s.player, _conflict: s.conflict } : s.player));
 }
 
+// v1.12.1 (Manual Matchmaking — constraints are warnings, not blocks): given a match's CURRENT team
+// composition, returns the Lock Pair / ไม่อยากคู่ / ไม่อยากเจอ rules that are not fully satisfied right
+// now, each with the exact player names involved. Pure display — never removes/blocks a selection.
+// Auto Matchmaking's own hard-constraint enforcement (buildMatch's lockOk / hard filters above) is
+// completely separate and untouched by this function. `availableIds` (optional Set/array of ids currently
+// eligible to be auto-filled — the same wait-queue pool replaceSlot's own v1.11.77 auto-fill assist trusts)
+// is only used for spec 2 Case C: when a locked partner can't legitimately be auto-filled in (playing,
+// absent, or otherwise ineligible), the empty-teammate-slot case below still surfaces a warning instead of
+// silently doing nothing.
+function computeManualConstraintWarnings(teamA, teamB, lockPairs, players, availableIds) {
+  const warnings = [];
+  const nameOf = (id) => (players.find((p) => p.id === id) || {}).name || "";
+  const teamOf = (id) => (teamA.includes(id) ? "A" : teamB.includes(id) ? "B" : null);
+  const allIds = [...(teamA || []), ...(teamB || [])].filter(Boolean);
+  const isAvailable = (id) => (availableIds ? (availableIds.has ? availableIds.has(id) : availableIds.includes(id)) : true);
+  for (const r of lockPairs || []) {
+    const aIn = allIds.includes(r.a), bIn = allIds.includes(r.b);
+    if (!aIn && !bIn) continue; // neither half is in this match at all -> not relevant here
+    if (r.type === "lock") {
+      if (aIn && bIn) {
+        const ta = teamOf(r.a), tb = teamOf(r.b);
+        if (ta && tb && ta !== tb) {
+          // locked pair ended up split across opposing teams (organizer manually overrode it)
+          warnings.push({ id: r.id + "-lock", kind: "lock", a: r.a, b: r.b, text: `${nameOf(r.a)} ถูกล็อคคู่กับ ${nameOf(r.b)} แต่กำลังเป็นคู่แข่งกัน` });
+        }
+        // both present, same team -> lock satisfied, no warning
+      } else {
+        // only one half of the lock is in this match — see who they're currently teamed with, if anyone
+        const presentId = aIn ? r.a : r.b;
+        const partnerId = aIn ? r.b : r.a;
+        const partnerName = nameOf(partnerId);
+        const t = teamOf(presentId);
+        const teammateId = (t === "A" ? teamA : t === "B" ? teamB : []).find((pid) => pid && pid !== presentId);
+        if (teammateId) {
+          // spec Case B: someone ELSE already occupies the remaining slot -> manual intent wins, warn only
+          warnings.push({ id: r.id + "-lock", kind: "lock", a: presentId, b: teammateId, text: `${nameOf(presentId)} ถูกล็อคคู่กับ ${partnerName} แต่กำลังจับคู่กับ ${nameOf(teammateId)}` });
+        } else if (!isAvailable(partnerId)) {
+          // spec Case C: teammate slot is still empty, but the locked partner can't legitimately be
+          // auto-filled in right now (playing/absent/otherwise ineligible) — replaceSlot's own v1.11.77
+          // auto-fill assist already tried and skipped them for the exact same reason, so surface why.
+          warnings.push({ id: r.id + "-lock", kind: "lock", a: presentId, b: partnerId, text: `${nameOf(presentId)} ถูกล็อคคู่กับ ${partnerName} แต่ ${partnerName} ไม่ว่างในขณะนี้` });
+        }
+        // else: teammate slot empty AND partner is available -> replaceSlot's auto-fill assist already
+        // seats them in the same update (spec Case A), so there's nothing left to warn about here.
+      }
+    } else {
+      const sameTeamViolation = r.type === "avoidPartner" || r.type === "avoidBoth";
+      const crossTeamViolation = r.type === "avoidOpponent" || r.type === "avoidBoth";
+      if (aIn && bIn) {
+        const ta = teamOf(r.a), tb = teamOf(r.b);
+        if (ta && tb) {
+          if (ta === tb && sameTeamViolation) {
+            warnings.push({ id: r.id + "-avoidP", kind: "avoid", a: r.a, b: r.b, text: `${nameOf(r.a)} ไม่อยากคู่กับ ${nameOf(r.b)} แต่กำลังจับคู่กัน` });
+          } else if (ta !== tb && crossTeamViolation) {
+            warnings.push({ id: r.id + "-avoidO", kind: "avoid", a: r.a, b: r.b, text: `${nameOf(r.a)} ไม่อยากเจอกับ ${nameOf(r.b)} แต่กำลังเป็นคู่แข่งกัน` });
+          }
+        }
+      }
+    }
+  }
+  return warnings;
+}
+
+// v1.12.1 (spec 3/4/5 — recent teammate/opponent warnings, now with exact names + Lock Pair exception):
+// reuses the EXISTING buildLatestPartnerMap detection (latestMap.partnerOf/opponentsOf) — no second
+// history algorithm — and simply reports WHICH specific pair triggered each relationship instead of the
+// old "ทีม A/ทีม B" generic phrasing. A recent-teammate pair that's also an explicit Lock Pair is
+// deliberately suppressed (spec 5: the organizer wants them paired repeatedly, so the redundant warning
+// would just be noise) — recent-opponent warnings and every other check are completely unaffected.
+function computeRecentPairWarnings(teamA, teamB, latestMap, mode, lockPairs, players) {
+  const warnings = [];
+  const nameOf = (id) => (players.find((p) => p.id === id) || {}).name || "";
+  const isLockedPair = (a, b) => (lockPairs || []).some((r) => r.type === "lock" && ((r.a === a && r.b === b) || (r.a === b && r.b === a)));
+  const partnerOf = (latestMap && latestMap.partnerOf) || {};
+  const opponentsOf = (latestMap && latestMap.opponentsOf) || {};
+  if (mode === "doubles") {
+    for (const team of [teamA, teamB]) {
+      if (team && team.length === 2 && team[0] && team[1]) {
+        const [a, b] = team;
+        if ((partnerOf[a] === b || partnerOf[b] === a) && !isLockedPair(a, b)) {
+          warnings.push({ id: `tm-${a}-${b}`, kind: "teammate", a, b, text: `${nameOf(a)} ↔ ${nameOf(b)} เป็นคู่กันในเกมล่าสุด` });
+        }
+      }
+    }
+  }
+  for (const a of teamA || []) {
+    if (!a) continue;
+    for (const b of teamB || []) {
+      if (!b) continue;
+      if ((opponentsOf[a] || []).includes(b) || (opponentsOf[b] || []).includes(a)) {
+        warnings.push({ id: `op-${a}-${b}`, kind: "opponent", a, b, text: `${nameOf(a)} ↔ ${nameOf(b)} เพิ่งเจอกันเป็นคู่แข่งในเกมล่าสุด` });
+      }
+    }
+  }
+  return warnings;
+}
+
 function genRound(localPlayers, mode, courtCount, lockPairs, stats, roundIndex, reserved) {
   const rs = reserved || new Set();
   const order = localPlayers.filter((p) => p.status === "ready" && !rs.has(p.id)).sort(SORT); // fairness-weighted (see SORT below)
@@ -9181,29 +9278,31 @@ function SessionTab(props) {
     // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
     const noCourt = !done && st === "next" && m.court == null;
     const canStart = !done && st === "next" && startReady(m) && !busyCourt && !noCourt;
-    // v1.11.36/v1.11.40: non-blocking "same teammate/opponent as the latest game" warning — pure display,
-    // computed fresh from this row's current team composition; covers manual AND automatic selection alike
-    // since it doesn't care how the teams got filled. Teammate check is doubles-only (a singles team has no
-    // "teammate"); opponent check applies to both (a singles match's two 1-player "teams" can still have
-    // faced each other last time).
-    const repeatsLatest = (team) => mode === "doubles" && team && team.length === 2 && team[0] && team[1] && (latestMap.partnerOf[team[0]] === team[1] || latestMap.partnerOf[team[1]] === team[0]);
-    const latestWarnA = !done && st === "next" && repeatsLatest(m.teamA);
-    const latestWarnB = !done && st === "next" && repeatsLatest(m.teamB);
-    // v1.11.40: "faced each other in the latest relevant match" — checked across every cross-team pair
-    // (both players of A vs both of B in doubles; the single pair in singles), independent of the
-    // teammate check above (a foursome can trigger both at once, e.g. a straight rematch of the exact same
-    // two pairs — see the render block below for how both are shown together, compactly).
-    const latestFacedOpp = (teamA, teamB) => {
-      for (const a of teamA || []) {
-        if (!a) continue;
-        for (const b of teamB || []) {
-          if (!b) continue;
-          if ((latestMap.opponentsOf[a] || []).includes(b) || (latestMap.opponentsOf[b] || []).includes(a)) return true;
-        }
-      }
-      return false;
-    };
-    const latestWarnOpp = !done && st === "next" && latestFacedOpp(m.teamA, m.teamB);
+    // v1.12.1 (Manual Matchmaking — spec sections 1,3,4,5,6): constraint warnings (Lock Pair /
+    // ไม่อยากคู่ / ไม่อยากเจอ) and recent teammate/opponent warnings, both WARNING ONLY — never affect
+    // canStart/startReady below (constraints are warnings, organizer choice stays authoritative).
+    // Scoped to the same !done && st === "next" window the recent-pair warning already used pre-v1.12.1
+    // (manual matchmaking happens before a match starts). computeManualConstraintWarnings/
+    // computeRecentPairWarnings are pure module-level functions (see above, near buildMatch/
+    // rankManualSlotCandidates) — recent-pair detection reuses the EXISTING latestMap.partnerOf/
+    // opponentsOf, no second history algorithm. Each unique warning also carries a highlight color so
+    // the exact player cards it refers to can be visually tied to its text (spec 4) — constraint
+    // warnings always use the existing conflict red; recent-pair warnings cycle through a small
+    // non-red palette so multiple simultaneous relationships stay visually distinguishable.
+    const manualWarnScope = !done && st === "next";
+    const benchIds = new Set(bench.map((p) => p.id)); // same eligibility pool replaceSlot's own auto-fill assist trusts (see spec Case C)
+    const constraintWarnings = (manualWarnScope ? computeManualConstraintWarnings(m.teamA, m.teamB, lockPairs, players, benchIds) : []).map((w) => ({ ...w, color: "#c0392b" }));
+    const RECENT_WARN_COLORS = ["#c2650a", "#7c3aed", "#2f6fb2", "#0f9d58"];
+    const recentWarnings = (manualWarnScope ? computeRecentPairWarnings(m.teamA, m.teamB, latestMap, mode, lockPairs, players) : [])
+      .map((w, i) => ({ ...w, color: RECENT_WARN_COLORS[i % RECENT_WARN_COLORS.length] }));
+    const allManualWarnings = [...constraintWarnings, ...recentWarnings]; // priority order per spec 6
+    // first warning to claim a player wins the highlight color (constraint warnings are listed first,
+    // so they take visual priority over a recent-pair warning touching the same player).
+    const warnHighlight = {};
+    allManualWarnings.forEach((w) => {
+      if (!warnHighlight[w.a]) warnHighlight[w.a] = w.color;
+      if (!warnHighlight[w.b]) warnHighlight[w.b] = w.color;
+    });
     // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
     // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
     // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
@@ -9237,10 +9336,10 @@ function SessionTab(props) {
             ))}
           </select>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} />
+            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
           </div>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} />
+            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
           </div>
           <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
             {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
@@ -9372,24 +9471,23 @@ function SessionTab(props) {
             and was noisy (see the screenshot: 3+ copies of the same line stacked down the table). The
             disabled "▶ เริ่มเกม" button and its title="เลือกผู้เล่นให้ครบก่อนเริ่มเกม" tooltip already convey
             the same thing on tap/hover, so nothing is lost — this was purely the extra always-visible line. */}
-        {(latestWarnA || latestWarnB || latestWarnOpp) && (
-          // v1.11.36/v1.11.40: "⚠️ คู่เกมล่าสุด" (recent teammate) and/or "⚠️ เจอกันเกมล่าสุด" (recent
-          // opponent) — WARNING ONLY, never blocks selection (see canStart/startReady — this has no effect
-          // on either). Purely informational, same tinted-row visual language as the status backgrounds
-          // above rather than a modal or alert. Kept to at most 2 short lines even if a foursome somehow
-          // triggers both relationships at once (e.g. an exact rematch of the same two pairs) — no
-          // per-pairing spam.
-          <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, display: "flex", flexDirection: "column", gap: 2 }}>
-            {(latestWarnA || latestWarnB) && (
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#c2650a" }}>
-                ⚠️ คู่เกมล่าสุด — {[latestWarnA && "ทีม A", latestWarnB && "ทีม B"].filter(Boolean).join(" และ ")} เพิ่งเป็นคู่กันในเกมล่าสุด (ยังเลือกคู่นี้ได้ตามปกติ)
+        {allManualWarnings.length > 0 && (
+          // v1.12.1 (spec sections 1/3/4/5/6 — replaces the old generic "ทีม A/ทีม B" text): Lock Pair /
+          // ไม่อยากคู่ / ไม่อยากเจอ constraint warnings first (higher priority per spec 6), then recent
+          // teammate/opponent warnings — every line now names the exact players involved (spec 3.1) and
+          // its color matches the highlighted player cards in TeamSide above (spec 4). WARNING ONLY,
+          // never blocks selection (see canStart/startReady — this has no effect on either).
+          <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, display: "flex", flexDirection: "column", gap: 3 }}>
+            {constraintWarnings.map((w) => (
+              <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
+                {w.kind === "lock" ? "⚠️ ล็อคคู่ — " : "⚠️ ข้อจำกัดการจับคู่ — "}{w.text}
               </div>
-            )}
-            {latestWarnOpp && (
-              <div style={{ fontSize: 11, fontWeight: 700, color: "#c2650a" }}>
-                ⚠️ เจอกันเกมล่าสุด — มีคู่ที่เพิ่งเจอกันเป็นคู่แข่งในเกมล่าสุด (ยังเลือกคู่นี้ได้ตามปกติ)
+            ))}
+            {recentWarnings.map((w) => (
+              <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
+                {w.kind === "teammate" ? "⚠️ เพิ่งคู่กัน — " : "⚠️ เจอกันเกมล่าสุด — "}{w.text} (ยังเลือกคู่นี้ได้ตามปกติ)
               </div>
-            )}
+            ))}
           </div>
         )}
       </div>
@@ -14569,7 +14667,7 @@ function MatchTeams({ m, getP, editable, tapSlot, isSel, replaceSlot, bench, big
 
 // v1.11.34: see the "subtle, ONE-TIME-EVER hint" comment inside TeamSide below.
 let _avatarHintClaimed = false;
-function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done, lockPairs = [], players = [], stats, latestMap }) {
+function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done, lockPairs = [], players = [], stats, latestMap, warnHighlight }) {
   const isWide = useIsWide(); // iPad / landscape phone (≥700px) — only the photo scales up further here; text stays the same size on every screen
   const compact = arr.length > 1; // doubles: tighten padding so both teams fit on one line
   const avatarSize = isWide
@@ -14640,11 +14738,18 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         const nameLong = p && p.name.length > 7;
         const nameFs = nameLong ? (compact ? 12.5 : 13) : (compact ? 14 : 15);
         const lvlFs = nameLong ? 11 : (compact ? 12 : 13);
+        // v1.12.1 (spec 4 — visually link a warning to the exact player cards it refers to): a color from
+        // MatchRow's warnHighlight map (Lock Pair/ไม่อยากคู่/ไม่อยากเจอ conflicts, or recent teammate/
+        // opponent pairs — see computeManualConstraintWarnings/computeRecentPairWarnings) drawn as this
+        // card's border only. Cards stay fully selectable/tappable and never look disabled — no opacity
+        // change, no background swap — and the active tap-to-swap `selected` state (an existing, unrelated
+        // system) always wins visually since it reflects something the organizer is doing RIGHT NOW.
+        const warnColor = !selected && warnHighlight && p ? warnHighlight[p.id] : null;
         return p ? (
           // v1.11.40: unselected cards now tint by team (TEAM_BG.A/B) instead of a flat T.surface2 — the
           // "selected" highlight (#e2f5ec, an existing unrelated state) still fully overrides it, and every
           // other bit of card styling (avatar, skill-level color, handedness color, border) is untouched.
-          <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: compact ? 6 : 7, padding: compact ? "6px 7px" : "7px 8px", borderRadius: 10, background: selected ? "#e2f5ec" : (done ? TEAM_BG_DONE[team] : TEAM_BG[team]), border: `1.5px solid ${selected ? T.green : "transparent"}`, minHeight: 46 }}>
+          <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", display: "flex", alignItems: "center", gap: compact ? 6 : 7, padding: compact ? "6px 7px" : "7px 8px", borderRadius: 10, background: selected ? "#e2f5ec" : (done ? TEAM_BG_DONE[team] : TEAM_BG[team]), border: `1.5px solid ${selected ? T.green : (warnColor || "transparent")}`, minHeight: 46 }}>
             <span style={{ position: "relative", display: "inline-flex", flexShrink: 0, width: avatarSize, height: avatarSize }}>
               <Avatar p={p} size={avatarSize} />
               {editable && p.photo && (
