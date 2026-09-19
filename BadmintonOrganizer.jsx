@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.3";
+const APP_VERSION = "1.12.5";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -123,7 +123,12 @@ const PSTATUS = {
   // zero further changes, exactly like "registered" already is) and NOT billed/counted toward court
   // planning (see computeBill/computeSplitExpenseSummary/buildCourtRecommendation — all explicitly
   // exclude it). Session-scoped exactly like every other status here.
-  waiting: { label: "รอคิว", color: "#b45309", bg: "#fef3c7" },
+  // v1.12.5: display label only ("รอคิว" -> "สำรอง") per simplified Player Status UI spec — the stored
+  // status KEY stays "waiting" (unchanged) so existing saved data/status logic/eligibility checks are fully
+  // backward compatible; every UI surface that renders this via PSTATUS[status].label picks up the new
+  // label automatically with zero other code changes. Distinct from the Game-page matchmaking queue
+  // ("รอเล่น"), which is untouched by this patch.
+  waiting: { label: "สำรอง", color: "#b45309", bg: "#fef3c7" },
   ready: { label: "พร้อมเล่น", color: "#12986a", bg: "#e2f5ec" },
   playing: { label: "กำลังเล่น", color: "#2563eb", bg: "#e7effd" },
   resting: { label: "พัก", color: "#d97706", bg: "#fef3ec" },
@@ -7187,16 +7192,11 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   };
   const list = useMemo(() => {
     let l = players.filter((p) => p.name.toLowerCase().includes(q.trim().toLowerCase()));
-    // v1.12.1 (spec 3.1): ทั้งหมด/มา/กำลังมา/ไม่มา — same status predicates the app already used
-    // (onlyPresent's old "come" predicate; PSTATUS_OPTS' registered/waiting bucketed as "coming"; absent
-    // stays "absent"), just switched from one boolean to a single 4-way selector.
+    // v1.12.5 (Simplify Player Status UI): filter chips now match an EXACT player status
+    // (ลงทะเบียน/สำรอง/พร้อมเล่น/กลับแล้ว = registered/waiting/ready/left) instead of the old bucketed
+    // มา/กำลังมา grouping — statusQuick is simply one of PSTATUS_OPTS' real keys (or "all").
     if (statusQuick !== "all") {
-      l = l.filter((p) => {
-        const st = p.status || "absent";
-        if (statusQuick === "come") return st !== "absent" && st !== "registered" && st !== "waiting";
-        if (statusQuick === "coming") return st === "registered" || st === "waiting";
-        return st === "absent";
-      });
+      l = l.filter((p) => (p.status || "absent") === statusQuick);
     }
     if (onlyInactive) l = l.filter((p) => isInactive(p));
     // v1.12.1 (spec 3.2): ตัวกรองเพิ่มเติม — Member/Guest/Owner and มือซ้าย/มือขวา, each an OR-within-group /
@@ -7218,17 +7218,16 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
       return a.name.localeCompare(b.name);
     });
   }, [players, q, sort, statusQuick, onlyInactive, memberTypeFilters, handFilters, participation, inactiveCutoff]);
-  // v1.12.1 (spec 3.1): live counts for the ทั้งหมด/มา/กำลังมา/ไม่มา pills — computed off the FULL players
-  // array (before search/other filters), matching the mockup's "ทั้งหมด 38 · มา 12 · กำลังมา 3 · ไม่มา 23".
+  // v1.12.5 (Simplify Player Status UI): live per-status counts for the
+  // ทั้งหมด/ลงทะเบียน/สำรอง/พร้อมเล่น/กลับแล้ว filter chips — computed off the FULL players array (before
+  // search/other filters), one exact count per real status key (no bucketing).
   const statusCounts = useMemo(() => {
-    let come = 0, coming = 0, absent = 0;
+    const counts = { registered: 0, waiting: 0, ready: 0, left: 0 };
     players.forEach((p) => {
       const st = p.status || "absent";
-      if (st === "absent") absent++;
-      else if (st === "registered" || st === "waiting") coming++;
-      else come++;
+      if (st in counts) counts[st]++;
     });
-    return { all: players.length, come, coming, absent };
+    return { all: players.length, ...counts };
   }, [players]);
   // v1.12.1 (spec 3.2): "Only expose options supported by existing data" — a chip for a memberType/hand
   // that literally no current player has is simply never rendered, so the sheet never shows a dead option.
@@ -7355,11 +7354,14 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อผู้เล่น" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
       </div>
 
-      {/* v1.12.1 (spec 3.1): ทั้งหมด/มา/กำลังมา/ไม่มา — one-tap status quick filter with live counts,
-          replacing the old single "เฉพาะที่มา" toggle. Same status semantics as always (see `list`/
-          statusCounts above) — purely a UI relabel from boolean-toggle to 4-way selector. */}
+      {/* v1.12.5 (Simplify Player Status UI): ทั้งหมด/ลงทะเบียน/สำรอง/พร้อมเล่น/กลับแล้ว — one-tap filter on
+          the ACTUAL player status (registered/waiting/ready/left) with live per-status counts, replacing the
+          old bucketed มา/กำลังมา/ไม่มา grouping. "พัก"/"ไม่ได้มา" stay usable statuses (see PSTATUS_OPTS in
+          the status selector below) but intentionally have no top-level chip here, per spec. Labels are
+          pulled straight from PSTATUS so the "รอคิว" -> "สำรอง" rename (see PSTATUS.waiting above) stays the
+          single source of truth. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 8, overflowX: "auto" }}>
-        {[["all", "ทั้งหมด", statusCounts.all], ["come", "มา", statusCounts.come], ["coming", "กำลังมา", statusCounts.coming], ["absent", "ไม่มา", statusCounts.absent]].map(([key, label, count]) => (
+        {[["all", "ทั้งหมด", statusCounts.all], ["registered", PSTATUS.registered.label, statusCounts.registered], ["waiting", PSTATUS.waiting.label, statusCounts.waiting], ["ready", PSTATUS.ready.label, statusCounts.ready], ["left", PSTATUS.left.label, statusCounts.left]].map(([key, label, count]) => (
           <button key={key} onClick={() => setStatusQuick(key)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: `1px solid ${statusQuick === key ? T.green : T.border}`, background: statusQuick === key ? "#e2f5ec" : T.surface, color: statusQuick === key ? T.green : T.muted, whiteSpace: "nowrap" }}>{label} {count}</button>
         ))}
       </div>
@@ -7471,23 +7473,12 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
 
       {(regTab === "group" || !settings.tournamentEnabled) && (
       <>
+      {/* v1.12.5 (Simplify Player Status UI, spec 4): the old inline "ลงทะเบียน N · พร้อมเล่น N · รอคิว N"
+          text summary is removed here — the filter chip row right above already shows every one of those
+          counts live, per status. "สมาชิก N คน" and "ไม่มาทั้งหมด" are unchanged/kept. */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.muted, marginBottom: 8 }}>
         <span>สมาชิก {players.length} คน</span>
-        <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          {/* v1.9.17: compact "ลงทะเบียน N · พร้อมเล่น N" — same row, no extra vertical space */}
-          <span>
-            <span style={{ color: PSTATUS.registered.color, fontWeight: 700 }}>ลงทะเบียน {registeredCount}{!!settings.maxPlayers && `/${settings.maxPlayers}`}</span>
-            <span style={{ color: T.muted }}> · </span>
-            <span style={{ color: T.green, fontWeight: 700 }}>พร้อมเล่น {readyCount}</span>
-            {waitingCount > 0 && (
-              <>
-                <span style={{ color: T.muted }}> · </span>
-                <span style={{ color: PSTATUS.waiting.color, fontWeight: 700 }}>รอคิว {waitingCount}</span>
-              </>
-            )}
-          </span>
-          {players.length > 0 && <button onClick={() => setConfirmResetAll(true)} title="รีเซ็ตทุกคนเป็นไม่ได้มา (เริ่มวันใหม่)" style={{ padding: "5px 9px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><RotateCcw size={12} /> ไม่มาทั้งหมด</button>}
-        </span>
+        {players.length > 0 && <button onClick={() => setConfirmResetAll(true)} title="รีเซ็ตทุกคนเป็นไม่ได้มา (เริ่มวันใหม่)" style={{ padding: "5px 9px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><RotateCcw size={12} /> ไม่มาทั้งหมด</button>}
       </div>
       {confirmResetAll && (
         <div onClick={() => setConfirmResetAll(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
@@ -9031,6 +9022,12 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
                   <div onClick={() => setShowNameDropdown(false)} style={{ position: "fixed", inset: 0, zIndex: 39 }} />
                   <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 40, minWidth: 190, maxHeight: 260, overflowY: "auto", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6 }}>
                     <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, padding: "6px 8px 4px" }}>ชื่อก๊วนที่เคยใช้</div>
+                    {/* v1.12.4: purely informational, no logic/pixel change — picking a name here loads that
+                        club's most-recently-saved photo verbatim (unchanged behavior). If that saved photo
+                        predates the transparency fix (v1.11.74) it will still show its old black background
+                        here and everywhere else, same root cause already confirmed for Rank tier images —
+                        this just tells the organizer why, right where they'll notice it, and what fixes it. */}
+                    <div style={{ fontSize: 10.5, color: T.muted, padding: "0 8px 6px", lineHeight: 1.4 }}>รูปก๊วนเก่าบางรูปอาจมีขอบ/พื้นหลังสีดำ ถ้าถูกบันทึกไว้ก่อนอัปเดตที่แก้ปัญหาความโปร่งใส — เลือกชื่อนั้นแล้วแตะรูปเพื่ออัปโหลดไฟล์เดิมซ้ำเพื่อแก้ไข</div>
                     {pastQuans.map((q) => (
                       <button
                         key={q.name}
