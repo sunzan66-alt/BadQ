@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.11.78";
+const APP_VERSION = "1.11.79";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -600,12 +600,16 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
   }
 
   const others = win.filter((id) => id !== anchor);
-  let forced = null;
-  for (const r of lockPairs) {
-    if (r.type !== "lock") continue;
-    if (r.a === anchor && others.includes(r.b)) forced = r.b;
-    if (r.b === anchor && others.includes(r.a)) forced = r.a;
-  }
+  // v1.11.79 (Auto Match Must Enforce Locked Pair — hard-constraint fix): a "lock" rule used to only be
+  // enforced relative to `anchor` (pool[0]) via a `forced` variable here — if anchor happened to be neither
+  // half of a locked pair, buildMatch could freely construct a four containing just ONE of them (leaving the
+  // other out entirely, or paired with someone else in a different four), since the lockOk() check below only
+  // rejects a four that contains BOTH locked members but splits them across teams — it never required a four
+  // to contain both, or neither. That gap is the root cause of "Auto Match can still pair Best or Phoom with
+  // someone else". Fixed generically (not anchor-specific): reject any candidate four that contains exactly
+  // one half of a lock pair that's currently eligible for this call (both members present in `win` — an
+  // unavailable partner is simply never forced in, per spec). This also subsumes the old anchor-only case.
+  const activeLocks = lockPairs.filter((r) => r.type === "lock" && win.includes(r.a) && win.includes(r.b));
   const lockOk = (A, B) => {
     for (const r of lockPairs) {
       const inFour = [...A, ...B];
@@ -623,7 +627,7 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
   let best = null;
   for (const trio of kcomb(others, 3)) {
     const four = [anchor, ...trio];
-    if (forced && !four.includes(forced)) continue;
+    if (activeLocks.some((r) => four.includes(r.a) !== four.includes(r.b))) continue;
     const ownerPenalty = OWNER_PENALTY * four.filter((id) => isOwner(id)).length; // same for every split of THIS four — only affects which four/trio gets picked, never how a given four is split into teams
     const splits = [
       [[four[0], four[1]], [four[2], four[3]]],
@@ -631,7 +635,6 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
       [[four[0], four[3]], [four[1], four[2]]],
     ];
     for (const [A, B] of splits) {
-      if (forced && !(A.includes(anchor) && A.includes(forced))) continue;
       if (!lockOk(A, B)) continue;
       const bal = Math.abs(w(A[0]) + w(A[1]) - w(B[0]) - w(B[1]));
       const pRep = pc(A[0], A[1]) + pc(B[0], B[1]);

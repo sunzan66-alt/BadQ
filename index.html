@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.11.78";
+      var CURRENT_VERSION = "1.11.79";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.11.78";
+const APP_VERSION = "1.11.79";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1564,12 +1564,16 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
     return best;
   }
   const others = win.filter(id => id !== anchor);
-  let forced = null;
-  for (const r of lockPairs) {
-    if (r.type !== "lock") continue;
-    if (r.a === anchor && others.includes(r.b)) forced = r.b;
-    if (r.b === anchor && others.includes(r.a)) forced = r.a;
-  }
+  // v1.11.79 (Auto Match Must Enforce Locked Pair — hard-constraint fix): a "lock" rule used to only be
+  // enforced relative to `anchor` (pool[0]) via a `forced` variable here — if anchor happened to be neither
+  // half of a locked pair, buildMatch could freely construct a four containing just ONE of them (leaving the
+  // other out entirely, or paired with someone else in a different four), since the lockOk() check below only
+  // rejects a four that contains BOTH locked members but splits them across teams — it never required a four
+  // to contain both, or neither. That gap is the root cause of "Auto Match can still pair Best or Phoom with
+  // someone else". Fixed generically (not anchor-specific): reject any candidate four that contains exactly
+  // one half of a lock pair that's currently eligible for this call (both members present in `win` — an
+  // unavailable partner is simply never forced in, per spec). This also subsumes the old anchor-only case.
+  const activeLocks = lockPairs.filter(r => r.type === "lock" && win.includes(r.a) && win.includes(r.b));
   const lockOk = (A, B) => {
     for (const r of lockPairs) {
       const inFour = [...A, ...B];
@@ -1596,11 +1600,10 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
   let best = null;
   for (const trio of kcomb(others, 3)) {
     const four = [anchor, ...trio];
-    if (forced && !four.includes(forced)) continue;
+    if (activeLocks.some(r => four.includes(r.a) !== four.includes(r.b))) continue;
     const ownerPenalty = OWNER_PENALTY * four.filter(id => isOwner(id)).length; // same for every split of THIS four — only affects which four/trio gets picked, never how a given four is split into teams
     const splits = [[[four[0], four[1]], [four[2], four[3]]], [[four[0], four[2]], [four[1], four[3]]], [[four[0], four[3]], [four[1], four[2]]]];
     for (const [A, B] of splits) {
-      if (forced && !(A.includes(anchor) && A.includes(forced))) continue;
       if (!lockOk(A, B)) continue;
       const bal = Math.abs(w(A[0]) + w(A[1]) - w(B[0]) - w(B[1]));
       const pRep = pc(A[0], A[1]) + pc(B[0], B[1]);
