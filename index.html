@@ -35,16 +35,43 @@
   // sequence (see BadmintonOrganizer.jsx) is what actually closes the "missing primary" gap, by
   // consulting the mirror / Last-Known-Good / Auto-Backup layers before ever concluding "new install".
   var IDB_NAME = "badq-shadow-store", IDB_STORE = "kv";
+  // v1.12.17 (P0 iOS standalone PWA import performance hotfix): idbOpen() used to call indexedDB.open(...)
+  // FRESH on every single idbGet/idbSet/idbSetIfNewer/idbDelete call — a large backup import calls into
+  // window.storage 4-5+ times (pre-restore snapshot, primary write, LKG write, read-back verify, plus
+  // whatever the ambient save effect/boot waterfall also does around the same time), so that was 4-5+
+  // separate indexedDB.open() round-trips for ONE import. Per-call open overhead is normally small, but
+  // iOS/WebKit standalone (Add-to-Home-Screen) PWAs run against a SEPARATE, isolated per-origin storage
+  // container from regular Safari tabs (see this file's own v1.11.0 header comment above, and WebKit bug
+  // 181849 / dev-forum threads 125041, 742037, 737827 already cited there) — that isolated container has
+  // been repeatedly observed to have materially higher IndexedDB-open latency than Safari's, especially
+  // after any backgrounding. Caching ONE open connection (and its promise, so concurrent calls that arrive
+  // before it resolves share the same in-flight open rather than each starting their own) turns N opens
+  // into 1 for the whole page lifetime, which should disproportionately help exactly the runtime where
+  // opens are most expensive. This changes ONLY connection reuse — every read/write still goes through
+  // its own normal transaction on this shared connection, with the exact same durability guarantees
+  // (oncomplete-gated resolution) as before.
+  var __idbConnPromise = null;
   function idbOpen(){
-    return new Promise(function(resolve, reject){
+    if (__idbConnPromise) return __idbConnPromise;
+    __idbConnPromise = new Promise(function(resolve, reject){
       try{
         if (!window.indexedDB) { reject(new Error("indexedDB unavailable")); return; }
         var req = indexedDB.open(IDB_NAME, 1);
         req.onupgradeneeded = function(){ try{ req.result.createObjectStore(IDB_STORE); }catch(e){} };
-        req.onsuccess = function(){ resolve(req.result); };
-        req.onerror = function(){ reject(req.error || new Error("indexedDB open failed")); };
-      }catch(e){ reject(e); }
+        req.onsuccess = function(){
+          var db = req.result;
+          // If the connection is ever closed out from under us (another tab/version upgrade, or the
+          // browser reclaiming it under memory pressure — standalone PWAs are more exposed to this),
+          // drop the cached promise so the NEXT call transparently reopens a fresh connection instead of
+          // reusing a dead one forever and failing every subsequent storage call.
+          db.onclose = function(){ __idbConnPromise = null; };
+          db.onversionchange = function(){ try{ db.close(); }catch(e){} __idbConnPromise = null; };
+          resolve(db);
+        };
+        req.onerror = function(){ __idbConnPromise = null; reject(req.error || new Error("indexedDB open failed")); };
+      }catch(e){ __idbConnPromise = null; reject(e); }
     });
+    return __idbConnPromise;
   }
   function idbGet(k){
     return idbOpen().then(function(db){
@@ -342,7 +369,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.16";
+      var CURRENT_VERSION = "1.12.17";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +753,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.12.16";
+const APP_VERSION = "1.12.17";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -5914,6 +5941,57 @@ function ensureSessionExpenses(s) {
     ...s,
     expenses: Array.isArray(s.expenses) ? s.expenses : []
   };
+}
+
+// v1.12.17 (P0 iOS standalone PWA import performance/freeze hotfix): a large backup import (validate ->
+// normalize -> pre-restore snapshot -> primary+LKG write -> read-back verify) previously ran as one long
+// uninterrupted synchronous stretch. On iOS this app is used in two runtimes that do NOT behave identically
+// (see index.html's own v1.11.0/v1.12.17 storage-shim comments) — a standalone/Add-to-Home-Screen PWA runs
+// against an isolated per-origin storage container and a tighter memory ceiling than a regular Safari tab,
+// and its WKWebView is more likely to be flagged "unresponsive" (or jetsam-killed outright) by a long
+// unbroken block of main-thread JS than a Safari tab appears to be. yieldToUI() hands control back to the
+// event loop between big phases (via requestAnimationFrame where available, a macrotask otherwise) so: (1)
+// the phase-progress label set just before it actually paints instead of being coalesced away, and (2) the
+// standalone PWA's watchdog/scheduler gets a breathing gap between each expensive stringify/parse/storage
+// call instead of one monolithic block. This never changes what work happens or in what order — only
+// inserts a cooperative pause between already-independent steps — so it cannot weaken any of the existing
+// validation/snapshot/persistence/verification guarantees.
+function yieldToUI() {
+  return new Promise(resolve => {
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => resolve());else setTimeout(resolve, 0);
+  });
+}
+// v1.12.17: diagnostics-only — never used for branching business logic (per spec: runtime detection is for
+// diagnostics/testing, not for forking behavior). Identifies whether this launch is a standalone/
+// Add-to-Home-Screen PWA (window.matchMedia('(display-mode: standalone)') is the standard signal;
+// navigator.standalone is the older iOS-Safari-specific flag some iOS versions still rely on) or an
+// ordinary browser tab, so the safe per-phase import timing log (see logImportPhase) can tell the two
+// runtimes apart when diagnosing a report like "works in Safari, stuck in the installed app".
+function getPwaRuntimeMode() {
+  try {
+    if (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) return "standalone";
+    if (typeof navigator !== "undefined" && navigator.standalone) return "standalone";
+    return "browser";
+  } catch (e) {
+    return "unknown";
+  }
+}
+// v1.12.17: safe, PII-free per-phase import timing diagnostic. Reuses the existing window.__pushDiag
+// infrastructure (index.html) — same small, bounded (DIAG_MAX=80), synchronous-localStorage-only log
+// already used for boot/lifecycle events, viewable in-app under ตั้งค่า → ข้อมูลและการสำรอง → Diagnostic
+// Log. Logs ONLY: phase name, elapsed ms, schemaVersion/appVersion, structural counts, approximate
+// serialized byte size, and runtime mode — never player names, phone numbers, LINE IDs, payment details,
+// QR payload, auth tokens, or any raw backup content.
+function logImportPhase(phase, elapsedMs, meta) {
+  try {
+    if (typeof window === "undefined" || !window.__pushDiag) return;
+    window.__pushDiag("importPhase", {
+      phase,
+      ms: Math.round(elapsedMs),
+      runtimeMode: getPwaRuntimeMode(),
+      ...(meta || {})
+    });
+  } catch (e) {}
 }
 
 // wraps the currently-persisted state shape into the exportable envelope
@@ -11314,7 +11392,15 @@ function App() {
   // apply a validated backup. restoreMode "replace" takes a safety snapshot of the CURRENT state first
   // (so it can be undone), then overwrites everything. "mergeHistory" only adds session-history entries
   // that aren't already present (by stable id) — current players/session are left untouched.
-  const applyRestore = async (restoreMode, backup) => {
+  // v1.12.17 (P0 iOS standalone PWA import performance/freeze hotfix): added an optional `onPhase(phase)`
+  // callback — existing callers (wipeAllAppData, deleteAllMembersData, other applyRestore(...) call sites)
+  // simply omit it and behave exactly as before; only confirmDoRestore's user-initiated backup-file import
+  // passes one, to drive the new phase-based "กำลังตรวจสอบไฟล์.../กำลังเตรียมข้อมูล.../..." progress label
+  // instead of a single static "กำลังนำเข้า..." for the whole operation (see spec's IMPORT PROGRESS UX
+  // section). Each phase also logs a safe, PII-free elapsed-ms diagnostic via logImportPhase so a report
+  // like "stuck on standalone PWA but fine in Safari" can be root-caused from real per-phase timings
+  // instead of guessed at.
+  const applyRestore = async (restoreMode, backup, onPhase) => {
     // v1.12.13 (P0 IMPORT/RESTORE MODAL-STUCK HOTFIX): the entire body below used to run with no top-level
     // guard — several of the normalization calls it makes (normTournament/normCloudClub/normRankingConfigs/
     // syncCourtLabels/inferAdvancedFeatureFlags on a real-world backup file's not-fully-predictable shape)
@@ -11327,7 +11413,31 @@ function App() {
     // can act on, never rejects. See confirmDoRestore's own v1.12.13 comment for the matching caller-side fix.
     try {
       const data = backup.data;
+      // v1.12.17: phase(label) both updates the caller's progress UI AND records how long the PREVIOUS
+      // phase took (safe metadata only — see logImportPhase). `now()` prefers performance.now() (monotonic,
+      // sub-ms) and falls back to Date.now() if unavailable. yieldToUI() calls are placed right after a
+      // phase() call, never before, so the just-set label actually gets a chance to paint before the next
+      // (potentially expensive) synchronous block begins.
+      const now = () => typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+      let __phaseT0 = now(),
+        __phaseName = "start";
+      const phase = (label, meta) => {
+        const t = now();
+        logImportPhase(__phaseName, t - __phaseT0, meta);
+        __phaseName = label;
+        __phaseT0 = t;
+        try {
+          onPhase && onPhase(label);
+        } catch (e) {}
+      };
       if (restoreMode === "replace") {
+        phase("backing-up", {
+          playerCount: (data.players || []).length,
+          sessionHistoryCount: (data.sessionHistory || []).length,
+          schemaVersion: backup.schemaVersion,
+          appVersion: backup.appVersion
+        });
+        await yieldToUI(); // let the "กำลังสำรองข้อมูลเดิม..." label paint before the (potentially large) snapshot stringify/write below
         try {
           const snapshot = buildBackupPayload({
             players,
@@ -11353,9 +11463,12 @@ function App() {
             cloudClub,
             lastIntentionalPlayerWipeAt
           });
-          await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
+          const snapshotJson = JSON.stringify(snapshot);
+          await window.storage.set("bg-v11-prerestore", snapshotJson);
           setHasPreRestoreBackup(true);
         } catch (e) {}
+        phase("preparing");
+        await yieldToUI(); // let the "กำลังเตรียมข้อมูล..." label paint before normalization
         // v1.11.76 (P0 fix, req 5/6): normalize into local consts ONCE — these are both what gets set into
         // React state below AND what gets persisted+verified immediately after, so the two can never diverge.
         const rPlayers = data.players.map(normPlayer);
@@ -11449,19 +11562,33 @@ function App() {
         });
         let verified = false,
           verifyReason = "write-failed";
+        phase("saving", {
+          byteLength: restoredJson.length
+        });
+        await yieldToUI(); // let the "กำลังบันทึกข้อมูล..." label paint before the primary+LKG writes below
         try {
-          await window.storage.set("bg-v11", restoredJson);
-          // v1.12.13 (Import/Restore + P0 offline persistence hotfix coordination): resync Last-Known-Good to
-          // the SAME just-imported snapshot, best-effort, right alongside the primary write — mirrors exactly
-          // what the boot waterfall itself does after every recovery (see Step 5's own comment). Without this,
-          // LKG would keep holding whatever PRE-import state it last saw; if primary/mirror ever later desync
-          // (the exact class of bug this hotfix targets), the player-loss-guard could fall back to that STALE
-          // pre-import LKG instead of the freshly-imported data — silently undoing a successful import after a
-          // later force-close. A failure here never fails the import itself (LKG is a fallback copy, not the
-          // source of truth) — this exact table already tolerates that (see the boot waterfall's own writes).
-          try {
-            await window.storage.set(LKG_KEY, restoredJson);
-          } catch (e) {}
+          // v1.12.17: primary ("bg-v11") and LKG writes are independent keys with no ordering dependency
+          // between them, so they now fire concurrently (Promise.all) instead of strictly sequentially.
+          // window.storage.set() itself is unchanged (same IndexedDB-transaction-gated primary write +
+          // best-effort localStorage mirror write per call, same durability semantics as before) — this only
+          // lets their two idbOpen() calls share the now-cached connection (see index.html v1.12.17 comment)
+          // and their two async IndexedDB transactions queue back-to-back instead of waiting on each other's
+          // full round-trip, which is exactly where a standalone PWA's higher per-call storage latency would
+          // otherwise compound. LKG remains explicitly best-effort (its own failure must never fail the
+          // import) — a rejected LKG write is caught here as before, independent of the primary write's
+          // result, which is still awaited/checked as the actual source of truth for `verified` below.
+          const [primaryResult, lkgResult] = await Promise.allSettled([window.storage.set("bg-v11", restoredJson),
+          // v1.12.13 (Import/Restore + P0 offline persistence hotfix coordination): resync Last-Known-Good
+          // to the SAME just-imported snapshot, right alongside the primary write — mirrors exactly what
+          // the boot waterfall itself does after every recovery (see Step 5's own comment). Without this,
+          // LKG would keep holding whatever PRE-import state it last saw; if primary/mirror ever later
+          // desync (the exact class of bug this hotfix targets), the player-loss-guard could fall back to
+          // that STALE pre-import LKG instead of the freshly-imported data — silently undoing a successful
+          // import after a later force-close.
+          window.storage.set(LKG_KEY, restoredJson)]);
+          if (primaryResult.status === "rejected") throw primaryResult.reason;
+          phase("verifying");
+          await yieldToUI(); // let the "กำลังตรวจสอบข้อมูล..." label paint before the read-back parse below
           const readBack = await window.storage.get("bg-v11");
           const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
           const expect = {
@@ -11492,6 +11619,9 @@ function App() {
         } catch (e) {
           verifyReason = "exception: " + (e?.message || e);
         }
+        phase("done", {
+          verified
+        });
         return {
           ok: verified,
           reason: verified ? null : verifyReason
@@ -11549,11 +11679,17 @@ function App() {
         });
         let verified = false,
           verifyReason = "write-failed";
+        phase("saving", {
+          byteLength: restoredJson.length
+        });
+        await yieldToUI();
         try {
-          await window.storage.set("bg-v11", restoredJson);
-          try {
-            await window.storage.set(LKG_KEY, restoredJson);
-          } catch (e) {} // best-effort, see "replace" branch's own comment above
+          // v1.12.17: same independent-key concurrent-write optimization as the "replace" branch above.
+          const [primaryResult] = await Promise.allSettled([window.storage.set("bg-v11", restoredJson), window.storage.set(LKG_KEY, restoredJson) // best-effort, see "replace" branch's own comment above
+          ]);
+          if (primaryResult.status === "rejected") throw primaryResult.reason;
+          phase("verifying");
+          await yieldToUI();
           const readBack = await window.storage.get("bg-v11");
           const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
           const expect = {
@@ -11580,6 +11716,9 @@ function App() {
         } catch (e) {
           verifyReason = "exception: " + (e?.message || e);
         }
+        phase("done", {
+          verified
+        });
         return {
           ok: verified,
           reason: verified ? null : verifyReason
@@ -35448,6 +35587,19 @@ function CustomLevelEditor({
 // local-file backup / restore UI: export the whole app state as a JSON file, or import one back with
 // a validate -> preview -> confirm flow. A "replace all" restore always takes a safety snapshot first
 // (see App().applyRestore) so it can be undone with the button below the two main actions.
+// v1.12.17 (P0 iOS standalone PWA import performance/freeze hotfix, IMPORT PROGRESS UX): phase-based labels
+// shown in place of a single static "กำลังนำเข้า..." for the whole (potentially long, on a large backup)
+// import operation — see applyRestore's onPhase callback, which drives which key is active here. Falls
+// back to the old generic label for any phase not in this map (defensive — never blocks progress on an
+// unrecognized key) and while busy with no phase set yet (e.g. undo/export, which don't pass onPhase).
+const IMPORT_PHASE_LABELS = {
+  validating: "กำลังตรวจสอบไฟล์...",
+  preparing: "กำลังเตรียมข้อมูล...",
+  "backing-up": "กำลังสำรองข้อมูลเดิม...",
+  saving: "กำลังบันทึกข้อมูล...",
+  verifying: "กำลังตรวจสอบข้อมูล...",
+  done: "นำเข้าข้อมูลสำเร็จ"
+};
 function BackupSettingsEditor({
   exportBackup,
   validateBackupFile,
@@ -35490,6 +35642,9 @@ function BackupSettingsEditor({
   const [importError, setImportError] = useState(null);
   const [preview, setPreview] = useState(null); // validated backup object awaiting mode choice / confirm
   const [restoreMode, setRestoreMode] = useState("replace"); // "replace" | "mergeHistory"
+  // v1.12.17: which import phase is currently running, driving IMPORT_PHASE_LABELS above. null whenever
+  // `busy` is true for something OTHER than an import (export/undo) — those keep showing their own labels.
+  const [importPhase, setImportPhase] = useState(null);
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
   const fileRef = useRef();
@@ -35519,20 +35674,37 @@ function BackupSettingsEditor({
     if (!f) return;
     setSuccessMsg(null);
     setImportError(null);
-    let text;
+    // v1.12.17 (IMPORT PROGRESS UX): file-read + validate/migrate/integrity-check is the "กำลังตรวจสอบ
+    // ไฟล์..." phase — it runs BEFORE the preview modal even opens, so the "นำเข้าข้อมูล" button (already
+    // `disabled={busy}` below) now visibly shows that state too instead of appearing to do nothing while a
+    // large file is read and its (synchronous) validateBackupFile migration/integrity work runs.
+    setBusy(true);
+    setImportPhase("validating");
+    const __t0 = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
     try {
-      text = await f.text();
-    } catch (err) {
-      setImportError("ไม่สามารถอ่านไฟล์นี้ได้");
-      return;
+      let text;
+      try {
+        text = await f.text();
+      } catch (err) {
+        setImportError("ไม่สามารถอ่านไฟล์นี้ได้");
+        return;
+      }
+      const res = validateBackupFile(text);
+      const __t1 = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+      logImportPhase("validating", __t1 - __t0, {
+        byteLength: text.length,
+        ok: res.ok
+      });
+      if (!res.ok) {
+        setImportError(res.reason || "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ");
+        return;
+      }
+      setRestoreMode("replace");
+      setPreview(res.backup);
+    } finally {
+      setBusy(false);
+      setImportPhase(null);
     }
-    const res = validateBackupFile(text);
-    if (!res.ok) {
-      setImportError(res.reason || "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ");
-      return;
-    }
-    setRestoreMode("replace");
-    setPreview(res.backup);
   };
   const confirmDoRestore = async () => {
     // v1.12.13 (P0 import/restore modal-stuck hotfix, double-submit protection): see submittingRestoreRef's
@@ -35542,13 +35714,17 @@ function BackupSettingsEditor({
     setConfirmRestore(false);
     setBusy(true);
     setImportError(null);
+    setImportPhase("preparing");
     const stats = backupStats(preview.data);
     try {
       // v1.12.13: applyRestore itself is now guaranteed to always resolve (never reject) — see its own
       // top-level try/catch — but this call is still wrapped defensively so a truly unexpected failure
       // (e.g. `preview`/`preview.data` itself being unexpectedly null) can never again leave `busy`/the
       // preview modal stuck with no explanation, closing the exact class of bug this hotfix targets.
-      const result = await applyRestore(restoreMode, preview);
+      // v1.12.17: passes setImportPhase directly as the onPhase callback — applyRestore invokes it with
+      // "backing-up"/"preparing"/"saving"/"verifying"/"done" as the real import progresses, which
+      // IMPORT_PHASE_LABELS below turns into the phase-based progress text (spec: IMPORT PROGRESS UX).
+      const result = await applyRestore(restoreMode, preview, setImportPhase);
       // v1.11.76 (P0 fix, req 6): never claim success if applyRestore's own persisted-count verification
       // failed — surface a clear error instead so the organizer knows to try again / not trust the screen.
       // v1.12.13: ON FAILURE the preview modal is deliberately left OPEN (`preview` is not cleared) so the
@@ -35572,6 +35748,7 @@ function BackupSettingsEditor({
       setRestoreMode("replace"); // reset for next time — reopening Import must never silently reuse this backup/mode (spec Test V)
     } finally {
       setBusy(false);
+      setImportPhase(null);
       submittingRestoreRef.current = false;
     }
   };
@@ -36056,7 +36233,7 @@ function BackupSettingsEditor({
       ...btnPrimary,
       opacity: busy ? 0.6 : 1
     }
-  }, busy ? "กำลังนำเข้า..." : "นำเข้าข้อมูล")))), confirmRestore && /*#__PURE__*/React.createElement("div", {
+  }, busy ? IMPORT_PHASE_LABELS[importPhase] || "กำลังนำเข้า..." : "นำเข้าข้อมูล")))), confirmRestore && /*#__PURE__*/React.createElement("div", {
     onClick: () => {
       if (!busy) setConfirmRestore(false);
     },
@@ -36110,7 +36287,7 @@ function BackupSettingsEditor({
       ...btnPrimary,
       opacity: busy ? 0.6 : 1
     }
-  }, busy ? "กำลังนำเข้า..." : "นำเข้าข้อมูล")))), confirmUndo && /*#__PURE__*/React.createElement("div", {
+  }, busy ? IMPORT_PHASE_LABELS[importPhase] || "กำลังนำเข้า..." : "นำเข้าข้อมูล")))), confirmUndo && /*#__PURE__*/React.createElement("div", {
     onClick: () => setConfirmUndo(false),
     style: {
       position: "fixed",
