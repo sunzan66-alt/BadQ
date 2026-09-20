@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.7";
+const APP_VERSION = "1.12.11";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -4609,6 +4609,28 @@ export default function App() {
   // normCloudClub above and MemberPortalSheet (Settings → Member Portal (Beta)). null/disabled by
   // default; nothing else in the app reads this yet outside that one panel.
   const [cloudClub, setCloudClub] = useState(() => normCloudClub(null));
+  // v1.12.8 (P2.1 — Cloud Foundation): a stable, random per-installation device identity, used ONLY by
+  // BadQ Online's Single Active Device model (see BadQOnlineSheet/firebase-sync.js). Deliberately its OWN
+  // independent window.storage key ("bg-v11-device-id"), NOT part of the buildBackupPayload/autosave flat-
+  // state blob — it must survive things that blob's own lifecycle doesn't guarantee the same way (an
+  // Owner logging out of BadQ Online, restoring/importing a backup, or exporting one to a different
+  // device) and must NEVER be regenerated on a normal boot/login, nor tied to wipeAllAppData/
+  // deleteAllMembersData/applyRestore/undoRestore, none of which touch this key. Generated exactly once
+  // per installation; every subsequent boot reads the same value back.
+  const [deviceId, setDeviceId] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const existing = await window.storage.get("bg-v11-device-id");
+        if (existing && existing.value) { if (!cancelled) setDeviceId(existing.value); return; }
+      } catch (e) {}
+      const fresh = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : ("dev-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
+      try { await window.storage.set("bg-v11-device-id", fresh); } catch (e) {}
+      if (!cancelled) setDeviceId(fresh);
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const [now, setNow] = useState(Date.now());
   const [loaded, setLoaded] = useState(false);
   const [hasPreRestoreBackup, setHasPreRestoreBackup] = useState(false); // safety snapshot exists -> show "undo last restore"
@@ -7101,7 +7123,7 @@ export default function App() {
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members") }}
           summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
         />}
-        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null) }} />}
+        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null) }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
       </div>
 
@@ -8380,12 +8402,13 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
 // BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
 // both reused in place rather than reimplemented, per "do not create duplicate implementations".
-function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, groupDefaults, session, cloudClub, setCloudClub, updatePlayer, sessionHistory, rankingConfigs, updateRankingConfig, onClose }) {
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, sessionHistory, rankingConfigs, updateRankingConfig, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false); // v1.11.68: section 9 club-picker-first flow
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
+  const [onlineSheetOpen, setOnlineSheetOpen] = useState(false); // v1.12.8: "☁️ BadQ Online" (P2.1)
   const [portalSheetOpen, setPortalSheetOpen] = useState(false); // v1.11.35: "Member Portal (Beta)"
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
@@ -8462,6 +8485,14 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
         />
         <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>เดือน</span>
       </div>
+
+      {/* v1.12.8 (P2.1 — Cloud Foundation): Owner Auth + Workspace + Single Active Device identity layer.
+          Entirely separate from Member Portal (Beta) below — does nothing to local data either way, and
+          does nothing at all when Firebase can't be reached (see BadQOnlineSheet/firebase-sync.js). Online
+          remains fully optional; every existing install keeps working 100% locally/offline regardless. */}
+      <div style={{ marginTop: 14 }}><Label>☁️ BadQ Online</Label></div>
+      <BadQOnlineNavRow deviceId={deviceId} onOpen={() => setOnlineSheetOpen(true)} />
+      {onlineSheetOpen && <BadQOnlineSheet deviceId={deviceId} onClose={() => setOnlineSheetOpen(false)} />}
 
       {/* v1.11.35 (Member Portal Phase 1 — Firebase Foundation): Owner-only Cloud setup entry point.
           Does nothing when Firebase isn't configured (see firebase-config.js/firebase-sync.js) — every
@@ -8802,6 +8833,481 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
 // This panel is a complete no-op, with zero console errors, whenever Firebase isn't configured
 // (window.BadQCloud is undefined or {available:false}) — the default state for every existing install,
 // and the state this was tested in here since no live Firebase project is wired up yet.
+// ============================================================================
+// v1.12.8 (P2.1 — Cloud Foundation: Owner Auth + Workspace + Single Active Device)
+// ============================================================================
+// A NEW, separate identity/cloud-authority layer, entirely independent from the v1.11.35 "Member Portal
+// (Beta)" prototype above (MemberPortalSheet/cloudClub/Club-centric Firestore schema) — that panel and its
+// data are untouched by this patch and keep working exactly as before, whether or not BadQ Online is ever
+// connected. This layer establishes ONLY: Firebase Auth (Owner email/password + verification + password
+// reset), a Workspace identity per Owner, a stable per-installation deviceId, and a "single active Owner
+// device" authority model. It does NOT sync any BadQ business data (players/groups/matches/finance/
+// history/ranking) to Firestore, and does NOT implement Member Portal / operational Club-Session sync —
+// those remain exactly what they were before this patch (Member Portal Beta, still Club-centric, still a
+// separate prototype) or are explicitly deferred to a later phase.
+//
+// Talks only to window.BadQCloud's NEW methods (sendVerificationEmail/reloadCurrentUser/sendPasswordReset/
+// getOrCreateWorkspace/subscribeWorkspace/claimActiveDevice/pingDeviceHeartbeat — see firebase-sync.js's
+// file header) plus the EXISTING getCurrentOwner/onAuthChange/registerOwner/signInOwner/signOutOwner
+// (shared, unchanged, with the SAME single underlying Firebase Auth session — signing in here also signs in
+// Member Portal Beta's own panel, and vice versa, since there is only ever one Firebase Auth user per
+// browser at a time; this is expected and does not change either panel's own behavior).
+//
+// ----------------------------------------------------------------------------------------------------
+// v1.12.9 (P2.1 SECURITY HARDENING — true server-trusted Single Active Device enforcement)
+// ----------------------------------------------------------------------------------------------------
+// v1.12.8 shipped the UI/state-machine for Single Active Device, but its actual enforcement was a client-
+// readable Firestore field (workspace.activeDeviceId) that ANY device signed in as the same Owner could, in
+// principle, have overwritten directly — that was explicitly flagged as a known gap at the time, blocked
+// only on the Blaze billing plan. The project is now on Blaze, so this patch closes it for real:
+// getOrCreateWorkspace/claimActiveDevice now run as trusted Cloud Functions (see /functions/index.js) that
+// derive the caller's identity solely from their verified Firebase Auth token — never from anything the
+// client sends — and are the ONLY code path (Admin SDK, bypasses Firestore Rules) allowed to write
+// users/{uid}, workspaces/{id}, or workspaces/{id}/devices/{deviceId}. Firestore Rules now deny ALL direct
+// client writes to those documents, full stop.
+//
+// The actual per-device revocation proof is a one-time, unguessable "activeSessionId" that
+// claimActiveDevice mints on every successful claim/takeover and returns ONLY to the device that just
+// called it — it is written to a workspaces/{id}/private/authority document that Firestore Rules make
+// unreadable to EVERY client, including the legitimate Owner's own other devices, specifically so a revoked
+// device can never simply read the new value and reuse it. Each device caches its own copy locally
+// (bg-v11-active-session-<deviceId>, isolated from business data exactly like deviceId itself) and presents
+// it as an argument — never stored back verbatim anywhere client-readable — to the new pingDeviceHeartbeat
+// Cloud Function, which is this phase's one concrete "protected Cloud write": it rejects with STALE_SESSION
+// the instant a DIFFERENT device has since taken over, because the old device's cached copy can never match
+// what the trusted backend now holds. Custom claims were deliberately NOT used for this comparison — a
+// custom claim lives on the Firebase Auth *account*, not a *device instance*, so both devices sharing one
+// Owner UID would receive the SAME claim value the next time either token refreshes, silently un-revoking
+// the old device. See /functions/index.js's header comment for the full reasoning.
+// ----------------------------------------------------------------------------------------------------
+// v1.12.10 — pingDeviceHeartbeat's authority check hardened: a caller had to present a valid
+// activeSessionId, but nothing stopped it from presenting a DIFFERENT deviceId string alongside a valid
+// session (the write would then land on some OTHER device's status doc). The Cloud Function now binds all
+// three of {authenticated uid, workspace.activeDeviceId === claimed deviceId, authority.activeSessionId ===
+// presented value} atomically inside one transaction. No client-side change was needed here beyond a new
+// STALE_DEVICE error-copy entry (cloudErrorMessage) — BadQOnlineSheet already treats any heartbeat rejection
+// the same way (surfaced via cloudError), since from this device's own point of view "STALE_DEVICE" and
+// "STALE_SESSION" both mean the same thing: it no longer holds Online authority.
+// ----------------------------------------------------------------------------------------------------
+// v1.12.11 — claimActiveDevice's ENTRY point hardened too: v1.12.10 only fixed the recurring heartbeat write.
+// The Cloud Function previously let a caller reclaim/refresh authority for a device that already equalled
+// workspace.activeDeviceId with NO proof at all, since deviceId is just a client-chosen string. It now
+// requires that same-device case to also present a currentActiveSessionId matching the server-held one, or
+// it's rejected with STALE_SESSION and nothing is written. Neither call site below actually needed new UI:
+// the auto-claim effect only ever fires when activeDeviceId is genuinely unset (needs no proof), and
+// doTakeover only ever fires for a genuinely different device (gated on confirmTakeover, not session proof)
+// — normal same-device reopen/reload doesn't call claimActiveDevice at all (it only re-presents the cached
+// activeSessionId to pingDeviceHeartbeat, unchanged). Both call sites now forward this device's own cached
+// activeSessionId as currentActiveSessionId for forward consistency with the Function's new contract; the
+// Function only actually consults it for the same-device case and ignores it otherwise.
+// ----------------------------------------------------------------------------------------------------
+
+// Centralized Online status model (spec section K) — one small derivation function instead of scattered
+// booleans, reused by both the compact NavRow and the full sheet below, and available to any future P2
+// screen that needs to reason about cloud connection state.
+const ONLINE_STATUS = {
+  NOT_CONNECTED: "not_connected", // never signed in on this device, or workspace not yet resolved
+  OFFLINE: "offline",             // signed in before, but this device currently has no network
+  UNVERIFIED: "unverified",       // signed in, email not verified yet — not an authorized Online Owner
+  ACTIVE: "active",               // signed in, verified, Workspace resolved, THIS device is the active one
+  REVOKED: "revoked",             // signed in, verified, but a DIFFERENT device is now the active one
+  ERROR: "error",                 // an unexpected Auth/Firestore error occurred
+};
+const ONLINE_STATUS_META = {
+  [ONLINE_STATUS.NOT_CONNECTED]: { icon: "☁️", label: "ยังไม่ได้เชื่อมต่อ", color: T.muted },
+  [ONLINE_STATUS.OFFLINE]: { icon: "🟠", label: "ออฟไลน์", color: "#b45309" },
+  [ONLINE_STATUS.UNVERIFIED]: { icon: "🟠", label: "ยังไม่ยืนยันอีเมล", color: "#b45309" },
+  [ONLINE_STATUS.ACTIVE]: { icon: "🟢", label: "ออนไลน์", color: T.green },
+  [ONLINE_STATUS.REVOKED]: { icon: "🔒", label: "ย้ายไปอุปกรณ์อื่นแล้ว", color: T.accent },
+  [ONLINE_STATUS.ERROR]: { icon: "🔴", label: "เกิดข้อผิดพลาด", color: T.accent },
+};
+// Pure function — the ONE place that decides which of the 6 statuses above applies. No component keeps its
+// own ad-hoc isConnected/isVerified/etc. booleans; every display funnels through this.
+function deriveOnlineStatus({ available, authUser, isOffline, workspace, deviceId, cloudError }) {
+  if (!available || !authUser) return ONLINE_STATUS.NOT_CONNECTED;
+  if (!authUser.emailVerified) return ONLINE_STATUS.UNVERIFIED;
+  if (cloudError) return ONLINE_STATUS.ERROR;
+  if (isOffline) return ONLINE_STATUS.OFFLINE;
+  if (!workspace) return ONLINE_STATUS.NOT_CONNECTED; // resolving, or not created yet
+  if (workspace.activeDeviceId && deviceId && workspace.activeDeviceId !== deviceId) return ONLINE_STATUS.REVOKED;
+  return ONLINE_STATUS.ACTIVE;
+}
+// Firebase Auth error codes -> Thai messages. Falls back to the raw message for anything unmapped, never
+// throws, never shows a blank error.
+function cloudErrorMessage(e) {
+  const code = e && e.code;
+  const MAP = {
+    "auth/email-already-in-use": "อีเมลนี้มีบัญชีอยู่แล้ว",
+    "auth/weak-password": "รหัสผ่านสั้นเกินไป (อย่างน้อย 6 ตัวอักษร)",
+    "auth/invalid-email": "รูปแบบอีเมลไม่ถูกต้อง",
+    "auth/missing-email": "กรุณากรอกอีเมล",
+    "auth/user-not-found": "ไม่พบบัญชีนี้",
+    "auth/wrong-password": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+    "auth/invalid-credential": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
+    "auth/too-many-requests": "ลองหลายครั้งเกินไป กรุณารอสักครู่แล้วลองใหม่",
+    "auth/network-request-failed": "ไม่มีการเชื่อมต่ออินเทอร์เน็ต",
+    DEVICE_CONFLICT: "มีอุปกรณ์อื่นกำลังใช้งานอยู่",
+    // v1.12.9 — Cloud Function (functions/index.js) error markers, normalized by firebase-sync.js so
+    // e.code always carries the exact literal below regardless of the Functions SDK's own error shape.
+    STALE_SESSION: "อุปกรณ์นี้ไม่มีสิทธิ์ใช้งาน BadQ Online แล้ว (สิทธิ์ถูกย้ายไปยังอุปกรณ์อื่น)",
+    // v1.12.10 — pingDeviceHeartbeat now also rejects a caller presenting a deviceId that no longer matches
+    // the Workspace's current activeDeviceId (even with an otherwise-valid session capability). Treated the
+    // same as STALE_SESSION from the UI's point of view: this device no longer holds Online authority.
+    STALE_DEVICE: "อุปกรณ์นี้ไม่มีสิทธิ์ใช้งาน BadQ Online แล้ว (สิทธิ์ถูกย้ายไปยังอุปกรณ์อื่น)",
+    EMAIL_NOT_VERIFIED: "กรุณายืนยันอีเมลก่อนใช้งาน BadQ Online",
+    WORKSPACE_NOT_FOUND: "ไม่พบ Workspace กรุณาลองเข้าสู่ระบบใหม่อีกครั้ง",
+    NOT_WORKSPACE_OWNER: "บัญชีนี้ไม่มีสิทธิ์เข้าถึง Workspace นี้",
+    unauthenticated: "กรุณาเข้าสู่ระบบใหม่อีกครั้ง",
+    "functions/unavailable": "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง",
+  };
+  if (code && MAP[code]) return MAP[code];
+  return (e && e.message) || "เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง";
+}
+// Firestore Timestamp (or a still-pending serverTimestamp() write, which briefly reads back as null) -> JS
+// Date, or null. Never throws on an unexpected shape.
+function firestoreTsToDate(ts) {
+  if (!ts) return null;
+  try {
+    if (typeof ts.toDate === "function") return ts.toDate();
+    if (typeof ts.seconds === "number") return new Date(ts.seconds * 1000);
+  } catch (e) {}
+  return null;
+}
+
+// Compact status row shown in ⚙️ ตั้งค่า → ตั้งค่าทั่วไป (spec section B). Keeps its OWN light auth/workspace
+// subscription purely for display — separate from BadQOnlineSheet's full state machine below, which only
+// mounts once the sheet is actually opened. This avoids threading the whole cloud state machine through
+// GeneralSettingsSheet/SettingsTab just to show one line of status text.
+function BadQOnlineNavRow({ deviceId, onOpen }) {
+  const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
+  const available = !!(cloud && cloud.available);
+  const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
+  const [workspace, setWorkspace] = useState(null);
+  const [isOffline, setIsOffline] = useState(typeof navigator !== "undefined" ? !navigator.onLine : false);
+
+  useEffect(() => {
+    if (!available || !cloud.onAuthChange) return;
+    const unsub = cloud.onAuthChange((u) => { setAuthUser(u || null); setWorkspace(null); });
+    return () => { try { unsub && unsub(); } catch (e) {} };
+  }, [available]);
+  useEffect(() => {
+    const goOnline = () => setIsOffline(false), goOffline = () => setIsOffline(true);
+    window.addEventListener("online", goOnline); window.addEventListener("offline", goOffline);
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
+  }, []);
+  useEffect(() => {
+    if (!available || !authUser || !authUser.emailVerified || !cloud.getOrCreateWorkspace || !cloud.subscribeWorkspace) return;
+    let cancelled = false, unsub = null;
+    (async () => {
+      try {
+        const workspaceId = await cloud.getOrCreateWorkspace(authUser.uid);
+        if (cancelled) return;
+        unsub = cloud.subscribeWorkspace(workspaceId, (ws) => { if (!cancelled) setWorkspace(ws); });
+      } catch (e) {}
+    })();
+    return () => { cancelled = true; try { unsub && unsub(); } catch (e) {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [available, authUser && authUser.uid, authUser && authUser.emailVerified]);
+
+  const status = deriveOnlineStatus({ available, authUser, isOffline, workspace, deviceId, cloudError: null });
+  const meta = ONLINE_STATUS_META[status];
+  return (
+    <button onClick={onOpen} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer" }}>
+      <span style={{ fontSize: 15 }}>{meta.icon}</span>
+      <span style={{ fontSize: 13, fontWeight: 700, color: meta.color }}>{meta.label}</span>
+      <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
+    </button>
+  );
+}
+
+// Full "☁️ BadQ Online" sheet (spec sections B-L). Owner Auth (register/verify/sign-in/reset/logout) +
+// Workspace resolution (create-once, idempotent) + Single Active Device (auto-register when none exists,
+// explicit-confirm takeover when one already exists, live revoked-state detection via a real-time Firestore
+// listener). Does not read or write ANY BadQ business data — see the file-level comment block above.
+function BadQOnlineSheet({ deviceId, onClose }) {
+  const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
+  const available = !!(cloud && cloud.available);
+  const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
+  const [authMode, setAuthMode] = useState("signin"); // "signin" | "register"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
+  const [workspace, setWorkspace] = useState(null); // live workspace doc ({id, primaryOwnerUid, activeDeviceId, ...}), or null while resolving/absent
+  const [cloudError, setCloudError] = useState(null);
+  const [isOffline, setIsOffline] = useState(typeof navigator !== "undefined" ? !navigator.onLine : false);
+  const [takeoverDismissed, setTakeoverDismissed] = useState(false); // collapses the big confirm dialog into a small reopenable banner
+  // Distinguishes the two device-conflict scenarios that deriveOnlineStatus's single REVOKED bucket does NOT
+  // separate (they share one status value on purpose -- see ONLINE_STATUS's own comment -- but need DIFFERENT
+  // banner copy per spec sections H and J): a device that has NEVER been this Workspace's active device
+  // meeting an already-claimed Workspace for the first time (section H -- "takeover offer" copy) vs. a
+  // device that WAS this Workspace's active device and has since been superseded by another device (section
+  // J -- "revoked" copy). Sticky for this mount once observed true; never reset back to false here.
+  const [everActiveHere, setEverActiveHere] = useState(false);
+  useEffect(() => {
+    if (workspace && deviceId && workspace.activeDeviceId === deviceId) setEverActiveHere(true);
+  }, [workspace && workspace.activeDeviceId, deviceId]);
+
+  // v1.12.9 — this device's own cached copy of the one-time "activeSessionId" capability that
+  // claimActiveDevice's Cloud Function hands back ONLY to whichever device just called it (see the file-
+  // header comment above and firebase-sync.js's). Never re-derived from any Firestore read -- Firestore
+  // Rules make workspaces/{id}/private/authority unreadable to every client on purpose, so a revoked device
+  // can never discover the current value; it can only ever know the value it was PERSONALLY handed the last
+  // time IT successfully claimed/took over. Persisted under its own storage key, isolated from deviceId and
+  // from all BadQ business data, exactly like deviceId itself (survives reload, not included in backups).
+  const [activeSessionId, setActiveSessionIdState] = useState(null);
+  useEffect(() => {
+    if (!deviceId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await window.storage.get("bg-v11-active-session-" + deviceId);
+        const raw = r && r.value != null ? r.value : null;
+        if (!cancelled) setActiveSessionIdState(raw || null);
+      } catch (e) {}
+    })();
+    return () => { cancelled = true; };
+  }, [deviceId]);
+  const persistSessionId = async (sid) => {
+    setActiveSessionIdState(sid || null);
+    if (!deviceId) return;
+    try { if (sid) await window.storage.set("bg-v11-active-session-" + deviceId, sid); } catch (e) {}
+  };
+
+  useEffect(() => {
+    if (!available || !cloud.onAuthChange) return;
+    const unsub = cloud.onAuthChange((u) => { setAuthUser(u || null); setWorkspace(null); setCloudError(null); setTakeoverDismissed(false); });
+    return () => { try { unsub && unsub(); } catch (e) {} };
+  }, [available]);
+  useEffect(() => {
+    const goOnline = () => setIsOffline(false), goOffline = () => setIsOffline(true);
+    window.addEventListener("online", goOnline); window.addEventListener("offline", goOffline);
+    return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
+  }, []);
+
+  // Resolve (create-once, idempotent) Workspace + subscribe to it in real time — ONLY once signed in AND
+  // verified (section D's required order: verify -> resolve workspace -> resolve device -> evaluate
+  // authority -> enable Online). An unverified account never reaches this at all.
+  useEffect(() => {
+    if (!available || !authUser || !authUser.emailVerified || !cloud.getOrCreateWorkspace || !cloud.subscribeWorkspace) return;
+    let cancelled = false, unsub = null;
+    (async () => {
+      try {
+        const workspaceId = await cloud.getOrCreateWorkspace(authUser.uid);
+        if (cancelled) return;
+        unsub = cloud.subscribeWorkspace(
+          workspaceId,
+          (ws) => { if (!cancelled) { setWorkspace(ws); setCloudError(null); } },
+          (e) => { if (!cancelled) setCloudError(e); }
+        );
+      } catch (e) { if (!cancelled) setCloudError(e); }
+    })();
+    return () => { cancelled = true; try { unsub && unsub(); } catch (e) {} };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [available, authUser && authUser.uid, authUser && authUser.emailVerified]);
+
+  // Auto-claim THIS device as Active the moment a Workspace with NO active device yet is seen (section H:
+  // "the current verified Owner may register the current device as Active"). Only ever fires when
+  // activeDeviceId is genuinely absent — a Workspace that already names a DIFFERENT device never goes
+  // through this path, only through the explicit takeover confirmation below.
+  useEffect(() => {
+    if (!workspace || !deviceId || !cloud || !cloud.claimActiveDevice) return;
+    if (workspace.activeDeviceId) return;
+    // v1.12.11: also present this device's own cached activeSessionId (if any). This effect's own guard
+    // above only ever fires when workspace.activeDeviceId is genuinely absent (Case A server-side, which
+    // needs no proof), so activeSessionId is normally null here anyway -- passed through for forward
+    // consistency with claimActiveDevice's new same-device-reclaim contract, never to change this effect's
+    // own trigger condition or behavior.
+    cloud.claimActiveDevice(workspace.id, deviceId, APP_VERSION, { isTakeover: false, currentActiveSessionId: activeSessionId })
+      .then((res) => { if (res && res.activeSessionId) persistSessionId(res.activeSessionId); })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace && workspace.id, workspace && workspace.activeDeviceId, deviceId]);
+
+  // v1.12.9 — the ONE concrete "protected Cloud write" in this phase (spec's own acceptance tests require
+  // one to demonstrate real enforcement, not just a client-side status label): once this device believes
+  // it's active AND holds a cached session capability, it asks the trusted pingDeviceHeartbeat Cloud
+  // Function to record a heartbeat. If a takeover happened elsewhere and this device's cached capability is
+  // now stale, the Function rejects it with STALE_SESSION regardless of what this device's own UI currently
+  // shows — that rejection is surfaced via cloudError exactly like any other Cloud error would be.
+  useEffect(() => {
+    if (!cloud || !cloud.pingDeviceHeartbeat || !workspace || !deviceId || !activeSessionId) return;
+    if (workspace.activeDeviceId !== deviceId) return;
+    let cancelled = false;
+    cloud.pingDeviceHeartbeat(deviceId, activeSessionId, APP_VERSION)
+      .then(() => { if (!cancelled) setCloudError(null); })
+      .catch((e) => { if (!cancelled) setCloudError(e); });
+    return () => { cancelled = true; };
+  }, [workspace && workspace.id, workspace && workspace.activeDeviceId, deviceId, activeSessionId]);
+
+  const status = deriveOnlineStatus({ available, authUser, isOffline, workspace, deviceId, cloudError });
+  const meta = ONLINE_STATUS_META[status];
+  const hasConflict = !!(workspace && workspace.activeDeviceId && deviceId && workspace.activeDeviceId !== deviceId);
+
+  const doRegister = async () => {
+    if (password !== confirmPassword) { setErr("รหัสผ่านไม่ตรงกัน"); return; }
+    if (password.length < 6) { setErr("รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร"); return; }
+    setBusy(true); setErr(""); setNotice("");
+    try {
+      await cloud.registerOwner(email.trim(), password);
+      if (cloud.sendVerificationEmail) await cloud.sendVerificationEmail().catch(() => {});
+      setPassword(""); setConfirmPassword("");
+    } catch (e) { setErr(cloudErrorMessage(e)); }
+    finally { setBusy(false); }
+  };
+  const doSignIn = async () => {
+    setBusy(true); setErr(""); setNotice("");
+    try { await cloud.signInOwner(email.trim(), password); setPassword(""); }
+    catch (e) { setErr(cloudErrorMessage(e)); }
+    finally { setBusy(false); }
+  };
+  const doResendVerification = async () => {
+    setBusy(true); setErr(""); setNotice("");
+    try { await cloud.sendVerificationEmail(); setNotice("ส่งอีเมลยืนยันอีกครั้งแล้ว กรุณาตรวจสอบกล่องจดหมาย"); }
+    catch (e) { setErr(cloudErrorMessage(e)); }
+    finally { setBusy(false); }
+  };
+  const doRecheckVerification = async () => {
+    setBusy(true); setErr(""); setNotice("");
+    try {
+      const u = await cloud.reloadCurrentUser();
+      setAuthUser(u || null);
+      if (!u || !u.emailVerified) setErr("ยังไม่พบการยืนยันอีเมล กรุณายืนยันก่อนแล้วลองใหม่");
+    } catch (e) { setErr(cloudErrorMessage(e)); }
+    finally { setBusy(false); }
+  };
+  const doPasswordReset = async () => {
+    if (!email.trim()) { setErr("กรุณากรอกอีเมลก่อน"); return; }
+    setBusy(true); setErr(""); setNotice("");
+    try { await cloud.sendPasswordReset(email.trim()); setNotice("ส่งอีเมลรีเซ็ตรหัสผ่านแล้ว กรุณาตรวจสอบกล่องจดหมาย"); }
+    catch (e) { setErr(cloudErrorMessage(e)); }
+    finally { setBusy(false); }
+  };
+  const doLogout = async () => {
+    // Logout is Auth-only (section L): sign out + let Online UI return to disconnected. Never touches BadQ
+    // local data, never touches deviceId, never releases activeDeviceId — Active Device authority is a
+    // separate concept from this browser's login session and stays exactly as it was.
+    setBusy(true); setErr("");
+    try { await cloud.signOutOwner(); setWorkspace(null); }
+    catch (e) { setErr(cloudErrorMessage(e)); }
+    finally { setBusy(false); }
+  };
+  const doTakeover = async () => {
+    setBusy(true); setErr("");
+    try {
+      // v1.12.11: currentActiveSessionId is meaningless for a genuine different-device takeover (Case C
+      // server-side is gated on confirmTakeover alone, never on session proof -- see functions/index.js) but
+      // is passed through anyway for call-shape consistency with the auto-claim effect above; the Cloud
+      // Function ignores it on this path.
+      const res = await cloud.claimActiveDevice(workspace.id, deviceId, APP_VERSION, { isTakeover: true, currentActiveSessionId: activeSessionId });
+      if (res && res.activeSessionId) await persistSessionId(res.activeSessionId);
+      setTakeoverDismissed(false);
+    } catch (e) { setErr(cloudErrorMessage(e)); }
+    finally { setBusy(false); }
+  };
+
+  const activeSinceDate = workspace ? firestoreTsToDate(workspace.activeDeviceSince) : null;
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>☁️ BadQ Online</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
+        <span style={{ fontSize: 13 }}>{meta.icon}</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: meta.color }}>{meta.label}</span>
+      </div>
+
+      {/* NOT CONNECTED (section B) */}
+      {!authUser && (
+        <div>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14, lineHeight: 1.6 }}>เชื่อมต่อ BadQ Online เพื่อเปิดใช้งานระบบออนไลน์และ Member Portal</div>
+          {!available && (
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12.5, color: T.muted, lineHeight: 1.7, marginBottom: 10 }}>ไม่สามารถเชื่อมต่อ Firebase ได้ในขณะนี้ (อาจเป็นเพราะไม่มีอินเทอร์เน็ต หรือ SDK โหลดไม่สำเร็จ) — แอปยังใช้งานได้ตามปกติแบบออฟไลน์ทุกประการ</div>
+          )}
+          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+            <button onClick={() => { setAuthMode("signin"); setErr(""); setNotice(""); }} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "signin" ? T.green : T.surface, color: authMode === "signin" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>เข้าสู่ระบบ</button>
+            <button onClick={() => { setAuthMode("register"); setErr(""); setNotice(""); }} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "register" ? T.green : T.surface, color: authMode === "register" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>สร้างบัญชี Owner</button>
+          </div>
+          <input type="email" placeholder="อีเมล" value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+          <input type="password" placeholder="รหัสผ่าน" value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+          {authMode === "register" && (
+            <input type="password" placeholder="ยืนยันรหัสผ่าน" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+          )}
+          {err && <div style={{ marginBottom: 8, fontSize: 12, color: T.accent }}>{err}</div>}
+          {notice && <div style={{ marginBottom: 8, fontSize: 12, color: T.green }}>{notice}</div>}
+          <button disabled={busy || !available || !email || !password || (authMode === "register" && !confirmPassword)} onClick={authMode === "register" ? doRegister : doSignIn} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, opacity: busy || !available ? 0.6 : 1, marginBottom: 8 }}>{busy ? "กำลังดำเนินการ..." : authMode === "register" ? "สร้างบัญชี Owner" : "เข้าสู่ระบบ"}</button>
+          {authMode === "signin" && (
+            <button disabled={busy || !available} onClick={doPasswordReset} style={{ width: "100%", padding: "8px 0", background: "none", border: "none", color: T.muted, fontSize: 12, fontWeight: 700, textDecoration: "underline" }}>ลืมรหัสผ่าน</button>
+          )}
+        </div>
+      )}
+
+      {/* AUTHENTICATED BUT NOT VERIFIED (section C) */}
+      {authUser && !authUser.emailVerified && (
+        <div>
+          <div style={{ padding: 12, borderRadius: 11, background: "#fef3c7", border: "1px solid #fde68a", fontSize: 12.5, color: "#92400e", lineHeight: 1.7, marginBottom: 12 }}>กรุณายืนยันอีเมลก่อนใช้งาน BadQ Online ({authUser.email})</div>
+          <button disabled={busy} onClick={doResendVerification} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>ส่งอีเมลยืนยันอีกครั้ง</button>
+          <button disabled={busy} onClick={doRecheckVerification} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, marginBottom: 8, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังตรวจสอบ..." : "ตรวจสอบอีกครั้ง"}</button>
+          <button disabled={busy} onClick={doLogout} style={btnSecondary}>ออกจากระบบ</button>
+        </div>
+      )}
+
+      {/* AUTHENTICATED + VERIFIED (sections F-L) */}
+      {authUser && authUser.emailVerified && (
+        <div>
+          <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{authUser.email}</div>
+            <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ยืนยันอีเมลแล้ว</div>
+          </div>
+
+          {cloudError && (
+            <div style={{ padding: 12, borderRadius: 11, background: "#fdeae7", border: `1px solid ${T.accent}`, fontSize: 12, color: T.accent, marginBottom: 10 }}>เกิดข้อผิดพลาดในการเชื่อมต่อ Cloud — {cloudErrorMessage(cloudError)}</div>
+          )}
+          {isOffline && !cloudError && (
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>ออฟไลน์อยู่ — จะเชื่อมต่อสถานะอุปกรณ์อีกครั้งเมื่อกลับมามีอินเทอร์เน็ต</div>
+          )}
+          {!workspace && !cloudError && !isOffline && (
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>กำลังเชื่อมต่อ Workspace...</div>
+          )}
+
+          {/* DEVICE CONFLICT — another device is (or was) the active one. Shown for BOTH the fresh
+              "someone else is active, want to take over?" case AND the "this device was revoked, want it
+              back?" case — same underlying action (claimActiveDevice with isTakeover:true), reused as-is. */}
+          {hasConflict && !takeoverDismissed && (
+            <div style={{ padding: 12, borderRadius: 11, background: "#fdeae7", border: `1px solid ${T.accent}`, marginBottom: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text, marginBottom: 4 }}>
+                {everActiveHere ? "BadQ Online ถูกย้ายไปอุปกรณ์อื่นแล้ว" : "บัญชี BadQ นี้กำลังใช้งานบนอุปกรณ์อื่น"}
+              </div>
+              <div style={{ fontSize: 11.5, color: "#7a2e22", lineHeight: 1.6, marginBottom: 10 }}>หากย้ายการใช้งานมายังอุปกรณ์นี้ อุปกรณ์เดิมจะไม่สามารถแก้ไขหรือ Sync ข้อมูล Online ได้</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button disabled={busy} onClick={() => setTakeoverDismissed(true)} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 12.5, fontWeight: 700 }}>ยกเลิก</button>
+                <button disabled={busy} onClick={doTakeover} style={{ flex: 1.4, padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังย้าย..." : "ย้ายการใช้งานมายังเครื่องนี้"}</button>
+              </div>
+            </div>
+          )}
+          {hasConflict && takeoverDismissed && (
+            <button onClick={() => setTakeoverDismissed(false)} style={{ width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>🔒 {everActiveHere ? "ย้ายไปอุปกรณ์อื่นแล้ว" : "อุปกรณ์อื่นกำลังใช้งานอยู่"} — แตะเพื่อดูตัวเลือก</button>
+          )}
+
+          {/* ACTIVE — this IS the active device */}
+          {status === ONLINE_STATUS.ACTIVE && (
+            <div style={{ padding: 12, borderRadius: 11, background: "#e2f5ec", border: `1px solid ${T.green}`, marginBottom: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.green }}>อุปกรณ์นี้เป็นอุปกรณ์หลักที่ใช้งาน BadQ Online อยู่</div>
+              {activeSinceDate && <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ตั้งแต่ {activeSinceDate.toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}</div>}
+            </div>
+          )}
+
+          {err && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{err}</div>}
+          {notice && <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>{notice}</div>}
+
+          <button disabled={busy} onClick={doLogout} style={btnSecondary}>ออกจากระบบ</button>
+        </div>
+      )}
+    </Overlay>
+  );
+}
+
 function MemberPortalSheet({ cloudClub, setCloudClub, players, updatePlayer, groupDefaults, session, onClose }) {
   const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
   const available = !!(cloud && cloud.available);
@@ -12496,7 +13002,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 function SettingsTab({
   settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory,
   changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData,
-  archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, updatePlayer,
+  archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer,
   tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory,
   openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint,
   exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog,
@@ -12560,7 +13066,7 @@ function SettingsTab({
           deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
           archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
           players={players} groupDefaults={groupDefaults} session={session}
-          cloudClub={cloudClub} setCloudClub={setCloudClub} updatePlayer={updatePlayer}
+          cloudClub={cloudClub} setCloudClub={setCloudClub} deviceId={deviceId} updatePlayer={updatePlayer}
           sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
           onClose={() => setView(null)}
         />
