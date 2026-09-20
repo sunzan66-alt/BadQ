@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.13";
+const APP_VERSION = "1.12.14";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -681,7 +681,17 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
 // final control"). `teammateIds`/`opponentIds` should be empty arrays when nobody else has been placed in
 // the match yet (the very first slot) — the caller is expected to skip calling this in that case so the
 // list keeps its original wait-priority order untouched, exactly as before this feature existed.
-function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lockPairs, stats, latestMap) {
+// v1.12.14 (P0 WAITING-TIME MODEL): the ONE canonical wait-minutes formula — every display/manual-ordering
+// call site (PlayerPicker's "รอ X นาที" hint, SessionTab's waitMin, rankManualSlotCandidates's tier sort)
+// must call this exact function with the exact same `nowMs` value, never re-derive its own Date.now() or a
+// second formula. Auto Matchmaking's fairnessScore/SORT (used by buildMatch and every auto-assign path) is
+// intentionally NOT routed through this helper — that engine's own locked, previously-tuned behavior must
+// not shift by even one line as a side effect of this fix (explicit instruction: do not change it).
+function waitMinutesFrom(waitingSince, nowMs) {
+  const n = typeof nowMs === "number" ? nowMs : Date.now();
+  return Math.max(0, Math.floor((n - (waitingSince || n)) / 60000));
+}
+function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lockPairs, stats, latestMap, now) {
   const pool = bench || [];
   if (pool.length === 0) return pool;
   const plist = players || [];
@@ -739,9 +749,13 @@ function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lock
   // per explicit spec ("if equal waiting time, preserve deterministic/stable ordering... never random").
   // This function is never called by Auto Matchmaking (buildMatch/fillCourt and every other auto-assign
   // call site) — that engine's own hard-filter/priority logic is completely untouched by this change.
-  const nowForWait = Date.now();
+  // v1.12.14: `now` is the SAME ticking clock value the caller (PlayerPicker) renders "รอ X นาที" from — no
+  // longer an independent Date.now() call — so the sort order and the displayed text can never straddle a
+  // different instant/minute boundary from each other (falls back to a fresh Date.now() only if a caller
+  // genuinely doesn't pass one, e.g. any future reuse outside the live ticking tree).
+  const nowForWait = typeof now === "number" ? now : Date.now();
   const tierOf = (s) => (s.conflict ? 2 : (s.player.status === "resting" ? 1 : 0));
-  const waitMinOf = (s) => Math.max(0, Math.floor((nowForWait - (s.player.waitingSince || nowForWait)) / 60000));
+  const waitMinOf = (s) => waitMinutesFrom(s.player.waitingSince, nowForWait);
   const ranked = [...scored].sort((a, b) =>
     tierOf(a) - tierOf(b) ||
     waitMinOf(b) - waitMinOf(a) ||
@@ -5505,7 +5519,32 @@ export default function App() {
       window.removeEventListener("pagehide", flush);
     };
   }, [loaded, bootStatus]);
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(t); }, []);
+  // v1.12.14 (P0 WAITING-TIME STUCK-AT-0 FIX): root cause was NOT waitingSince itself — every mutation site
+  // (finishAndAdvance/nextCourt/setStatus/addPlayer) already stamps it correctly and atomically. The bug is
+  // in the DISPLAY/SORT clock: `now` only ever advanced via this bare 15s interval, with no resync on the
+  // app returning to the foreground. On iOS/Android, a backgrounded tab/PWA (screen locked, app switched
+  // away, or the browser throttling a hidden tab) suspends `setInterval` — exactly the real tester scenario
+  // (finish a game, put the phone down for ~10 real minutes, come back, open the picker): `now` is still
+  // holding whatever value it had right when the game finished (which is when waitingSince was ALSO
+  // stamped), so `now - waitingSince` reads ~0 despite ~10 real minutes elapsed, and stays wrong until the
+  // interval happens to fire again (which a suspended/throttled timer may not do promptly, or at all, until
+  // some unrelated re-render papers over it) — matching "wait time only updates when another business-state
+  // change happens". Fix: resync `now` immediately the instant the page becomes visible/focused again, not
+  // just on the next 15s tick.
+  useEffect(() => {
+    const tick = () => setNow(Date.now());
+    const onVisible = () => { if (document.visibilityState === "visible") tick(); };
+    const t = setInterval(tick, 15000);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", tick);
+    window.addEventListener("pageshow", tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", tick);
+      window.removeEventListener("pageshow", tick);
+    };
+  }, []);
 
   const getP = (id) => players.find((p) => p.id === id);
   const playersById = useMemo(() => Object.fromEntries(players.map((p) => [p.id, p])), [players]);
@@ -7326,7 +7365,12 @@ export default function App() {
   const showBackupReminder = !backupNoticeDismissed && (daysSinceBackup == null || daysSinceBackup >= BACKUP_REMINDER_DAYS);
 
   return (
-    <div style={{ background: T.bg, color: T.text, minHeight: "100vh", fontFamily: "ui-sans-serif, system-ui, sans-serif", paddingTop: "env(safe-area-inset-top)" }}>
+    /* v1.12.14 (P0 responsive fix): 100vh on mobile is the browser's LARGE (toolbar-hidden) viewport
+       height, so this background can visibly fall short of the real viewport while the address bar/toolbar
+       is showing, leaving a gap below the last section on some devices. 100dvh tracks the actual visible
+       viewport as browser chrome shows/hides — same effect everywhere else in the app that fills the
+       screen. This only affects the background/min-height of the shell, never any business logic. */
+    <div style={{ background: T.bg, color: T.text, minHeight: "100dvh", fontFamily: "ui-sans-serif, system-ui, sans-serif", paddingTop: "env(safe-area-inset-top)" }}>
       {staleSyncNotice && (
         <div style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 8px)", left: "50%", transform: "translateX(-50%)", zIndex: 9999, background: T.green, color: "#fff", padding: "8px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 14px rgba(0,0,0,.18)", maxWidth: "90vw", textAlign: "center" }}>
           {staleSyncNotice}
@@ -9502,7 +9546,11 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>☁️ BadQ Online</div>
+      {/* v1.12.14 (BadQ Online Beta labeling): the feature is still in-development/future-facing — labeled
+          "(Beta)" on the sheet's own title (and the Settings top-level card, see SettingsTab) so users don't
+          mistake it for a fully-released production feature. Informational only — does not disable/change
+          any P2.1 login/auth/device/heartbeat/cloud-authority behavior below, per explicit instruction. */}
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>☁️ BadQ Online (Beta)</div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
         <span style={{ fontSize: 13 }}>{meta.icon}</span>
         <span style={{ fontSize: 12.5, fontWeight: 700, color: meta.color }}>{meta.label}</span>
@@ -9511,7 +9559,8 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
       {/* NOT CONNECTED (section B) */}
       {!authUser && (
         <div>
-          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14, lineHeight: 1.6 }}>เชื่อมต่อ BadQ Online เพื่อเปิดใช้งานระบบออนไลน์และ Member Portal</div>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 2, lineHeight: 1.6 }}>เชื่อมต่อ BadQ Online เพื่อเปิดใช้งานระบบออนไลน์และ Member Portal</div>
+          <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14, lineHeight: 1.6, fontStyle: "italic" }}>ฟีเจอร์ออนไลน์กำลังอยู่ระหว่างพัฒนา (Beta) — การใช้งานออฟไลน์ปกติไม่ได้รับผลกระทบ</div>
           {!available && (
             <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12.5, color: T.muted, lineHeight: 1.7, marginBottom: 10 }}>ไม่สามารถเชื่อมต่อ Firebase ได้ในขณะนี้ (อาจเป็นเพราะไม่มีอินเทอร์เน็ต หรือ SDK โหลดไม่สำเร็จ) — แอปยังใช้งานได้ตามปกติแบบออฟไลน์ทุกประการ</div>
           )}
@@ -9911,7 +9960,7 @@ function SessionTab(props) {
   // together with `current` on both a fresh genStart() and endSession(), so a brand-new/just-ended ก๊วน is
   // completely unaffected and still correctly shows the "not started yet" landing state.
   const started = current.length > 0 || history.length > 0;
-  const waitMin = (p) => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
+  const waitMin = (p) => waitMinutesFrom(p.waitingSince, now); // v1.12.14: routed through the single canonical formula (see waitMinutesFrom)
   // Requirement 16: block starting a match with unfilled slots — surfaced as a disabled+dimmed button
   // rather than a silent no-op, plus a short hint line under the action row.
   const startReady = startReadyMatch;
@@ -13354,7 +13403,12 @@ function SettingsTab({
           longer requires Settings → ตั้งค่าทั่วไป → BadQ Online, just Settings → BadQ Online. Uses the same
           live-status BadQOnlineNavRow (☁️/🟢/🟠/🔒/🔴, spec section K) this row already had inside ตั้งค่า
           ทั่วไป — only WHERE it's mounted changed, not its own behavior. */}
-      <SectionLabel>☁️ BadQ Online</SectionLabel>
+      {/* v1.12.14: labeled "(Beta)" here (the main entry point) — the sheet itself also carries the same
+          label on its own title; per explicit instruction, this is display-only and never repeated onto
+          every sentence/status string below (those stay exactly as they were — only offline/local features
+          must never read as Beta, and BadQOnlineNavRow's own live status text is functional, not the
+          feature's marketing name). */}
+      <SectionLabel>☁️ BadQ Online (Beta)</SectionLabel>
       <BadQOnlineNavRow deviceId={deviceId} onOpen={() => setView("online")} />
       <SectionLabel>การตั้งค่า</SectionLabel>
       <Row icon="🚀" title="ตั้งค่าขั้นสูง" sub="Ranking · Tournament · รางวัล" onClick={() => setView("advanced")} />
@@ -15556,7 +15610,13 @@ function DetailList({ title, map, getP }) {
 function Overlay({ children, onClose }) {
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 40, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: T.bg, width: "100%", maxWidth: 520, maxHeight: "88vh", overflowY: "auto", borderRadius: "18px 18px 0 0", padding: "18px 18px calc(18px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
+      {/* v1.12.14 (P0 responsive fix): 88vh is computed off the browser's LARGE viewport height on iOS/
+          Android — while the toolbar/address-bar is visible (the common case for a bottom sheet, which is
+          opened by tapping something without ever entering fullscreen), the real visible height is smaller,
+          so a long sheet's own bottom (its close/action buttons) can land below the visible viewport,
+          forcing the whole background page to scroll instead of just this sheet scrolling internally.
+          100dvh-based dvh tracks the ACTUAL visible viewport as browser chrome shows/hides. */}
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.bg, width: "100%", maxWidth: 520, maxHeight: "88dvh", overflowY: "auto", borderRadius: "18px 18px 0 0", padding: "18px 18px calc(18px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}><button onClick={onClose} style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 20, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", color: T.muted }}><X size={17} /></button></div>
         {children}
       </div>
@@ -15648,7 +15708,7 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         // (verified: both reduce to "longest-waited first").
         const teammateIds = arr.filter((pid, i) => i !== idx && pid);
         const opponentIds = ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean);
-        const rankedBench = rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap);
+        const rankedBench = rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap, now);
         const nameLong = p && p.name.length > 7;
         const nameFs = nameLong ? (compact ? 12.5 : 13) : (compact ? 14 : 15);
         const lvlFs = nameLong ? 11 : (compact ? 12 : 13);
@@ -15749,11 +15809,20 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
 // look as before, it just can no longer be clipped by any ancestor.
 function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRect }) {
   const alignRight = align === "right";
+  const panelWidth = Math.max(anchorRect.width, 210);
+  // v1.12.14 (P0 responsive fix): the align="left" branch only ever clamped a MINIMUM 6px from the left
+  // edge — unlike the align="right" branch, it never clamped the panel back onto-screen from the RIGHT
+  // edge. Since this picker portals to document.body positioned from the slot's live on-screen rect inside
+  // a horizontally-scrollable match table, a Team A slot scrolled near the right edge of a narrow (320-
+  // 360px) screen could open a 210px+ panel that runs off the viewport, clipping player options. Clamp the
+  // left offset so `left + panelWidth` never exceeds the viewport width (minus the same 6px margin used on
+  // every other edge) — same technique the align="right" branch already used, just mirrored.
+  const leftPos = Math.min(Math.max(6, anchorRect.left), Math.max(6, window.innerWidth - panelWidth - 6));
   const panelStyle = {
     position: "fixed",
     top: anchorRect.bottom + 4,
-    ...(alignRight ? { right: Math.max(6, window.innerWidth - anchorRect.right) } : { left: Math.max(6, anchorRect.left) }),
-    width: Math.max(anchorRect.width, 210),
+    ...(alignRight ? { right: Math.max(6, window.innerWidth - anchorRect.right) } : { left: leftPos }),
+    width: panelWidth,
     background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.2)", zIndex: 200, maxHeight: 250, overflowY: "auto",
   };
   return ReactDOM.createPortal(
@@ -15797,7 +15866,7 @@ function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRe
                     </span>
                   ) : typeof now === "number" && (
                     <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: isResting ? "#d97706" : T.muted, marginTop: 1 }}>
-                      {isResting ? "ขอพัก · " : ""}รอ {Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000))} นาที · เล่น {b.games || 0} เกม
+                      {isResting ? "ขอพัก · " : ""}รอ {waitMinutesFrom(b.waitingSince, now)} นาที · เล่น {b.games || 0} เกม
                     </span>
                   )}
                 </span>
@@ -16583,7 +16652,9 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
         // backdrop no longer dismisses the modal — there is a real in-flight write underneath and no
         // cancellation mechanism, so letting the user "close" it here would be misleading, not safe.
         <div onClick={() => { if (!busy) setPreview(null); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 360, width: "100%", maxHeight: "85vh", overflowY: "auto", boxSizing: "border-box" }}>
+          {/* v1.12.14 (P0 responsive fix): same 88vh -> dvh reasoning as Overlay above — tracks the real
+              visible viewport instead of the browser's large/toolbar-hidden height. */}
+          <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 360, width: "100%", maxHeight: "85dvh", overflowY: "auto", boxSizing: "border-box" }}>
             <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>พบข้อมูลสำรอง</div>
             <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 2 }}>วันที่สำรอง: {fmtThaiDateTime(preview.exportedAt)}</div>
             <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 12 }}>Version: BadQ v{preview.appVersion}</div>

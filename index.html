@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.13";
+      var CURRENT_VERSION = "1.12.14";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.12.13";
+const APP_VERSION = "1.12.14";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1653,7 +1653,17 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
 // final control"). `teammateIds`/`opponentIds` should be empty arrays when nobody else has been placed in
 // the match yet (the very first slot) — the caller is expected to skip calling this in that case so the
 // list keeps its original wait-priority order untouched, exactly as before this feature existed.
-function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lockPairs, stats, latestMap) {
+// v1.12.14 (P0 WAITING-TIME MODEL): the ONE canonical wait-minutes formula — every display/manual-ordering
+// call site (PlayerPicker's "รอ X นาที" hint, SessionTab's waitMin, rankManualSlotCandidates's tier sort)
+// must call this exact function with the exact same `nowMs` value, never re-derive its own Date.now() or a
+// second formula. Auto Matchmaking's fairnessScore/SORT (used by buildMatch and every auto-assign path) is
+// intentionally NOT routed through this helper — that engine's own locked, previously-tuned behavior must
+// not shift by even one line as a side effect of this fix (explicit instruction: do not change it).
+function waitMinutesFrom(waitingSince, nowMs) {
+  const n = typeof nowMs === "number" ? nowMs : Date.now();
+  return Math.max(0, Math.floor((n - (waitingSince || n)) / 60000));
+}
+function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lockPairs, stats, latestMap, now) {
   const pool = bench || [];
   if (pool.length === 0) return pool;
   const plist = players || [];
@@ -1720,9 +1730,13 @@ function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lock
   // per explicit spec ("if equal waiting time, preserve deterministic/stable ordering... never random").
   // This function is never called by Auto Matchmaking (buildMatch/fillCourt and every other auto-assign
   // call site) — that engine's own hard-filter/priority logic is completely untouched by this change.
-  const nowForWait = Date.now();
+  // v1.12.14: `now` is the SAME ticking clock value the caller (PlayerPicker) renders "รอ X นาที" from — no
+  // longer an independent Date.now() call — so the sort order and the displayed text can never straddle a
+  // different instant/minute boundary from each other (falls back to a fresh Date.now() only if a caller
+  // genuinely doesn't pass one, e.g. any future reuse outside the live ticking tree).
+  const nowForWait = typeof now === "number" ? now : Date.now();
   const tierOf = s => s.conflict ? 2 : s.player.status === "resting" ? 1 : 0;
-  const waitMinOf = s => Math.max(0, Math.floor((nowForWait - (s.player.waitingSince || nowForWait)) / 60000));
+  const waitMinOf = s => waitMinutesFrom(s.player.waitingSince, nowForWait);
   const ranked = [...scored].sort((a, b) => tierOf(a) - tierOf(b) || waitMinOf(b) - waitMinOf(a) || a.score - b.score || priorityIdx(a.player.id) - priorityIdx(b.player.id));
   return ranked.map(s => s.conflict ? {
     ...s.player,
@@ -8614,9 +8628,33 @@ function App() {
       window.removeEventListener("pagehide", flush);
     };
   }, [loaded, bootStatus]);
+  // v1.12.14 (P0 WAITING-TIME STUCK-AT-0 FIX): root cause was NOT waitingSince itself — every mutation site
+  // (finishAndAdvance/nextCourt/setStatus/addPlayer) already stamps it correctly and atomically. The bug is
+  // in the DISPLAY/SORT clock: `now` only ever advanced via this bare 15s interval, with no resync on the
+  // app returning to the foreground. On iOS/Android, a backgrounded tab/PWA (screen locked, app switched
+  // away, or the browser throttling a hidden tab) suspends `setInterval` — exactly the real tester scenario
+  // (finish a game, put the phone down for ~10 real minutes, come back, open the picker): `now` is still
+  // holding whatever value it had right when the game finished (which is when waitingSince was ALSO
+  // stamped), so `now - waitingSince` reads ~0 despite ~10 real minutes elapsed, and stays wrong until the
+  // interval happens to fire again (which a suspended/throttled timer may not do promptly, or at all, until
+  // some unrelated re-render papers over it) — matching "wait time only updates when another business-state
+  // change happens". Fix: resync `now` immediately the instant the page becomes visible/focused again, not
+  // just on the next 15s tick.
   useEffect(() => {
-    const t = setInterval(() => setNow(Date.now()), 15000);
-    return () => clearInterval(t);
+    const tick = () => setNow(Date.now());
+    const onVisible = () => {
+      if (document.visibilityState === "visible") tick();
+    };
+    const t = setInterval(tick, 15000);
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", tick);
+    window.addEventListener("pageshow", tick);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", tick);
+      window.removeEventListener("pageshow", tick);
+    };
   }, []);
   const getP = id => players.find(p => p.id === id);
   const playersById = useMemo(() => Object.fromEntries(players.map(p => [p.id, p])), [players]);
@@ -11639,587 +11677,595 @@ function App() {
   const BACKUP_REMINDER_DAYS = 7;
   const daysSinceBackup = settings.lastBackupAt ? Math.floor((Date.now() - new Date(settings.lastBackupAt).getTime()) / 86400000) : null;
   const showBackupReminder = !backupNoticeDismissed && (daysSinceBackup == null || daysSinceBackup >= BACKUP_REMINDER_DAYS);
-  return /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: T.bg,
-      color: T.text,
-      minHeight: "100vh",
-      fontFamily: "ui-sans-serif, system-ui, sans-serif",
-      paddingTop: "env(safe-area-inset-top)"
-    }
-  }, staleSyncNotice && /*#__PURE__*/React.createElement("div", {
-    style: {
-      position: "fixed",
-      top: "calc(env(safe-area-inset-top) + 8px)",
-      left: "50%",
-      transform: "translateX(-50%)",
-      zIndex: 9999,
-      background: T.green,
-      color: "#fff",
-      padding: "8px 14px",
-      borderRadius: 10,
-      fontSize: 13,
-      fontWeight: 600,
-      boxShadow: "0 4px 14px rgba(0,0,0,.18)",
-      maxWidth: "90vw",
-      textAlign: "center"
-    }
-  }, staleSyncNotice), autoRecoveryToast && /*#__PURE__*/React.createElement("div", {
-    style: {
-      position: "fixed",
-      top: "calc(env(safe-area-inset-top) + 8px)",
-      left: "50%",
-      transform: "translateX(-50%)",
-      zIndex: 9999,
-      background: T.green,
-      color: "#fff",
-      padding: "8px 14px",
-      borderRadius: 10,
-      fontSize: 13,
-      fontWeight: 600,
-      boxShadow: "0 4px 14px rgba(0,0,0,.18)",
-      maxWidth: "90vw",
-      textAlign: "center"
-    }
-  }, autoRecoveryToast), /*#__PURE__*/React.createElement("input", {
-    ref: fileRef,
-    type: "file",
-    accept: "image/*",
-    onChange: onPhotoFile,
-    style: {
-      display: "none"
-    }
-  }), /*#__PURE__*/React.createElement("input", {
-    ref: sessionPhotoFileRef,
-    type: "file",
-    accept: "image/*",
-    onChange: onSessionPhotoFile,
-    style: {
-      display: "none"
-    }
-  }), /*#__PURE__*/React.createElement("input", {
-    ref: qrRef,
-    type: "file",
-    accept: "image/*",
-    onChange: onQRFile,
-    style: {
-      display: "none"
-    }
-  }), /*#__PURE__*/React.createElement("input", {
-    ref: tLogoFileRef,
-    type: "file",
-    accept: "image/*",
-    onChange: onTournamentLogoFile,
-    style: {
-      display: "none"
-    }
-  }), cropJob && /*#__PURE__*/React.createElement(ImageCropper, {
-    src: cropJob.src,
-    circleGuide: cropJob.circleGuide,
-    title: cropJob.title,
-    onCancel: () => setCropJob(null),
-    onConfirm: data => {
-      cropJob.onDone(data);
-      setCropJob(null);
-    }
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      maxWidth: gameShellMaxWidth,
-      margin: "0 auto",
-      padding: "16px 14px calc(92px + env(safe-area-inset-bottom))",
-      boxSizing: "border-box"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 9,
-      marginBottom: 16
-    }
-  }, /*#__PURE__*/React.createElement("img", {
-    src: "data:image/png;base64,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",
-    alt: "BadQ",
-    style: {
-      width: 32,
-      height: 32,
-      borderRadius: 9,
-      objectFit: "cover",
-      flexShrink: 0
-    }
-  }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontWeight: 800,
-      fontSize: 18,
-      letterSpacing: -0.3
-    }
-  }, "BadQ"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11,
-      color: T.muted
-    }
-  }, "v", APP_VERSION))), loadCorrupted && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#fdecea",
-      border: "1px solid #f0a8a0",
-      borderRadius: 12,
-      padding: "10px 11px",
-      marginBottom: 14,
-      display: "flex",
-      alignItems: "flex-start",
-      gap: 9
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 17,
-      flexShrink: 0,
-      lineHeight: "20px"
-    }
-  }, "\u26A0\uFE0F"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      fontWeight: 800
-    }
-  }, "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E40\u0E14\u0E34\u0E21\u0E40\u0E2A\u0E35\u0E22\u0E2B\u0E32\u0E22 \u0E23\u0E30\u0E1A\u0E1A\u0E44\u0E21\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E17\u0E31\u0E1A\u0E43\u0E2B\u0E49\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E01\u0E31\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2B\u0E32\u0E22\u0E0B\u0E49\u0E33"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10.5,
-      color: T.muted,
-      marginTop: 2
-    }
-  }, "\u0E19\u0E48\u0E32\u0E08\u0E30\u0E40\u0E01\u0E34\u0E14\u0E08\u0E32\u0E01\u0E41\u0E2D\u0E1B\u0E16\u0E39\u0E01\u0E1B\u0E34\u0E14\u0E01\u0E25\u0E32\u0E07\u0E04\u0E31\u0E19\u0E15\u0E2D\u0E19\u0E01\u0E33\u0E25\u0E31\u0E07\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01 \u2014 \u0E44\u0E1B\u0E17\u0E35\u0E48 \"\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\" \u0E41\u0E25\u0E49\u0E27\u0E40\u0E1B\u0E34\u0E14 \"\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E41\u0E25\u0E30\u0E01\u0E32\u0E23\u0E2A\u0E33\u0E23\u0E2D\u0E07\" \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19\u0E08\u0E32\u0E01\u0E08\u0E38\u0E14\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34 \u0E2B\u0E23\u0E37\u0E2D\u0E44\u0E1F\u0E25\u0E4C\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E40\u0E01\u0E47\u0E1A\u0E44\u0E27\u0E49"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      marginTop: 7
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setTab("settings");
-      setSettingsAutoOpen("backup");
-    },
-    style: {
-      padding: "7px 13px",
-      borderRadius: 9,
-      background: T.accent,
-      border: "none",
-      color: "#fff",
-      fontSize: 12,
-      fontWeight: 800
-    }
-  }, "\u0E44\u0E1B\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setLoadCorrupted(false);
-      setBootStatus("new-install");
-    },
-    style: {
-      padding: "7px 13px",
-      borderRadius: 9,
-      background: "none",
-      border: `1px solid ${T.border}`,
-      color: T.muted,
-      fontSize: 12,
-      fontWeight: 700
-    }
-  }, "\u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19\u0E43\u0E2B\u0E21\u0E48 (\u0E44\u0E21\u0E48\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19)")))), updateAvailable && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#eaf3ff",
-      border: "1px solid #a9cdf0",
-      borderRadius: 12,
-      padding: "10px 11px",
-      marginBottom: 14,
-      display: "flex",
-      alignItems: "center",
-      gap: 9
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 17,
-      flexShrink: 0,
-      lineHeight: "20px"
-    }
-  }, "\uD83D\uDD04"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0,
-      fontSize: 12.5,
-      fontWeight: 700
-    }
-  }, "\u0E21\u0E35\u0E40\u0E27\u0E2D\u0E23\u0E4C\u0E0A\u0E31\u0E48\u0E19\u0E43\u0E2B\u0E21\u0E48 (v", updateAvailable, ") \u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19"), /*#__PURE__*/React.createElement("button", {
-    onClick: applyUpdateNow,
-    style: {
-      flexShrink: 0,
-      padding: "7px 13px",
-      borderRadius: 9,
-      background: T.blue,
-      border: "none",
-      color: "#fff",
-      fontSize: 12,
-      fontWeight: 800
-    }
-  }, "\u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E15\u0E2D\u0E19\u0E19\u0E35\u0E49")), showBackupReminder && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#fff7e6",
-      border: "1px solid #f0c96b",
-      borderRadius: 12,
-      padding: "10px 11px",
-      marginBottom: 14,
-      display: "flex",
-      alignItems: "flex-start",
-      gap: 9
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 17,
-      flexShrink: 0,
-      lineHeight: "20px"
-    }
-  }, "\uD83D\uDCBE"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      fontWeight: 800
-    }
-  }, daysSinceBackup == null ? "ยังไม่เคยสำรองข้อมูลเลย" : `ยังไม่ได้สำรองข้อมูลมา ${daysSinceBackup} วันแล้ว`), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 10.5,
-      color: T.muted,
-      marginTop: 2
-    }
-  }, "\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D (\u0E42\u0E14\u0E22\u0E40\u0E09\u0E1E\u0E32\u0E30 iPhone) \u0E2D\u0E32\u0E08\u0E25\u0E49\u0E32\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E41\u0E2D\u0E1B\u0E40\u0E2D\u0E07\u0E44\u0E14\u0E49\u0E16\u0E49\u0E32\u0E1B\u0E34\u0E14/\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E40\u0E1B\u0E34\u0E14\u0E19\u0E32\u0E19 \u0E46 \u2014 \u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E40\u0E01\u0E47\u0E1A\u0E44\u0E27\u0E49\u0E01\u0E31\u0E19\u0E1E\u0E25\u0E32\u0E14"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      exportBackup();
-      setBackupNoticeDismissed(true);
-    },
-    style: {
-      marginTop: 7,
-      padding: "7px 13px",
-      borderRadius: 9,
-      background: T.green,
-      border: "none",
-      color: "#fff",
-      fontSize: 12,
-      fontWeight: 800
-    }
-  }, "\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E40\u0E25\u0E22")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBackupNoticeDismissed(true),
-    style: {
-      flexShrink: 0,
-      background: "none",
-      border: "none",
-      color: T.muted,
-      padding: 4
-    }
-  }, /*#__PURE__*/React.createElement(X, {
-    size: 16
-  }))), tab === "members" && /*#__PURE__*/React.createElement(MembersTab, {
-    players: activePlayers,
-    archivedPlayers,
-    playingIds,
-    addPlayer,
-    resetAllToAbsent,
-    setStatus,
-    setAttendanceTime,
-    session,
-    setSession,
-    setPLevel,
-    updatePlayer,
-    delPlayer,
-    archivePlayer,
-    bulkArchivePlayers,
-    restorePlayer,
-    openPhoto,
-    openSessionPhoto,
-    clearSessionPhoto,
-    settings,
-    setSettings,
-    changeLevelPreset,
-    setCustomLevels,
-    getP,
-    history,
-    current,
-    sessionHistory,
-    tournamentHistory,
-    exportBackup,
-    validateBackupFile,
-    applyRestore,
-    undoRestore,
-    lastBackupAt: settings.lastBackupAt,
-    hasPreRestoreBackup,
-    autoBackups,
-    bootLog,
-    deleteAllMembersData,
-    wipeAllAppData,
-    activeTournament,
-    tournamentRegister,
-    tournamentUnregister,
-    groupDefaults,
-    saveGroupDefault,
-    applyGroupDefaultsFor,
-    cloudClub,
-    setCloudClub,
-    otherIncome,
-    payEntranceFee,
-    payMembership,
-    rankingConfigs,
-    updateRankingConfig,
-    mode,
-    setMode,
-    courtCount,
-    setCourtCount,
-    courtLabels,
-    setCourtLabel,
-    lockPairs,
-    addLockPair,
-    removeLockPair,
-    setHandPref,
-    resetGames,
-    qrRef
-  }), tab === "session" && /*#__PURE__*/React.createElement(GameTab, {
-    sessionTabProps: {
+  return (
+    /*#__PURE__*/
+    /* v1.12.14 (P0 responsive fix): 100vh on mobile is the browser's LARGE (toolbar-hidden) viewport
+       height, so this background can visibly fall short of the real viewport while the address bar/toolbar
+       is showing, leaving a gap below the last section on some devices. 100dvh tracks the actual visible
+       viewport as browser chrome shows/hides — same effect everywhere else in the app that fills the
+       screen. This only affects the background/min-height of the shell, never any business logic. */
+    React.createElement("div", {
+      style: {
+        background: T.bg,
+        color: T.text,
+        minHeight: "100dvh",
+        fontFamily: "ui-sans-serif, system-ui, sans-serif",
+        paddingTop: "env(safe-area-inset-top)"
+      }
+    }, staleSyncNotice && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: "fixed",
+        top: "calc(env(safe-area-inset-top) + 8px)",
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 9999,
+        background: T.green,
+        color: "#fff",
+        padding: "8px 14px",
+        borderRadius: 10,
+        fontSize: 13,
+        fontWeight: 600,
+        boxShadow: "0 4px 14px rgba(0,0,0,.18)",
+        maxWidth: "90vw",
+        textAlign: "center"
+      }
+    }, staleSyncNotice), autoRecoveryToast && /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: "fixed",
+        top: "calc(env(safe-area-inset-top) + 8px)",
+        left: "50%",
+        transform: "translateX(-50%)",
+        zIndex: 9999,
+        background: T.green,
+        color: "#fff",
+        padding: "8px 14px",
+        borderRadius: 10,
+        fontSize: 13,
+        fontWeight: 600,
+        boxShadow: "0 4px 14px rgba(0,0,0,.18)",
+        maxWidth: "90vw",
+        textAlign: "center"
+      }
+    }, autoRecoveryToast), /*#__PURE__*/React.createElement("input", {
+      ref: fileRef,
+      type: "file",
+      accept: "image/*",
+      onChange: onPhotoFile,
+      style: {
+        display: "none"
+      }
+    }), /*#__PURE__*/React.createElement("input", {
+      ref: sessionPhotoFileRef,
+      type: "file",
+      accept: "image/*",
+      onChange: onSessionPhotoFile,
+      style: {
+        display: "none"
+      }
+    }), /*#__PURE__*/React.createElement("input", {
+      ref: qrRef,
+      type: "file",
+      accept: "image/*",
+      onChange: onQRFile,
+      style: {
+        display: "none"
+      }
+    }), /*#__PURE__*/React.createElement("input", {
+      ref: tLogoFileRef,
+      type: "file",
+      accept: "image/*",
+      onChange: onTournamentLogoFile,
+      style: {
+        display: "none"
+      }
+    }), cropJob && /*#__PURE__*/React.createElement(ImageCropper, {
+      src: cropJob.src,
+      circleGuide: cropJob.circleGuide,
+      title: cropJob.title,
+      onCancel: () => setCropJob(null),
+      onConfirm: data => {
+        cropJob.onDone(data);
+        setCropJob(null);
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      style: {
+        maxWidth: gameShellMaxWidth,
+        margin: "0 auto",
+        padding: "16px 14px calc(92px + env(safe-area-inset-bottom))",
+        boxSizing: "border-box"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        marginBottom: 16
+      }
+    }, /*#__PURE__*/React.createElement("img", {
+      src: "data:image/png;base64,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",
+      alt: "BadQ",
+      style: {
+        width: 32,
+        height: 32,
+        borderRadius: 9,
+        objectFit: "cover",
+        flexShrink: 0
+      }
+    }), /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontWeight: 800,
+        fontSize: 18,
+        letterSpacing: -0.3
+      }
+    }, "BadQ"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 11,
+        color: T.muted
+      }
+    }, "v", APP_VERSION))), loadCorrupted && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#fdecea",
+        border: "1px solid #f0a8a0",
+        borderRadius: 12,
+        padding: "10px 11px",
+        marginBottom: 14,
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 9
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 17,
+        flexShrink: 0,
+        lineHeight: "20px"
+      }
+    }, "\u26A0\uFE0F"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        fontWeight: 800
+      }
+    }, "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E40\u0E14\u0E34\u0E21\u0E40\u0E2A\u0E35\u0E22\u0E2B\u0E32\u0E22 \u0E23\u0E30\u0E1A\u0E1A\u0E44\u0E21\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E17\u0E31\u0E1A\u0E43\u0E2B\u0E49\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E01\u0E31\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2B\u0E32\u0E22\u0E0B\u0E49\u0E33"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10.5,
+        color: T.muted,
+        marginTop: 2
+      }
+    }, "\u0E19\u0E48\u0E32\u0E08\u0E30\u0E40\u0E01\u0E34\u0E14\u0E08\u0E32\u0E01\u0E41\u0E2D\u0E1B\u0E16\u0E39\u0E01\u0E1B\u0E34\u0E14\u0E01\u0E25\u0E32\u0E07\u0E04\u0E31\u0E19\u0E15\u0E2D\u0E19\u0E01\u0E33\u0E25\u0E31\u0E07\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01 \u2014 \u0E44\u0E1B\u0E17\u0E35\u0E48 \"\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\" \u0E41\u0E25\u0E49\u0E27\u0E40\u0E1B\u0E34\u0E14 \"\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E41\u0E25\u0E30\u0E01\u0E32\u0E23\u0E2A\u0E33\u0E23\u0E2D\u0E07\" \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19\u0E08\u0E32\u0E01\u0E08\u0E38\u0E14\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34 \u0E2B\u0E23\u0E37\u0E2D\u0E44\u0E1F\u0E25\u0E4C\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E40\u0E01\u0E47\u0E1A\u0E44\u0E27\u0E49"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 8,
+        marginTop: 7
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        setTab("settings");
+        setSettingsAutoOpen("backup");
+      },
+      style: {
+        padding: "7px 13px",
+        borderRadius: 9,
+        background: T.accent,
+        border: "none",
+        color: "#fff",
+        fontSize: 12,
+        fontWeight: 800
+      }
+    }, "\u0E44\u0E1B\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        setLoadCorrupted(false);
+        setBootStatus("new-install");
+      },
+      style: {
+        padding: "7px 13px",
+        borderRadius: 9,
+        background: "none",
+        border: `1px solid ${T.border}`,
+        color: T.muted,
+        fontSize: 12,
+        fontWeight: 700
+      }
+    }, "\u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19\u0E43\u0E2B\u0E21\u0E48 (\u0E44\u0E21\u0E48\u0E01\u0E39\u0E49\u0E04\u0E37\u0E19)")))), updateAvailable && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#eaf3ff",
+        border: "1px solid #a9cdf0",
+        borderRadius: 12,
+        padding: "10px 11px",
+        marginBottom: 14,
+        display: "flex",
+        alignItems: "center",
+        gap: 9
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 17,
+        flexShrink: 0,
+        lineHeight: "20px"
+      }
+    }, "\uD83D\uDD04"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        fontSize: 12.5,
+        fontWeight: 700
+      }
+    }, "\u0E21\u0E35\u0E40\u0E27\u0E2D\u0E23\u0E4C\u0E0A\u0E31\u0E48\u0E19\u0E43\u0E2B\u0E21\u0E48 (v", updateAvailable, ") \u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19"), /*#__PURE__*/React.createElement("button", {
+      onClick: applyUpdateNow,
+      style: {
+        flexShrink: 0,
+        padding: "7px 13px",
+        borderRadius: 9,
+        background: T.blue,
+        border: "none",
+        color: "#fff",
+        fontSize: 12,
+        fontWeight: 800
+      }
+    }, "\u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E15\u0E2D\u0E19\u0E19\u0E35\u0E49")), showBackupReminder && /*#__PURE__*/React.createElement("div", {
+      style: {
+        background: "#fff7e6",
+        border: "1px solid #f0c96b",
+        borderRadius: 12,
+        padding: "10px 11px",
+        marginBottom: 14,
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 9
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 17,
+        flexShrink: 0,
+        lineHeight: "20px"
+      }
+    }, "\uD83D\uDCBE"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        fontWeight: 800
+      }
+    }, daysSinceBackup == null ? "ยังไม่เคยสำรองข้อมูลเลย" : `ยังไม่ได้สำรองข้อมูลมา ${daysSinceBackup} วันแล้ว`), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10.5,
+        color: T.muted,
+        marginTop: 2
+      }
+    }, "\u0E21\u0E37\u0E2D\u0E16\u0E37\u0E2D (\u0E42\u0E14\u0E22\u0E40\u0E09\u0E1E\u0E32\u0E30 iPhone) \u0E2D\u0E32\u0E08\u0E25\u0E49\u0E32\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E41\u0E2D\u0E1B\u0E40\u0E2D\u0E07\u0E44\u0E14\u0E49\u0E16\u0E49\u0E32\u0E1B\u0E34\u0E14/\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E40\u0E1B\u0E34\u0E14\u0E19\u0E32\u0E19 \u0E46 \u2014 \u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E40\u0E01\u0E47\u0E1A\u0E44\u0E27\u0E49\u0E01\u0E31\u0E19\u0E1E\u0E25\u0E32\u0E14"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        exportBackup();
+        setBackupNoticeDismissed(true);
+      },
+      style: {
+        marginTop: 7,
+        padding: "7px 13px",
+        borderRadius: 9,
+        background: T.green,
+        border: "none",
+        color: "#fff",
+        fontSize: 12,
+        fontWeight: 800
+      }
+    }, "\u0E2A\u0E33\u0E23\u0E2D\u0E07\u0E40\u0E25\u0E22")), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setBackupNoticeDismissed(true),
+      style: {
+        flexShrink: 0,
+        background: "none",
+        border: "none",
+        color: T.muted,
+        padding: 4
+      }
+    }, /*#__PURE__*/React.createElement(X, {
+      size: 16
+    }))), tab === "members" && /*#__PURE__*/React.createElement(MembersTab, {
       players: activePlayers,
+      archivedPlayers,
+      playingIds,
+      addPlayer,
+      resetAllToAbsent,
+      setStatus,
+      setAttendanceTime,
+      session,
+      setSession,
+      setPLevel,
+      updatePlayer,
+      delPlayer,
+      archivePlayer,
+      bulkArchivePlayers,
+      restorePlayer,
+      openPhoto,
+      openSessionPhoto,
+      clearSessionPhoto,
+      settings,
+      setSettings,
+      changeLevelPreset,
+      setCustomLevels,
       getP,
-      playersById,
       history,
       current,
-      roundNo,
+      sessionHistory,
+      tournamentHistory,
+      exportBackup,
+      validateBackupFile,
+      applyRestore,
+      undoRestore,
+      lastBackupAt: settings.lastBackupAt,
+      hasPreRestoreBackup,
+      autoBackups,
+      bootLog,
+      deleteAllMembersData,
+      wipeAllAppData,
+      activeTournament,
+      tournamentRegister,
+      tournamentUnregister,
+      groupDefaults,
+      saveGroupDefault,
+      applyGroupDefaultsFor,
+      cloudClub,
+      setCloudClub,
+      otherIncome,
+      payEntranceFee,
+      payMembership,
+      rankingConfigs,
+      updateRankingConfig,
+      mode,
+      setMode,
       courtCount,
       setCourtCount,
       courtLabels,
       setCourtLabel,
-      mode,
-      setMode,
-      settings,
-      setSettings,
-      session,
-      setSession,
-      sessionHistory,
-      groupDefaults,
-      saveGroupDefault,
-      applyGroupDefaultsFor,
       lockPairs,
       addLockPair,
       removeLockPair,
       setHandPref,
-      genStart,
-      startGame,
-      endGame,
-      finishAndAdvance,
-      undoFinish,
-      nextCourt,
-      regenCourt,
-      fillCourt,
-      addExtraMatch,
-      deleteMatch,
-      regenFuture,
-      toggleCurrentLock,
-      setMatchStatus,
-      reassignCourt,
-      reassignHistoryCourt,
-      replaceHistorySlot,
-      setScore,
-      setWin,
-      clearScore,
-      setMatchShuttleUsed,
-      tapSlot,
-      isSel,
-      sel,
-      replaceSlot,
-      nextPoolFor,
-      waitQueue,
-      manualBenchPool,
-      now,
       resetGames,
-      endSession,
+      qrRef
+    }), tab === "session" && /*#__PURE__*/React.createElement(GameTab, {
+      sessionTabProps: {
+        players: activePlayers,
+        getP,
+        playersById,
+        history,
+        current,
+        roundNo,
+        courtCount,
+        setCourtCount,
+        courtLabels,
+        setCourtLabel,
+        mode,
+        setMode,
+        settings,
+        setSettings,
+        session,
+        setSession,
+        sessionHistory,
+        groupDefaults,
+        saveGroupDefault,
+        applyGroupDefaultsFor,
+        lockPairs,
+        addLockPair,
+        removeLockPair,
+        setHandPref,
+        genStart,
+        startGame,
+        endGame,
+        finishAndAdvance,
+        undoFinish,
+        nextCourt,
+        regenCourt,
+        fillCourt,
+        addExtraMatch,
+        deleteMatch,
+        regenFuture,
+        toggleCurrentLock,
+        setMatchStatus,
+        reassignCourt,
+        reassignHistoryCourt,
+        replaceHistorySlot,
+        setScore,
+        setWin,
+        clearScore,
+        setMatchShuttleUsed,
+        tapSlot,
+        isSel,
+        sel,
+        replaceSlot,
+        nextPoolFor,
+        waitQueue,
+        manualBenchPool,
+        now,
+        resetGames,
+        endSession,
+        changeLevelPreset,
+        setCustomLevels,
+        setQueuedSlot,
+        autoQueueNext,
+        clearQueuedNext,
+        swapQueuedTeams,
+        queueEligiblePool,
+        activeTournament,
+        tournamentHistory,
+        startTournament,
+        saveTournamentDraft,
+        tStartMatch,
+        tSetCourtLabel,
+        tSetCourtCount,
+        tSetScore,
+        tSetWin,
+        tClearScore,
+        tFinishMatch,
+        tEditAffectsDownstream,
+        tUndoMatch,
+        tPauseTournament,
+        tResumeTournament,
+        tMoveTeamDivision,
+        tGenerateGroupKnockout,
+        tGenerateSwissNextRound,
+        tCompleteTournament,
+        tArchiveOnly,
+        tDeleteTournament,
+        tUpdateProfile,
+        tSetRegistrationConfig,
+        tToggleTeamPaid,
+        tAddFinanceEntry,
+        tRemoveFinanceEntry,
+        openTournamentLogo,
+        openSessionPhoto,
+        clearSessionPhoto,
+        onOpenTournamentPrint: setTournamentPrintReport,
+        onGoToMembers: () => setTab("members")
+      },
+      summaryTabProps: {
+        players,
+        history,
+        current,
+        getP,
+        settings,
+        session,
+        tournamentHistory
+      }
+    }), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
+      settings,
+      setSettings,
+      rankingConfigs,
+      updateRankingConfig,
+      players,
+      sessionHistory,
       changeLevelPreset,
       setCustomLevels,
-      setQueuedSlot,
-      autoQueueNext,
-      clearQueuedNext,
-      swapQueuedTeams,
-      queueEligiblePool,
-      activeTournament,
+      deleteAllMembersData,
+      wipeAllAppData,
+      archivedPlayers,
+      restorePlayer,
+      groupDefaults,
+      session,
+      cloudClub,
+      setCloudClub,
+      deviceId,
+      updatePlayer,
       tournamentHistory,
-      startTournament,
-      saveTournamentDraft,
-      tStartMatch,
-      tSetCourtLabel,
-      tSetCourtCount,
-      tSetScore,
-      tSetWin,
-      tClearScore,
-      tFinishMatch,
-      tEditAffectsDownstream,
-      tUndoMatch,
-      tPauseTournament,
-      tResumeTournament,
-      tMoveTeamDivision,
-      tGenerateGroupKnockout,
-      tGenerateSwissNextRound,
-      tCompleteTournament,
-      tArchiveOnly,
-      tDeleteTournament,
-      tUpdateProfile,
-      tSetRegistrationConfig,
-      tToggleTeamPaid,
-      tAddFinanceEntry,
-      tRemoveFinanceEntry,
-      openTournamentLogo,
-      openSessionPhoto,
-      clearSessionPhoto,
+      rewardHistory,
+      playersById,
+      toggleHistoricalPaid,
+      deleteSessionHistory,
+      exportBackup,
+      validateBackupFile,
+      applyRestore,
+      undoRestore,
+      lastBackupAt: settings.lastBackupAt,
+      hasPreRestoreBackup,
+      autoBackups,
+      bootLog,
+      openHistPhoto,
+      clearHistPhoto,
+      addHistExpense,
+      updateHistExpense,
+      removeHistExpense,
       onOpenTournamentPrint: setTournamentPrintReport,
-      onGoToMembers: () => setTab("members")
-    },
-    summaryTabProps: {
+      autoOpen: settingsAutoOpen,
+      onAutoOpenConsumed: () => setSettingsAutoOpen(null)
+    }), tab === "finance" && /*#__PURE__*/React.createElement(FinanceTab, {
+      sessionHistory,
+      session,
+      setSession,
+      generalExpenses,
+      otherIncome,
+      addHistExpense,
+      updateHistExpense,
+      removeHistExpense,
+      addGeneralExpense,
+      updateGeneralExpense,
+      removeGeneralExpense,
+      addOtherIncome,
+      updateOtherIncome,
+      removeOtherIncome,
+      openHistPhoto,
+      clearHistPhoto,
+      discountCredits,
+      applyDiscountCredits,
+      cancelDiscountCredit,
       players,
       history,
       current,
-      getP,
       settings,
-      session,
-      tournamentHistory
-    }
-  }), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
-    settings,
-    setSettings,
-    rankingConfigs,
-    updateRankingConfig,
-    players,
-    sessionHistory,
-    changeLevelPreset,
-    setCustomLevels,
-    deleteAllMembersData,
-    wipeAllAppData,
-    archivedPlayers,
-    restorePlayer,
-    groupDefaults,
-    session,
-    cloudClub,
-    setCloudClub,
-    deviceId,
-    updatePlayer,
-    tournamentHistory,
-    rewardHistory,
-    playersById,
-    toggleHistoricalPaid,
-    deleteSessionHistory,
-    exportBackup,
-    validateBackupFile,
-    applyRestore,
-    undoRestore,
-    lastBackupAt: settings.lastBackupAt,
-    hasPreRestoreBackup,
-    autoBackups,
-    bootLog,
-    openHistPhoto,
-    clearHistPhoto,
-    addHistExpense,
-    updateHistExpense,
-    removeHistExpense,
-    onOpenTournamentPrint: setTournamentPrintReport,
-    autoOpen: settingsAutoOpen,
-    onAutoOpenConsumed: () => setSettingsAutoOpen(null)
-  }), tab === "finance" && /*#__PURE__*/React.createElement(FinanceTab, {
-    sessionHistory,
-    session,
-    setSession,
-    generalExpenses,
-    otherIncome,
-    addHistExpense,
-    updateHistExpense,
-    removeHistExpense,
-    addGeneralExpense,
-    updateGeneralExpense,
-    removeGeneralExpense,
-    addOtherIncome,
-    updateOtherIncome,
-    removeOtherIncome,
-    openHistPhoto,
-    clearHistPhoto,
-    discountCredits,
-    applyDiscountCredits,
-    cancelDiscountCredit,
-    players,
-    history,
-    current,
-    settings,
-    setSettings,
-    togglePaid,
-    setPDiscount,
-    applyWheelPrize,
-    endSession,
-    qrRef,
-    courtCount,
-    setCourtCount,
-    courtLabels,
-    rewardHistory,
-    onOpenFinancePrint: setFinancePrintReport,
-    activeTournament,
-    tournamentHistory,
-    playersById,
-    tTogglePlayerPaid,
-    tToggleHistoricalPlayerPaid,
-    gameMode: mode
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      position: "fixed",
-      bottom: 0,
-      left: 0,
-      right: 0,
-      background: T.surface,
-      borderTop: `1px solid ${T.border}`,
-      paddingBottom: "env(safe-area-inset-bottom)"
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      maxWidth: gameShellMaxWidth,
-      margin: "0 auto",
-      display: "flex"
-    }
-  }, /*#__PURE__*/React.createElement(TabBtn, {
-    active: tab === "members",
-    onClick: () => setTab("members"),
-    label: "\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19"
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 19,
-      lineHeight: "20px"
-    }
-  }, "\uD83D\uDC65")), /*#__PURE__*/React.createElement(TabBtn, {
-    active: tab === "session",
-    onClick: () => setTab("session"),
-    label: "\u0E40\u0E01\u0E21"
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 19,
-      lineHeight: "20px"
-    }
-  }, "\uD83C\uDFF8")), /*#__PURE__*/React.createElement(TabBtn, {
-    active: tab === "finance",
-    onClick: () => setTab("finance"),
-    label: "\u0E01\u0E32\u0E23\u0E40\u0E07\u0E34\u0E19"
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 19,
-      lineHeight: "20px"
-    }
-  }, "\uD83D\uDCB0")), /*#__PURE__*/React.createElement(TabBtn, {
-    active: tab === "settings",
-    onClick: () => setTab("settings"),
-    label: "\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32"
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 19,
-      lineHeight: "20px"
-    }
-  }, "\u2699\uFE0F")))));
+      setSettings,
+      togglePaid,
+      setPDiscount,
+      applyWheelPrize,
+      endSession,
+      qrRef,
+      courtCount,
+      setCourtCount,
+      courtLabels,
+      rewardHistory,
+      onOpenFinancePrint: setFinancePrintReport,
+      activeTournament,
+      tournamentHistory,
+      playersById,
+      tTogglePlayerPaid,
+      tToggleHistoricalPlayerPaid,
+      gameMode: mode
+    })), /*#__PURE__*/React.createElement("div", {
+      style: {
+        position: "fixed",
+        bottom: 0,
+        left: 0,
+        right: 0,
+        background: T.surface,
+        borderTop: `1px solid ${T.border}`,
+        paddingBottom: "env(safe-area-inset-bottom)"
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        maxWidth: gameShellMaxWidth,
+        margin: "0 auto",
+        display: "flex"
+      }
+    }, /*#__PURE__*/React.createElement(TabBtn, {
+      active: tab === "members",
+      onClick: () => setTab("members"),
+      label: "\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19"
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 19,
+        lineHeight: "20px"
+      }
+    }, "\uD83D\uDC65")), /*#__PURE__*/React.createElement(TabBtn, {
+      active: tab === "session",
+      onClick: () => setTab("session"),
+      label: "\u0E40\u0E01\u0E21"
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 19,
+        lineHeight: "20px"
+      }
+    }, "\uD83C\uDFF8")), /*#__PURE__*/React.createElement(TabBtn, {
+      active: tab === "finance",
+      onClick: () => setTab("finance"),
+      label: "\u0E01\u0E32\u0E23\u0E40\u0E07\u0E34\u0E19"
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 19,
+        lineHeight: "20px"
+      }
+    }, "\uD83D\uDCB0")), /*#__PURE__*/React.createElement(TabBtn, {
+      active: tab === "settings",
+      onClick: () => setTab("settings"),
+      label: "\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32"
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 19,
+        lineHeight: "20px"
+      }
+    }, "\u2699\uFE0F")))))
+  );
 }
 function TabBtn({
   active,
@@ -17240,7 +17286,7 @@ function BadQOnlineSheet({
       fontWeight: 800,
       marginBottom: 4
     }
-  }, "\u2601\uFE0F BadQ Online"), /*#__PURE__*/React.createElement("div", {
+  }, "\u2601\uFE0F BadQ Online (Beta)"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -17261,10 +17307,18 @@ function BadQOnlineSheet({
     style: {
       fontSize: 11.5,
       color: T.muted,
-      marginBottom: 14,
+      marginBottom: 2,
       lineHeight: 1.6
     }
-  }, "\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D BadQ Online \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E40\u0E1B\u0E34\u0E14\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19\u0E23\u0E30\u0E1A\u0E1A\u0E2D\u0E2D\u0E19\u0E44\u0E25\u0E19\u0E4C\u0E41\u0E25\u0E30 Member Portal"), !available && /*#__PURE__*/React.createElement("div", {
+  }, "\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D BadQ Online \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E40\u0E1B\u0E34\u0E14\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19\u0E23\u0E30\u0E1A\u0E1A\u0E2D\u0E2D\u0E19\u0E44\u0E25\u0E19\u0E4C\u0E41\u0E25\u0E30 Member Portal"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginBottom: 14,
+      lineHeight: 1.6,
+      fontStyle: "italic"
+    }
+  }, "\u0E1F\u0E35\u0E40\u0E08\u0E2D\u0E23\u0E4C\u0E2D\u0E2D\u0E19\u0E44\u0E25\u0E19\u0E4C\u0E01\u0E33\u0E25\u0E31\u0E07\u0E2D\u0E22\u0E39\u0E48\u0E23\u0E30\u0E2B\u0E27\u0E48\u0E32\u0E07\u0E1E\u0E31\u0E12\u0E19\u0E32 (Beta) \u2014 \u0E01\u0E32\u0E23\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19\u0E2D\u0E2D\u0E1F\u0E44\u0E25\u0E19\u0E4C\u0E1B\u0E01\u0E15\u0E34\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E23\u0E31\u0E1A\u0E1C\u0E25\u0E01\u0E23\u0E30\u0E17\u0E1A"), !available && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 12,
       borderRadius: 11,
@@ -18559,7 +18613,7 @@ function SessionTab(props) {
   // together with `current` on both a fresh genStart() and endSession(), so a brand-new/just-ended ก๊วน is
   // completely unaffected and still correctly shows the "not started yet" landing state.
   const started = current.length > 0 || history.length > 0;
-  const waitMin = p => Math.max(0, Math.floor((now - (p.waitingSince || now)) / 60000));
+  const waitMin = p => waitMinutesFrom(p.waitingSince, now); // v1.12.14: routed through the single canonical formula (see waitMinutesFrom)
   // Requirement 16: block starting a match with unfilled slots — surfaced as a disabled+dimmed button
   // rather than a silent no-op, plus a short hint line under the action row.
   const startReady = startReadyMatch;
@@ -27426,7 +27480,7 @@ function SettingsTab({
       margin: "16px 2px 8px"
     }
   }, children);
-  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionLabel, null, "\u2601\uFE0F BadQ Online"), /*#__PURE__*/React.createElement(BadQOnlineNavRow, {
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionLabel, null, "\u2601\uFE0F BadQ Online (Beta)"), /*#__PURE__*/React.createElement(BadQOnlineNavRow, {
     deviceId: deviceId,
     onOpen: () => setView("online")
   }), /*#__PURE__*/React.createElement(SectionLabel, null, "\u0E01\u0E32\u0E23\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32"), /*#__PURE__*/React.createElement(Row, {
@@ -33187,7 +33241,7 @@ function Overlay({
       background: T.bg,
       width: "100%",
       maxWidth: 520,
-      maxHeight: "88vh",
+      maxHeight: "88dvh",
       overflowY: "auto",
       borderRadius: "18px 18px 0 0",
       padding: "18px 18px calc(18px + env(safe-area-inset-bottom))",
@@ -33388,7 +33442,7 @@ function TeamSide({
     // (verified: both reduce to "longest-waited first").
     const teammateIds = arr.filter((pid, i) => i !== idx && pid);
     const opponentIds = ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean);
-    const rankedBench = rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap);
+    const rankedBench = rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap, now);
     const nameLong = p && p.name.length > 7;
     const nameFs = nameLong ? compact ? 12.5 : 13 : compact ? 14 : 15;
     const lvlFs = nameLong ? 11 : compact ? 12 : 13;
@@ -33640,15 +33694,24 @@ function PlayerPicker({
   anchorRect
 }) {
   const alignRight = align === "right";
+  const panelWidth = Math.max(anchorRect.width, 210);
+  // v1.12.14 (P0 responsive fix): the align="left" branch only ever clamped a MINIMUM 6px from the left
+  // edge — unlike the align="right" branch, it never clamped the panel back onto-screen from the RIGHT
+  // edge. Since this picker portals to document.body positioned from the slot's live on-screen rect inside
+  // a horizontally-scrollable match table, a Team A slot scrolled near the right edge of a narrow (320-
+  // 360px) screen could open a 210px+ panel that runs off the viewport, clipping player options. Clamp the
+  // left offset so `left + panelWidth` never exceeds the viewport width (minus the same 6px margin used on
+  // every other edge) — same technique the align="right" branch already used, just mirrored.
+  const leftPos = Math.min(Math.max(6, anchorRect.left), Math.max(6, window.innerWidth - panelWidth - 6));
   const panelStyle = {
     position: "fixed",
     top: anchorRect.bottom + 4,
     ...(alignRight ? {
       right: Math.max(6, window.innerWidth - anchorRect.right)
     } : {
-      left: Math.max(6, anchorRect.left)
+      left: leftPos
     }),
-    width: Math.max(anchorRect.width, 210),
+    width: panelWidth,
     background: T.surface,
     border: `1px solid ${T.border}`,
     borderRadius: 12,
@@ -33766,7 +33829,7 @@ function PlayerPicker({
         color: isResting ? "#d97706" : T.muted,
         marginTop: 1
       }
-    }, isResting ? "ขอพัก · " : "", "\u0E23\u0E2D ", Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000)), " \u0E19\u0E32\u0E17\u0E35 \xB7 \u0E40\u0E25\u0E48\u0E19 ", b.games || 0, " \u0E40\u0E01\u0E21")));
+    }, isResting ? "ขอพัก · " : "", "\u0E23\u0E2D ", waitMinutesFrom(b.waitingSince, now), " \u0E19\u0E32\u0E17\u0E35 \xB7 \u0E40\u0E25\u0E48\u0E19 ", b.games || 0, " \u0E40\u0E01\u0E21")));
   })()))), document.body);
 }
 
@@ -35764,7 +35827,7 @@ function BackupSettingsEditor({
       padding: 18,
       maxWidth: 360,
       width: "100%",
-      maxHeight: "85vh",
+      maxHeight: "85dvh",
       overflowY: "auto",
       boxSizing: "border-box"
     }
