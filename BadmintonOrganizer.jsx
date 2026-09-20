@@ -7104,6 +7104,17 @@ export default function App() {
   // (so it can be undone), then overwrites everything. "mergeHistory" only adds session-history entries
   // that aren't already present (by stable id) — current players/session are left untouched.
   const applyRestore = async (restoreMode, backup) => {
+   // v1.12.13 (P0 IMPORT/RESTORE MODAL-STUCK HOTFIX): the entire body below used to run with no top-level
+   // guard — several of the normalization calls it makes (normTournament/normCloudClub/normRankingConfigs/
+   // syncCourtLabels/inferAdvancedFeatureFlags on a real-world backup file's not-fully-predictable shape)
+   // could throw, and an exception thrown from an async function makes its returned Promise REJECT rather
+   // than resolve. confirmDoRestore's `await applyRestore(...)` had no try/catch of its own, so a reject
+   // here became a silently-swallowed unhandled promise rejection: setBusy(false)/setPreview(null) never
+   // ran, and the "พบข้อมูลสำรอง" preview modal (gated purely on `preview` staying truthy) never closed —
+   // with no error shown at all, exactly the reported "is it stuck, did it work?" symptom. Wrapping the
+   // whole function in try/catch guarantees it ALWAYS resolves to a plain {ok, reason} object the caller
+   // can act on, never rejects. See confirmDoRestore's own v1.12.13 comment for the matching caller-side fix.
+   try {
     const data = backup.data;
     if (restoreMode === "replace") {
       try {
@@ -7180,6 +7191,15 @@ export default function App() {
       let verified = false, verifyReason = "write-failed";
       try {
         await window.storage.set("bg-v11", restoredJson);
+        // v1.12.13 (Import/Restore + P0 offline persistence hotfix coordination): resync Last-Known-Good to
+        // the SAME just-imported snapshot, best-effort, right alongside the primary write — mirrors exactly
+        // what the boot waterfall itself does after every recovery (see Step 5's own comment). Without this,
+        // LKG would keep holding whatever PRE-import state it last saw; if primary/mirror ever later desync
+        // (the exact class of bug this hotfix targets), the player-loss-guard could fall back to that STALE
+        // pre-import LKG instead of the freshly-imported data — silently undoing a successful import after a
+        // later force-close. A failure here never fails the import itself (LKG is a fallback copy, not the
+        // source of truth) — this exact table already tolerates that (see the boot waterfall's own writes).
+        try { await window.storage.set(LKG_KEY, restoredJson); } catch (e) {}
         const readBack = await window.storage.get("bg-v11");
         const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
         const expect = { history: rHistory.length, current: rCurrent.length, future: rFuture.length, sessionHistory: rSessionHistory.length, tournamentHistory: rTournamentHistory.length, players: rPlayers.length };
@@ -7190,33 +7210,61 @@ export default function App() {
       } catch (e) { verifyReason = "exception: " + (e?.message || e); }
       return { ok: verified, reason: verified ? null : verifyReason };
     } else if (restoreMode === "mergeHistory") {
-      setSessionHistory((prev) => {
-        const existing = new Set(prev.map((s) => s.id));
-        const toAdd = (data.sessionHistory || []).filter((s) => !existing.has(s.id)); // stable-id dedup — never duplicate an existing archived session
-        return [...prev, ...toAdd];
-      });
-      setTournamentHistory((prev) => {
-        const existing = new Set(prev.map((t) => t.id));
-        const toAdd = (data.tournamentHistory || []).filter((t) => !existing.has(t.id));
-        return [...prev, ...toAdd];
-      });
-      setDiscountCredits((prev) => {
-        const existing = new Set(prev.map((c) => c.id));
-        const toAdd = (data.discountCredits || []).filter((c) => !existing.has(c.id)); // stable-id dedup — never duplicate an existing credit
-        return [...prev, ...toAdd.map(normDiscountCredit)];
-      });
+      // v1.12.13 (Import/Restore modal-stuck hotfix + persistence coordination): this branch used to only
+      // call functional-updater setters and return `{ok:true}` immediately, with NO persisted write of its
+      // own — durability relied entirely on the ambient save effect picking the change up later. Per the
+      // explicit "the imported state must be saved during the import flow itself... do not rely on iOS
+      // pagehide" requirement, this now computes the merged arrays as plain values (so the exact same
+      // values can be both set into React state AND persisted+verified immediately, never diverging — the
+      // same discipline the "replace" branch above already used since v1.11.76) rather than functional
+      // updaters whose result isn't otherwise observable here.
+      const existingSH = new Set(sessionHistory.map((s) => s.id));
+      const mergedSessionHistory = [...sessionHistory, ...(data.sessionHistory || []).filter((s) => !existingSH.has(s.id))]; // stable-id dedup — never duplicate an existing archived session
+      const existingTH = new Set(tournamentHistory.map((t) => t.id));
+      const mergedTournamentHistory = [...tournamentHistory, ...(data.tournamentHistory || []).filter((t) => !existingTH.has(t.id))];
+      const existingDC = new Set(discountCredits.map((c) => c.id));
+      const mergedDiscountCredits = [...discountCredits, ...(data.discountCredits || []).filter((c) => !existingDC.has(c.id)).map(normDiscountCredit)]; // stable-id dedup — never duplicate an existing credit
       // v1.11.34: same stable-id dedup merge for Reward History — a "merge history" restore should bring
       // in past reward wins too, never duplicate ones already present.
-      setRewardHistory((prev) => {
-        const existing = new Set(prev.map((r) => r.id));
-        const toAdd = (data.rewardHistory || []).filter((r) => !existing.has(r.id));
-        return [...prev, ...toAdd];
+      const existingRH = new Set(rewardHistory.map((r) => r.id));
+      const mergedRewardHistory = [...rewardHistory, ...(data.rewardHistory || []).filter((r) => !existingRH.has(r.id))];
+
+      setSessionHistory(mergedSessionHistory);
+      setTournamentHistory(mergedTournamentHistory);
+      setDiscountCredits(mergedDiscountCredits);
+      setRewardHistory(mergedRewardHistory);
+
+      const restoredSavedAt = Date.now();
+      lastKnownSavedAtRef.current = restoredSavedAt;
+      const restoredJson = JSON.stringify({
+        players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs,
+        sessionHistory: mergedSessionHistory, generalExpenses, otherIncome, discountCredits: mergedDiscountCredits,
+        rewardHistory: mergedRewardHistory, activeTournament, tournamentHistory: mergedTournamentHistory,
+        groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt,
+        savedAt: restoredSavedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null,
       });
-      // v1.11.76: mergeHistory only ever appends (functional updaters, stable-id deduped) — it can't
-      // regress existing data by construction, so it keeps returning a plain success unchanged.
-      return { ok: true, reason: null };
+      let verified = false, verifyReason = "write-failed";
+      try {
+        await window.storage.set("bg-v11", restoredJson);
+        try { await window.storage.set(LKG_KEY, restoredJson); } catch (e) {} // best-effort, see "replace" branch's own comment above
+        const readBack = await window.storage.get("bg-v11");
+        const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
+        const expect = { sessionHistory: mergedSessionHistory.length, tournamentHistory: mergedTournamentHistory.length, discountCredits: mergedDiscountCredits.length, rewardHistory: mergedRewardHistory.length };
+        const got = persisted ? { sessionHistory: (persisted.sessionHistory||[]).length, tournamentHistory: (persisted.tournamentHistory||[]).length, discountCredits: (persisted.discountCredits||[]).length, rewardHistory: (persisted.rewardHistory||[]).length } : null;
+        verified = !!got && Object.keys(expect).every((k) => expect[k] === got[k]);
+        if (!verified) verifyReason = got ? "count-mismatch" : "read-back-empty";
+        pushBootLog({ event: verified ? "restore-verified" : "restore-verify-failed", fromSavedAt: null, toSavedAt: restoredSavedAt, playerCount: players.length, sessionHistoryCount: mergedSessionHistory.length });
+      } catch (e) { verifyReason = "exception: " + (e?.message || e); }
+      return { ok: verified, reason: verified ? null : verifyReason };
     }
     return { ok: true, reason: null };
+   } catch (e) {
+    // v1.12.13 (P0 import/restore modal-stuck hotfix): see this function's own opening comment — ANY
+    // unexpected exception anywhere above resolves here instead of rejecting, so the caller (confirmDoRestore)
+    // always gets a normal {ok:false, reason} it can show to the user and recover from, never an unhandled
+    // promise rejection that leaves the preview modal stuck open with no explanation.
+    return { ok: false, reason: "exception: " + ((e && e.message) || e) };
+   }
   };
   // v1.11.5: "ล้างข้อมูลทั้งหมด" (Settings → ความเป็นส่วนตัวและข้อมูล) — full factory reset. Reuses the
   // EXISTING applyRestore("replace", ...) path instead of a new deletion code path, so this destructive
@@ -9995,6 +10043,27 @@ function SessionTab(props) {
     // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
     const noCourt = !done && st === "next" && m.court == null;
     const canStart = !done && st === "next" && startReady(m) && !busyCourt && !noCourt;
+    // v1.12.13 (Court Dropdown Availability): for a NOT-YET-STARTED ("next") row, the court dropdown must
+    // only ever offer courts genuinely free right now — never one currently occupied by a live
+    // (playing/paused) match, and never one another "next" row has already claimed. This deliberately
+    // removes the old "assign a next row onto a still-playing court to queue behind it" prep-ahead-via-
+    // dropdown capability (v1.11.29/39's `busyCourt`) per explicit request — `busyCourt` itself is left
+    // completely unchanged above (still gates the start button/เกมต่อไป badge exactly as before) since
+    // that's a separate concern from what the SELECT may newly offer. Rows that are NOT "next" (playing/
+    // paused/done) keep the full, unfiltered court list exactly as before (v1.11.39/58 intentionally never
+    // touch a live/historical row's own already-occupied or already-recorded court).
+    const takenCourts = !done && st === "next"
+      ? new Set(current.filter((c) => c.id !== m.id && c.court != null && (c.status === "playing" || c.status === "paused" || c.status === "next")).map((c) => c.court))
+      : new Set();
+    const availableCourtNumbers = Array.from({ length: courtCount }, (_, i) => i + 1).filter((c) => !takenCourts.has(c));
+    // A previously-picked court that has SINCE become occupied/claimed elsewhere (by a match that started,
+    // or another next row grabbing it first) before THIS match started must never be silently kept as if
+    // nothing happened — flagged so the select can show an explicit conflict state instead (spec: "clear it
+    // or show an explicit conflict state according to the existing architecture" — the existing
+    // busyCourt-driven "เกมต่อไป" badge already IS that architecture for the live-occupant case; this
+    // extends the same idea to the select itself, and to the other-next-row case).
+    const courtNowConflicting = !done && st === "next" && m.court != null && takenCourts.has(m.court);
+    const showNoCourtAvailable = !done && st === "next" && m.court == null && availableCourtNumbers.length === 0;
     // v1.12.1 (Manual Matchmaking — spec sections 1,3,4,5,6): constraint warnings (Lock Pair /
     // ไม่อยากคู่ / ไม่อยากเจอ) and recent teammate/opponent warnings, both WARNING ONLY — never affect
     // canStart/startReady below (constraints are warnings, organizer choice stays authoritative).
@@ -10034,24 +10103,41 @@ function SessionTab(props) {
       <div key={m.id}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`, background: rowBg, minWidth: TABLE_MIN_WIDTH }}>
           <span style={{ width: COLW.no, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>{String(no).padStart(2, "0")}</span>
-          <select
-            value={m.court == null ? "" : m.court}
-            onChange={(e) => reassign(m.id, e.target.value === "" ? null : Number(e.target.value))}
-            style={{ width: COLW.court, flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "6px 4px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: m.court == null ? T.muted : T.text }}
-          >
-            {/* v1.11.36: a freshly-added upcoming game (see addExtraMatch) starts with no court at all —
-                this placeholder is what actually renders as "เลือกสนาม" until the organizer assigns one.
-                v1.11.58 (Section 2): also offered on any NOT-YET-STARTED ("next") row even after a court has
-                already been picked, so the organizer can revert back to "ยังไม่แน่ใจ" from the dropdown
-                itself instead of it only ever appearing before the first pick. Deliberately excluded for
-                กำลังเล่น/พักเกม (a physically-occupying match must never lose its court label — see
-                reassignCourt's v1.11.39 comment) and for finished/history rows (a factual past record, not
-                a "to be decided" one) — this only ever appears while st === "next". */}
-            {(m.court == null || (!done && st === "next")) && <option value="">เลือกสนาม</option>}
-            {Array.from({ length: courtCount }, (_, i) => i + 1).map((c) => (
-              <option key={c} value={c}>สนาม {courtLabelFor(courtLabels, c)}</option>
-            ))}
-          </select>
+          {/* v1.12.13 (Court Dropdown Availability): when a "next" row has no court yet AND every court is
+              currently taken (playing/paused, or already claimed by another next row), show an explicit
+              "รอสนามว่าง" state instead of an oddly-empty selectable dropdown. */}
+          {showNoCourtAvailable ? (
+            <div style={{ width: COLW.court, flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "6px 2px", borderRadius: 8, border: `1px dashed ${T.border}`, background: T.surface2, color: T.muted, textAlign: "center" }}>
+              รอสนามว่าง
+            </div>
+          ) : (
+            <select
+              value={m.court == null ? "" : m.court}
+              onChange={(e) => reassign(m.id, e.target.value === "" ? null : Number(e.target.value))}
+              style={{ width: COLW.court, flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "6px 4px", borderRadius: 8, border: `1px solid ${courtNowConflicting ? "#c0392b" : T.border}`, background: T.surface2, color: m.court == null ? T.muted : (courtNowConflicting ? "#c0392b" : T.text) }}
+            >
+              {/* v1.11.36: a freshly-added upcoming game (see addExtraMatch) starts with no court at all —
+                  this placeholder is what actually renders as "เลือกสนาม" until the organizer assigns one.
+                  v1.11.58 (Section 2): also offered on any NOT-YET-STARTED ("next") row even after a court has
+                  already been picked, so the organizer can revert back to "ยังไม่แน่ใจ" from the dropdown
+                  itself instead of it only ever appearing before the first pick. Deliberately excluded for
+                  กำลังเล่น/พักเกม (a physically-occupying match must never lose its court label — see
+                  reassignCourt's v1.11.39 comment) and for finished/history rows (a factual past record, not
+                  a "to be decided" one) — this only ever appears while st === "next". */}
+              {(m.court == null || (!done && st === "next")) && <option value="">เลือกสนาม</option>}
+              {/* v1.12.13: for a "next" row, only genuinely-free courts are offered (see availableCourtNumbers
+                  above); playing/paused/done rows keep the full, unfiltered 1..courtCount list unchanged. */}
+              {(!done && st === "next" ? availableCourtNumbers : Array.from({ length: courtCount }, (_, i) => i + 1)).map((c) => (
+                <option key={c} value={c}>สนาม {courtLabelFor(courtLabels, c)}</option>
+              ))}
+              {/* v1.12.13: the row's OWN currently-selected court is always kept visible even if it has since
+                  become conflicting (see courtNowConflicting) — never silently hidden out from under an
+                  existing selection, per spec's explicit conflict-state requirement. */}
+              {courtNowConflicting && !availableCourtNumbers.includes(m.court) && (
+                <option value={m.court}>สนาม {courtLabelFor(courtLabels, m.court)} (ถูกใช้แล้ว)</option>
+              )}
+            </select>
+          )}
           <div style={{ width: COLW.team, flexShrink: 0 }}>
             <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
           </div>
@@ -16283,6 +16369,14 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
   const fileRef = useRef();
+  // v1.12.13 (P0 import/restore modal-stuck hotfix): a plain ref (not state) guard against double-submit —
+  // mirrors the existing submittingRef pattern already used elsewhere in this file (MembershipPaymentSheet).
+  // A ref is required rather than checking `busy` alone because `busy` is set via setState, which is async/
+  // batched — two taps arriving in the same event-loop turn (or during React's own re-render) could both
+  // read `busy === false` before either setter commits. The ref updates synchronously the instant the first
+  // tap is handled, so a second tap arriving before that render even reflects the new `busy` value is still
+  // correctly rejected.
+  const submittingRestoreRef = useRef(false);
 
   const doExport = async () => {
     setBusy(true); setSuccessMsg(null); setImportError(null);
@@ -16305,19 +16399,40 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
   };
 
   const confirmDoRestore = async () => {
-    setConfirmRestore(false); setBusy(true);
+    // v1.12.13 (P0 import/restore modal-stuck hotfix, double-submit protection): see submittingRestoreRef's
+    // own comment above for why this must be a ref check, not a `busy` state check.
+    if (submittingRestoreRef.current) return;
+    submittingRestoreRef.current = true;
+    setConfirmRestore(false); setBusy(true); setImportError(null);
     const stats = backupStats(preview.data);
-    const result = await applyRestore(restoreMode, preview);
-    setBusy(false);
-    // v1.11.76 (P0 fix, req 6): never claim success if applyRestore's own persisted-count verification
-    // failed — surface a clear error instead so the organizer knows to try again / not trust the screen.
-    if (result && result.ok === false) {
-      setSuccessMsg(null);
-      setImportError("__verify_failed__:นำเข้าข้อมูลไม่สำเร็จสมบูรณ์ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง (" + (result.reason || "unknown") + ")");
-      return;
+    try {
+      // v1.12.13: applyRestore itself is now guaranteed to always resolve (never reject) — see its own
+      // top-level try/catch — but this call is still wrapped defensively so a truly unexpected failure
+      // (e.g. `preview`/`preview.data` itself being unexpectedly null) can never again leave `busy`/the
+      // preview modal stuck with no explanation, closing the exact class of bug this hotfix targets.
+      const result = await applyRestore(restoreMode, preview);
+      // v1.11.76 (P0 fix, req 6): never claim success if applyRestore's own persisted-count verification
+      // failed — surface a clear error instead so the organizer knows to try again / not trust the screen.
+      // v1.12.13: ON FAILURE the preview modal is deliberately left OPEN (`preview` is not cleared) so the
+      // user can retry the SAME backup or cancel — the pre-restore safety snapshot taken at the top of
+      // applyRestore's "replace" branch is untouched by a failed attempt, so nothing destructive was
+      // committed and a retry is always safe.
+      if (!result || result.ok === false) {
+        setSuccessMsg(null);
+        setImportError("__verify_failed__:นำเข้าข้อมูลไม่สำเร็จ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง (" + ((result && result.reason) || "unknown") + ")");
+        return;
+      }
+      // v1.12.13: ON SUCCESS — clear ALL temporary import state (preview/mode/pending), close the modal,
+      // and show the success banner on the underlying "ข้อมูลและการสำรอง" page (BackupSettingsEditor itself
+      // IS that page's content — see SettingsTab's `view === "backup"` Overlay — so simply closing this
+      // component's own preview/confirm modals already returns the user there with nothing further to do).
+      setSuccessMsg({ kind: "import", stats });
+      setPreview(null);
+      setRestoreMode("replace"); // reset for next time — reopening Import must never silently reuse this backup/mode (spec Test V)
+    } finally {
+      setBusy(false);
+      submittingRestoreRef.current = false;
     }
-    setSuccessMsg({ kind: "import", stats });
-    setPreview(null);
   };
 
   const doUndo = async () => {
@@ -16462,7 +16577,12 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       </div>
 
       {preview && (
-        <div onClick={() => setPreview(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+        // v1.12.13 (P0 import/restore modal-stuck hotfix, double-submit protection): while `busy` (an
+        // import is actually in flight — confirmDoRestore already closed the confirmRestore dialog above
+        // this one, which is why this modal is what's visibly on screen for the whole async duration), the
+        // backdrop no longer dismisses the modal — there is a real in-flight write underneath and no
+        // cancellation mechanism, so letting the user "close" it here would be misleading, not safe.
+        <div onClick={() => { if (!busy) setPreview(null); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 360, width: "100%", maxHeight: "85vh", overflowY: "auto", boxSizing: "border-box" }}>
             <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>พบข้อมูลสำรอง</div>
             <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 2 }}>วันที่สำรอง: {fmtThaiDateTime(preview.exportedAt)}</div>
@@ -16495,24 +16615,27 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
                 <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>เพิ่มเฉพาะประวัติก๊วนที่ยังไม่มี ไม่แตะผู้เล่น/ก๊วนปัจจุบัน (กันซ้ำอัตโนมัติ)</div>
               </button>
             </div>
+            {/* v1.12.13: while `busy`, both buttons disable and the confirm button shows an explicit
+                loading label — prevents a duplicate tap and makes the in-flight state unambiguous instead
+                of silently doing nothing (the reported bug's exact "did it succeed, did it fail?" symptom). */}
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setPreview(null)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={() => setConfirmRestore(true)} style={btnPrimary}>นำเข้าข้อมูล</button>
+              <button disabled={busy} onClick={() => setPreview(null)} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}>ยกเลิก</button>
+              <button disabled={busy} onClick={() => setConfirmRestore(true)} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังนำเข้า..." : "นำเข้าข้อมูล"}</button>
             </div>
           </div>
         </div>
       )}
 
       {confirmRestore && (
-        <div onClick={() => setConfirmRestore(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 71, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+        <div onClick={() => { if (!busy) setConfirmRestore(false); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 71, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
             <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>นำเข้าข้อมูลสำรอง?</div>
             <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>
               {restoreMode === "replace" ? "ระบบจะสำรองข้อมูลปัจจุบันไว้ก่อนดำเนินการ" : "จะเพิ่มเฉพาะประวัติก๊วนที่ยังไม่มี ไม่กระทบผู้เล่น/ก๊วนปัจจุบัน"}
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmRestore(false)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={confirmDoRestore} style={btnPrimary}>นำเข้าข้อมูล</button>
+              <button disabled={busy} onClick={() => setConfirmRestore(false)} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}>ยกเลิก</button>
+              <button disabled={busy} onClick={confirmDoRestore} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังนำเข้า..." : "นำเข้าข้อมูล"}</button>
             </div>
           </div>
         </div>

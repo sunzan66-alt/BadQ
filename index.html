@@ -11264,10 +11264,213 @@ function App() {
   // (so it can be undone), then overwrites everything. "mergeHistory" only adds session-history entries
   // that aren't already present (by stable id) — current players/session are left untouched.
   const applyRestore = async (restoreMode, backup) => {
-    const data = backup.data;
-    if (restoreMode === "replace") {
-      try {
-        const snapshot = buildBackupPayload({
+    // v1.12.13 (P0 IMPORT/RESTORE MODAL-STUCK HOTFIX): the entire body below used to run with no top-level
+    // guard — several of the normalization calls it makes (normTournament/normCloudClub/normRankingConfigs/
+    // syncCourtLabels/inferAdvancedFeatureFlags on a real-world backup file's not-fully-predictable shape)
+    // could throw, and an exception thrown from an async function makes its returned Promise REJECT rather
+    // than resolve. confirmDoRestore's `await applyRestore(...)` had no try/catch of its own, so a reject
+    // here became a silently-swallowed unhandled promise rejection: setBusy(false)/setPreview(null) never
+    // ran, and the "พบข้อมูลสำรอง" preview modal (gated purely on `preview` staying truthy) never closed —
+    // with no error shown at all, exactly the reported "is it stuck, did it work?" symptom. Wrapping the
+    // whole function in try/catch guarantees it ALWAYS resolves to a plain {ok, reason} object the caller
+    // can act on, never rejects. See confirmDoRestore's own v1.12.13 comment for the matching caller-side fix.
+    try {
+      const data = backup.data;
+      if (restoreMode === "replace") {
+        try {
+          const snapshot = buildBackupPayload({
+            players,
+            history,
+            current,
+            future,
+            roundNo,
+            courtCount,
+            courtLabels,
+            mode,
+            settings,
+            session,
+            lockPairs,
+            sessionHistory,
+            activeTournament,
+            tournamentHistory,
+            generalExpenses,
+            otherIncome,
+            discountCredits,
+            rewardHistory,
+            groupDefaults,
+            rankingConfigs,
+            cloudClub,
+            lastIntentionalPlayerWipeAt
+          });
+          await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
+          setHasPreRestoreBackup(true);
+        } catch (e) {}
+        // v1.11.76 (P0 fix, req 5/6): normalize into local consts ONCE — these are both what gets set into
+        // React state below AND what gets persisted+verified immediately after, so the two can never diverge.
+        const rPlayers = data.players.map(normPlayer);
+        const rHistory = data.history,
+          rCurrent = data.current,
+          rFuture = data.future;
+        // v1.12.1 (UX restructure — Advanced Feature migration): a restored backup goes through the SAME
+        // inferAdvancedFeatureFlags logic as normal boot (applyPersistedState) — restoring an old backup that
+        // predates the Tournament/Reward toggles must not silently disable a feature that backup's own
+        // tournamentHistory/rewardHistory shows was actually in use.
+        const rFeatureFlags = inferAdvancedFeatureFlags(data.settings, data.activeTournament, data.tournamentHistory, data.rewardHistory);
+        const rSettings = normSettings({
+          ...data.settings,
+          tournamentEnabled: rFeatureFlags.tournamentEnabled,
+          wheelEnabled: rFeatureFlags.wheelEnabled
+        });
+        const rSession = normSession(data.session);
+        const rSessionHistory = data.sessionHistory,
+          rTournamentHistory = data.tournamentHistory || [];
+        const rGeneralExpenses = data.generalExpenses || [],
+          rOtherIncome = data.otherIncome || [];
+        const rDiscountCredits = (data.discountCredits || []).map(normDiscountCredit);
+        const rRewardHistory = data.rewardHistory || [];
+        const rGroupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {};
+        const rRankingConfigs = normRankingConfigs(data.rankingConfigs);
+        const rCloudClub = normCloudClub(data.cloudClub);
+        const rCourtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
+        const rActiveTournament = normTournament(data.activeTournament) || null;
+        // v1.12.13 (P0 offline persistence hotfix): applyRestore("replace", ...) is ONLY ever invoked after
+        // an explicit, confirmed user action (a manual "แทนที่ทั้งหมด" backup restore, or wipeAllAppData's
+        // factory reset below) — so a replace that lands on zero players is, by definition, an intentional
+        // wipe, not an accident. Stamping it here (rather than only inside wipeAllAppData/
+        // deleteAllMembersData) covers BOTH callers uniformly. A replace that brings in a real roster clears
+        // any stale prior marker — there is no wipe to explain once real data is back.
+        const rLastIntentionalPlayerWipeAt = rPlayers.length === 0 ? Date.now() : null;
+        setLastIntentionalPlayerWipeAt(rLastIntentionalPlayerWipeAt);
+        setPlayers(rPlayers);
+        setHistory(rHistory);
+        setCurrent(rCurrent);
+        setFuture(rFuture);
+        setRoundNo(data.roundNo);
+        setCourtCount(data.courtCount);
+        setCourtLabelsRaw(rCourtLabels);
+        setMode(data.mode);
+        setSettings(rSettings);
+        setSession(rSession);
+        setLockPairs(data.lockPairs);
+        setSessionHistory(rSessionHistory);
+        setActiveTournament(rActiveTournament);
+        setTournamentHistory(rTournamentHistory);
+        setGeneralExpenses(rGeneralExpenses);
+        setOtherIncome(rOtherIncome);
+        setDiscountCredits(rDiscountCredits);
+        setRewardHistory(rRewardHistory); // v1.11.34
+        setGroupDefaults(rGroupDefaults);
+        setRankingConfigs(rRankingConfigs); // v1.11.68
+        setCloudClub(rCloudClub); // v1.11.35
+        // v1.11.76 (P0 fix, req 5): establish this restore as the current authoritative generation RIGHT NOW
+        // — bumping lastKnownSavedAtRef synchronously means no stale record already sitting in storage (or
+        // written moments from now by another instance) can ever look "newer" than what we just restored,
+        // closing the exact race the diagnostic traced. Then persist it directly (do not just wait for the
+        // ambient save effect to eventually get to it) and verify the write actually landed before reporting
+        // success (req 6) — never trust "the setters ran" as proof the data survived.
+        const restoredSavedAt = Date.now();
+        lastKnownSavedAtRef.current = restoredSavedAt;
+        const restoredJson = JSON.stringify({
+          players: rPlayers,
+          history: rHistory,
+          current: rCurrent,
+          future: rFuture,
+          roundNo: data.roundNo,
+          courtCount: data.courtCount,
+          courtLabels: rCourtLabels,
+          mode: data.mode,
+          settings: rSettings,
+          session: rSession,
+          lockPairs: data.lockPairs,
+          sessionHistory: rSessionHistory,
+          generalExpenses: rGeneralExpenses,
+          otherIncome: rOtherIncome,
+          discountCredits: rDiscountCredits,
+          rewardHistory: rRewardHistory,
+          activeTournament: rActiveTournament,
+          tournamentHistory: rTournamentHistory,
+          groupDefaults: rGroupDefaults,
+          rankingConfigs: rRankingConfigs,
+          cloudClub: rCloudClub,
+          lastIntentionalPlayerWipeAt: rLastIntentionalPlayerWipeAt,
+          savedAt: restoredSavedAt,
+          pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null
+        });
+        let verified = false,
+          verifyReason = "write-failed";
+        try {
+          await window.storage.set("bg-v11", restoredJson);
+          // v1.12.13 (Import/Restore + P0 offline persistence hotfix coordination): resync Last-Known-Good to
+          // the SAME just-imported snapshot, best-effort, right alongside the primary write — mirrors exactly
+          // what the boot waterfall itself does after every recovery (see Step 5's own comment). Without this,
+          // LKG would keep holding whatever PRE-import state it last saw; if primary/mirror ever later desync
+          // (the exact class of bug this hotfix targets), the player-loss-guard could fall back to that STALE
+          // pre-import LKG instead of the freshly-imported data — silently undoing a successful import after a
+          // later force-close. A failure here never fails the import itself (LKG is a fallback copy, not the
+          // source of truth) — this exact table already tolerates that (see the boot waterfall's own writes).
+          try {
+            await window.storage.set(LKG_KEY, restoredJson);
+          } catch (e) {}
+          const readBack = await window.storage.get("bg-v11");
+          const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
+          const expect = {
+            history: rHistory.length,
+            current: rCurrent.length,
+            future: rFuture.length,
+            sessionHistory: rSessionHistory.length,
+            tournamentHistory: rTournamentHistory.length,
+            players: rPlayers.length
+          };
+          const got = persisted ? {
+            history: (persisted.history || []).length,
+            current: (persisted.current || []).length,
+            future: (persisted.future || []).length,
+            sessionHistory: (persisted.sessionHistory || []).length,
+            tournamentHistory: (persisted.tournamentHistory || []).length,
+            players: (persisted.players || []).length
+          } : null;
+          verified = !!got && Object.keys(expect).every(k => expect[k] === got[k]);
+          if (!verified) verifyReason = got ? "count-mismatch" : "read-back-empty";
+          pushBootLog({
+            event: verified ? "restore-verified" : "restore-verify-failed",
+            fromSavedAt: null,
+            toSavedAt: restoredSavedAt,
+            playerCount: expect.players,
+            sessionHistoryCount: expect.sessionHistory
+          });
+        } catch (e) {
+          verifyReason = "exception: " + (e?.message || e);
+        }
+        return {
+          ok: verified,
+          reason: verified ? null : verifyReason
+        };
+      } else if (restoreMode === "mergeHistory") {
+        // v1.12.13 (Import/Restore modal-stuck hotfix + persistence coordination): this branch used to only
+        // call functional-updater setters and return `{ok:true}` immediately, with NO persisted write of its
+        // own — durability relied entirely on the ambient save effect picking the change up later. Per the
+        // explicit "the imported state must be saved during the import flow itself... do not rely on iOS
+        // pagehide" requirement, this now computes the merged arrays as plain values (so the exact same
+        // values can be both set into React state AND persisted+verified immediately, never diverging — the
+        // same discipline the "replace" branch above already used since v1.11.76) rather than functional
+        // updaters whose result isn't otherwise observable here.
+        const existingSH = new Set(sessionHistory.map(s => s.id));
+        const mergedSessionHistory = [...sessionHistory, ...(data.sessionHistory || []).filter(s => !existingSH.has(s.id))]; // stable-id dedup — never duplicate an existing archived session
+        const existingTH = new Set(tournamentHistory.map(t => t.id));
+        const mergedTournamentHistory = [...tournamentHistory, ...(data.tournamentHistory || []).filter(t => !existingTH.has(t.id))];
+        const existingDC = new Set(discountCredits.map(c => c.id));
+        const mergedDiscountCredits = [...discountCredits, ...(data.discountCredits || []).filter(c => !existingDC.has(c.id)).map(normDiscountCredit)]; // stable-id dedup — never duplicate an existing credit
+        // v1.11.34: same stable-id dedup merge for Reward History — a "merge history" restore should bring
+        // in past reward wins too, never duplicate ones already present.
+        const existingRH = new Set(rewardHistory.map(r => r.id));
+        const mergedRewardHistory = [...rewardHistory, ...(data.rewardHistory || []).filter(r => !existingRH.has(r.id))];
+        setSessionHistory(mergedSessionHistory);
+        setTournamentHistory(mergedTournamentHistory);
+        setDiscountCredits(mergedDiscountCredits);
+        setRewardHistory(mergedRewardHistory);
+        const restoredSavedAt = Date.now();
+        lastKnownSavedAtRef.current = restoredSavedAt;
+        const restoredJson = JSON.stringify({
           players,
           history,
           current,
@@ -11279,184 +11482,72 @@ function App() {
           settings,
           session,
           lockPairs,
-          sessionHistory,
-          activeTournament,
-          tournamentHistory,
+          sessionHistory: mergedSessionHistory,
           generalExpenses,
           otherIncome,
-          discountCredits,
-          rewardHistory,
+          discountCredits: mergedDiscountCredits,
+          rewardHistory: mergedRewardHistory,
+          activeTournament,
+          tournamentHistory: mergedTournamentHistory,
           groupDefaults,
           rankingConfigs,
           cloudClub,
-          lastIntentionalPlayerWipeAt
+          lastIntentionalPlayerWipeAt,
+          savedAt: restoredSavedAt,
+          pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null
         });
-        await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
-        setHasPreRestoreBackup(true);
-      } catch (e) {}
-      // v1.11.76 (P0 fix, req 5/6): normalize into local consts ONCE — these are both what gets set into
-      // React state below AND what gets persisted+verified immediately after, so the two can never diverge.
-      const rPlayers = data.players.map(normPlayer);
-      const rHistory = data.history,
-        rCurrent = data.current,
-        rFuture = data.future;
-      // v1.12.1 (UX restructure — Advanced Feature migration): a restored backup goes through the SAME
-      // inferAdvancedFeatureFlags logic as normal boot (applyPersistedState) — restoring an old backup that
-      // predates the Tournament/Reward toggles must not silently disable a feature that backup's own
-      // tournamentHistory/rewardHistory shows was actually in use.
-      const rFeatureFlags = inferAdvancedFeatureFlags(data.settings, data.activeTournament, data.tournamentHistory, data.rewardHistory);
-      const rSettings = normSettings({
-        ...data.settings,
-        tournamentEnabled: rFeatureFlags.tournamentEnabled,
-        wheelEnabled: rFeatureFlags.wheelEnabled
-      });
-      const rSession = normSession(data.session);
-      const rSessionHistory = data.sessionHistory,
-        rTournamentHistory = data.tournamentHistory || [];
-      const rGeneralExpenses = data.generalExpenses || [],
-        rOtherIncome = data.otherIncome || [];
-      const rDiscountCredits = (data.discountCredits || []).map(normDiscountCredit);
-      const rRewardHistory = data.rewardHistory || [];
-      const rGroupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {};
-      const rRankingConfigs = normRankingConfigs(data.rankingConfigs);
-      const rCloudClub = normCloudClub(data.cloudClub);
-      const rCourtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
-      const rActiveTournament = normTournament(data.activeTournament) || null;
-      // v1.12.13 (P0 offline persistence hotfix): applyRestore("replace", ...) is ONLY ever invoked after
-      // an explicit, confirmed user action (a manual "แทนที่ทั้งหมด" backup restore, or wipeAllAppData's
-      // factory reset below) — so a replace that lands on zero players is, by definition, an intentional
-      // wipe, not an accident. Stamping it here (rather than only inside wipeAllAppData/
-      // deleteAllMembersData) covers BOTH callers uniformly. A replace that brings in a real roster clears
-      // any stale prior marker — there is no wipe to explain once real data is back.
-      const rLastIntentionalPlayerWipeAt = rPlayers.length === 0 ? Date.now() : null;
-      setLastIntentionalPlayerWipeAt(rLastIntentionalPlayerWipeAt);
-      setPlayers(rPlayers);
-      setHistory(rHistory);
-      setCurrent(rCurrent);
-      setFuture(rFuture);
-      setRoundNo(data.roundNo);
-      setCourtCount(data.courtCount);
-      setCourtLabelsRaw(rCourtLabels);
-      setMode(data.mode);
-      setSettings(rSettings);
-      setSession(rSession);
-      setLockPairs(data.lockPairs);
-      setSessionHistory(rSessionHistory);
-      setActiveTournament(rActiveTournament);
-      setTournamentHistory(rTournamentHistory);
-      setGeneralExpenses(rGeneralExpenses);
-      setOtherIncome(rOtherIncome);
-      setDiscountCredits(rDiscountCredits);
-      setRewardHistory(rRewardHistory); // v1.11.34
-      setGroupDefaults(rGroupDefaults);
-      setRankingConfigs(rRankingConfigs); // v1.11.68
-      setCloudClub(rCloudClub); // v1.11.35
-      // v1.11.76 (P0 fix, req 5): establish this restore as the current authoritative generation RIGHT NOW
-      // — bumping lastKnownSavedAtRef synchronously means no stale record already sitting in storage (or
-      // written moments from now by another instance) can ever look "newer" than what we just restored,
-      // closing the exact race the diagnostic traced. Then persist it directly (do not just wait for the
-      // ambient save effect to eventually get to it) and verify the write actually landed before reporting
-      // success (req 6) — never trust "the setters ran" as proof the data survived.
-      const restoredSavedAt = Date.now();
-      lastKnownSavedAtRef.current = restoredSavedAt;
-      const restoredJson = JSON.stringify({
-        players: rPlayers,
-        history: rHistory,
-        current: rCurrent,
-        future: rFuture,
-        roundNo: data.roundNo,
-        courtCount: data.courtCount,
-        courtLabels: rCourtLabels,
-        mode: data.mode,
-        settings: rSettings,
-        session: rSession,
-        lockPairs: data.lockPairs,
-        sessionHistory: rSessionHistory,
-        generalExpenses: rGeneralExpenses,
-        otherIncome: rOtherIncome,
-        discountCredits: rDiscountCredits,
-        rewardHistory: rRewardHistory,
-        activeTournament: rActiveTournament,
-        tournamentHistory: rTournamentHistory,
-        groupDefaults: rGroupDefaults,
-        rankingConfigs: rRankingConfigs,
-        cloudClub: rCloudClub,
-        lastIntentionalPlayerWipeAt: rLastIntentionalPlayerWipeAt,
-        savedAt: restoredSavedAt,
-        pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null
-      });
-      let verified = false,
-        verifyReason = "write-failed";
-      try {
-        await window.storage.set("bg-v11", restoredJson);
-        const readBack = await window.storage.get("bg-v11");
-        const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
-        const expect = {
-          history: rHistory.length,
-          current: rCurrent.length,
-          future: rFuture.length,
-          sessionHistory: rSessionHistory.length,
-          tournamentHistory: rTournamentHistory.length,
-          players: rPlayers.length
+        let verified = false,
+          verifyReason = "write-failed";
+        try {
+          await window.storage.set("bg-v11", restoredJson);
+          try {
+            await window.storage.set(LKG_KEY, restoredJson);
+          } catch (e) {} // best-effort, see "replace" branch's own comment above
+          const readBack = await window.storage.get("bg-v11");
+          const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
+          const expect = {
+            sessionHistory: mergedSessionHistory.length,
+            tournamentHistory: mergedTournamentHistory.length,
+            discountCredits: mergedDiscountCredits.length,
+            rewardHistory: mergedRewardHistory.length
+          };
+          const got = persisted ? {
+            sessionHistory: (persisted.sessionHistory || []).length,
+            tournamentHistory: (persisted.tournamentHistory || []).length,
+            discountCredits: (persisted.discountCredits || []).length,
+            rewardHistory: (persisted.rewardHistory || []).length
+          } : null;
+          verified = !!got && Object.keys(expect).every(k => expect[k] === got[k]);
+          if (!verified) verifyReason = got ? "count-mismatch" : "read-back-empty";
+          pushBootLog({
+            event: verified ? "restore-verified" : "restore-verify-failed",
+            fromSavedAt: null,
+            toSavedAt: restoredSavedAt,
+            playerCount: players.length,
+            sessionHistoryCount: mergedSessionHistory.length
+          });
+        } catch (e) {
+          verifyReason = "exception: " + (e?.message || e);
+        }
+        return {
+          ok: verified,
+          reason: verified ? null : verifyReason
         };
-        const got = persisted ? {
-          history: (persisted.history || []).length,
-          current: (persisted.current || []).length,
-          future: (persisted.future || []).length,
-          sessionHistory: (persisted.sessionHistory || []).length,
-          tournamentHistory: (persisted.tournamentHistory || []).length,
-          players: (persisted.players || []).length
-        } : null;
-        verified = !!got && Object.keys(expect).every(k => expect[k] === got[k]);
-        if (!verified) verifyReason = got ? "count-mismatch" : "read-back-empty";
-        pushBootLog({
-          event: verified ? "restore-verified" : "restore-verify-failed",
-          fromSavedAt: null,
-          toSavedAt: restoredSavedAt,
-          playerCount: expect.players,
-          sessionHistoryCount: expect.sessionHistory
-        });
-      } catch (e) {
-        verifyReason = "exception: " + (e?.message || e);
       }
-      return {
-        ok: verified,
-        reason: verified ? null : verifyReason
-      };
-    } else if (restoreMode === "mergeHistory") {
-      setSessionHistory(prev => {
-        const existing = new Set(prev.map(s => s.id));
-        const toAdd = (data.sessionHistory || []).filter(s => !existing.has(s.id)); // stable-id dedup — never duplicate an existing archived session
-        return [...prev, ...toAdd];
-      });
-      setTournamentHistory(prev => {
-        const existing = new Set(prev.map(t => t.id));
-        const toAdd = (data.tournamentHistory || []).filter(t => !existing.has(t.id));
-        return [...prev, ...toAdd];
-      });
-      setDiscountCredits(prev => {
-        const existing = new Set(prev.map(c => c.id));
-        const toAdd = (data.discountCredits || []).filter(c => !existing.has(c.id)); // stable-id dedup — never duplicate an existing credit
-        return [...prev, ...toAdd.map(normDiscountCredit)];
-      });
-      // v1.11.34: same stable-id dedup merge for Reward History — a "merge history" restore should bring
-      // in past reward wins too, never duplicate ones already present.
-      setRewardHistory(prev => {
-        const existing = new Set(prev.map(r => r.id));
-        const toAdd = (data.rewardHistory || []).filter(r => !existing.has(r.id));
-        return [...prev, ...toAdd];
-      });
-      // v1.11.76: mergeHistory only ever appends (functional updaters, stable-id deduped) — it can't
-      // regress existing data by construction, so it keeps returning a plain success unchanged.
       return {
         ok: true,
         reason: null
       };
+    } catch (e) {
+      // v1.12.13 (P0 import/restore modal-stuck hotfix): see this function's own opening comment — ANY
+      // unexpected exception anywhere above resolves here instead of rejecting, so the caller (confirmDoRestore)
+      // always gets a normal {ok:false, reason} it can show to the user and recover from, never an unhandled
+      // promise rejection that leaves the preview modal stuck open with no explanation.
+      return {
+        ok: false,
+        reason: "exception: " + (e && e.message || e)
+      };
     }
-    return {
-      ok: true,
-      reason: null
-    };
   };
   // v1.11.5: "ล้างข้อมูลทั้งหมด" (Settings → ความเป็นส่วนตัวและข้อมูล) — full factory reset. Reuses the
   // EXISTING applyRestore("replace", ...) path instead of a new deletion code path, so this destructive
@@ -18639,6 +18730,27 @@ function SessionTab(props) {
     // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
     const noCourt = !done && st === "next" && m.court == null;
     const canStart = !done && st === "next" && startReady(m) && !busyCourt && !noCourt;
+    // v1.12.13 (Court Dropdown Availability): for a NOT-YET-STARTED ("next") row, the court dropdown must
+    // only ever offer courts genuinely free right now — never one currently occupied by a live
+    // (playing/paused) match, and never one another "next" row has already claimed. This deliberately
+    // removes the old "assign a next row onto a still-playing court to queue behind it" prep-ahead-via-
+    // dropdown capability (v1.11.29/39's `busyCourt`) per explicit request — `busyCourt` itself is left
+    // completely unchanged above (still gates the start button/เกมต่อไป badge exactly as before) since
+    // that's a separate concern from what the SELECT may newly offer. Rows that are NOT "next" (playing/
+    // paused/done) keep the full, unfiltered court list exactly as before (v1.11.39/58 intentionally never
+    // touch a live/historical row's own already-occupied or already-recorded court).
+    const takenCourts = !done && st === "next" ? new Set(current.filter(c => c.id !== m.id && c.court != null && (c.status === "playing" || c.status === "paused" || c.status === "next")).map(c => c.court)) : new Set();
+    const availableCourtNumbers = Array.from({
+      length: courtCount
+    }, (_, i) => i + 1).filter(c => !takenCourts.has(c));
+    // A previously-picked court that has SINCE become occupied/claimed elsewhere (by a match that started,
+    // or another next row grabbing it first) before THIS match started must never be silently kept as if
+    // nothing happened — flagged so the select can show an explicit conflict state instead (spec: "clear it
+    // or show an explicit conflict state according to the existing architecture" — the existing
+    // busyCourt-driven "เกมต่อไป" badge already IS that architecture for the live-occupant case; this
+    // extends the same idea to the select itself, and to the other-next-row case).
+    const courtNowConflicting = !done && st === "next" && m.court != null && takenCourts.has(m.court);
+    const showNoCourtAvailable = !done && st === "next" && m.court == null && availableCourtNumbers.length === 0;
     // v1.12.1 (Manual Matchmaking — spec sections 1,3,4,5,6): constraint warnings (Lock Pair /
     // ไม่อยากคู่ / ไม่อยากเจอ) and recent teammate/opponent warnings, both WARNING ONLY — never affect
     // canStart/startReady below (constraints are warnings, organizer choice stays authoritative).
@@ -18700,7 +18812,20 @@ function SessionTab(props) {
         fontWeight: 800,
         color: T.muted
       }
-    }, String(no).padStart(2, "0")), /*#__PURE__*/React.createElement("select", {
+    }, String(no).padStart(2, "0")), showNoCourtAvailable ? /*#__PURE__*/React.createElement("div", {
+      style: {
+        width: COLW.court,
+        flexShrink: 0,
+        fontSize: 10,
+        fontWeight: 700,
+        padding: "6px 2px",
+        borderRadius: 8,
+        border: `1px dashed ${T.border}`,
+        background: T.surface2,
+        color: T.muted,
+        textAlign: "center"
+      }
+    }, "\u0E23\u0E2D\u0E2A\u0E19\u0E32\u0E21\u0E27\u0E48\u0E32\u0E07") : /*#__PURE__*/React.createElement("select", {
       value: m.court == null ? "" : m.court,
       onChange: e => reassign(m.id, e.target.value === "" ? null : Number(e.target.value)),
       style: {
@@ -18710,18 +18835,20 @@ function SessionTab(props) {
         fontWeight: 700,
         padding: "6px 4px",
         borderRadius: 8,
-        border: `1px solid ${T.border}`,
+        border: `1px solid ${courtNowConflicting ? "#c0392b" : T.border}`,
         background: T.surface2,
-        color: m.court == null ? T.muted : T.text
+        color: m.court == null ? T.muted : courtNowConflicting ? "#c0392b" : T.text
       }
     }, (m.court == null || !done && st === "next") && /*#__PURE__*/React.createElement("option", {
       value: ""
-    }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E2A\u0E19\u0E32\u0E21"), Array.from({
+    }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E2A\u0E19\u0E32\u0E21"), (!done && st === "next" ? availableCourtNumbers : Array.from({
       length: courtCount
-    }, (_, i) => i + 1).map(c => /*#__PURE__*/React.createElement("option", {
+    }, (_, i) => i + 1)).map(c => /*#__PURE__*/React.createElement("option", {
       key: c,
       value: c
-    }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, c)))), /*#__PURE__*/React.createElement("div", {
+    }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, c))), courtNowConflicting && !availableCourtNumbers.includes(m.court) && /*#__PURE__*/React.createElement("option", {
+      value: m.court
+    }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, m.court), " (\u0E16\u0E39\u0E01\u0E43\u0E0A\u0E49\u0E41\u0E25\u0E49\u0E27)")), /*#__PURE__*/React.createElement("div", {
       style: {
         width: COLW.team,
         flexShrink: 0
@@ -35176,6 +35303,14 @@ function BackupSettingsEditor({
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [confirmUndo, setConfirmUndo] = useState(false);
   const fileRef = useRef();
+  // v1.12.13 (P0 import/restore modal-stuck hotfix): a plain ref (not state) guard against double-submit —
+  // mirrors the existing submittingRef pattern already used elsewhere in this file (MembershipPaymentSheet).
+  // A ref is required rather than checking `busy` alone because `busy` is set via setState, which is async/
+  // batched — two taps arriving in the same event-loop turn (or during React's own re-render) could both
+  // read `busy === false` before either setter commits. The ref updates synchronously the instant the first
+  // tap is handled, so a second tap arriving before that render even reflects the new `busy` value is still
+  // correctly rejected.
+  const submittingRestoreRef = useRef(false);
   const doExport = async () => {
     setBusy(true);
     setSuccessMsg(null);
@@ -35210,23 +35345,45 @@ function BackupSettingsEditor({
     setPreview(res.backup);
   };
   const confirmDoRestore = async () => {
+    // v1.12.13 (P0 import/restore modal-stuck hotfix, double-submit protection): see submittingRestoreRef's
+    // own comment above for why this must be a ref check, not a `busy` state check.
+    if (submittingRestoreRef.current) return;
+    submittingRestoreRef.current = true;
     setConfirmRestore(false);
     setBusy(true);
+    setImportError(null);
     const stats = backupStats(preview.data);
-    const result = await applyRestore(restoreMode, preview);
-    setBusy(false);
-    // v1.11.76 (P0 fix, req 6): never claim success if applyRestore's own persisted-count verification
-    // failed — surface a clear error instead so the organizer knows to try again / not trust the screen.
-    if (result && result.ok === false) {
-      setSuccessMsg(null);
-      setImportError("__verify_failed__:นำเข้าข้อมูลไม่สำเร็จสมบูรณ์ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง (" + (result.reason || "unknown") + ")");
-      return;
+    try {
+      // v1.12.13: applyRestore itself is now guaranteed to always resolve (never reject) — see its own
+      // top-level try/catch — but this call is still wrapped defensively so a truly unexpected failure
+      // (e.g. `preview`/`preview.data` itself being unexpectedly null) can never again leave `busy`/the
+      // preview modal stuck with no explanation, closing the exact class of bug this hotfix targets.
+      const result = await applyRestore(restoreMode, preview);
+      // v1.11.76 (P0 fix, req 6): never claim success if applyRestore's own persisted-count verification
+      // failed — surface a clear error instead so the organizer knows to try again / not trust the screen.
+      // v1.12.13: ON FAILURE the preview modal is deliberately left OPEN (`preview` is not cleared) so the
+      // user can retry the SAME backup or cancel — the pre-restore safety snapshot taken at the top of
+      // applyRestore's "replace" branch is untouched by a failed attempt, so nothing destructive was
+      // committed and a retry is always safe.
+      if (!result || result.ok === false) {
+        setSuccessMsg(null);
+        setImportError("__verify_failed__:นำเข้าข้อมูลไม่สำเร็จ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง (" + (result && result.reason || "unknown") + ")");
+        return;
+      }
+      // v1.12.13: ON SUCCESS — clear ALL temporary import state (preview/mode/pending), close the modal,
+      // and show the success banner on the underlying "ข้อมูลและการสำรอง" page (BackupSettingsEditor itself
+      // IS that page's content — see SettingsTab's `view === "backup"` Overlay — so simply closing this
+      // component's own preview/confirm modals already returns the user there with nothing further to do).
+      setSuccessMsg({
+        kind: "import",
+        stats
+      });
+      setPreview(null);
+      setRestoreMode("replace"); // reset for next time — reopening Import must never silently reuse this backup/mode (spec Test V)
+    } finally {
+      setBusy(false);
+      submittingRestoreRef.current = false;
     }
-    setSuccessMsg({
-      kind: "import",
-      stats
-    });
-    setPreview(null);
   };
   const doUndo = async () => {
     setConfirmUndo(false);
@@ -35578,8 +35735,17 @@ function BackupSettingsEditor({
       lineHeight: 1.5,
       wordBreak: "break-all"
     }
-  }, fmtThaiDateTime(e.t), " \xB7 ", e.event, " \xB7 pid=", e.pid, e.isRestart != null && ` · isRestart=${e.isRestart ? "YES" : "no"}${e.previousPid ? " (prev=" + e.previousPid + ")" : ""}`, e.gen != null && ` · gen=${e.gen}`, e.jsonLen != null && ` · jsonLen=${(e.jsonLen / 1024).toFixed(1)}KB`, e.snapshotJsonLen != null && ` · snapshotLen=${(e.snapshotJsonLen / 1024).toFixed(1)}KB`, e.photoBytesApprox != null && ` · photoBytes=${(e.photoBytesApprox / 1024).toFixed(1)}KB(${e.photoCount})`, e.playerCount != null && ` · players=${e.playerCount}`, e.sessionHistoryCount != null && ` · history=${e.sessionHistoryCount}`, e.primaryOk != null && ` · primaryOk=${e.primaryOk} mirrorOk=${e.mirrorOk}`, e.state != null && ` · state=${e.state}`, e.persisted != null && ` · persisted=${e.persisted}`))))), preview && /*#__PURE__*/React.createElement("div", {
-    onClick: () => setPreview(null),
+  }, fmtThaiDateTime(e.t), " \xB7 ", e.event, " \xB7 pid=", e.pid, e.isRestart != null && ` · isRestart=${e.isRestart ? "YES" : "no"}${e.previousPid ? " (prev=" + e.previousPid + ")" : ""}`, e.gen != null && ` · gen=${e.gen}`, e.jsonLen != null && ` · jsonLen=${(e.jsonLen / 1024).toFixed(1)}KB`, e.snapshotJsonLen != null && ` · snapshotLen=${(e.snapshotJsonLen / 1024).toFixed(1)}KB`, e.photoBytesApprox != null && ` · photoBytes=${(e.photoBytesApprox / 1024).toFixed(1)}KB(${e.photoCount})`, e.playerCount != null && ` · players=${e.playerCount}`, e.sessionHistoryCount != null && ` · history=${e.sessionHistoryCount}`, e.primaryOk != null && ` · primaryOk=${e.primaryOk} mirrorOk=${e.mirrorOk}`, e.state != null && ` · state=${e.state}`, e.persisted != null && ` · persisted=${e.persisted}`))))), preview &&
+  /*#__PURE__*/
+  // v1.12.13 (P0 import/restore modal-stuck hotfix, double-submit protection): while `busy` (an
+  // import is actually in flight — confirmDoRestore already closed the confirmRestore dialog above
+  // this one, which is why this modal is what's visibly on screen for the whole async duration), the
+  // backdrop no longer dismisses the modal — there is a real in-flight write underneath and no
+  // cancellation mechanism, so letting the user "close" it here would be misleading, not safe.
+  React.createElement("div", {
+    onClick: () => {
+      if (!busy) setPreview(null);
+    },
     style: {
       position: "fixed",
       inset: 0,
@@ -35687,13 +35853,23 @@ function BackupSettingsEditor({
       gap: 8
     }
   }, /*#__PURE__*/React.createElement("button", {
+    disabled: busy,
     onClick: () => setPreview(null),
-    style: btnSecondary
+    style: {
+      ...btnSecondary,
+      opacity: busy ? 0.6 : 1
+    }
   }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    disabled: busy,
     onClick: () => setConfirmRestore(true),
-    style: btnPrimary
-  }, "\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25")))), confirmRestore && /*#__PURE__*/React.createElement("div", {
-    onClick: () => setConfirmRestore(false),
+    style: {
+      ...btnPrimary,
+      opacity: busy ? 0.6 : 1
+    }
+  }, busy ? "กำลังนำเข้า..." : "นำเข้าข้อมูล")))), confirmRestore && /*#__PURE__*/React.createElement("div", {
+    onClick: () => {
+      if (!busy) setConfirmRestore(false);
+    },
     style: {
       position: "fixed",
       inset: 0,
@@ -35731,12 +35907,20 @@ function BackupSettingsEditor({
       gap: 8
     }
   }, /*#__PURE__*/React.createElement("button", {
+    disabled: busy,
     onClick: () => setConfirmRestore(false),
-    style: btnSecondary
+    style: {
+      ...btnSecondary,
+      opacity: busy ? 0.6 : 1
+    }
   }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    disabled: busy,
     onClick: confirmDoRestore,
-    style: btnPrimary
-  }, "\u0E19\u0E33\u0E40\u0E02\u0E49\u0E32\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25")))), confirmUndo && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...btnPrimary,
+      opacity: busy ? 0.6 : 1
+    }
+  }, busy ? "กำลังนำเข้า..." : "นำเข้าข้อมูล")))), confirmUndo && /*#__PURE__*/React.createElement("div", {
     onClick: () => setConfirmUndo(false),
     style: {
       position: "fixed",
