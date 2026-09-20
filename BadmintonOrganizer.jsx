@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.11";
+const APP_VERSION = "1.12.13";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -725,9 +725,30 @@ function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lock
     return { player: p, score, conflict };
   });
 
-  const normal = scored.filter((s) => !s.conflict).sort((a, b) => a.score - b.score);
-  const conflicted = scored.filter((s) => s.conflict).sort((a, b) => a.score - b.score);
-  return [...normal, ...conflicted].map((s) => (s.conflict ? { ...s.player, _conflict: s.conflict } : s.player));
+  // v1.12.13 (P0 MANUAL MATCHMAKING DROPDOWN ORDERING FIX): required ordering per spec — group candidates
+  // by eligibility TIER first (0=NORMAL, 1=YELLOW/resting, 2=RED/conflict), and eligibility tier ALWAYS
+  // outranks wait time (a RED candidate stays below every YELLOW/NORMAL candidate even if they've waited
+  // far longer than anyone else). WITHIN a tier, sort by wait time longest-to-shortest, using the exact
+  // same wait-time source the rest of the app already shows/uses (waitingSince — see fairnessScore/SORT
+  // above and PlayerPicker's own "รอ X นาที" hint below) — never a second, independently-invented wait-time
+  // calculation. A candidate who is BOTH resting AND conflicted lands in RED (conflict is the more severe
+  // state — matches the existing "conflict always sorts last" precedent this function already had).
+  // `score` (the pre-existing skill-balance/partner-repeat/owner-penalty fit score computed above, itself
+  // UNCHANGED) is kept only as the deterministic tie-breaker when two candidates in the same tier have the
+  // exact same wait time, falling back to `priorityIdx` (existing player-order/priority index) after that —
+  // per explicit spec ("if equal waiting time, preserve deterministic/stable ordering... never random").
+  // This function is never called by Auto Matchmaking (buildMatch/fillCourt and every other auto-assign
+  // call site) — that engine's own hard-filter/priority logic is completely untouched by this change.
+  const nowForWait = Date.now();
+  const tierOf = (s) => (s.conflict ? 2 : (s.player.status === "resting" ? 1 : 0));
+  const waitMinOf = (s) => Math.max(0, Math.floor((nowForWait - (s.player.waitingSince || nowForWait)) / 60000));
+  const ranked = [...scored].sort((a, b) =>
+    tierOf(a) - tierOf(b) ||
+    waitMinOf(b) - waitMinOf(a) ||
+    a.score - b.score ||
+    priorityIdx(a.player.id) - priorityIdx(b.player.id)
+  );
+  return ranked.map((s) => (s.conflict ? { ...s.player, _conflict: s.conflict } : s.player));
 }
 
 // v1.12.1 (Manual Matchmaking — constraints are warnings, not blocks): given a match's CURRENT team
@@ -1651,17 +1672,49 @@ function otherExpensesTotal(items) {
 // yields a fresh AUTO row for the new court (nothing stored for it yet); decreasing it naturally hides any
 // higher-numbered rows (their stored data, if any, is left untouched, never deleted, so re-increasing the
 // count later restores a previously-set manual value instead of silently losing it).
-function reconcileCourtHours(courtHours, courtCount, durationHours) {
+// v1.12.12 (P0 Court Booking / Time Model): extends this SAME function/array contract rather than replacing
+// it. `courtHours` still holds ONLY courts the organizer has explicitly edited (source:"manual"); each stored
+// row can now independently override any of {startAt, endAt, billableHours} — an untouched field stays
+// null/absent and falls back to the session-wide default (startAt/endAt -> the two new trailing params,
+// billableHours -> that court's own actual usage duration). This is the same "AUTO follows live data, MANUAL
+// never does" invariant the v1.11.51 header above already established, now covering three independently-
+// overridable fields per court instead of one. `sessionStartTime`/`sessionEndTime` are NEW, OPTIONAL trailing
+// params: any pre-v1.12.12 caller that omits them gets startAt/endAt=null for every row and
+// actualDurationHours falls back to the `durationHours` param exactly as before -- byte-identical behavior to
+// the old function for anyone not yet updated to pass them.
+// Backward compatibility for data written BEFORE this patch: an old stored row only ever had `hours` (no
+// startAt/endAt/billableHours field existed yet). Such a row is read as a legacy BILLABLE-HOURS override —
+// so a pre-v1.12.12 manual edit keeps costing exactly what it did before, never silently reset to auto —
+// while its actual start/end still default to the session window (there was never any other start/end for it
+// to have had).
+function reconcileCourtHours(courtHours, courtCount, durationHours, sessionStartTime, sessionEndTime) {
   const stored = Array.isArray(courtHours) ? courtHours : [];
   const manualByCourt = new Map();
   stored.forEach((r) => {
-    if (r && r.source === "manual" && Number(r.court) > 0) manualByCourt.set(Math.round(Number(r.court)), Math.max(0, Number(r.hours) || 0));
+    if (r && r.source === "manual" && Number(r.court) > 0) {
+      const hasStartAt = typeof r.startAt === "string" && !!r.startAt;
+      const hasEndAt = typeof r.endAt === "string" && !!r.endAt;
+      const hasBillable = r.billableHours != null && !isNaN(Number(r.billableHours));
+      manualByCourt.set(Math.round(Number(r.court)), {
+        startAt: hasStartAt ? r.startAt : null,
+        endAt: hasEndAt ? r.endAt : null,
+        billableHours: hasBillable ? Math.max(0, Number(r.billableHours)) : null,
+        legacyHours: (!hasStartAt && !hasEndAt && !hasBillable && r.hours != null && !isNaN(Number(r.hours))) ? Math.max(0, Number(r.hours)) : null,
+      });
+    }
   });
   const n = Math.max(0, Math.round(Number(courtCount) || 0));
+  const fallbackStart = sessionStartTime || null;
+  const fallbackEnd = sessionEndTime || null;
+  const fallbackHours = Math.max(0, Number(durationHours) || 0);
   const rows = [];
   for (let c = 1; c <= n; c++) {
-    if (manualByCourt.has(c)) rows.push({ court: c, hours: manualByCourt.get(c), source: "manual" });
-    else rows.push({ court: c, hours: Math.max(0, Number(durationHours) || 0), source: "auto" });
+    const m = manualByCourt.get(c);
+    const startAt = (m && m.startAt) || fallbackStart;
+    const endAt = (m && m.endAt) || fallbackEnd;
+    const actualDurationHours = (startAt && endAt) ? sessionDurationHours(startAt, endAt) : fallbackHours;
+    const billableHours = m ? (m.billableHours != null ? m.billableHours : (m.legacyHours != null ? m.legacyHours : actualDurationHours)) : actualDurationHours;
+    rows.push({ court: c, source: m ? "manual" : "auto", startAt, endAt, actualDurationHours, billableHours, hours: billableHours });
   }
   return rows;
 }
@@ -1671,7 +1724,17 @@ function buildCourtCostRows(rows, ratePerHour) {
   const r = Math.max(0, Number(ratePerHour) || 0);
   return (rows || []).map((row) => {
     const hours = Math.max(0, Number(row.hours) || 0);
-    return { court: row.court, hours, source: row.source || "auto", rate: r, cost: Math.round((hours * r + Number.EPSILON) * 100) / 100 };
+    return {
+      court: row.court, hours, source: row.source || "auto", rate: r, cost: Math.round((hours * r + Number.EPSILON) * 100) / 100,
+      // v1.12.12 (P0): additive fields only -- court/hours/source/rate/cost above are byte-identical in
+      // meaning to every pre-v1.12.12 caller. `hours`/`billableHours` are always the SAME resolved value
+      // (the actual basis for `cost`); `actualDurationHours` is the court's real usage time, which can now
+      // differ from billableHours (free/bonus court-time — see reconcileCourtHours).
+      startAt: row.startAt || null,
+      endAt: row.endAt || null,
+      actualDurationHours: row.actualDurationHours != null ? Math.max(0, Number(row.actualDurationHours) || 0) : hours,
+      billableHours: hours,
+    };
   });
 }
 // v1.11.51 (spec F): Total Court Cost = sum of every court's own cost — never a single
@@ -1695,7 +1758,7 @@ function courtRateConfigured(ratePerHour) {
 // "simple"/"perPerson" return [] (unchanged — simple stays revenue-only as today; perPerson is a revenue
 // override handled entirely inside computeBill above, no expense line needed) EXCEPT for the shuttle line,
 // which (v1.11.41) is independent of costModel — see shuttleLine() below.
-function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries, shuttleUsageOverride, openingBalance) {
+function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries, shuttleUsageOverride, openingBalance, sessionStartTime, sessionEndTime) {
   const model = settings.costModel || "simple";
   const out = [];
   // v1.11.41: prefers the new cost/tube-derived per-shuttle cost (auto — reuses the existing `used` match
@@ -1739,7 +1802,7 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, us
   if (courtRateConfigured(cCost.ratePerHour)) {
     // v1.11.51 (spec F/I): per-court hours × rate, summed — NEVER the old
     // จำนวนสนาม × Session Duration × Court Rate shortcut, since courts can now carry different hours.
-    const rows = buildCourtCostRows(reconcileCourtHours(courtEntries, courtCount, durationHours), cCost.ratePerHour);
+    const rows = buildCourtCostRows(reconcileCourtHours(courtEntries, courtCount, durationHours, sessionStartTime, sessionEndTime), cCost.ratePerHour);
     const total = totalCourtCostFromRows(rows);
     if (total > 0) {
       const uniform = rows.length > 0 && rows.every((r) => r.hours === rows[0].hours);
@@ -1845,9 +1908,9 @@ function computeExpectedRevenue(settings, expectedPlayers, expectedGamesPerPerso
 // the live Finance summary and the eventual frozen History total can never diverge (spec G: "reuse the same
 // authoritative Finance calculation helpers to prevent divergence" / "do not create a second independent
 // expense calculation").
-function computeLiveExpenseTotal(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, rewardHistory, sessionId, openingBalance) {
+function computeLiveExpenseTotal(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, rewardHistory, sessionId, openingBalance, sessionStartTime, sessionEndTime) {
   const lines = [
-    ...computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, openingBalance),
+    ...computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, openingBalance, sessionStartTime, sessionEndTime),
     ...computeRewardExpenses(rewardHistory, sessionId, dateStr),
   ];
   return Math.round((lines.reduce((s, e) => s + (Number(e.amount) || 0), 0) + Number.EPSILON) * 100) / 100;
@@ -3612,6 +3675,10 @@ function buildBackupPayload(state) {
       rankingConfigs: state.rankingConfigs || {}, // v1.11.68: per-club Ranking config only (RP/Rank are always derived, never stored)
       rewardHistory: state.rewardHistory || [], // v1.11.34: global Reward History ledger, see App()'s rewardHistory state
       cloudClub: state.cloudClub || null, // v1.11.35: Member Portal Phase 1 — this install's Cloud Club link, if any
+      // v1.12.13 (P0 offline persistence hotfix): carry the intentional-wipe marker into every backup payload
+      // (manual export AND the pre-restore safety snapshot) so a later restore/import can still tell an
+      // intentional roster wipe apart from an accidental one — see isSuspiciousPlayerLoss's header comment.
+      lastIntentionalPlayerWipeAt: typeof state.lastIntentionalPlayerWipeAt === "number" ? state.lastIntentionalPlayerWipeAt : null,
     },
   };
 }
@@ -3722,6 +3789,11 @@ function migrateBackupData(parsed) {
   data.rankingConfigs = normRankingConfigs(data.rankingConfigs); // v1.11.68: no field at all (old backup) -> {} (no club has Ranking configured yet)
   data.rewardHistory = Array.isArray(data.rewardHistory) ? data.rewardHistory : []; // v1.11.34: no field at all (old backup) -> []
   data.cloudClub = normCloudClub(data.cloudClub); // v1.11.35: no field at all (old backup) -> disabled/local-only
+  // v1.12.13 (P0 offline persistence hotfix): optional, additive field — see isSuspiciousPlayerLoss's own
+  // header comment for the full "how does the app tell an intentional roster wipe apart from an accidental
+  // one" reasoning this backs. Absent on every backup/save older than this version -> null, which is always
+  // the SAFE direction (an old save can never accidentally "prove" a wipe it has no record of).
+  data.lastIntentionalPlayerWipeAt = typeof data.lastIntentionalPlayerWipeAt === "number" ? data.lastIntentionalPlayerWipeAt : null;
   // v1.12.1: now that activeTournament/tournamentHistory/rewardHistory are fully migrated, run the ONE
   // canonical Advanced-Feature-flag inference using the PRE-backfill explicit values captured above (not
   // data.settings.tournamentEnabled, which the getDefaultSettings() spread may have just set to false).
@@ -3840,6 +3912,44 @@ function chooseBootCandidate(primaryCandidate, mirrorCandidate) {
   if (mirrorCandidate) return { finalState: mirrorCandidate, recoverySource: "mirror", chosenReason: "mirror-only-valid" };
   return { finalState: null, recoverySource: "new-install", chosenReason: null };
 }
+// v1.12.13 (P0 OFFLINE PERSISTENCE / DATA-LOSS HOTFIX): root cause of the reported "group survives, all
+// players vanish after a force-close + relaunch" bug — chooseBootCandidate's own "meaningful-state-
+// protection" above (A2) only ever runs in the primary-AND-mirror branch. The moment only ONE store has
+// anything at all (the mirror never got written this save cycle, was evicted by iOS, or is simply the
+// -only- source LKG/Auto-Backup ever fall back to), an empty-but-structurally-valid `players: []` candidate
+// is accepted immediately with ZERO cross-check against LKG/Auto-Backup — see the boot waterfall's new
+// Step 5 below, which is the other half of this fix and is what actually calls this function during boot.
+// This function is also reused by wouldRegressProgress (below) so the exact same protection applies at
+// RUNTIME (cross-instance/cross-tab writes), not just at cold boot — one rule, two call sites.
+//
+// `candidate` is the thing about to be ACCEPTED/WRITTEN (a flat state object, or the `incomingData` side of
+// wouldRegressProgress). `priorEvidence` is the BEST other known snapshot to compare against (a flat state
+// object, or the `liveState` side of wouldRegressProgress) — may be null if there is genuinely nothing else
+// to compare against (e.g. a true new install, see Test F).
+//
+// Deliberately narrow and conservative by design (spec: "do NOT blindly restore an older backup every time
+// playerCount = 0"): this only ever fires when the candidate's OWN player count is exactly zero AND some
+// other known snapshot demonstrably had players. It is not triggered by a smaller-but-nonzero roster (a
+// legitimate partial backup restore, or one player being deleted, is never "suspicious") — only a full
+// collapse to zero is treated as a potential accident, matching the exact reported symptom.
+//
+// The one legitimate way a candidate's own zero-player state is NOT suspicious is an explicit, user-
+// confirmed wipe (ลบข้อมูลสมาชิก / ล้างข้อมูลทั้งหมด — see deleteAllMembersData/applyRestore's "replace"
+// branch, both of which stamp `lastIntentionalPlayerWipeAt = Date.now()` into the SAME state that goes to
+// zero players). A wipe marker only "explains" a given priorEvidence snapshot if it is at least as recent
+// as that snapshot's own savedAt — an old, stale wipe timestamp from long before priorEvidence was saved
+// proves nothing about whether THIS particular emptiness is the same wipe or a later, unrelated accident.
+function isSuspiciousPlayerLoss(candidate, priorEvidence) {
+  const candidateCount = Array.isArray(candidate && candidate.players) ? candidate.players.length : 0;
+  if (candidateCount > 0) return false; // nothing suspicious about a non-empty roster
+  if (!priorEvidence) return false; // no prior evidence at all to compare against -- e.g. a true new install
+  const priorCount = Array.isArray(priorEvidence.players) ? priorEvidence.players.length : 0;
+  if (priorCount === 0) return false; // prior evidence is ALSO empty -- nothing regressed, nothing to recover
+  const wipeAt = typeof (candidate && candidate.lastIntentionalPlayerWipeAt) === "number" ? candidate.lastIntentionalPlayerWipeAt : 0;
+  if (wipeAt <= 0) return true; // no intentional-wipe evidence at all, but prior evidence had a real roster
+  const priorAt = typeof (priorEvidence && priorEvidence.savedAt) === "number" ? priorEvidence.savedAt : 0;
+  return wipeAt < priorAt; // a wipe timestamp older than priorEvidence itself does not explain this transition
+}
 // v1.11.76 (P0 CROSS-INSTANCE DATA-LOSS GUARD): confirmed via reproducible e2e test that a raw savedAt
 // comparison alone cannot tell "genuinely newer data" apart from "a stale, forgotten same-origin tab that
 // happens to save later" — refreshFromStorageIfNewer's own `storedSavedAt > lastKnownSavedAtRef.current`
@@ -3860,10 +3970,21 @@ function chooseBootCandidate(primaryCandidate, mirrorCandidate) {
 function wouldRegressProgress(liveState, incomingData) {
   const idsOf = (arr) => new Set((Array.isArray(arr) ? arr : []).map((x) => x && x.id).filter(Boolean));
   const liveHistory = idsOf(liveState.history), liveSessionHistory = idsOf(liveState.sessionHistory), liveTournamentHistory = idsOf(liveState.tournamentHistory);
-  if (liveHistory.size === 0 && liveSessionHistory.size === 0 && liveTournamentHistory.size === 0) return false; // nothing live yet worth protecting (e.g. fresh boot, brand-new session)
-  const incHistory = idsOf(incomingData.history), incSessionHistory = idsOf(incomingData.sessionHistory), incTournamentHistory = idsOf(incomingData.tournamentHistory);
-  const missesAny = (liveSet, incSet) => { for (const id of liveSet) if (!incSet.has(id)) return true; return false; };
-  return missesAny(liveHistory, incHistory) || missesAny(liveSessionHistory, incSessionHistory) || missesAny(liveTournamentHistory, incTournamentHistory);
+  let historyRegression = false;
+  if (liveHistory.size > 0 || liveSessionHistory.size > 0 || liveTournamentHistory.size > 0) {
+    const incHistory = idsOf(incomingData.history), incSessionHistory = idsOf(incomingData.sessionHistory), incTournamentHistory = idsOf(incomingData.tournamentHistory);
+    const missesAny = (liveSet, incSet) => { for (const id of liveSet) if (!incSet.has(id)) return true; return false; };
+    historyRegression = missesAny(liveHistory, incHistory) || missesAny(liveSessionHistory, incSessionHistory) || missesAny(liveTournamentHistory, incTournamentHistory);
+  }
+  // v1.12.13 (P0 offline persistence hotfix): the player roster gets the exact same "don't silently
+  // regress" protection the history-type ledgers already had above — see isSuspiciousPlayerLoss's own
+  // header comment. `incomingData` is the candidate about to be accepted/written; `liveState` is what's
+  // already trusted, playing the role of "priorEvidence" here. This closes the gap the offline persistence
+  // investigation found: every existing caller of this function protected match/session/tournament history
+  // but none of them protected the roster itself, so an incoming/outgoing write with `players: []` sailed
+  // through every guard as long as it didn't also drop a history record.
+  const playerRegression = isSuspiciousPlayerLoss(incomingData, liveState);
+  return historyRegression || playerRegression;
 }
 // v1.11.0 PERSISTENCE REWRITE — recovery helpers shared by the boot-sequence waterfall (primary /
 // mirror / Last-Known-Good / Auto-Backup). Both funnel through the EXACT SAME migrate+validate pipeline
@@ -4560,6 +4681,12 @@ export default function App() {
   // landscape or an iPad in portrait all land on exactly 860 or 520 here, identical to before.
   const gameShellMaxWidth = tab === "session" && isWide ? "max(860px, min(96vw, 1400px))" : (isWide ? 860 : 520);
   const [players, setPlayers] = useState([]);
+  // v1.12.13 (P0 offline persistence hotfix): timestamp of the most recent EXPLICIT, user-confirmed action
+  // that intentionally emptied the player roster (ลบข้อมูลสมาชิก / ล้างข้อมูลทั้งหมด) — see
+  // isSuspiciousPlayerLoss's header comment. null means "no known intentional wipe." Persisted alongside
+  // `players` in every save/backup so a later boot can tell "this device's owner deliberately emptied the
+  // roster" apart from "something silently went wrong."
+  const [lastIntentionalPlayerWipeAt, setLastIntentionalPlayerWipeAt] = useState(null);
   const [history, setHistory] = useState([]);
   const [current, setCurrent] = useState([]);
   const [future, setFuture] = useState([]);
@@ -4753,7 +4880,7 @@ export default function App() {
       const savedAt = Date.now();
       // v1.11.76: pageInstanceId tags every "bg-v11" write so refreshFromStorageIfNewer can tell "another
       // tab/session wrote this" from "this is my own earlier write" — see wouldRegressProgress.
-      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
+      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
       latestStateJsonRef.current = json;
       // v1.11.76: same final pre-write conflict guard as the main save effect (see its comment) — this is
       // the exact "organizer swipes/kills the PWA to update" path implicated in the original incident, so
@@ -4767,7 +4894,7 @@ export default function App() {
           if (
             onDisk.pageInstanceId &&
             onDisk.pageInstanceId !== window.__pageInstanceId &&
-            wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory })
+            wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory, players, lastIntentionalPlayerWipeAt })
           ) {
             blockedByConflict = true;
             pushBootLog({
@@ -4819,6 +4946,10 @@ export default function App() {
   const applyPersistedState = (s) => {
     if (!s) return;
     s.players && setPlayers(s.players.map(normPlayer));
+    // v1.12.13 (P0 offline persistence hotfix): restore the intentional-wipe marker alongside `players` so
+    // it travels with the roster through every load path (boot, cross-instance heal, pre-write conflict
+    // adopt) — absent on saves older than this version -> null, the safe default (see migrateBackupData).
+    setLastIntentionalPlayerWipeAt(typeof s.lastIntentionalPlayerWipeAt === "number" ? s.lastIntentionalPlayerWipeAt : null);
     s.history && setHistory(s.history);
     s.current && setCurrent(s.current);
     s.future && setFuture(s.future);
@@ -4898,7 +5029,7 @@ export default function App() {
       // v1.11.48 (Section C/D): buildBackupSnapshot (not buildBackupPayload) — a lightweight, photo-
       // stripped copy built specifically for this checkpoint. See buildBackupSnapshot's own comment for
       // why this is safe and non-destructive to existing data.
-      const payload = buildBackupSnapshot({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
+      const payload = buildBackupSnapshot({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub, lastIntentionalPlayerWipeAt });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
@@ -4932,7 +5063,7 @@ export default function App() {
         // backward compatible by construction. A legitimate newer write (superset, or from elsewhere with
         // nothing of ours to lose) is never blocked — this is a targeted conflict guard, not a blanket
         // "ignore other tabs" rule.
-        if (s.pageInstanceId && s.pageInstanceId !== window.__pageInstanceId && wouldRegressProgress({ history, sessionHistory, tournamentHistory }, s)) {
+        if (s.pageInstanceId && s.pageInstanceId !== window.__pageInstanceId && wouldRegressProgress({ history, sessionHistory, tournamentHistory, players, lastIntentionalPlayerWipeAt }, s)) {
           pushBootLog({ event: "conflict-blocked", fromSavedAt: lastKnownSavedAtRef.current, toSavedAt: storedSavedAt, incomingPageInstanceId: s.pageInstanceId, playerCount: Array.isArray(s.players) ? s.players.length : 0, sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0 });
           return false;
         }
@@ -4961,6 +5092,9 @@ export default function App() {
       const storageErrors = [];
       let primaryFound = false, primaryValid = false, mirrorFound = false, lastKnownGoodFound = false, autoBackupFound = false;
       let finalState = null, recoverySource = "new-install", recoveryAction = "none";
+      // v1.12.13 (P0 offline persistence hotfix): diagnostics for the new Step 5 player-loss-guard below —
+      // non-PII (source label + boolean only), surfaced via pushBootLog same as every other boot diagnostic.
+      let playerLossGuardTriggered = false, playerLossGuardRejectedSource = null;
       let corrupted = false; // legacy flag — kept in sync so the existing recovery banner/tests (which key off `loadCorrupted`) keep working unchanged; true exactly when bootStatus lands on "recovery-required"
 
       let mirrorValid = false, chosenReason = null, primarySavedAtDiag = null, mirrorSavedAtDiag = null;
@@ -5025,6 +5159,64 @@ export default function App() {
             }
           } catch (e) { storageErrors.push("auto-backup read: " + (e?.message || e)); }
         }
+
+        // Step 5 (v1.12.13, P0 OFFLINE PERSISTENCE / DATA-LOSS HOTFIX — the actual fix for the reported
+        // "group survives, all players vanish after force-close + relaunch" bug): everything above this
+        // point only ever validates STRUCTURE (tryRecoverFlatState/tryRecoverFromAutoBackupEntry), never
+        // emptiness — and chooseBootCandidate's own meaningful-state-protection (A2) only runs when BOTH
+        // primary and mirror exist. The moment only one of them does (mirror skipped by the 4MB
+        // MIRROR_SIZE_LIMIT_CHARS cap on a large/photo-heavy roster, or evicted by iOS Safari's storage
+        // pressure — exactly the reported tester's situation with 69 players), `chosenReason ===
+        // "primary-only-valid"` (or "mirror-only-valid") accepts that lone candidate with ZERO cross-check
+        // against LKG/Auto-Backup, and a structurally-valid-but-empty `players: []` primary wins outright.
+        // This step runs whenever the winning candidate has zero players and asks: is there OTHER evidence
+        // (any store this boot did NOT already choose from) that this device recently had a real roster,
+        // with no matching intentional-wipe marker to explain the drop? If so, treat the empty candidate as
+        // suspicious and fail over to the best non-empty evidence instead — see isSuspiciousPlayerLoss's own
+        // header comment for the exact "accidental vs intentional" reasoning this backs.
+        if (finalState && (!Array.isArray(finalState.players) || finalState.players.length === 0)) {
+          try {
+            const otherCandidates = [];
+            if (recoverySource !== "primary" && primaryCandidate) otherCandidates.push(primaryCandidate);
+            if (recoverySource !== "mirror" && mirrorCandidate) otherCandidates.push(mirrorCandidate);
+            if (recoverySource !== "last-known-good") {
+              try {
+                const lkgR2 = await window.storage.get(LKG_KEY);
+                if (lkgR2?.value) { const rec = tryRecoverFlatState(lkgR2.value); if (rec) otherCandidates.push(rec); }
+              } catch (e) {}
+            }
+            if (recoverySource !== "auto-backup") {
+              try {
+                const abR2 = await window.storage.get(AUTO_BACKUP_KEY);
+                const list2 = abR2?.value ? JSON.parse(abR2.value) : [];
+                if (Array.isArray(list2)) {
+                  for (const entry of list2) {
+                    const rec = tryRecoverFromAutoBackupEntry(entry);
+                    if (rec) { otherCandidates.push(rec); break; } // newest-first list -> first valid entry is the freshest
+                  }
+                }
+              } catch (e) {}
+            }
+            // Pick the single best "prior evidence" candidate to compare against: prefer whichever has the
+            // most players (the strongest evidence something real existed), tie-broken by the newer savedAt.
+            let priorEvidence = null;
+            for (const c of otherCandidates) {
+              const cCount = Array.isArray(c.players) ? c.players.length : 0;
+              const bestCount = priorEvidence ? (Array.isArray(priorEvidence.players) ? priorEvidence.players.length : 0) : -1;
+              if (cCount > bestCount || (cCount === bestCount && (c.savedAt || 0) > (priorEvidence.savedAt || 0))) priorEvidence = c;
+            }
+            if (isSuspiciousPlayerLoss(finalState, priorEvidence)) {
+              const rejectedSource = recoverySource;
+              storageErrors.push("player-loss-guard: chosen source (" + rejectedSource + ") had 0 players but prior evidence had " + (priorEvidence.players || []).length + " with no covering intentional wipe");
+              finalState = priorEvidence;
+              recoverySource = "player-loss-guard";
+              recoveryAction = "restored-from-player-loss-guard";
+              chosenReason = "player-loss-guard";
+              playerLossGuardTriggered = true;
+              playerLossGuardRejectedSource = rejectedSource;
+            }
+          } catch (e) { storageErrors.push("player-loss-guard check: " + (e?.message || e)); }
+        }
       } catch (e) { storageErrors.push("waterfall: " + (e?.message || e)); }
 
       let bootStatusResult, recoveredPlayerCount = 0, recoveredHistoryCount = 0, loadedSavedAt = null;
@@ -5047,7 +5239,7 @@ export default function App() {
           await window.storage.set(LKG_KEY, rebuiltJson);
           lastKnownSavedAtRef.current = rebuiltAt;
         } catch (e) { storageErrors.push("rebuild-after-recovery: " + (e?.message || e)); }
-        if (recoverySource === "last-known-good" || recoverySource === "auto-backup") {
+        if (recoverySource === "last-known-good" || recoverySource === "auto-backup" || recoverySource === "player-loss-guard") {
           // A genuine "this would have been gone" automatic recovery — a small non-blocking heads-up,
           // never a forced trip to the manual restore screen (spec: automatic recovery, no modal spam).
           setAutoRecoveryToast("♻️ กู้คืนข้อมูลล่าสุดให้อัตโนมัติแล้ว");
@@ -5107,6 +5299,7 @@ export default function App() {
         primaryFound, primaryValid, primarySavedAt: primarySavedAtDiag, mirrorFound, mirrorValid, mirrorSavedAt: mirrorSavedAtDiag,
         lastKnownGoodFound, autoBackupFound,
         recoveredPlayerCount, recoveredHistoryCount, loadedSavedAt,
+        playerLossGuardTriggered, playerLossGuardRejectedSource, // v1.12.13: non-PII (source label only) — see Step 5 above
         playerCount: recoveredPlayerCount, sessionHistoryCount: recoveredHistoryCount, corrupted, // legacy field names, kept so older boot-log entries/consumers read consistently
         saveBlockedDuringBoot: bootStatusResult === "recovery-required",
         storageErrors: storageErrors.length ? storageErrors : undefined,
@@ -5186,7 +5379,7 @@ export default function App() {
         const savedAt = Date.now();
         try { window.__pushDiag && window.__pushDiag("beforeStorageSerialize", { gen: mySaveGeneration }); } catch (e) {}
         // v1.11.76: pageInstanceId tags every "bg-v11" write — see the same note on applyUpdateNow's write.
-        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
+        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
         try { window.__pushDiag && window.__pushDiag("afterStorageSerialize", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
@@ -5216,7 +5409,7 @@ export default function App() {
             if (
               onDisk.pageInstanceId &&
               onDisk.pageInstanceId !== window.__pageInstanceId &&
-              wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory })
+              wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory, players, lastIntentionalPlayerWipeAt })
             ) {
               pushBootLog({
                 event: "conflict-blocked-prewrite",
@@ -5274,7 +5467,7 @@ export default function App() {
         }
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus]);
+  }, [players, lastIntentionalPlayerWipeAt, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus]);
   // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
   // most recently computed save payload when the app backgrounds — insurance for the narrow window
   // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
@@ -5332,6 +5525,19 @@ export default function App() {
   const playingIds = useMemo(() => new Set(current.filter((m) => m.status === "playing" || m.status === "paused").flatMap((m) => [...m.teamA, ...m.teamB].filter(Boolean))), [current]);
   const waitQueue = useMemo(
     () => activePlayers.filter((p) => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order),
+    [activePlayers, inPlay]
+  );
+  // v1.12.13 (P0 manual matchmaking dropdown ordering fix): a SEPARATE, wider pool used ONLY as the
+  // candidate source for the manual player-picker dropdown (PlayerPicker/rankManualSlotCandidates below) —
+  // waitQueue itself stays "ready"-only and completely untouched, since it also drives two unrelated things
+  // that must NOT start including resting players: the "รอเล่น — N คน" overview count/list, and the Lock
+  // Pair auto-fill assist's own "is the partner currently available" check (benchIds, inside MatchRow —
+  // both still key off `bench = waitQueue`, unchanged). This pool additionally includes status==="resting"
+  // players (the spec's YELLOW/"ขอพัก" tier) so they can appear as still-selectable, lower-priority manual
+  // candidates — same wait-time source (waitingSince), same "not already seated anywhere in current" guard.
+  // Auto Matchmaking (buildMatch and every fillCourt/auto-assign call site) never reads this pool.
+  const manualBenchPool = useMemo(
+    () => activePlayers.filter((p) => (p.status === "ready" || p.status === "resting") && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order),
     [activePlayers, inPlay]
   );
 
@@ -5555,6 +5761,11 @@ export default function App() {
   // afterward, exactly like deleting one player already does today — see delPlayer above).
   const deleteAllMembersData = () => {
     setPlayers([]);
+    // v1.12.13 (P0 offline persistence hotfix): stamp the intentional-wipe marker in the SAME action that
+    // empties the roster — this is what lets a later cold boot tell this deliberate action apart from an
+    // accidental empty-roster read (see isSuspiciousPlayerLoss). Both are part of the same explicit,
+    // confirm-gated user action, so there is no window where one could persist without the other.
+    setLastIntentionalPlayerWipeAt(Date.now());
     setLockPairs([]);
     setCurrent((prev) => prev.map((m) => (m.queued ? { ...m, queued: null } : m)));
   };
@@ -6323,7 +6534,7 @@ export default function App() {
       // `totalMatches` as the usage baseline here; `null` replaces `session.shuttleUsage` — the old aggregate
       // manual-override concept is retired for ACTUAL usage (per-match editing is now the only way to change
       // it), so this always resolves to `{used: actualShuttleUsed, source:"auto"}` via resolveShuttleUsage.
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, actualShuttleUsed, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, null, shuttleOpeningResolved), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, actualShuttleUsed, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, null, shuttleOpeningResolved, session.sessionStartTime, session.sessionEndTime), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
       // v1.11.51 (Court Cost Per-Court Enhancement, spec K): freeze the FULL per-court breakdown — rate,
       // hours/source/cost per court, and the total — so History can never be affected by a LATER change to
       // Court Rate/Session Time/Court Count (this object is computed once, right now, from the live values,
@@ -6331,10 +6542,14 @@ export default function App() {
       // into the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline (no double counting — this is purely an
       // additional structured record for audit/detail, spec K's "อย่างน้อย" minimum).
       courtCostSnapshot: (() => {
-        const rows = buildCourtCostRows(reconcileCourtHours(session.courtHours, courtCount, sessionDurationHours(session.sessionStartTime, session.sessionEndTime)), settings.courtCost && settings.courtCost.ratePerHour);
+        const rows = buildCourtCostRows(reconcileCourtHours(session.courtHours, courtCount, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.sessionStartTime, session.sessionEndTime), settings.courtCost && settings.courtCost.ratePerHour);
         return {
           ratePerHour: Math.max(0, Number(settings.courtCost && settings.courtCost.ratePerHour) || 0),
-          courts: rows.map((r) => ({ court: r.court, hours: r.hours, source: r.source, cost: r.cost })),
+          // v1.12.12 (P0): startAt/endAt/actualDurationHours/billableHours are ADDITIVE fields on top of the
+          // exact same court/hours/source/cost shape every pre-v1.12.12 History record already froze — old
+          // frozen records are never touched/reprocessed (this whole block only ever runs ONCE, right now, at
+          // THIS endSession() call), and any reader that only knows the old 4 fields keeps working unchanged.
+          courts: rows.map((r) => ({ court: r.court, hours: r.hours, source: r.source, cost: r.cost, startAt: r.startAt, endAt: r.endAt, actualDurationHours: r.actualDurationHours, billableHours: r.billableHours })),
           totalCourtCost: totalCourtCostFromRows(rows),
         };
       })(),
@@ -6836,7 +7051,7 @@ export default function App() {
   // Returns null if the user cancelled the native share sheet or every fallback failed; otherwise
   // { stats, sizeLabel } for the caller to show a success banner with.
   const exportBackup = async () => {
-    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub });
+    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub, lastIntentionalPlayerWipeAt });
     const json = JSON.stringify(payload);
     // v1.9.19: "BadQ Back-up <date> <time>.json" per explicit naming request — colon-free time (HH-mm)
     // so the filename stays valid on every OS (Windows rejects ":" in filenames).
@@ -6892,7 +7107,7 @@ export default function App() {
     const data = backup.data;
     if (restoreMode === "replace") {
       try {
-        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub });
+        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt });
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
       } catch (e) {}
@@ -6916,6 +7131,14 @@ export default function App() {
       const rCloudClub = normCloudClub(data.cloudClub);
       const rCourtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
       const rActiveTournament = normTournament(data.activeTournament) || null;
+      // v1.12.13 (P0 offline persistence hotfix): applyRestore("replace", ...) is ONLY ever invoked after
+      // an explicit, confirmed user action (a manual "แทนที่ทั้งหมด" backup restore, or wipeAllAppData's
+      // factory reset below) — so a replace that lands on zero players is, by definition, an intentional
+      // wipe, not an accident. Stamping it here (rather than only inside wipeAllAppData/
+      // deleteAllMembersData) covers BOTH callers uniformly. A replace that brings in a real roster clears
+      // any stale prior marker — there is no wipe to explain once real data is back.
+      const rLastIntentionalPlayerWipeAt = rPlayers.length === 0 ? Date.now() : null;
+      setLastIntentionalPlayerWipeAt(rLastIntentionalPlayerWipeAt);
       setPlayers(rPlayers);
       setHistory(rHistory);
       setCurrent(rCurrent);
@@ -6951,6 +7174,7 @@ export default function App() {
         lockPairs: data.lockPairs, sessionHistory: rSessionHistory, generalExpenses: rGeneralExpenses, otherIncome: rOtherIncome,
         discountCredits: rDiscountCredits, rewardHistory: rRewardHistory, activeTournament: rActiveTournament,
         tournamentHistory: rTournamentHistory, groupDefaults: rGroupDefaults, rankingConfigs: rRankingConfigs, cloudClub: rCloudClub,
+        lastIntentionalPlayerWipeAt: rLastIntentionalPlayerWipeAt,
         savedAt: restoredSavedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null,
       });
       let verified = false, verifyReason = "write-failed";
@@ -7120,11 +7344,11 @@ export default function App() {
 
         {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef }} />}
         {tab === "session" && <GameTab
-          sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members") }}
+          sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members") }}
           summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
         />}
         {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null) }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -8402,14 +8626,16 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
 // BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
 // both reused in place rather than reimplemented, per "do not create duplicate implementations".
-function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, sessionHistory, rankingConfigs, updateRankingConfig, onClose }) {
+// v1.12.12 (P2.2 IA cleanup): cloudClub/setCloudClub/groupDefaults/session/updatePlayer/deviceId are no
+// longer accepted here — they existed ONLY to feed the removed BadQ Online row (moved to SettingsTab, see
+// its own comment) and the removed legacy Member Portal (Beta) sheet. Nothing else in this component ever
+// read them; dropping them here is pure dead-prop cleanup, not a behavior change.
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false); // v1.11.68: section 9 club-picker-first flow
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
-  const [onlineSheetOpen, setOnlineSheetOpen] = useState(false); // v1.12.8: "☁️ BadQ Online" (P2.1)
-  const [portalSheetOpen, setPortalSheetOpen] = useState(false); // v1.11.35: "Member Portal (Beta)"
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
@@ -8486,29 +8712,11 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
         <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>เดือน</span>
       </div>
 
-      {/* v1.12.8 (P2.1 — Cloud Foundation): Owner Auth + Workspace + Single Active Device identity layer.
-          Entirely separate from Member Portal (Beta) below — does nothing to local data either way, and
-          does nothing at all when Firebase can't be reached (see BadQOnlineSheet/firebase-sync.js). Online
-          remains fully optional; every existing install keeps working 100% locally/offline regardless. */}
-      <div style={{ marginTop: 14 }}><Label>☁️ BadQ Online</Label></div>
-      <BadQOnlineNavRow deviceId={deviceId} onOpen={() => setOnlineSheetOpen(true)} />
-      {onlineSheetOpen && <BadQOnlineSheet deviceId={deviceId} onClose={() => setOnlineSheetOpen(false)} />}
-
-      {/* v1.11.35 (Member Portal Phase 1 — Firebase Foundation): Owner-only Cloud setup entry point.
-          Does nothing when Firebase isn't configured (see firebase-config.js/firebase-sync.js) — every
-          existing install keeps working 100% locally/offline whether or not this section is ever opened. */}
-      <div style={{ marginTop: 14 }}><Label>🌐 Member Portal (Beta)</Label></div>
-      <NavRow onClick={() => setPortalSheetOpen(true)}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{cloudClub?.clubId ? `เชื่อมต่อแล้ว: ${cloudClub.sourceGroupName || cloudClub.clubId}` : "ยังไม่เชื่อมต่อ Cloud"}</span>
-        <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
-      </NavRow>
-      {portalSheetOpen && (
-        <MemberPortalSheet
-          cloudClub={cloudClub} setCloudClub={setCloudClub}
-          players={players} updatePlayer={updatePlayer} groupDefaults={groupDefaults} session={session}
-          onClose={() => setPortalSheetOpen(false)}
-        />
-      )}
+      {/* v1.12.12 (P2.2 IA reorg): "☁️ BadQ Online" moved OUT of ตั้งค่าทั่วไป into its own top-level Settings
+          card (see SettingsTab) — Settings → BadQ Online directly, not Settings → ตั้งค่าทั่วไป → BadQ Online.
+          The legacy "🌐 Member Portal (Beta)" row that used to sit below this has been REMOVED entirely (see
+          the comment above MemberPortalSheet's old location, right before ArchivedPlayersSheet, for what was
+          and wasn't touched). */}
 
       <div style={{ marginTop: 6 }}><Label>🔒 ความเป็นส่วนตัวและข้อมูล</Label></div>
 
@@ -9024,7 +9232,7 @@ function BadQOnlineNavRow({ deviceId, onOpen }) {
 // Workspace resolution (create-once, idempotent) + Single Active Device (auto-register when none exists,
 // explicit-confirm takeover when one already exists, live revoked-state detection via a real-time Firestore
 // listener). Does not read or write ANY BadQ business data — see the file-level comment block above.
-function BadQOnlineSheet({ deviceId, onClose }) {
+function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
   const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
   const available = !!(cloud && cloud.available);
   const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
@@ -9145,6 +9353,40 @@ function BadQOnlineSheet({ deviceId, onClose }) {
   const status = deriveOnlineStatus({ available, authUser, isOffline, workspace, deviceId, cloudError });
   const meta = ONLINE_STATUS_META[status];
   const hasConflict = !!(workspace && workspace.activeDeviceId && deviceId && workspace.activeDeviceId !== deviceId);
+
+  // v1.12.12 (P2.2 — CRITICAL: Initial Cloud Data Safety) — read-only reconnaissance, ONLY once this device
+  // is genuinely the Active Device (never for a revoked/conflicted device, which has no business offering to
+  // seed anything). Tells this UI whether Cloud already has Club data (in which case NO upload is ever
+  // offered here — see the safe "already has data" state below, spec: "never automatically overwrite it with
+  // local data merely because this device became Active") or is genuinely empty (in which case, and ONLY
+  // then, an explicit Owner-confirmed initial upload becomes possible).
+  const [cloudInitState, setCloudInitState] = useState(null);
+  useEffect(() => {
+    if (!cloud || !cloud.checkCloudInitState || !workspace || !deviceId || workspace.activeDeviceId !== deviceId) { setCloudInitState(null); return; }
+    let cancelled = false;
+    cloud.checkCloudInitState().then((res) => { if (!cancelled) setCloudInitState(res); }).catch(() => { if (!cancelled) setCloudInitState(null); });
+    return () => { cancelled = true; };
+  }, [workspace && workspace.id, workspace && workspace.activeDeviceId, deviceId]);
+  const [initConfirmOpen, setInitConfirmOpen] = useState(false);
+  const [initBusy, setInitBusy] = useState(false);
+  const [initErr, setInitErr] = useState("");
+  const [initDone, setInitDone] = useState(false);
+  // Summary shown to the Owner BEFORE they confirm (spec: "number of clubs/groups, number of current
+  // sessions, most recent local update timestamp, device/browser context where practical") — built entirely
+  // from data THIS device already has locally; never fetched from anywhere else.
+  const localGroupCount = Object.keys(groupDefaults || {}).length;
+  const localSessionCount = (sessionHistory || []).length;
+  const localMostRecentAt = (sessionHistory || []).reduce((max, h) => Math.max(max, Number(h && h.endedAt) || 0), 0);
+  const doConfirmInitialCloudData = async () => {
+    setInitBusy(true); setInitErr("");
+    try {
+      const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
+      await cloud.upsertClub(deviceId, activeSessionId, { club: { name: firstGroupName }, confirmedInitialData: true });
+      setInitConfirmOpen(false); setInitDone(true);
+      setCloudInitState({ clubsInitialized: true });
+    } catch (e) { setInitErr(cloudErrorMessage(e)); }
+    finally { setInitBusy(false); }
+  };
 
   const doRegister = async () => {
     if (password !== confirmPassword) { setErr("รหัสผ่านไม่ตรงกัน"); return; }
@@ -9298,6 +9540,45 @@ function BadQOnlineSheet({ deviceId, onClose }) {
             </div>
           )}
 
+          {/* v1.12.12 (P2.2 — CRITICAL: Initial Cloud Data Safety). Cloud genuinely has no Club yet — the
+              ONLY case where an upload is ever offered here, and only with an explicit tap after seeing a
+              summary of what's about to become Cloud's starting data. Never automatic, never inferred from
+              merely becoming the Active Device. */}
+          {status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === false && !initDone && (
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text, marginBottom: 4 }}>ยังไม่มีข้อมูลก๊วนบน Cloud</div>
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 8, lineHeight: 1.6 }}>ยังไม่เคยสร้างก๊วน (Club) บน Cloud สำหรับบัญชีนี้ — เลือกได้ว่าจะใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้นหรือไม่</div>
+              <button disabled={initBusy} onClick={() => setInitConfirmOpen(true)} style={{ width: "100%", padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: initBusy ? 0.6 : 1 }}>ใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้น</button>
+            </div>
+          )}
+          {/* Cloud ALREADY has Club data — safe state only, per spec NEVER silently overwritten just because
+              this device is Active. No upload/merge action is offered here at all; full reconciliation
+              between divergent datasets is out of scope for this phase (P2.7). */}
+          {status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === true && (
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, fontSize: 11.5, color: T.muted }}>
+              มีข้อมูลก๊วน (Club) บน Cloud อยู่แล้วสำหรับบัญชีนี้
+            </div>
+          )}
+          {initConfirmOpen && (
+            <Overlay onClose={() => { if (!initBusy) setInitConfirmOpen(false); }}>
+              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>ใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้น?</div>
+              <div style={{ fontSize: 12, color: T.muted, marginBottom: 14, lineHeight: 1.7 }}>
+                ข้อมูลสรุปจากอุปกรณ์นี้ ({navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? "มือถือ" : "เดสก์ท็อป/แท็บเล็ต"}):
+                <div style={{ marginTop: 6 }}>• จำนวนก๊วนที่บันทึกไว้: {localGroupCount}</div>
+                <div>• จำนวนประวัติก๊วนที่ผ่านมา: {localSessionCount}</div>
+                {localMostRecentAt > 0 && <div>• อัปเดตล่าสุด: {new Date(localMostRecentAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}</div>}
+              </div>
+              {initErr && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{initErr}</div>}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button disabled={initBusy} onClick={() => setInitConfirmOpen(false)} style={btnSecondary}>ยกเลิก</button>
+                <button disabled={initBusy} onClick={doConfirmInitialCloudData} style={{ ...btnPrimary, opacity: initBusy ? 0.6 : 1 }}>{initBusy ? "กำลังบันทึก..." : "ยืนยัน"}</button>
+              </div>
+            </Overlay>
+          )}
+          {initDone && (
+            <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>สร้างข้อมูลก๊วนตั้งต้นบน Cloud แล้ว</div>
+          )}
+
           {err && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{err}</div>}
           {notice && <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>{notice}</div>}
 
@@ -9308,126 +9589,16 @@ function BadQOnlineSheet({ deviceId, onClose }) {
   );
 }
 
-function MemberPortalSheet({ cloudClub, setCloudClub, players, updatePlayer, groupDefaults, session, onClose }) {
-  const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
-  const available = !!(cloud && cloud.available);
-  const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
-  const [authMode, setAuthMode] = useState("signin"); // "signin" | "register"
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [customName, setCustomName] = useState("");
-  const [migrating, setMigrating] = useState(false);
-  const [migrateResult, setMigrateResult] = useState(null); // { done, skipped, failed }
-
-  useEffect(() => {
-    if (!available || !cloud.onAuthChange) return;
-    const unsub = cloud.onAuthChange((u) => setAuthUser(u || null));
-    return () => { try { unsub && unsub(); } catch (e) {} };
-  }, [available]);
-
-  const doAuth = async () => {
-    setBusy(true); setErr("");
-    try {
-      if (authMode === "register") await cloud.registerOwner(email.trim(), password);
-      else await cloud.signInOwner(email.trim(), password);
-    } catch (e) { setErr(e?.message || "เข้าสู่ระบบไม่สำเร็จ"); }
-    finally { setBusy(false); }
-  };
-
-  const doCreateClub = async (name) => {
-    const n = (name || "").trim();
-    if (!n || !cloud) return;
-    setBusy(true); setErr("");
-    try {
-      const clubId = await cloud.createClub(n);
-      setCloudClub(normCloudClub({ clubId, ownerUid: authUser?.uid || null, sourceGroupName: n, enabled: true, migratedAt: null }));
-    } catch (e) { setErr(e?.message || "สร้าง Club ไม่สำเร็จ"); }
-    finally { setBusy(false); }
-  };
-
-  // v1.11.35: migrates only players missing a badqId — safe to run repeatedly (idempotent both here and
-  // server-side in allocateBadqId), never touches players already migrated, never touches archived
-  // players (this panel only ever receives the active roster), never reads/writes photo.
-  const doMigrate = async () => {
-    if (!cloudClub?.clubId || !cloud) return;
-    setMigrating(true); setErr(""); setMigrateResult(null);
-    let done = 0, skipped = 0, failed = 0;
-    for (const p of players || []) {
-      if (p.badqId) { skipped++; continue; }
-      try {
-        const res = await cloud.allocateBadqId({
-          clubId: cloudClub.clubId, localId: p.id, name: p.name, skillIndex: p.skillIndex,
-          levelSnapshot: p.level, handedness: p.handedness, handPref: p.handPref,
-          memberType: p.memberType, phone: p.phone, lineId: p.lineId,
-        });
-        if (res && res.badqId) { updatePlayer(p.id, { badqId: res.badqId }); done++; } else failed++;
-      } catch (e) { failed++; }
-    }
-    setCloudClub((c) => normCloudClub({ ...c, migratedAt: Date.now() }));
-    setMigrateResult({ done, skipped, failed });
-    setMigrating(false);
-  };
-
-  return (
-    <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>🌐 Member Portal (Beta)</div>
-      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14, lineHeight: 1.6 }}>
-        ขั้นนี้เป็นแค่ "การเชื่อมต่อพื้นฐาน" เท่านั้น (สร้าง Club บน Cloud + ย้ายรายชื่อสมาชิกที่มีอยู่ขึ้นไปพร้อม BadQ ID) — ยังไม่มีหน้าลงทะเบียนออนไลน์หรือระบบคิวรอ แอปทำงานตามปกติแบบออฟไลน์เหมือนเดิมทุกประการไม่ว่าจะเชื่อมต่อ Cloud หรือไม่
-      </div>
-
-      {!available && (
-        <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12.5, color: T.muted, lineHeight: 1.7 }}>
-          ยังไม่ได้ตั้งค่า Firebase สำหรับเครื่องนี้ — ฟีเจอร์นี้ยังปิดอยู่และไม่กระทบการใช้งานปกติของแอป ผู้ดูแลระบบต้องกรอกค่า config ในไฟล์ firebase-config.js ก่อนจึงจะเปิดใช้งานได้ (ดูขั้นตอนใน Firebase Console setup)
-        </div>
-      )}
-
-      {available && !authUser && (
-        <div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <button onClick={() => setAuthMode("signin")} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "signin" ? T.green : T.surface, color: authMode === "signin" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>เข้าสู่ระบบ Owner</button>
-            <button onClick={() => setAuthMode("register")} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "register" ? T.green : T.surface, color: authMode === "register" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>สมัคร Owner ใหม่</button>
-          </div>
-          <input type="email" placeholder="อีเมล" value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
-          <input type="password" placeholder="รหัสผ่าน" value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
-          <button disabled={busy || !email || !password} onClick={doAuth} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังดำเนินการ..." : authMode === "register" ? "สมัคร Owner" : "เข้าสู่ระบบ"}</button>
-        </div>
-      )}
-
-      {available && authUser && !cloudClub?.clubId && (
-        <div>
-          <Label>สร้าง Club จากชื่อก๊วนที่เคยบันทึกไว้</Label>
-          {Object.keys(groupDefaults || {}).length === 0 && (
-            <div style={{ fontSize: 12, color: T.muted, marginBottom: 8 }}>ยังไม่มีชื่อก๊วนที่บันทึกไว้ — พิมพ์ชื่อ Club ด้านล่างแทนได้</div>
-          )}
-          {Object.keys(groupDefaults || {}).map((name) => (
-            <button key={name} disabled={busy} onClick={() => doCreateClub(name)} style={{ width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, marginBottom: 6, fontSize: 13, fontWeight: 700, color: T.text }}>สร้าง Club: {name}</button>
-          ))}
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <input placeholder="หรือพิมพ์ชื่อ Club เอง" value={customName} onChange={(e) => setCustomName(e.target.value)} style={{ flex: 1, padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13 }} />
-            <button disabled={busy || !customName.trim()} onClick={() => doCreateClub(customName)} style={{ padding: "9px 14px", borderRadius: 9, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>สร้าง</button>
-          </div>
-        </div>
-      )}
-
-      {available && authUser && cloudClub?.clubId && (
-        <div>
-          <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>เชื่อมต่อแล้ว</div>
-            <div style={{ fontSize: 11.5, color: T.muted, marginTop: 2 }}>Club: {cloudClub.sourceGroupName || cloudClub.clubId}</div>
-          </div>
-          <button disabled={migrating} onClick={doMigrate} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, opacity: migrating ? 0.6 : 1 }}>{migrating ? "กำลังย้ายข้อมูล..." : "ย้ายข้อมูลสมาชิกขึ้น Cloud"}</button>
-          {migrateResult && (
-            <div style={{ marginTop: 8, fontSize: 12, color: T.muted }}>สำเร็จ {migrateResult.done} คน · ข้ามไปแล้ว (มี BadQ ID อยู่แล้ว) {migrateResult.skipped} คน{migrateResult.failed ? ` · ล้มเหลว ${migrateResult.failed} คน` : ""}</div>
-          )}
-        </div>
-      )}
-
-      {err && <div style={{ marginTop: 10, fontSize: 12, color: "#c0392b" }}>{err}</div>}
-    </Overlay>
-  );
-}
+// v1.12.12 (P2.2 IA cleanup): the legacy "Member Portal (Beta)" sheet (v1.11.35, its own separate
+// prototype "Club" concept — sign in, create a Cloud Club by name, migrate players to get a badqId) has been
+// REMOVED. It was never the P2 architecture (Workspace/Clubs/Sessions, see BadQOnlineSheet's own header
+// comment) — just an early, superseded experiment that shared the same underlying Firebase Auth session.
+// Removed here: this component, its Settings card/nav row, and its `portalSheetOpen` state (all below, in
+// GeneralSettingsSheet). Deliberately NOT removed: `cloud.registerOwner`/`signInOwner`/`signOutOwner`/
+// `createClub`/`allocateBadqId` in firebase-sync.js (shared utilities other layers still use/may reuse),
+// `cloudClub`/`setCloudClub` local state and its `badqId` player field (existing local data — untouched,
+// never deleted, and may still be a genuine hook for a future real Member Portal built on the P2 Workspace
+// architecture), and every actual player/member record (completely unaffected either way).
 
 // v1.11.6: "สมาชิกที่เก็บไว้" — reached from ⚙️ ตั้งค่า. Deliberately minimal (photo/name/skill/hand/type
 // + a single "กู้คืนสมาชิก" action) per spec section 4: this is a recovery list, not a second member-
@@ -9641,7 +9812,7 @@ function GameTab({ sessionTabProps, summaryTabProps }) {
 
 /* ============ SESSION ============ */
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint, onGoToMembers } = props;
   // v1.12.1: openQuanSettings/showNameDropdown/pastQuans (the editable group-card's own local state) moved
   // out to GroupSessionHeader along with the card itself — see that component, defined just above GameTab.
@@ -9809,6 +9980,10 @@ function SessionTab(props) {
     // including this very row's own other slot — see `inPlay`), and it recomputes live off `current`, so
     // removing/deleting a game frees its players again immediately with zero extra bookkeeping.
     const bench = waitQueue;
+    // v1.12.13 (P0 manual matchmaking dropdown ordering fix): the picker itself gets the wider pool
+    // (includes YELLOW/resting candidates) — `bench` above stays waitQueue-only for benchIds/warnings
+    // (unchanged, see manualBenchPool's own comment for why those two must not widen).
+    const pickerBench = manualBenchPool;
     const rowOpenSlot = openSlot && openSlot.mid === m.id ? { team: openSlot.team, idx: openSlot.idx, rect: openSlot.rect } : null;
     const setRowOpenSlot = (v) => setOpenSlot(v ? { mid: m.id, ...v } : null);
     const allowed = allowedNextStatuses(st);
@@ -9878,10 +10053,10 @@ function SessionTab(props) {
             ))}
           </select>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
+            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
           </div>
           <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={bench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
+            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
           </div>
           <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
             {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
@@ -11652,7 +11827,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
       </button>
       {open === "payment" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
+          <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
         </div>
       )}
 
@@ -12092,42 +12267,84 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
 // settings.courtCost.manualOverrideTotal field is never read or written by this component either way, so an
 // old value already sitting there from before this upgrade is left completely untouched (see the backward-
 // compat fallback branch in computeCostModelExpenses).
-function CourtCostSection({ settings, setSettings, courtCount, courtLabels, durationHours, session, setSession }) {
+// v1.12.12 (P0 Court Booking / Time Model): each court now carries its OWN start/end time (not just its own
+// hours) and a separately-editable "billable hours" that can differ from its actual usage duration (venue
+// free/bonus court-time). See reconcileCourtHours/buildCourtCostRows's own v1.12.12 comments for the full
+// storage-model rationale — this component is purely the editing UI on top of that.
+function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, courtLabels, durationHours, session, setSession }) {
   const rate = (settings.courtCost && settings.courtCost.ratePerHour) || 0;
-  const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), rate);
+  const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), rate);
   const total = totalCourtCostFromRows(rows);
   const setRate = (v) => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), ratePerHour: v } }));
-  // v1.11.51 (spec C/D): editing a court's hours is ALWAYS an explicit, real "this court is now MANUAL"
-  // action — never inferred later by comparing numbers. Stored in `session` (not `settings`) so it's
-  // session-specific (spec H) and resets to a clean slate every new session (see normSession/endSession).
-  const setCourtHours = (court, hours) => setSession((s) => {
+  // v1.12.12: editing any of a court's start time / end time / billable hours is ALWAYS an explicit, real
+  // "this court is now MANUAL" action for THAT field, merged onto whatever this court's row already stores —
+  // never inferred later by comparing numbers (same discipline as v1.11.51's own setCourtHours). Still
+  // session-scoped (session.courtHours, not settings), still resets to a clean slate every new session (see
+  // normSession/endSession) — the array's own name/identity is unchanged on purpose, only its row shape
+  // grew (see reconcileCourtHours's read-side backward-compat handling of pre-v1.12.12 rows).
+  const patchCourt = (court, patch) => setSession((s) => {
     const others = (s.courtHours || []).filter((r) => r.court !== court);
-    return { ...s, courtHours: [...others, { court, hours: Math.max(0, Number(hours) || 0), source: "manual" }] };
+    const existing = (s.courtHours || []).find((r) => r.court === court) || {};
+    return { ...s, courtHours: [...others, { ...existing, court, ...patch, source: "manual" }] };
   });
+  const setCourtStartAt = (court, v) => patchCourt(court, { startAt: v || null });
+  const setCourtEndAt = (court, v) => patchCourt(court, { endAt: v || null });
+  const setCourtBillable = (court, v) => patchCourt(court, { billableHours: Math.max(0, Number(v) || 0) });
+  // v1.12.12 (spec P0.2): "+ เปิดสนามเพิ่ม" opens one more REAL court (bumps the same courtCount every other
+  // part of the app — matchmaking/court labels — already uses, not just a cost-tracking line), defaulted to a
+  // clean full-hour window starting NOW — never assumed to share the ก๊วน's own start time, since a court
+  // opened mid-session usually does not (spec explicitly calls this out). Immediately editable like any other
+  // row via the inputs above.
+  const addCourt = () => {
+    const nextCourt = Math.max(0, Math.round(Number(courtCount) || 0)) + 1;
+    const nowMin = new Date().getHours() * 60;
+    const startAt = minutesToTimeStr(nowMin);
+    const endAt = minutesToTimeStr(nowMin + 60);
+    if (typeof setCourtCount === "function") setCourtCount(nextCourt);
+    setSession((s) => {
+      const others = (s.courtHours || []).filter((r) => r.court !== nextCourt);
+      return { ...s, courtHours: [...others, { court: nextCourt, startAt, endAt, billableHours: null, source: "manual" }] };
+    });
+  };
   return (
     <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
       <Label>🏟️ ต้นทุนค่าคอร์ด</Label>
       <div style={{ marginBottom: 10 }}>
         <NumField label="ค่าสนาม/ชั่วโมง (฿)" value={rate} onChange={setRate} />
       </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
         {rows.map((row) => (
-          <div key={row.court} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
-            <span style={{ fontSize: 12.5, fontWeight: 800, flexShrink: 0, minWidth: 52, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>สนาม {courtLabelFor(courtLabels, row.court)}</span>
-            <input
-              type="number"
-              value={row.hours}
-              onChange={(e) => setCourtHours(row.court, e.target.value)}
-              onFocus={(e) => e.target.select()}
-              style={{ width: 52, padding: "6px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 800, outline: "none", flexShrink: 0 }}
-            />
-            <span style={{ fontSize: 11.5, color: T.muted, flexShrink: 0 }}>ชม. × ฿{rate} =</span>
-            <span style={{ fontSize: 13, fontWeight: 800, marginLeft: "auto", flexShrink: 0 }}>{formatCurrency(row.cost)}</span>
+          <div key={row.court} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "9px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12.5, fontWeight: 800, flexShrink: 0 }}>สนาม {courtLabelFor(courtLabels, row.court)}</span>
+              <span style={{ fontSize: 10.5, color: T.muted, marginLeft: "auto", flexShrink: 0 }}>{row.source === "manual" ? "แก้ไขแล้ว" : "อัตโนมัติ"}</span>
+              <span style={{ fontSize: 13, fontWeight: 800, flexShrink: 0 }}>{formatCurrency(row.cost)}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              <input type="time" value={row.startAt || ""} onChange={(e) => setCourtStartAt(row.court, e.target.value)} style={{ padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none" }} />
+              <span style={{ fontSize: 11, color: T.muted }}>→</span>
+              <input type="time" value={row.endAt || ""} onChange={(e) => setCourtEndAt(row.court, e.target.value)} style={{ padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none" }} />
+              <span style={{ fontSize: 11, color: T.muted, marginLeft: 4 }}>ใช้จริง {Math.round(row.actualDurationHours * 100) / 100} ชม.</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 11.5, color: T.muted, flexShrink: 0 }}>คิดเงินจริง</span>
+              <input
+                type="number"
+                value={row.billableHours}
+                onChange={(e) => setCourtBillable(row.court, e.target.value)}
+                onFocus={(e) => e.target.select()}
+                style={{ width: 52, padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 12.5, fontWeight: 800, outline: "none", flexShrink: 0 }}
+              />
+              <span style={{ fontSize: 11, color: T.muted }}>ชม. × ฿{rate}</span>
+            </div>
           </div>
         ))}
       </div>
+      <button onClick={addCourt} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>
+        <Plus size={14} /> เปิดสนามเพิ่ม
+      </button>
       <div style={{ fontSize: 11, color: T.muted, marginBottom: 8 }}>
-        ชั่วโมงเริ่มต้นของแต่ละสนามอิงจากเวลาก๊วน (ตั้งค่าใน "ตั้งค่าก๊วน"/"วันนี้") — แก้รายสนามได้ทุกเมื่อ
+        เวลาเริ่มต้นของแต่ละสนามอิงจากเวลาก๊วน (ตั้งค่าใน "ตั้งค่าก๊วน"/"วันนี้") จนกว่าจะแก้เอง — สนามที่เปิดเพิ่มระหว่างก๊วนจะเริ่มจากเวลาปัจจุบันโดยอัตโนมัติ และแก้ไขเวลา/ชั่วโมงที่คิดเงินจริงได้ทุกเมื่อ
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 4, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
         <span style={{ color: T.muted, fontWeight: 700 }}>รวมค่าคอร์ด</span><span>{formatCurrency(total)}</span>
@@ -12200,7 +12417,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
   // v1.11.51 (spec J): reflects the new per-court hours × rate total — updates immediately when any court's
   // hours are edited (session.courtHours), never the old single-figure ratePerHour×courtCount×duration. Court
   // cost is about court/time configuration, not planned headcount — spec D: "Keep current cost logic".
-  const courtCostRows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), settings.courtCost && settings.courtCost.ratePerHour);
+  const courtCostRows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), settings.courtCost && settings.courtCost.ratePerHour);
   const courtCostTotal = totalCourtCostFromRows(courtCostRows);
   const otherTotal = otherExpensesTotal(settings.otherExpenses);
   // v1.11.55 (Revenue Estimate Eligibility spec A): default "จำนวนผู้เล่นคาดการณ์" is UNCONDITIONALLY the
@@ -12267,7 +12484,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
 // Overlay/backdrop, no duplicated payment/cost system. FinanceSettingsSheet (the existing standalone modal
 // opened from the ชำระเงิน tab) keeps its exact same props/call site/behavior; it is now just
 // <Overlay><heading/><FinanceSettingsBody/></Overlay>.
-function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }) {
+function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | null — v1.12.1: "prize" moved to RewardSettingsSheet (Advanced Settings)
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.52 (spec C): "จำนวนลูกที่ใช้"'s AUTO baseline — the SAME live completed-match definition already
@@ -12404,7 +12621,7 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, courtLa
       {open === "cost" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
           <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} actualShuttleUsed={actualShuttleUsed} carryForward={shuttleOpeningCarryForward} opening={shuttleOpeningResolved} />
-          <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} />
+          <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} />
           <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} />
         </div>
       )}
@@ -12433,11 +12650,11 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, courtLa
 // v1.12.7: thin standalone-sheet wrapper around FinanceSettingsBody (see comment above it) — same props,
 // same Overlay/heading/onClose behavior as before this patch, used unchanged by its one existing call site
 // (the ชำระเงิน tab's "การชำระเงินและต้นทุน" button).
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, onClose }) {
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, onClose }) {
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>💵 การชำระเงินและต้นทุน</div>
-      <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
+      <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
     </Overlay>
   );
 }
@@ -13008,7 +13225,7 @@ function SettingsTab({
   exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog,
   autoOpen, onAutoOpenConsumed,
 }) {
-  const [view, setView] = useState(null); // null | "advanced" | "general" | "history" | "backup"
+  const [view, setView] = useState(null); // null | "online" | "advanced" | "general" | "history" | "backup"
 
   // v1.12.1: one-shot deep-link support for the corrupted-data recovery banner (App(), spec 12) — jumps
   // straight to "💾 ข้อมูลและการสำรอง" the instant this page mounts with autoOpen="backup" set, then
@@ -13047,6 +13264,12 @@ function SettingsTab({
 
   return (
     <div>
+      {/* v1.12.12 (P2.2.1 — Settings IA reorg): "☁️ BadQ Online" is now the FIRST top-level card — it no
+          longer requires Settings → ตั้งค่าทั่วไป → BadQ Online, just Settings → BadQ Online. Uses the same
+          live-status BadQOnlineNavRow (☁️/🟢/🟠/🔒/🔴, spec section K) this row already had inside ตั้งค่า
+          ทั่วไป — only WHERE it's mounted changed, not its own behavior. */}
+      <SectionLabel>☁️ BadQ Online</SectionLabel>
+      <BadQOnlineNavRow deviceId={deviceId} onOpen={() => setView("online")} />
       <SectionLabel>การตั้งค่า</SectionLabel>
       <Row icon="🚀" title="ตั้งค่าขั้นสูง" sub="Ranking · Tournament · รางวัล" onClick={() => setView("advanced")} />
       <Row icon="⚙️" title="ตั้งค่าทั่วไป" sub="ระดับฝีมือ · ความเป็นส่วนตัว · ภาษา" onClick={() => setView("general")} />
@@ -13065,11 +13288,17 @@ function SettingsTab({
           lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
           deleteAllMembersData={deleteAllMembersData} wipeAllAppData={wipeAllAppData}
           archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
-          players={players} groupDefaults={groupDefaults} session={session}
-          cloudClub={cloudClub} setCloudClub={setCloudClub} deviceId={deviceId} updatePlayer={updatePlayer}
+          players={players}
           sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
           onClose={() => setView(null)}
         />
+      )}
+      {/* v1.12.12 (P2.2.1 — Settings IA reorg): "☁️ BadQ Online" is now a TOP-LEVEL Settings destination
+          (Settings → BadQ Online), not nested inside ตั้งค่าทั่วไป any more. Reuses the exact same
+          BadQOnlineNavRow/BadQOnlineSheet components P2.1 already shipped — only where they're mounted from
+          has changed, nothing about their own behavior/authority logic. */}
+      {view === "online" && (
+        <BadQOnlineSheet deviceId={deviceId} groupDefaults={groupDefaults} sessionHistory={sessionHistory} onClose={() => setView(null)} />
       )}
       {view === "backup" && (
         <Overlay onClose={() => setView(null)}>
@@ -13286,7 +13515,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, setCourtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
   // v1.11.53: this component's OWN local `mode` state (below) is the finance period view toggle
   // (day/month/overview) — unrelated to and pre-dating the doubles/singles game format, hence the `gameMode`
   // prop name here specifically (every other component in this file still just calls it `mode`, matching
@@ -13352,7 +13581,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
           sees every player regardless of archive status, and a member who played earlier today keeps
           showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
-        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} sessionHistory={sessionHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} sessionHistory={sessionHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
       ) : (
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -14767,7 +14996,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
 // same component/logic/state that used to be this entire file, just renamed and unpinched from the outer
 // switcher; zero behavior change. Tournament payment is a NEW sibling reusing the same visual patterns
 // (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
-function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
   // v1.12.1 (Tournament Feature Toggle): hide the [🏸 ก๊วน][🏆 Tournament] sub-tab row entirely (no layout
   // gap) when settings.tournamentEnabled is off, and always render the ก๊วน panel in that case regardless
@@ -14781,14 +15010,14 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
         </div>
       )}
       {payerTab === "quan" || !showTournamentTab ? (
-        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory }} />
+        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory }} />
       ) : (
         <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
       )}
     </div>
   );
 }
-function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, courtLabels, mode, rewardHistory, sessionHistory }) {
+function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -14832,7 +15061,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   // sum (actualShuttleUsedSoFar), not a match count, and `null` replaces session.shuttleUsage (the aggregate
   // manual-override concept is retired for ACTUAL usage) — same swap as endSession()/ShuttlecockCostSection,
   // so this live figure can never drift from what End Session will eventually freeze.
-  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, actualShuttleUsedSoFar(history, current), durationHours, session && session.courtHours, null, rewardHistory, session && session.id, shuttleOpeningResolved);
+  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, actualShuttleUsedSoFar(history, current), durationHours, session && session.courtHours, null, rewardHistory, session && session.id, shuttleOpeningResolved, session && session.sessionStartTime, session && session.sessionEndTime);
   const liveProfit = Math.round((liveRevenue - liveExpenseTotal + Number.EPSILON) * 100) / 100;
   const detailP = detail ? players.find((p) => p.id === detail) : null;
   const detailBill = detailP ? billBy(detailP.id) : null;
@@ -14880,7 +15109,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         <ChevronRight size={18} color={T.muted} />
       </button>
       {openFinanceSettings && (
-        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} mode={mode} sessionHistory={sessionHistory} onClose={() => setOpenFinanceSettings(false)} />
+        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} mode={mode} sessionHistory={sessionHistory} onClose={() => setOpenFinanceSettings(false)} />
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
@@ -15323,14 +15552,17 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         // in this match is already filled, reorder/flag this slot's bench using the same scoring engine
         // buildMatch uses — teammates = already-placed players on THIS side (excluding this slot itself),
         // opponents = already-placed players on the OTHER side. Recomputed fresh on every render, so
-        // selecting P2 immediately re-ranks P3's candidates, and so on (spec section 3). Left untouched
-        // (original wait-priority order) when nobody else has been placed yet, so the very first pick's
-        // behavior is byte-for-byte unchanged from before this feature existed.
+        // selecting P2 immediately re-ranks P3's candidates, and so on (spec section 3).
+        // v1.12.13 (P0 manual matchmaking dropdown ordering fix): now ALWAYS routed through
+        // rankManualSlotCandidates, including the very first pick (teammateIds/opponentIds both empty) —
+        // the required NORMAL > YELLOW(resting) > RED(conflict) tiering must apply even before anyone else
+        // is placed (no conflicts are possible yet, but a resting candidate still must not outrank a
+        // normal one). With empty teammateIds/opponentIds the function computes zero conflicts and a flat
+        // score, so a pool with no resting candidates sorts identically to the old raw wait-priority order
+        // (verified: both reduce to "longest-waited first").
         const teammateIds = arr.filter((pid, i) => i !== idx && pid);
         const opponentIds = ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean);
-        const rankedBench = (teammateIds.length + opponentIds.length) > 0
-          ? rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap)
-          : (bench || []);
+        const rankedBench = rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap);
         const nameLong = p && p.name.length > 7;
         const nameFs = nameLong ? (compact ? 12.5 : 13) : (compact ? 14 : 15);
         const lvlFs = nameLong ? 11 : (compact ? 12 : 13);
@@ -15461,21 +15693,31 @@ function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRe
           // error/warning banners elsewhere in this file (BackupSettingsEditor's import-error box), so
           // this stays visually consistent instead of inventing a new color. Purely a background swap:
           // still fully clickable/selectable (onPick unchanged), never disabled.
-          <button key={b.id} onClick={() => onPick(b.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: b._conflict ? "#fdecea" : "none", border: "none", borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
-            <Avatar p={b} size={26} />
-            <span style={{ flex: 1, minWidth: 0 }}>
-              <span style={{ display: "block", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: b._conflict ? "#c0392b" : undefined }}>{b._conflict ? "🔴 " : ""}{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>
-              {b._conflict ? (
-                <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#c0392b", marginTop: 1 }}>
-                  {b._conflict.label} {b._conflict.withName}
+          // v1.12.13 (P0 manual matchmaking dropdown ordering fix): YELLOW visual state for a
+          // resting("ขอพัก") candidate with no conflict — reuses PSTATUS.resting's own existing color
+          // (#d97706 text / #fef3ec background, the same amber already used everywhere else "พัก" is shown)
+          // rather than inventing a new color. Still fully tappable (onPick unchanged) — resting candidates
+          // are selectable, never disabled, matching how RED/conflict candidates already behave.
+          (() => {
+            const isResting = !b._conflict && b.status === "resting";
+            return (
+              <button key={b.id} onClick={() => onPick(b.id)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", background: b._conflict ? "#fdecea" : (isResting ? "#fef3ec" : "none"), border: "none", borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
+                <Avatar p={b} size={26} />
+                <span style={{ flex: 1, minWidth: 0 }}>
+                  <span style={{ display: "block", fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: b._conflict ? "#c0392b" : (isResting ? "#d97706" : undefined) }}>{b._conflict ? "🔴 " : (isResting ? "🟡 " : "")}{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>
+                  {b._conflict ? (
+                    <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: "#c0392b", marginTop: 1 }}>
+                      {b._conflict.label} {b._conflict.withName}
+                    </span>
+                  ) : typeof now === "number" && (
+                    <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: isResting ? "#d97706" : T.muted, marginTop: 1 }}>
+                      {isResting ? "ขอพัก · " : ""}รอ {Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000))} นาที · เล่น {b.games || 0} เกม
+                    </span>
+                  )}
                 </span>
-              ) : typeof now === "number" && (
-                <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: T.muted, marginTop: 1 }}>
-                  รอ {Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000))} นาที · เล่น {b.games || 0} เกม
-                </span>
-              )}
-            </span>
-          </button>
+              </button>
+            );
+          })()
         ))}
       </div>
     </>,

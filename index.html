@@ -342,7 +342,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.11";
+      var CURRENT_VERSION = "1.12.13";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -726,7 +726,7 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.12.11";
+const APP_VERSION = "1.12.13";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1705,9 +1705,26 @@ function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lock
       conflict
     };
   });
-  const normal = scored.filter(s => !s.conflict).sort((a, b) => a.score - b.score);
-  const conflicted = scored.filter(s => s.conflict).sort((a, b) => a.score - b.score);
-  return [...normal, ...conflicted].map(s => s.conflict ? {
+
+  // v1.12.13 (P0 MANUAL MATCHMAKING DROPDOWN ORDERING FIX): required ordering per spec — group candidates
+  // by eligibility TIER first (0=NORMAL, 1=YELLOW/resting, 2=RED/conflict), and eligibility tier ALWAYS
+  // outranks wait time (a RED candidate stays below every YELLOW/NORMAL candidate even if they've waited
+  // far longer than anyone else). WITHIN a tier, sort by wait time longest-to-shortest, using the exact
+  // same wait-time source the rest of the app already shows/uses (waitingSince — see fairnessScore/SORT
+  // above and PlayerPicker's own "รอ X นาที" hint below) — never a second, independently-invented wait-time
+  // calculation. A candidate who is BOTH resting AND conflicted lands in RED (conflict is the more severe
+  // state — matches the existing "conflict always sorts last" precedent this function already had).
+  // `score` (the pre-existing skill-balance/partner-repeat/owner-penalty fit score computed above, itself
+  // UNCHANGED) is kept only as the deterministic tie-breaker when two candidates in the same tier have the
+  // exact same wait time, falling back to `priorityIdx` (existing player-order/priority index) after that —
+  // per explicit spec ("if equal waiting time, preserve deterministic/stable ordering... never random").
+  // This function is never called by Auto Matchmaking (buildMatch/fillCourt and every other auto-assign
+  // call site) — that engine's own hard-filter/priority logic is completely untouched by this change.
+  const nowForWait = Date.now();
+  const tierOf = s => s.conflict ? 2 : s.player.status === "resting" ? 1 : 0;
+  const waitMinOf = s => Math.max(0, Math.floor((nowForWait - (s.player.waitingSince || nowForWait)) / 60000));
+  const ranked = [...scored].sort((a, b) => tierOf(a) - tierOf(b) || waitMinOf(b) - waitMinOf(a) || a.score - b.score || priorityIdx(a.player.id) - priorityIdx(b.player.id));
+  return ranked.map(s => s.conflict ? {
     ...s.player,
     _conflict: s.conflict
   } : s.player);
@@ -2917,23 +2934,56 @@ function otherExpensesTotal(items) {
 // yields a fresh AUTO row for the new court (nothing stored for it yet); decreasing it naturally hides any
 // higher-numbered rows (their stored data, if any, is left untouched, never deleted, so re-increasing the
 // count later restores a previously-set manual value instead of silently losing it).
-function reconcileCourtHours(courtHours, courtCount, durationHours) {
+// v1.12.12 (P0 Court Booking / Time Model): extends this SAME function/array contract rather than replacing
+// it. `courtHours` still holds ONLY courts the organizer has explicitly edited (source:"manual"); each stored
+// row can now independently override any of {startAt, endAt, billableHours} — an untouched field stays
+// null/absent and falls back to the session-wide default (startAt/endAt -> the two new trailing params,
+// billableHours -> that court's own actual usage duration). This is the same "AUTO follows live data, MANUAL
+// never does" invariant the v1.11.51 header above already established, now covering three independently-
+// overridable fields per court instead of one. `sessionStartTime`/`sessionEndTime` are NEW, OPTIONAL trailing
+// params: any pre-v1.12.12 caller that omits them gets startAt/endAt=null for every row and
+// actualDurationHours falls back to the `durationHours` param exactly as before -- byte-identical behavior to
+// the old function for anyone not yet updated to pass them.
+// Backward compatibility for data written BEFORE this patch: an old stored row only ever had `hours` (no
+// startAt/endAt/billableHours field existed yet). Such a row is read as a legacy BILLABLE-HOURS override —
+// so a pre-v1.12.12 manual edit keeps costing exactly what it did before, never silently reset to auto —
+// while its actual start/end still default to the session window (there was never any other start/end for it
+// to have had).
+function reconcileCourtHours(courtHours, courtCount, durationHours, sessionStartTime, sessionEndTime) {
   const stored = Array.isArray(courtHours) ? courtHours : [];
   const manualByCourt = new Map();
   stored.forEach(r => {
-    if (r && r.source === "manual" && Number(r.court) > 0) manualByCourt.set(Math.round(Number(r.court)), Math.max(0, Number(r.hours) || 0));
+    if (r && r.source === "manual" && Number(r.court) > 0) {
+      const hasStartAt = typeof r.startAt === "string" && !!r.startAt;
+      const hasEndAt = typeof r.endAt === "string" && !!r.endAt;
+      const hasBillable = r.billableHours != null && !isNaN(Number(r.billableHours));
+      manualByCourt.set(Math.round(Number(r.court)), {
+        startAt: hasStartAt ? r.startAt : null,
+        endAt: hasEndAt ? r.endAt : null,
+        billableHours: hasBillable ? Math.max(0, Number(r.billableHours)) : null,
+        legacyHours: !hasStartAt && !hasEndAt && !hasBillable && r.hours != null && !isNaN(Number(r.hours)) ? Math.max(0, Number(r.hours)) : null
+      });
+    }
   });
   const n = Math.max(0, Math.round(Number(courtCount) || 0));
+  const fallbackStart = sessionStartTime || null;
+  const fallbackEnd = sessionEndTime || null;
+  const fallbackHours = Math.max(0, Number(durationHours) || 0);
   const rows = [];
   for (let c = 1; c <= n; c++) {
-    if (manualByCourt.has(c)) rows.push({
+    const m = manualByCourt.get(c);
+    const startAt = m && m.startAt || fallbackStart;
+    const endAt = m && m.endAt || fallbackEnd;
+    const actualDurationHours = startAt && endAt ? sessionDurationHours(startAt, endAt) : fallbackHours;
+    const billableHours = m ? m.billableHours != null ? m.billableHours : m.legacyHours != null ? m.legacyHours : actualDurationHours : actualDurationHours;
+    rows.push({
       court: c,
-      hours: manualByCourt.get(c),
-      source: "manual"
-    });else rows.push({
-      court: c,
-      hours: Math.max(0, Number(durationHours) || 0),
-      source: "auto"
+      source: m ? "manual" : "auto",
+      startAt,
+      endAt,
+      actualDurationHours,
+      billableHours,
+      hours: billableHours
     });
   }
   return rows;
@@ -2949,7 +2999,15 @@ function buildCourtCostRows(rows, ratePerHour) {
       hours,
       source: row.source || "auto",
       rate: r,
-      cost: Math.round((hours * r + Number.EPSILON) * 100) / 100
+      cost: Math.round((hours * r + Number.EPSILON) * 100) / 100,
+      // v1.12.12 (P0): additive fields only -- court/hours/source/rate/cost above are byte-identical in
+      // meaning to every pre-v1.12.12 caller. `hours`/`billableHours` are always the SAME resolved value
+      // (the actual basis for `cost`); `actualDurationHours` is the court's real usage time, which can now
+      // differ from billableHours (free/bonus court-time — see reconcileCourtHours).
+      startAt: row.startAt || null,
+      endAt: row.endAt || null,
+      actualDurationHours: row.actualDurationHours != null ? Math.max(0, Number(row.actualDurationHours) || 0) : hours,
+      billableHours: hours
     };
   });
 }
@@ -2974,7 +3032,7 @@ function courtRateConfigured(ratePerHour) {
 // "simple"/"perPerson" return [] (unchanged — simple stays revenue-only as today; perPerson is a revenue
 // override handled entirely inside computeBill above, no expense line needed) EXCEPT for the shuttle line,
 // which (v1.11.41) is independent of costModel — see shuttleLine() below.
-function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries, shuttleUsageOverride, openingBalance) {
+function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, usedShuttlecocks, durationHours, courtEntries, shuttleUsageOverride, openingBalance, sessionStartTime, sessionEndTime) {
   const model = settings.costModel || "simple";
   const out = [];
   // v1.11.41: prefers the new cost/tube-derived per-shuttle cost (auto — reuses the existing `used` match
@@ -3038,7 +3096,7 @@ function computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, us
   if (courtRateConfigured(cCost.ratePerHour)) {
     // v1.11.51 (spec F/I): per-court hours × rate, summed — NEVER the old
     // จำนวนสนาม × Session Duration × Court Rate shortcut, since courts can now carry different hours.
-    const rows = buildCourtCostRows(reconcileCourtHours(courtEntries, courtCount, durationHours), cCost.ratePerHour);
+    const rows = buildCourtCostRows(reconcileCourtHours(courtEntries, courtCount, durationHours, sessionStartTime, sessionEndTime), cCost.ratePerHour);
     const total = totalCourtCostFromRows(rows);
     if (total > 0) {
       const uniform = rows.length > 0 && rows.every(r => r.hours === rows[0].hours);
@@ -3231,8 +3289,8 @@ function computeExpectedRevenue(settings, expectedPlayers, expectedGamesPerPerso
 // the live Finance summary and the eventual frozen History total can never diverge (spec G: "reuse the same
 // authoritative Finance calculation helpers to prevent divergence" / "do not create a second independent
 // expense calculation").
-function computeLiveExpenseTotal(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, rewardHistory, sessionId, openingBalance) {
-  const lines = [...computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, openingBalance), ...computeRewardExpenses(rewardHistory, sessionId, dateStr)];
+function computeLiveExpenseTotal(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, rewardHistory, sessionId, openingBalance, sessionStartTime, sessionEndTime) {
+  const lines = [...computeCostModelExpenses(settings, courtCount, courtLabels, dateStr, matchesSoFar, durationHours, courtEntries, shuttleUsageOverride, openingBalance, sessionStartTime, sessionEndTime), ...computeRewardExpenses(rewardHistory, sessionId, dateStr)];
   return Math.round((lines.reduce((s, e) => s + (Number(e.amount) || 0), 0) + Number.EPSILON) * 100) / 100;
 }
 // ===================== FINANCE (v1.8.4) =====================
@@ -5875,7 +5933,12 @@ function buildBackupPayload(state) {
       // v1.11.68: per-club Ranking config only (RP/Rank are always derived, never stored)
       rewardHistory: state.rewardHistory || [],
       // v1.11.34: global Reward History ledger, see App()'s rewardHistory state
-      cloudClub: state.cloudClub || null // v1.11.35: Member Portal Phase 1 — this install's Cloud Club link, if any
+      cloudClub: state.cloudClub || null,
+      // v1.11.35: Member Portal Phase 1 — this install's Cloud Club link, if any
+      // v1.12.13 (P0 offline persistence hotfix): carry the intentional-wipe marker into every backup payload
+      // (manual export AND the pre-restore safety snapshot) so a later restore/import can still tell an
+      // intentional roster wipe apart from an accidental one — see isSuspiciousPlayerLoss's header comment.
+      lastIntentionalPlayerWipeAt: typeof state.lastIntentionalPlayerWipeAt === "number" ? state.lastIntentionalPlayerWipeAt : null
     }
   };
 }
@@ -6021,6 +6084,11 @@ function migrateBackupData(parsed) {
   data.rankingConfigs = normRankingConfigs(data.rankingConfigs); // v1.11.68: no field at all (old backup) -> {} (no club has Ranking configured yet)
   data.rewardHistory = Array.isArray(data.rewardHistory) ? data.rewardHistory : []; // v1.11.34: no field at all (old backup) -> []
   data.cloudClub = normCloudClub(data.cloudClub); // v1.11.35: no field at all (old backup) -> disabled/local-only
+  // v1.12.13 (P0 offline persistence hotfix): optional, additive field — see isSuspiciousPlayerLoss's own
+  // header comment for the full "how does the app tell an intentional roster wipe apart from an accidental
+  // one" reasoning this backs. Absent on every backup/save older than this version -> null, which is always
+  // the SAFE direction (an old save can never accidentally "prove" a wipe it has no record of).
+  data.lastIntentionalPlayerWipeAt = typeof data.lastIntentionalPlayerWipeAt === "number" ? data.lastIntentionalPlayerWipeAt : null;
   // v1.12.1: now that activeTournament/tournamentHistory/rewardHistory are fully migrated, run the ONE
   // canonical Advanced-Feature-flag inference using the PRE-backfill explicit values captured above (not
   // data.settings.tournamentEnabled, which the getDefaultSettings() spread may have just set to false).
@@ -6195,6 +6263,44 @@ function chooseBootCandidate(primaryCandidate, mirrorCandidate) {
     chosenReason: null
   };
 }
+// v1.12.13 (P0 OFFLINE PERSISTENCE / DATA-LOSS HOTFIX): root cause of the reported "group survives, all
+// players vanish after a force-close + relaunch" bug — chooseBootCandidate's own "meaningful-state-
+// protection" above (A2) only ever runs in the primary-AND-mirror branch. The moment only ONE store has
+// anything at all (the mirror never got written this save cycle, was evicted by iOS, or is simply the
+// -only- source LKG/Auto-Backup ever fall back to), an empty-but-structurally-valid `players: []` candidate
+// is accepted immediately with ZERO cross-check against LKG/Auto-Backup — see the boot waterfall's new
+// Step 5 below, which is the other half of this fix and is what actually calls this function during boot.
+// This function is also reused by wouldRegressProgress (below) so the exact same protection applies at
+// RUNTIME (cross-instance/cross-tab writes), not just at cold boot — one rule, two call sites.
+//
+// `candidate` is the thing about to be ACCEPTED/WRITTEN (a flat state object, or the `incomingData` side of
+// wouldRegressProgress). `priorEvidence` is the BEST other known snapshot to compare against (a flat state
+// object, or the `liveState` side of wouldRegressProgress) — may be null if there is genuinely nothing else
+// to compare against (e.g. a true new install, see Test F).
+//
+// Deliberately narrow and conservative by design (spec: "do NOT blindly restore an older backup every time
+// playerCount = 0"): this only ever fires when the candidate's OWN player count is exactly zero AND some
+// other known snapshot demonstrably had players. It is not triggered by a smaller-but-nonzero roster (a
+// legitimate partial backup restore, or one player being deleted, is never "suspicious") — only a full
+// collapse to zero is treated as a potential accident, matching the exact reported symptom.
+//
+// The one legitimate way a candidate's own zero-player state is NOT suspicious is an explicit, user-
+// confirmed wipe (ลบข้อมูลสมาชิก / ล้างข้อมูลทั้งหมด — see deleteAllMembersData/applyRestore's "replace"
+// branch, both of which stamp `lastIntentionalPlayerWipeAt = Date.now()` into the SAME state that goes to
+// zero players). A wipe marker only "explains" a given priorEvidence snapshot if it is at least as recent
+// as that snapshot's own savedAt — an old, stale wipe timestamp from long before priorEvidence was saved
+// proves nothing about whether THIS particular emptiness is the same wipe or a later, unrelated accident.
+function isSuspiciousPlayerLoss(candidate, priorEvidence) {
+  const candidateCount = Array.isArray(candidate && candidate.players) ? candidate.players.length : 0;
+  if (candidateCount > 0) return false; // nothing suspicious about a non-empty roster
+  if (!priorEvidence) return false; // no prior evidence at all to compare against -- e.g. a true new install
+  const priorCount = Array.isArray(priorEvidence.players) ? priorEvidence.players.length : 0;
+  if (priorCount === 0) return false; // prior evidence is ALSO empty -- nothing regressed, nothing to recover
+  const wipeAt = typeof (candidate && candidate.lastIntentionalPlayerWipeAt) === "number" ? candidate.lastIntentionalPlayerWipeAt : 0;
+  if (wipeAt <= 0) return true; // no intentional-wipe evidence at all, but prior evidence had a real roster
+  const priorAt = typeof (priorEvidence && priorEvidence.savedAt) === "number" ? priorEvidence.savedAt : 0;
+  return wipeAt < priorAt; // a wipe timestamp older than priorEvidence itself does not explain this transition
+}
 // v1.11.76 (P0 CROSS-INSTANCE DATA-LOSS GUARD): confirmed via reproducible e2e test that a raw savedAt
 // comparison alone cannot tell "genuinely newer data" apart from "a stale, forgotten same-origin tab that
 // happens to save later" — refreshFromStorageIfNewer's own `storedSavedAt > lastKnownSavedAtRef.current`
@@ -6217,15 +6323,26 @@ function wouldRegressProgress(liveState, incomingData) {
   const liveHistory = idsOf(liveState.history),
     liveSessionHistory = idsOf(liveState.sessionHistory),
     liveTournamentHistory = idsOf(liveState.tournamentHistory);
-  if (liveHistory.size === 0 && liveSessionHistory.size === 0 && liveTournamentHistory.size === 0) return false; // nothing live yet worth protecting (e.g. fresh boot, brand-new session)
-  const incHistory = idsOf(incomingData.history),
-    incSessionHistory = idsOf(incomingData.sessionHistory),
-    incTournamentHistory = idsOf(incomingData.tournamentHistory);
-  const missesAny = (liveSet, incSet) => {
-    for (const id of liveSet) if (!incSet.has(id)) return true;
-    return false;
-  };
-  return missesAny(liveHistory, incHistory) || missesAny(liveSessionHistory, incSessionHistory) || missesAny(liveTournamentHistory, incTournamentHistory);
+  let historyRegression = false;
+  if (liveHistory.size > 0 || liveSessionHistory.size > 0 || liveTournamentHistory.size > 0) {
+    const incHistory = idsOf(incomingData.history),
+      incSessionHistory = idsOf(incomingData.sessionHistory),
+      incTournamentHistory = idsOf(incomingData.tournamentHistory);
+    const missesAny = (liveSet, incSet) => {
+      for (const id of liveSet) if (!incSet.has(id)) return true;
+      return false;
+    };
+    historyRegression = missesAny(liveHistory, incHistory) || missesAny(liveSessionHistory, incSessionHistory) || missesAny(liveTournamentHistory, incTournamentHistory);
+  }
+  // v1.12.13 (P0 offline persistence hotfix): the player roster gets the exact same "don't silently
+  // regress" protection the history-type ledgers already had above — see isSuspiciousPlayerLoss's own
+  // header comment. `incomingData` is the candidate about to be accepted/written; `liveState` is what's
+  // already trusted, playing the role of "priorEvidence" here. This closes the gap the offline persistence
+  // investigation found: every existing caller of this function protected match/session/tournament history
+  // but none of them protected the roster itself, so an incoming/outgoing write with `players: []` sailed
+  // through every guard as long as it didn't also drop a history record.
+  const playerRegression = isSuspiciousPlayerLoss(incomingData, liveState);
+  return historyRegression || playerRegression;
 }
 // v1.11.0 PERSISTENCE REWRITE — recovery helpers shared by the boot-sequence waterfall (primary /
 // mirror / Last-Known-Good / Auto-Backup). Both funnel through the EXACT SAME migrate+validate pipeline
@@ -7420,6 +7537,12 @@ function App() {
   // landscape or an iPad in portrait all land on exactly 860 or 520 here, identical to before.
   const gameShellMaxWidth = tab === "session" && isWide ? "max(860px, min(96vw, 1400px))" : isWide ? 860 : 520;
   const [players, setPlayers] = useState([]);
+  // v1.12.13 (P0 offline persistence hotfix): timestamp of the most recent EXPLICIT, user-confirmed action
+  // that intentionally emptied the player roster (ลบข้อมูลสมาชิก / ล้างข้อมูลทั้งหมด) — see
+  // isSuspiciousPlayerLoss's header comment. null means "no known intentional wipe." Persisted alongside
+  // `players` in every save/backup so a later boot can tell "this device's owner deliberately emptied the
+  // roster" apart from "something silently went wrong."
+  const [lastIntentionalPlayerWipeAt, setLastIntentionalPlayerWipeAt] = useState(null);
   const [history, setHistory] = useState([]);
   const [current, setCurrent] = useState([]);
   const [future, setFuture] = useState([]);
@@ -7657,6 +7780,7 @@ function App() {
         groupDefaults,
         rankingConfigs,
         cloudClub,
+        lastIntentionalPlayerWipeAt,
         savedAt,
         pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null
       });
@@ -7673,7 +7797,9 @@ function App() {
           if (onDisk.pageInstanceId && onDisk.pageInstanceId !== window.__pageInstanceId && wouldRegressProgress(onDisk, {
             history,
             sessionHistory,
-            tournamentHistory
+            tournamentHistory,
+            players,
+            lastIntentionalPlayerWipeAt
           })) {
             blockedByConflict = true;
             pushBootLog({
@@ -7735,6 +7861,10 @@ function App() {
   const applyPersistedState = s => {
     if (!s) return;
     s.players && setPlayers(s.players.map(normPlayer));
+    // v1.12.13 (P0 offline persistence hotfix): restore the intentional-wipe marker alongside `players` so
+    // it travels with the roster through every load path (boot, cross-instance heal, pre-write conflict
+    // adopt) — absent on saves older than this version -> null, the safe default (see migrateBackupData).
+    setLastIntentionalPlayerWipeAt(typeof s.lastIntentionalPlayerWipeAt === "number" ? s.lastIntentionalPlayerWipeAt : null);
     s.history && setHistory(s.history);
     s.current && setCurrent(s.current);
     s.future && setFuture(s.future);
@@ -7845,7 +7975,8 @@ function App() {
         discountCredits,
         rewardHistory,
         groupDefaults,
-        cloudClub
+        cloudClub,
+        lastIntentionalPlayerWipeAt
       });
       const entry = {
         savedAt: Date.now(),
@@ -7900,7 +8031,9 @@ function App() {
         if (s.pageInstanceId && s.pageInstanceId !== window.__pageInstanceId && wouldRegressProgress({
           history,
           sessionHistory,
-          tournamentHistory
+          tournamentHistory,
+          players,
+          lastIntentionalPlayerWipeAt
         }, s)) {
           pushBootLog({
             event: "conflict-blocked",
@@ -7948,6 +8081,10 @@ function App() {
       let finalState = null,
         recoverySource = "new-install",
         recoveryAction = "none";
+      // v1.12.13 (P0 offline persistence hotfix): diagnostics for the new Step 5 player-loss-guard below —
+      // non-PII (source label + boolean only), surfaced via pushBootLog same as every other boot diagnostic.
+      let playerLossGuardTriggered = false,
+        playerLossGuardRejectedSource = null;
       let corrupted = false; // legacy flag — kept in sync so the existing recovery banner/tests (which key off `loadCorrupted`) keep working unchanged; true exactly when bootStatus lands on "recovery-required"
 
       let mirrorValid = false,
@@ -8038,6 +8175,72 @@ function App() {
             storageErrors.push("auto-backup read: " + (e?.message || e));
           }
         }
+
+        // Step 5 (v1.12.13, P0 OFFLINE PERSISTENCE / DATA-LOSS HOTFIX — the actual fix for the reported
+        // "group survives, all players vanish after force-close + relaunch" bug): everything above this
+        // point only ever validates STRUCTURE (tryRecoverFlatState/tryRecoverFromAutoBackupEntry), never
+        // emptiness — and chooseBootCandidate's own meaningful-state-protection (A2) only runs when BOTH
+        // primary and mirror exist. The moment only one of them does (mirror skipped by the 4MB
+        // MIRROR_SIZE_LIMIT_CHARS cap on a large/photo-heavy roster, or evicted by iOS Safari's storage
+        // pressure — exactly the reported tester's situation with 69 players), `chosenReason ===
+        // "primary-only-valid"` (or "mirror-only-valid") accepts that lone candidate with ZERO cross-check
+        // against LKG/Auto-Backup, and a structurally-valid-but-empty `players: []` primary wins outright.
+        // This step runs whenever the winning candidate has zero players and asks: is there OTHER evidence
+        // (any store this boot did NOT already choose from) that this device recently had a real roster,
+        // with no matching intentional-wipe marker to explain the drop? If so, treat the empty candidate as
+        // suspicious and fail over to the best non-empty evidence instead — see isSuspiciousPlayerLoss's own
+        // header comment for the exact "accidental vs intentional" reasoning this backs.
+        if (finalState && (!Array.isArray(finalState.players) || finalState.players.length === 0)) {
+          try {
+            const otherCandidates = [];
+            if (recoverySource !== "primary" && primaryCandidate) otherCandidates.push(primaryCandidate);
+            if (recoverySource !== "mirror" && mirrorCandidate) otherCandidates.push(mirrorCandidate);
+            if (recoverySource !== "last-known-good") {
+              try {
+                const lkgR2 = await window.storage.get(LKG_KEY);
+                if (lkgR2?.value) {
+                  const rec = tryRecoverFlatState(lkgR2.value);
+                  if (rec) otherCandidates.push(rec);
+                }
+              } catch (e) {}
+            }
+            if (recoverySource !== "auto-backup") {
+              try {
+                const abR2 = await window.storage.get(AUTO_BACKUP_KEY);
+                const list2 = abR2?.value ? JSON.parse(abR2.value) : [];
+                if (Array.isArray(list2)) {
+                  for (const entry of list2) {
+                    const rec = tryRecoverFromAutoBackupEntry(entry);
+                    if (rec) {
+                      otherCandidates.push(rec);
+                      break;
+                    } // newest-first list -> first valid entry is the freshest
+                  }
+                }
+              } catch (e) {}
+            }
+            // Pick the single best "prior evidence" candidate to compare against: prefer whichever has the
+            // most players (the strongest evidence something real existed), tie-broken by the newer savedAt.
+            let priorEvidence = null;
+            for (const c of otherCandidates) {
+              const cCount = Array.isArray(c.players) ? c.players.length : 0;
+              const bestCount = priorEvidence ? Array.isArray(priorEvidence.players) ? priorEvidence.players.length : 0 : -1;
+              if (cCount > bestCount || cCount === bestCount && (c.savedAt || 0) > (priorEvidence.savedAt || 0)) priorEvidence = c;
+            }
+            if (isSuspiciousPlayerLoss(finalState, priorEvidence)) {
+              const rejectedSource = recoverySource;
+              storageErrors.push("player-loss-guard: chosen source (" + rejectedSource + ") had 0 players but prior evidence had " + (priorEvidence.players || []).length + " with no covering intentional wipe");
+              finalState = priorEvidence;
+              recoverySource = "player-loss-guard";
+              recoveryAction = "restored-from-player-loss-guard";
+              chosenReason = "player-loss-guard";
+              playerLossGuardTriggered = true;
+              playerLossGuardRejectedSource = rejectedSource;
+            }
+          } catch (e) {
+            storageErrors.push("player-loss-guard check: " + (e?.message || e));
+          }
+        }
       } catch (e) {
         storageErrors.push("waterfall: " + (e?.message || e));
       }
@@ -8069,7 +8272,7 @@ function App() {
         } catch (e) {
           storageErrors.push("rebuild-after-recovery: " + (e?.message || e));
         }
-        if (recoverySource === "last-known-good" || recoverySource === "auto-backup") {
+        if (recoverySource === "last-known-good" || recoverySource === "auto-backup" || recoverySource === "player-loss-guard") {
           // A genuine "this would have been gone" automatic recovery — a small non-blocking heads-up,
           // never a forced trip to the manual restore screen (spec: automatic recovery, no modal spam).
           setAutoRecoveryToast("♻️ กู้คืนข้อมูลล่าสุดให้อัตโนมัติแล้ว");
@@ -8135,6 +8338,9 @@ function App() {
         recoveredPlayerCount,
         recoveredHistoryCount,
         loadedSavedAt,
+        playerLossGuardTriggered,
+        playerLossGuardRejectedSource,
+        // v1.12.13: non-PII (source label only) — see Step 5 above
         playerCount: recoveredPlayerCount,
         sessionHistoryCount: recoveredHistoryCount,
         corrupted,
@@ -8248,6 +8454,7 @@ function App() {
           groupDefaults,
           rankingConfigs,
           cloudClub,
+          lastIntentionalPlayerWipeAt,
           savedAt,
           pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null
         });
@@ -8285,7 +8492,9 @@ function App() {
             if (onDisk.pageInstanceId && onDisk.pageInstanceId !== window.__pageInstanceId && wouldRegressProgress(onDisk, {
               history,
               sessionHistory,
-              tournamentHistory
+              tournamentHistory,
+              players,
+              lastIntentionalPlayerWipeAt
             })) {
               pushBootLog({
                 event: "conflict-blocked-prewrite",
@@ -8365,7 +8574,7 @@ function App() {
         }
       } catch (e) {}
     })();
-  }, [players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus]);
+  }, [players, lastIntentionalPlayerWipeAt, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus]);
   // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
   // most recently computed save payload when the app backgrounds — insurance for the narrow window
   // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
@@ -8426,6 +8635,16 @@ function App() {
   // (still editable) for anyone sitting in a paired-but-not-started "next" court, not just free players.
   const playingIds = useMemo(() => new Set(current.filter(m => m.status === "playing" || m.status === "paused").flatMap(m => [...m.teamA, ...m.teamB].filter(Boolean))), [current]);
   const waitQueue = useMemo(() => activePlayers.filter(p => p.status === "ready" && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order), [activePlayers, inPlay]);
+  // v1.12.13 (P0 manual matchmaking dropdown ordering fix): a SEPARATE, wider pool used ONLY as the
+  // candidate source for the manual player-picker dropdown (PlayerPicker/rankManualSlotCandidates below) —
+  // waitQueue itself stays "ready"-only and completely untouched, since it also drives two unrelated things
+  // that must NOT start including resting players: the "รอเล่น — N คน" overview count/list, and the Lock
+  // Pair auto-fill assist's own "is the partner currently available" check (benchIds, inside MatchRow —
+  // both still key off `bench = waitQueue`, unchanged). This pool additionally includes status==="resting"
+  // players (the spec's YELLOW/"ขอพัก" tier) so they can appear as still-selectable, lower-priority manual
+  // candidates — same wait-time source (waitingSince), same "not already seated anywhere in current" guard.
+  // Auto Matchmaking (buildMatch and every fillCourt/auto-assign call site) never reads this pool.
+  const manualBenchPool = useMemo(() => activePlayers.filter(p => (p.status === "ready" || p.status === "resting") && !inPlay.has(p.id)).sort((a, b) => (a.waitingSince || 0) - (b.waitingSince || 0) || a.order - b.order), [activePlayers, inPlay]);
 
   // members
   // v1.11.22: a freshly-added member starts "พร้อมเล่น" (ready) immediately per explicit request — the
@@ -8805,6 +9024,11 @@ function App() {
   // afterward, exactly like deleting one player already does today — see delPlayer above).
   const deleteAllMembersData = () => {
     setPlayers([]);
+    // v1.12.13 (P0 offline persistence hotfix): stamp the intentional-wipe marker in the SAME action that
+    // empties the roster — this is what lets a later cold boot tell this deliberate action apart from an
+    // accidental empty-roster read (see isSuspiciousPlayerLoss). Both are part of the same explicit,
+    // confirm-gated user action, so there is no window where one could persist without the other.
+    setLastIntentionalPlayerWipeAt(Date.now());
     setLockPairs([]);
     setCurrent(prev => prev.map(m => m.queued ? {
       ...m,
@@ -10027,7 +10251,7 @@ function App() {
       // `totalMatches` as the usage baseline here; `null` replaces `session.shuttleUsage` — the old aggregate
       // manual-override concept is retired for ACTUAL usage (per-match editing is now the only way to change
       // it), so this always resolves to `{used: actualShuttleUsed, source:"auto"}` via resolveShuttleUsage.
-      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, actualShuttleUsed, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, null, shuttleOpeningResolved), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
+      expenses: [...computeCostModelExpenses(settings, courtCount, courtLabels, session.date, actualShuttleUsed, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.courtHours, null, shuttleOpeningResolved, session.sessionStartTime, session.sessionEndTime), ...computeRewardExpenses(rewardHistory, session.id, session.date)],
       // v1.11.51 (Court Cost Per-Court Enhancement, spec K): freeze the FULL per-court breakdown — rate,
       // hours/source/cost per court, and the total — so History can never be affected by a LATER change to
       // Court Rate/Session Time/Court Count (this object is computed once, right now, from the live values,
@@ -10035,14 +10259,22 @@ function App() {
       // into the existing รายรับ/ค่าใช้จ่าย/กำไรสุทธิ pipeline (no double counting — this is purely an
       // additional structured record for audit/detail, spec K's "อย่างน้อย" minimum).
       courtCostSnapshot: (() => {
-        const rows = buildCourtCostRows(reconcileCourtHours(session.courtHours, courtCount, sessionDurationHours(session.sessionStartTime, session.sessionEndTime)), settings.courtCost && settings.courtCost.ratePerHour);
+        const rows = buildCourtCostRows(reconcileCourtHours(session.courtHours, courtCount, sessionDurationHours(session.sessionStartTime, session.sessionEndTime), session.sessionStartTime, session.sessionEndTime), settings.courtCost && settings.courtCost.ratePerHour);
         return {
           ratePerHour: Math.max(0, Number(settings.courtCost && settings.courtCost.ratePerHour) || 0),
+          // v1.12.12 (P0): startAt/endAt/actualDurationHours/billableHours are ADDITIVE fields on top of the
+          // exact same court/hours/source/cost shape every pre-v1.12.12 History record already froze — old
+          // frozen records are never touched/reprocessed (this whole block only ever runs ONCE, right now, at
+          // THIS endSession() call), and any reader that only knows the old 4 fields keeps working unchanged.
           courts: rows.map(r => ({
             court: r.court,
             hours: r.hours,
             source: r.source,
-            cost: r.cost
+            cost: r.cost,
+            startAt: r.startAt,
+            endAt: r.endAt,
+            actualDurationHours: r.actualDurationHours,
+            billableHours: r.billableHours
           })),
           totalCourtCost: totalCourtCostFromRows(rows)
         };
@@ -10934,7 +11166,8 @@ function App() {
       discountCredits,
       rewardHistory,
       groupDefaults,
-      cloudClub
+      cloudClub,
+      lastIntentionalPlayerWipeAt
     });
     const json = JSON.stringify(payload);
     // v1.9.19: "BadQ Back-up <date> <time>.json" per explicit naming request — colon-free time (HH-mm)
@@ -11055,7 +11288,8 @@ function App() {
           rewardHistory,
           groupDefaults,
           rankingConfigs,
-          cloudClub
+          cloudClub,
+          lastIntentionalPlayerWipeAt
         });
         await window.storage.set("bg-v11-prerestore", JSON.stringify(snapshot));
         setHasPreRestoreBackup(true);
@@ -11088,6 +11322,14 @@ function App() {
       const rCloudClub = normCloudClub(data.cloudClub);
       const rCourtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
       const rActiveTournament = normTournament(data.activeTournament) || null;
+      // v1.12.13 (P0 offline persistence hotfix): applyRestore("replace", ...) is ONLY ever invoked after
+      // an explicit, confirmed user action (a manual "แทนที่ทั้งหมด" backup restore, or wipeAllAppData's
+      // factory reset below) — so a replace that lands on zero players is, by definition, an intentional
+      // wipe, not an accident. Stamping it here (rather than only inside wipeAllAppData/
+      // deleteAllMembersData) covers BOTH callers uniformly. A replace that brings in a real roster clears
+      // any stale prior marker — there is no wipe to explain once real data is back.
+      const rLastIntentionalPlayerWipeAt = rPlayers.length === 0 ? Date.now() : null;
+      setLastIntentionalPlayerWipeAt(rLastIntentionalPlayerWipeAt);
       setPlayers(rPlayers);
       setHistory(rHistory);
       setCurrent(rCurrent);
@@ -11139,6 +11381,7 @@ function App() {
         groupDefaults: rGroupDefaults,
         rankingConfigs: rRankingConfigs,
         cloudClub: rCloudClub,
+        lastIntentionalPlayerWipeAt: rLastIntentionalPlayerWipeAt,
         savedAt: restoredSavedAt,
         pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null
       });
@@ -11700,6 +11943,7 @@ function App() {
       replaceSlot,
       nextPoolFor,
       waitQueue,
+      manualBenchPool,
       now,
       resetGames,
       endSession,
@@ -11822,6 +12066,7 @@ function App() {
     endSession,
     qrRef,
     courtCount,
+    setCourtCount,
     courtLabels,
     rewardHistory,
     onOpenFinancePrint: setFinancePrintReport,
@@ -15022,6 +15267,10 @@ function LevelSettingsSheet({
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
 // BackupSettingsEditor (unmodified, same export/import/restore/undo logic already used from History) —
 // both reused in place rather than reimplemented, per "do not create duplicate implementations".
+// v1.12.12 (P2.2 IA cleanup): cloudClub/setCloudClub/groupDefaults/session/updatePlayer/deviceId are no
+// longer accepted here — they existed ONLY to feed the removed BadQ Online row (moved to SettingsTab, see
+// its own comment) and the removed legacy Member Portal (Beta) sheet. Nothing else in this component ever
+// read them; dropping them here is pure dead-prop cleanup, not a behavior change.
 function GeneralSettingsSheet({
   settings,
   setSettings,
@@ -15040,12 +15289,6 @@ function GeneralSettingsSheet({
   archivedPlayers,
   restorePlayer,
   players,
-  groupDefaults,
-  session,
-  cloudClub,
-  setCloudClub,
-  deviceId,
-  updatePlayer,
   sessionHistory,
   rankingConfigs,
   updateRankingConfig,
@@ -15056,8 +15299,6 @@ function GeneralSettingsSheet({
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
-  const [onlineSheetOpen, setOnlineSheetOpen] = useState(false); // v1.12.8: "☁️ BadQ Online" (P2.1)
-  const [portalSheetOpen, setPortalSheetOpen] = useState(false); // v1.11.35: "Member Portal (Beta)"
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
@@ -15245,42 +15486,6 @@ function GeneralSettingsSheet({
       fontWeight: 700
     }
   }, "\u0E40\u0E14\u0E37\u0E2D\u0E19")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 14
-    }
-  }, /*#__PURE__*/React.createElement(Label, null, "\u2601\uFE0F BadQ Online")), /*#__PURE__*/React.createElement(BadQOnlineNavRow, {
-    deviceId: deviceId,
-    onOpen: () => setOnlineSheetOpen(true)
-  }), onlineSheetOpen && /*#__PURE__*/React.createElement(BadQOnlineSheet, {
-    deviceId: deviceId,
-    onClose: () => setOnlineSheetOpen(false)
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 14
-    }
-  }, /*#__PURE__*/React.createElement(Label, null, "\uD83C\uDF10 Member Portal (Beta)")), /*#__PURE__*/React.createElement(NavRow, {
-    onClick: () => setPortalSheetOpen(true)
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 13,
-      fontWeight: 700,
-      color: T.text
-    }
-  }, cloudClub?.clubId ? `เชื่อมต่อแล้ว: ${cloudClub.sourceGroupName || cloudClub.clubId}` : "ยังไม่เชื่อมต่อ Cloud"), /*#__PURE__*/React.createElement(ChevronRight, {
-    size: 15,
-    color: T.muted,
-    style: {
-      marginLeft: "auto"
-    }
-  })), portalSheetOpen && /*#__PURE__*/React.createElement(MemberPortalSheet, {
-    cloudClub: cloudClub,
-    setCloudClub: setCloudClub,
-    players: players,
-    updatePlayer: updatePlayer,
-    groupDefaults: groupDefaults,
-    session: session,
-    onClose: () => setPortalSheetOpen(false)
-  }), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 6
     }
@@ -16600,6 +16805,8 @@ function BadQOnlineNavRow({
 // listener). Does not read or write ANY BadQ business data — see the file-level comment block above.
 function BadQOnlineSheet({
   deviceId,
+  groupDefaults,
+  sessionHistory,
   onClose
 }) {
   const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
@@ -16763,6 +16970,61 @@ function BadQOnlineSheet({
   });
   const meta = ONLINE_STATUS_META[status];
   const hasConflict = !!(workspace && workspace.activeDeviceId && deviceId && workspace.activeDeviceId !== deviceId);
+
+  // v1.12.12 (P2.2 — CRITICAL: Initial Cloud Data Safety) — read-only reconnaissance, ONLY once this device
+  // is genuinely the Active Device (never for a revoked/conflicted device, which has no business offering to
+  // seed anything). Tells this UI whether Cloud already has Club data (in which case NO upload is ever
+  // offered here — see the safe "already has data" state below, spec: "never automatically overwrite it with
+  // local data merely because this device became Active") or is genuinely empty (in which case, and ONLY
+  // then, an explicit Owner-confirmed initial upload becomes possible).
+  const [cloudInitState, setCloudInitState] = useState(null);
+  useEffect(() => {
+    if (!cloud || !cloud.checkCloudInitState || !workspace || !deviceId || workspace.activeDeviceId !== deviceId) {
+      setCloudInitState(null);
+      return;
+    }
+    let cancelled = false;
+    cloud.checkCloudInitState().then(res => {
+      if (!cancelled) setCloudInitState(res);
+    }).catch(() => {
+      if (!cancelled) setCloudInitState(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace && workspace.id, workspace && workspace.activeDeviceId, deviceId]);
+  const [initConfirmOpen, setInitConfirmOpen] = useState(false);
+  const [initBusy, setInitBusy] = useState(false);
+  const [initErr, setInitErr] = useState("");
+  const [initDone, setInitDone] = useState(false);
+  // Summary shown to the Owner BEFORE they confirm (spec: "number of clubs/groups, number of current
+  // sessions, most recent local update timestamp, device/browser context where practical") — built entirely
+  // from data THIS device already has locally; never fetched from anywhere else.
+  const localGroupCount = Object.keys(groupDefaults || {}).length;
+  const localSessionCount = (sessionHistory || []).length;
+  const localMostRecentAt = (sessionHistory || []).reduce((max, h) => Math.max(max, Number(h && h.endedAt) || 0), 0);
+  const doConfirmInitialCloudData = async () => {
+    setInitBusy(true);
+    setInitErr("");
+    try {
+      const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
+      await cloud.upsertClub(deviceId, activeSessionId, {
+        club: {
+          name: firstGroupName
+        },
+        confirmedInitialData: true
+      });
+      setInitConfirmOpen(false);
+      setInitDone(true);
+      setCloudInitState({
+        clubsInitialized: true
+      });
+    } catch (e) {
+      setInitErr(cloudErrorMessage(e));
+    } finally {
+      setInitBusy(false);
+    }
+  };
   const doRegister = async () => {
     if (password !== confirmPassword) {
       setErr("รหัสผ่านไม่ตรงกัน");
@@ -17226,7 +17488,105 @@ function BadQOnlineSheet({
   }, "\u0E15\u0E31\u0E49\u0E07\u0E41\u0E15\u0E48 ", activeSinceDate.toLocaleString("th-TH", {
     dateStyle: "medium",
     timeStyle: "short"
-  }))), err && /*#__PURE__*/React.createElement("div", {
+  }))), status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === false && !initDone && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 12,
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: T.text,
+      marginBottom: 4
+    }
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19\u0E1A\u0E19 Cloud"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginBottom: 8,
+      lineHeight: 1.6
+    }
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E40\u0E04\u0E22\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19 (Club) \u0E1A\u0E19 Cloud \u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E19\u0E35\u0E49 \u2014 \u0E40\u0E25\u0E37\u0E2D\u0E01\u0E44\u0E14\u0E49\u0E27\u0E48\u0E32\u0E08\u0E30\u0E43\u0E0A\u0E49\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19\u0E2B\u0E23\u0E37\u0E2D\u0E44\u0E21\u0E48"), /*#__PURE__*/React.createElement("button", {
+    disabled: initBusy,
+    onClick: () => setInitConfirmOpen(true),
+    style: {
+      width: "100%",
+      padding: "9px 0",
+      borderRadius: 9,
+      border: "none",
+      background: T.accent,
+      color: "#fff",
+      fontSize: 12.5,
+      fontWeight: 800,
+      opacity: initBusy ? 0.6 : 1
+    }
+  }, "\u0E43\u0E0A\u0E49\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19")), status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === true && /*#__PURE__*/React.createElement("div", {
+    style: {
+      padding: 12,
+      borderRadius: 11,
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      marginBottom: 10,
+      fontSize: 11.5,
+      color: T.muted
+    }
+  }, "\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19 (Club) \u0E1A\u0E19 Cloud \u0E2D\u0E22\u0E39\u0E48\u0E41\u0E25\u0E49\u0E27\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E19\u0E35\u0E49"), initConfirmOpen && /*#__PURE__*/React.createElement(Overlay, {
+    onClose: () => {
+      if (!initBusy) setInitConfirmOpen(false);
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 8
+    }
+  }, "\u0E43\u0E0A\u0E49\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19?"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: T.muted,
+      marginBottom: 14,
+      lineHeight: 1.7
+    }
+  }, "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2A\u0E23\u0E38\u0E1B\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49 (", navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? "มือถือ" : "เดสก์ท็อป/แท็บเล็ต", "):", /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6
+    }
+  }, "\u2022 \u0E08\u0E33\u0E19\u0E27\u0E19\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49: ", localGroupCount), /*#__PURE__*/React.createElement("div", null, "\u2022 \u0E08\u0E33\u0E19\u0E27\u0E19\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E1C\u0E48\u0E32\u0E19\u0E21\u0E32: ", localSessionCount), localMostRecentAt > 0 && /*#__PURE__*/React.createElement("div", null, "\u2022 \u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14: ", new Date(localMostRecentAt).toLocaleString("th-TH", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }))), initErr && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10,
+      fontSize: 12,
+      color: T.accent
+    }
+  }, initErr), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    disabled: initBusy,
+    onClick: () => setInitConfirmOpen(false),
+    style: btnSecondary
+  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+    disabled: initBusy,
+    onClick: doConfirmInitialCloudData,
+    style: {
+      ...btnPrimary,
+      opacity: initBusy ? 0.6 : 1
+    }
+  }, initBusy ? "กำลังบันทึก..." : "ยืนยัน"))), initDone && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 10,
+      fontSize: 12,
+      color: T.green
+    }
+  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19\u0E1A\u0E19 Cloud \u0E41\u0E25\u0E49\u0E27"), err && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10,
       fontSize: 12,
@@ -17244,314 +17604,17 @@ function BadQOnlineSheet({
     style: btnSecondary
   }, "\u0E2D\u0E2D\u0E01\u0E08\u0E32\u0E01\u0E23\u0E30\u0E1A\u0E1A")));
 }
-function MemberPortalSheet({
-  cloudClub,
-  setCloudClub,
-  players,
-  updatePlayer,
-  groupDefaults,
-  session,
-  onClose
-}) {
-  const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
-  const available = !!(cloud && cloud.available);
-  const [authUser, setAuthUser] = useState(() => available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null);
-  const [authMode, setAuthMode] = useState("signin"); // "signin" | "register"
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
-  const [customName, setCustomName] = useState("");
-  const [migrating, setMigrating] = useState(false);
-  const [migrateResult, setMigrateResult] = useState(null); // { done, skipped, failed }
 
-  useEffect(() => {
-    if (!available || !cloud.onAuthChange) return;
-    const unsub = cloud.onAuthChange(u => setAuthUser(u || null));
-    return () => {
-      try {
-        unsub && unsub();
-      } catch (e) {}
-    };
-  }, [available]);
-  const doAuth = async () => {
-    setBusy(true);
-    setErr("");
-    try {
-      if (authMode === "register") await cloud.registerOwner(email.trim(), password);else await cloud.signInOwner(email.trim(), password);
-    } catch (e) {
-      setErr(e?.message || "เข้าสู่ระบบไม่สำเร็จ");
-    } finally {
-      setBusy(false);
-    }
-  };
-  const doCreateClub = async name => {
-    const n = (name || "").trim();
-    if (!n || !cloud) return;
-    setBusy(true);
-    setErr("");
-    try {
-      const clubId = await cloud.createClub(n);
-      setCloudClub(normCloudClub({
-        clubId,
-        ownerUid: authUser?.uid || null,
-        sourceGroupName: n,
-        enabled: true,
-        migratedAt: null
-      }));
-    } catch (e) {
-      setErr(e?.message || "สร้าง Club ไม่สำเร็จ");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // v1.11.35: migrates only players missing a badqId — safe to run repeatedly (idempotent both here and
-  // server-side in allocateBadqId), never touches players already migrated, never touches archived
-  // players (this panel only ever receives the active roster), never reads/writes photo.
-  const doMigrate = async () => {
-    if (!cloudClub?.clubId || !cloud) return;
-    setMigrating(true);
-    setErr("");
-    setMigrateResult(null);
-    let done = 0,
-      skipped = 0,
-      failed = 0;
-    for (const p of players || []) {
-      if (p.badqId) {
-        skipped++;
-        continue;
-      }
-      try {
-        const res = await cloud.allocateBadqId({
-          clubId: cloudClub.clubId,
-          localId: p.id,
-          name: p.name,
-          skillIndex: p.skillIndex,
-          levelSnapshot: p.level,
-          handedness: p.handedness,
-          handPref: p.handPref,
-          memberType: p.memberType,
-          phone: p.phone,
-          lineId: p.lineId
-        });
-        if (res && res.badqId) {
-          updatePlayer(p.id, {
-            badqId: res.badqId
-          });
-          done++;
-        } else failed++;
-      } catch (e) {
-        failed++;
-      }
-    }
-    setCloudClub(c => normCloudClub({
-      ...c,
-      migratedAt: Date.now()
-    }));
-    setMigrateResult({
-      done,
-      skipped,
-      failed
-    });
-    setMigrating(false);
-  };
-  return /*#__PURE__*/React.createElement(Overlay, {
-    onClose: onClose
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 16,
-      fontWeight: 800,
-      marginBottom: 6
-    }
-  }, "\uD83C\uDF10 Member Portal (Beta)"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      color: T.muted,
-      marginBottom: 14,
-      lineHeight: 1.6
-    }
-  }, "\u0E02\u0E31\u0E49\u0E19\u0E19\u0E35\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E41\u0E04\u0E48 \"\u0E01\u0E32\u0E23\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D\u0E1E\u0E37\u0E49\u0E19\u0E10\u0E32\u0E19\" \u0E40\u0E17\u0E48\u0E32\u0E19\u0E31\u0E49\u0E19 (\u0E2A\u0E23\u0E49\u0E32\u0E07 Club \u0E1A\u0E19 Cloud + \u0E22\u0E49\u0E32\u0E22\u0E23\u0E32\u0E22\u0E0A\u0E37\u0E48\u0E2D\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01\u0E17\u0E35\u0E48\u0E21\u0E35\u0E2D\u0E22\u0E39\u0E48\u0E02\u0E36\u0E49\u0E19\u0E44\u0E1B\u0E1E\u0E23\u0E49\u0E2D\u0E21 BadQ ID) \u2014 \u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E2B\u0E19\u0E49\u0E32\u0E25\u0E07\u0E17\u0E30\u0E40\u0E1A\u0E35\u0E22\u0E19\u0E2D\u0E2D\u0E19\u0E44\u0E25\u0E19\u0E4C\u0E2B\u0E23\u0E37\u0E2D\u0E23\u0E30\u0E1A\u0E1A\u0E04\u0E34\u0E27\u0E23\u0E2D \u0E41\u0E2D\u0E1B\u0E17\u0E33\u0E07\u0E32\u0E19\u0E15\u0E32\u0E21\u0E1B\u0E01\u0E15\u0E34\u0E41\u0E1A\u0E1A\u0E2D\u0E2D\u0E1F\u0E44\u0E25\u0E19\u0E4C\u0E40\u0E2B\u0E21\u0E37\u0E2D\u0E19\u0E40\u0E14\u0E34\u0E21\u0E17\u0E38\u0E01\u0E1B\u0E23\u0E30\u0E01\u0E32\u0E23\u0E44\u0E21\u0E48\u0E27\u0E48\u0E32\u0E08\u0E30\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D Cloud \u0E2B\u0E23\u0E37\u0E2D\u0E44\u0E21\u0E48"), !available && /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: 12,
-      borderRadius: 11,
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      fontSize: 12.5,
-      color: T.muted,
-      lineHeight: 1.7
-    }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32 Firebase \u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E19\u0E35\u0E49 \u2014 \u0E1F\u0E35\u0E40\u0E08\u0E2D\u0E23\u0E4C\u0E19\u0E35\u0E49\u0E22\u0E31\u0E07\u0E1B\u0E34\u0E14\u0E2D\u0E22\u0E39\u0E48\u0E41\u0E25\u0E30\u0E44\u0E21\u0E48\u0E01\u0E23\u0E30\u0E17\u0E1A\u0E01\u0E32\u0E23\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19\u0E1B\u0E01\u0E15\u0E34\u0E02\u0E2D\u0E07\u0E41\u0E2D\u0E1B \u0E1C\u0E39\u0E49\u0E14\u0E39\u0E41\u0E25\u0E23\u0E30\u0E1A\u0E1A\u0E15\u0E49\u0E2D\u0E07\u0E01\u0E23\u0E2D\u0E01\u0E04\u0E48\u0E32 config \u0E43\u0E19\u0E44\u0E1F\u0E25\u0E4C firebase-config.js \u0E01\u0E48\u0E2D\u0E19\u0E08\u0E36\u0E07\u0E08\u0E30\u0E40\u0E1B\u0E34\u0E14\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19\u0E44\u0E14\u0E49 (\u0E14\u0E39\u0E02\u0E31\u0E49\u0E19\u0E15\u0E2D\u0E19\u0E43\u0E19 Firebase Console setup)"), available && !authUser && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setAuthMode("signin"),
-    style: {
-      flex: 1,
-      padding: "8px 0",
-      borderRadius: 9,
-      border: `1px solid ${T.border}`,
-      background: authMode === "signin" ? T.green : T.surface,
-      color: authMode === "signin" ? "#fff" : T.text,
-      fontSize: 12.5,
-      fontWeight: 700
-    }
-  }, "\u0E40\u0E02\u0E49\u0E32\u0E2A\u0E39\u0E48\u0E23\u0E30\u0E1A\u0E1A Owner"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setAuthMode("register"),
-    style: {
-      flex: 1,
-      padding: "8px 0",
-      borderRadius: 9,
-      border: `1px solid ${T.border}`,
-      background: authMode === "register" ? T.green : T.surface,
-      color: authMode === "register" ? "#fff" : T.text,
-      fontSize: 12.5,
-      fontWeight: 700
-    }
-  }, "\u0E2A\u0E21\u0E31\u0E04\u0E23 Owner \u0E43\u0E2B\u0E21\u0E48")), /*#__PURE__*/React.createElement("input", {
-    type: "email",
-    placeholder: "\u0E2D\u0E35\u0E40\u0E21\u0E25",
-    value: email,
-    onChange: e => setEmail(e.target.value),
-    style: {
-      width: "100%",
-      boxSizing: "border-box",
-      padding: "9px 10px",
-      borderRadius: 9,
-      border: `1px solid ${T.border}`,
-      fontSize: 13,
-      marginBottom: 8
-    }
-  }), /*#__PURE__*/React.createElement("input", {
-    type: "password",
-    placeholder: "\u0E23\u0E2B\u0E31\u0E2A\u0E1C\u0E48\u0E32\u0E19",
-    value: password,
-    onChange: e => setPassword(e.target.value),
-    style: {
-      width: "100%",
-      boxSizing: "border-box",
-      padding: "9px 10px",
-      borderRadius: 9,
-      border: `1px solid ${T.border}`,
-      fontSize: 13,
-      marginBottom: 8
-    }
-  }), /*#__PURE__*/React.createElement("button", {
-    disabled: busy || !email || !password,
-    onClick: doAuth,
-    style: {
-      width: "100%",
-      padding: "10px 0",
-      borderRadius: 9,
-      border: "none",
-      background: T.accent,
-      color: "#fff",
-      fontSize: 13,
-      fontWeight: 800,
-      opacity: busy ? 0.6 : 1
-    }
-  }, busy ? "กำลังดำเนินการ..." : authMode === "register" ? "สมัคร Owner" : "เข้าสู่ระบบ")), available && authUser && !cloudClub?.clubId && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(Label, null, "\u0E2A\u0E23\u0E49\u0E32\u0E07 Club \u0E08\u0E32\u0E01\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E40\u0E04\u0E22\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49"), Object.keys(groupDefaults || {}).length === 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      color: T.muted,
-      marginBottom: 8
-    }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49 \u2014 \u0E1E\u0E34\u0E21\u0E1E\u0E4C\u0E0A\u0E37\u0E48\u0E2D Club \u0E14\u0E49\u0E32\u0E19\u0E25\u0E48\u0E32\u0E07\u0E41\u0E17\u0E19\u0E44\u0E14\u0E49"), Object.keys(groupDefaults || {}).map(name => /*#__PURE__*/React.createElement("button", {
-    key: name,
-    disabled: busy,
-    onClick: () => doCreateClub(name),
-    style: {
-      width: "100%",
-      textAlign: "left",
-      padding: "10px 12px",
-      borderRadius: 9,
-      border: `1px solid ${T.border}`,
-      background: T.surface,
-      marginBottom: 6,
-      fontSize: 13,
-      fontWeight: 700,
-      color: T.text
-    }
-  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07 Club: ", name)), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      marginTop: 8
-    }
-  }, /*#__PURE__*/React.createElement("input", {
-    placeholder: "\u0E2B\u0E23\u0E37\u0E2D\u0E1E\u0E34\u0E21\u0E1E\u0E4C\u0E0A\u0E37\u0E48\u0E2D Club \u0E40\u0E2D\u0E07",
-    value: customName,
-    onChange: e => setCustomName(e.target.value),
-    style: {
-      flex: 1,
-      padding: "9px 10px",
-      borderRadius: 9,
-      border: `1px solid ${T.border}`,
-      fontSize: 13
-    }
-  }), /*#__PURE__*/React.createElement("button", {
-    disabled: busy || !customName.trim(),
-    onClick: () => doCreateClub(customName),
-    style: {
-      padding: "9px 14px",
-      borderRadius: 9,
-      border: "none",
-      background: T.green,
-      color: "#fff",
-      fontSize: 13,
-      fontWeight: 800
-    }
-  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07"))), available && authUser && cloudClub?.clubId && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      padding: 12,
-      borderRadius: 11,
-      background: T.surface,
-      border: `1px solid ${T.border}`,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      fontWeight: 800,
-      color: T.text
-    }
-  }, "\u0E40\u0E0A\u0E37\u0E48\u0E2D\u0E21\u0E15\u0E48\u0E2D\u0E41\u0E25\u0E49\u0E27"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 11.5,
-      color: T.muted,
-      marginTop: 2
-    }
-  }, "Club: ", cloudClub.sourceGroupName || cloudClub.clubId)), /*#__PURE__*/React.createElement("button", {
-    disabled: migrating,
-    onClick: doMigrate,
-    style: {
-      width: "100%",
-      padding: "10px 0",
-      borderRadius: 9,
-      border: "none",
-      background: T.accent,
-      color: "#fff",
-      fontSize: 13,
-      fontWeight: 800,
-      opacity: migrating ? 0.6 : 1
-    }
-  }, migrating ? "กำลังย้ายข้อมูล..." : "ย้ายข้อมูลสมาชิกขึ้น Cloud"), migrateResult && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 8,
-      fontSize: 12,
-      color: T.muted
-    }
-  }, "\u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08 ", migrateResult.done, " \u0E04\u0E19 \xB7 \u0E02\u0E49\u0E32\u0E21\u0E44\u0E1B\u0E41\u0E25\u0E49\u0E27 (\u0E21\u0E35 BadQ ID \u0E2D\u0E22\u0E39\u0E48\u0E41\u0E25\u0E49\u0E27) ", migrateResult.skipped, " \u0E04\u0E19", migrateResult.failed ? ` · ล้มเหลว ${migrateResult.failed} คน` : "")), err && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 10,
-      fontSize: 12,
-      color: "#c0392b"
-    }
-  }, err));
-}
+// v1.12.12 (P2.2 IA cleanup): the legacy "Member Portal (Beta)" sheet (v1.11.35, its own separate
+// prototype "Club" concept — sign in, create a Cloud Club by name, migrate players to get a badqId) has been
+// REMOVED. It was never the P2 architecture (Workspace/Clubs/Sessions, see BadQOnlineSheet's own header
+// comment) — just an early, superseded experiment that shared the same underlying Firebase Auth session.
+// Removed here: this component, its Settings card/nav row, and its `portalSheetOpen` state (all below, in
+// GeneralSettingsSheet). Deliberately NOT removed: `cloud.registerOwner`/`signInOwner`/`signOutOwner`/
+// `createClub`/`allocateBadqId` in firebase-sync.js (shared utilities other layers still use/may reuse),
+// `cloudClub`/`setCloudClub` local state and its `badqId` player field (existing local data — untouched,
+// never deleted, and may still be a genuine hook for a future real Member Portal built on the P2 Workspace
+// architecture), and every actual player/member record (completely unaffected either way).
 
 // v1.11.6: "สมาชิกที่เก็บไว้" — reached from ⚙️ ตั้งค่า. Deliberately minimal (photo/name/skill/hand/type
 // + a single "กู้คืนสมาชิก" action) per spec section 4: this is a recovery list, not a second member-
@@ -18288,6 +18351,7 @@ function SessionTab(props) {
     replaceSlot,
     nextPoolFor,
     waitQueue,
+    manualBenchPool,
     now,
     resetGames,
     endSession,
@@ -18553,6 +18617,10 @@ function SessionTab(props) {
     // including this very row's own other slot — see `inPlay`), and it recomputes live off `current`, so
     // removing/deleting a game frees its players again immediately with zero extra bookkeeping.
     const bench = waitQueue;
+    // v1.12.13 (P0 manual matchmaking dropdown ordering fix): the picker itself gets the wider pool
+    // (includes YELLOW/resting candidates) — `bench` above stays waitQueue-only for benchIds/warnings
+    // (unchanged, see manualBenchPool's own comment for why those two must not widen).
+    const pickerBench = manualBenchPool;
     const rowOpenSlot = openSlot && openSlot.mid === m.id ? {
       team: openSlot.team,
       idx: openSlot.idx,
@@ -18667,7 +18735,7 @@ function SessionTab(props) {
       replaceSlot: replace,
       tapSlot: tapSlot,
       isSel: isSel,
-      bench: bench,
+      bench: pickerBench,
       openSlot: rowOpenSlot,
       setOpenSlot: setRowOpenSlot,
       big: st === "playing",
@@ -18692,7 +18760,7 @@ function SessionTab(props) {
       replaceSlot: replace,
       tapSlot: tapSlot,
       isSel: isSel,
-      bench: bench,
+      bench: pickerBench,
       openSlot: rowOpenSlot,
       setOpenSlot: setRowOpenSlot,
       big: st === "playing",
@@ -23475,6 +23543,7 @@ function QuanSettingsSheet({
     setSettings,
     qrRef,
     courtCount,
+    setCourtCount,
     courtLabels,
     players,
     session,
@@ -24536,17 +24605,22 @@ function ShuttlecockCostSection({
 // settings.courtCost.manualOverrideTotal field is never read or written by this component either way, so an
 // old value already sitting there from before this upgrade is left completely untouched (see the backward-
 // compat fallback branch in computeCostModelExpenses).
+// v1.12.12 (P0 Court Booking / Time Model): each court now carries its OWN start/end time (not just its own
+// hours) and a separately-editable "billable hours" that can differ from its actual usage duration (venue
+// free/bonus court-time). See reconcileCourtHours/buildCourtCostRows's own v1.12.12 comments for the full
+// storage-model rationale — this component is purely the editing UI on top of that.
 function CourtCostSection({
   settings,
   setSettings,
   courtCount,
+  setCourtCount,
   courtLabels,
   durationHours,
   session,
   setSession
 }) {
   const rate = settings.courtCost && settings.courtCost.ratePerHour || 0;
-  const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), rate);
+  const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), rate);
   const total = totalCourtCostFromRows(rows);
   const setRate = v => setSettings(s => ({
     ...s,
@@ -24555,20 +24629,59 @@ function CourtCostSection({
       ratePerHour: v
     }
   }));
-  // v1.11.51 (spec C/D): editing a court's hours is ALWAYS an explicit, real "this court is now MANUAL"
-  // action — never inferred later by comparing numbers. Stored in `session` (not `settings`) so it's
-  // session-specific (spec H) and resets to a clean slate every new session (see normSession/endSession).
-  const setCourtHours = (court, hours) => setSession(s => {
+  // v1.12.12: editing any of a court's start time / end time / billable hours is ALWAYS an explicit, real
+  // "this court is now MANUAL" action for THAT field, merged onto whatever this court's row already stores —
+  // never inferred later by comparing numbers (same discipline as v1.11.51's own setCourtHours). Still
+  // session-scoped (session.courtHours, not settings), still resets to a clean slate every new session (see
+  // normSession/endSession) — the array's own name/identity is unchanged on purpose, only its row shape
+  // grew (see reconcileCourtHours's read-side backward-compat handling of pre-v1.12.12 rows).
+  const patchCourt = (court, patch) => setSession(s => {
     const others = (s.courtHours || []).filter(r => r.court !== court);
+    const existing = (s.courtHours || []).find(r => r.court === court) || {};
     return {
       ...s,
       courtHours: [...others, {
+        ...existing,
         court,
-        hours: Math.max(0, Number(hours) || 0),
+        ...patch,
         source: "manual"
       }]
     };
   });
+  const setCourtStartAt = (court, v) => patchCourt(court, {
+    startAt: v || null
+  });
+  const setCourtEndAt = (court, v) => patchCourt(court, {
+    endAt: v || null
+  });
+  const setCourtBillable = (court, v) => patchCourt(court, {
+    billableHours: Math.max(0, Number(v) || 0)
+  });
+  // v1.12.12 (spec P0.2): "+ เปิดสนามเพิ่ม" opens one more REAL court (bumps the same courtCount every other
+  // part of the app — matchmaking/court labels — already uses, not just a cost-tracking line), defaulted to a
+  // clean full-hour window starting NOW — never assumed to share the ก๊วน's own start time, since a court
+  // opened mid-session usually does not (spec explicitly calls this out). Immediately editable like any other
+  // row via the inputs above.
+  const addCourt = () => {
+    const nextCourt = Math.max(0, Math.round(Number(courtCount) || 0)) + 1;
+    const nowMin = new Date().getHours() * 60;
+    const startAt = minutesToTimeStr(nowMin);
+    const endAt = minutesToTimeStr(nowMin + 60);
+    if (typeof setCourtCount === "function") setCourtCount(nextCourt);
+    setSession(s => {
+      const others = (s.courtHours || []).filter(r => r.court !== nextCourt);
+      return {
+        ...s,
+        courtHours: [...others, {
+          court: nextCourt,
+          startAt,
+          endAt,
+          billableHours: null,
+          source: "manual"
+        }]
+      };
+    });
+  };
   return /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 16,
@@ -24587,66 +24700,144 @@ function CourtCostSection({
     style: {
       display: "flex",
       flexDirection: "column",
-      gap: 6,
+      gap: 8,
       marginBottom: 8
     }
   }, rows.map(row => /*#__PURE__*/React.createElement("div", {
     key: row.court,
     style: {
       display: "flex",
-      alignItems: "center",
-      gap: 8,
-      padding: "7px 10px",
+      flexDirection: "column",
+      gap: 6,
+      padding: "9px 10px",
       borderRadius: 10,
       background: T.surface,
       border: `1px solid ${T.border}`
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 12.5,
       fontWeight: 800,
-      flexShrink: 0,
-      minWidth: 52,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap"
+      flexShrink: 0
     }
-  }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, row.court)), /*#__PURE__*/React.createElement("input", {
+  }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, row.court)), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginLeft: "auto",
+      flexShrink: 0
+    }
+  }, row.source === "manual" ? "แก้ไขแล้ว" : "อัตโนมัติ"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      flexShrink: 0
+    }
+  }, formatCurrency(row.cost))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "time",
+    value: row.startAt || "",
+    onChange: e => setCourtStartAt(row.court, e.target.value),
+    style: {
+      padding: "5px 6px",
+      borderRadius: 7,
+      border: `1px solid ${T.border}`,
+      fontSize: 12,
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: T.muted
+    }
+  }, "\u2192"), /*#__PURE__*/React.createElement("input", {
+    type: "time",
+    value: row.endAt || "",
+    onChange: e => setCourtEndAt(row.court, e.target.value),
+    style: {
+      padding: "5px 6px",
+      borderRadius: 7,
+      border: `1px solid ${T.border}`,
+      fontSize: 12,
+      outline: "none"
+    }
+  }), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginLeft: 4
+    }
+  }, "\u0E43\u0E0A\u0E49\u0E08\u0E23\u0E34\u0E07 ", Math.round(row.actualDurationHours * 100) / 100, " \u0E0A\u0E21.")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      flexShrink: 0
+    }
+  }, "\u0E04\u0E34\u0E14\u0E40\u0E07\u0E34\u0E19\u0E08\u0E23\u0E34\u0E07"), /*#__PURE__*/React.createElement("input", {
     type: "number",
-    value: row.hours,
-    onChange: e => setCourtHours(row.court, e.target.value),
+    value: row.billableHours,
+    onChange: e => setCourtBillable(row.court, e.target.value),
     onFocus: e => e.target.select(),
     style: {
       width: 52,
-      padding: "6px 6px",
-      borderRadius: 8,
+      padding: "5px 6px",
+      borderRadius: 7,
       border: `1px solid ${T.border}`,
       textAlign: "right",
-      fontSize: 13,
+      fontSize: 12.5,
       fontWeight: 800,
       outline: "none",
       flexShrink: 0
     }
   }), /*#__PURE__*/React.createElement("span", {
     style: {
-      fontSize: 11.5,
-      color: T.muted,
-      flexShrink: 0
+      fontSize: 11,
+      color: T.muted
     }
-  }, "\u0E0A\u0E21. \xD7 \u0E3F", rate, " ="), /*#__PURE__*/React.createElement("span", {
+  }, "\u0E0A\u0E21. \xD7 \u0E3F", rate))))), /*#__PURE__*/React.createElement("button", {
+    onClick: addCourt,
     style: {
-      fontSize: 13,
-      fontWeight: 800,
-      marginLeft: "auto",
-      flexShrink: 0
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 6,
+      padding: "9px 0",
+      borderRadius: 10,
+      background: "none",
+      border: `1.5px dashed ${T.border}`,
+      color: T.muted,
+      fontSize: 12.5,
+      fontWeight: 700,
+      marginBottom: 8
     }
-  }, formatCurrency(row.cost))))), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(Plus, {
+    size: 14
+  }), " \u0E40\u0E1B\u0E34\u0E14\u0E2A\u0E19\u0E32\u0E21\u0E40\u0E1E\u0E34\u0E48\u0E21"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
       color: T.muted,
       marginBottom: 8
     }
-  }, "\u0E0A\u0E31\u0E48\u0E27\u0E42\u0E21\u0E07\u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19\u0E02\u0E2D\u0E07\u0E41\u0E15\u0E48\u0E25\u0E30\u0E2A\u0E19\u0E32\u0E21\u0E2D\u0E34\u0E07\u0E08\u0E32\u0E01\u0E40\u0E27\u0E25\u0E32\u0E01\u0E4A\u0E27\u0E19 (\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E43\u0E19 \"\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19\"/\"\u0E27\u0E31\u0E19\u0E19\u0E35\u0E49\") \u2014 \u0E41\u0E01\u0E49\u0E23\u0E32\u0E22\u0E2A\u0E19\u0E32\u0E21\u0E44\u0E14\u0E49\u0E17\u0E38\u0E01\u0E40\u0E21\u0E37\u0E48\u0E2D"), /*#__PURE__*/React.createElement("div", {
+  }, "\u0E40\u0E27\u0E25\u0E32\u0E40\u0E23\u0E34\u0E48\u0E21\u0E15\u0E49\u0E19\u0E02\u0E2D\u0E07\u0E41\u0E15\u0E48\u0E25\u0E30\u0E2A\u0E19\u0E32\u0E21\u0E2D\u0E34\u0E07\u0E08\u0E32\u0E01\u0E40\u0E27\u0E25\u0E32\u0E01\u0E4A\u0E27\u0E19 (\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E43\u0E19 \"\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E01\u0E4A\u0E27\u0E19\"/\"\u0E27\u0E31\u0E19\u0E19\u0E35\u0E49\") \u0E08\u0E19\u0E01\u0E27\u0E48\u0E32\u0E08\u0E30\u0E41\u0E01\u0E49\u0E40\u0E2D\u0E07 \u2014 \u0E2A\u0E19\u0E32\u0E21\u0E17\u0E35\u0E48\u0E40\u0E1B\u0E34\u0E14\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E23\u0E30\u0E2B\u0E27\u0E48\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19\u0E08\u0E30\u0E40\u0E23\u0E34\u0E48\u0E21\u0E08\u0E32\u0E01\u0E40\u0E27\u0E25\u0E32\u0E1B\u0E31\u0E08\u0E08\u0E38\u0E1A\u0E31\u0E19\u0E42\u0E14\u0E22\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34 \u0E41\u0E25\u0E30\u0E41\u0E01\u0E49\u0E44\u0E02\u0E40\u0E27\u0E25\u0E32/\u0E0A\u0E31\u0E48\u0E27\u0E42\u0E21\u0E07\u0E17\u0E35\u0E48\u0E04\u0E34\u0E14\u0E40\u0E07\u0E34\u0E19\u0E08\u0E23\u0E34\u0E07\u0E44\u0E14\u0E49\u0E17\u0E38\u0E01\u0E40\u0E21\u0E37\u0E48\u0E2D"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       justifyContent: "space-between",
@@ -24915,7 +25106,7 @@ function FinancialEstimatePanel({
   // v1.11.51 (spec J): reflects the new per-court hours × rate total — updates immediately when any court's
   // hours are edited (session.courtHours), never the old single-figure ratePerHour×courtCount×duration. Court
   // cost is about court/time configuration, not planned headcount — spec D: "Keep current cost logic".
-  const courtCostRows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours), settings.courtCost && settings.courtCost.ratePerHour);
+  const courtCostRows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), settings.courtCost && settings.courtCost.ratePerHour);
   const courtCostTotal = totalCourtCostFromRows(courtCostRows);
   const otherTotal = otherExpensesTotal(settings.otherExpenses);
   // v1.11.55 (Revenue Estimate Eligibility spec A): default "จำนวนผู้เล่นคาดการณ์" is UNCONDITIONALLY the
@@ -25064,6 +25255,7 @@ function FinanceSettingsBody({
   setSettings,
   qrRef,
   courtCount,
+  setCourtCount,
   courtLabels,
   players,
   session,
@@ -25522,6 +25714,7 @@ function FinanceSettingsBody({
     settings: settings,
     setSettings: setSettings,
     courtCount: courtCount,
+    setCourtCount: setCourtCount,
     courtLabels: courtLabels,
     durationHours: durationHours,
     session: session,
@@ -25587,6 +25780,7 @@ function FinanceSettingsSheet({
   setSettings,
   qrRef,
   courtCount,
+  setCourtCount,
   courtLabels,
   players,
   session,
@@ -25610,6 +25804,7 @@ function FinanceSettingsSheet({
     setSettings,
     qrRef,
     courtCount,
+    setCourtCount,
     courtLabels,
     players,
     session,
@@ -26995,7 +27190,7 @@ function SettingsTab({
   autoOpen,
   onAutoOpenConsumed
 }) {
-  const [view, setView] = useState(null); // null | "advanced" | "general" | "history" | "backup"
+  const [view, setView] = useState(null); // null | "online" | "advanced" | "general" | "history" | "backup"
 
   // v1.12.1: one-shot deep-link support for the corrupted-data recovery banner (App(), spec 12) — jumps
   // straight to "💾 ข้อมูลและการสำรอง" the instant this page mounts with autoOpen="backup" set, then
@@ -27104,7 +27299,10 @@ function SettingsTab({
       margin: "16px 2px 8px"
     }
   }, children);
-  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionLabel, null, "\u0E01\u0E32\u0E23\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32"), /*#__PURE__*/React.createElement(Row, {
+  return /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement(SectionLabel, null, "\u2601\uFE0F BadQ Online"), /*#__PURE__*/React.createElement(BadQOnlineNavRow, {
+    deviceId: deviceId,
+    onOpen: () => setView("online")
+  }), /*#__PURE__*/React.createElement(SectionLabel, null, "\u0E01\u0E32\u0E23\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32"), /*#__PURE__*/React.createElement(Row, {
     icon: "\uD83D\uDE80",
     title: "\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E02\u0E31\u0E49\u0E19\u0E2A\u0E39\u0E07",
     sub: "Ranking \xB7 Tournament \xB7 \u0E23\u0E32\u0E07\u0E27\u0E31\u0E25",
@@ -27150,15 +27348,14 @@ function SettingsTab({
     archivedPlayers: archivedPlayers,
     restorePlayer: restorePlayer,
     players: players,
-    groupDefaults: groupDefaults,
-    session: session,
-    cloudClub: cloudClub,
-    setCloudClub: setCloudClub,
-    deviceId: deviceId,
-    updatePlayer: updatePlayer,
     sessionHistory: sessionHistory,
     rankingConfigs: rankingConfigs,
     updateRankingConfig: updateRankingConfig,
+    onClose: () => setView(null)
+  }), view === "online" && /*#__PURE__*/React.createElement(BadQOnlineSheet, {
+    deviceId: deviceId,
+    groupDefaults: groupDefaults,
+    sessionHistory: sessionHistory,
     onClose: () => setView(null)
   }), view === "backup" && /*#__PURE__*/React.createElement(Overlay, {
     onClose: () => setView(null)
@@ -27849,6 +28046,7 @@ function FinanceTab({
   endSession,
   qrRef,
   courtCount,
+  setCourtCount,
   courtLabels,
   gameMode,
   rewardHistory,
@@ -27973,6 +28171,7 @@ function FinanceTab({
     discountCredits: discountCredits,
     applyDiscountCredits: applyDiscountCredits,
     courtCount: courtCount,
+    setCourtCount: setCourtCount,
     courtLabels: courtLabels,
     mode: gameMode,
     rewardHistory: rewardHistory,
@@ -31550,6 +31749,7 @@ function PaymentTab({
   discountCredits,
   applyDiscountCredits,
   courtCount,
+  setCourtCount,
   courtLabels,
   mode,
   rewardHistory,
@@ -31589,6 +31789,7 @@ function PaymentTab({
     discountCredits,
     applyDiscountCredits,
     courtCount,
+    setCourtCount,
     courtLabels,
     mode,
     rewardHistory,
@@ -31617,6 +31818,7 @@ function QuanPaymentPanel({
   discountCredits,
   applyDiscountCredits,
   courtCount,
+  setCourtCount,
   courtLabels,
   mode,
   rewardHistory,
@@ -31665,7 +31867,7 @@ function QuanPaymentPanel({
   // sum (actualShuttleUsedSoFar), not a match count, and `null` replaces session.shuttleUsage (the aggregate
   // manual-override concept is retired for ACTUAL usage) — same swap as endSession()/ShuttlecockCostSection,
   // so this live figure can never drift from what End Session will eventually freeze.
-  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, actualShuttleUsedSoFar(history, current), durationHours, session && session.courtHours, null, rewardHistory, session && session.id, shuttleOpeningResolved);
+  const liveExpenseTotal = computeLiveExpenseTotal(settings, courtCount, courtLabels, session && session.date, actualShuttleUsedSoFar(history, current), durationHours, session && session.courtHours, null, rewardHistory, session && session.id, shuttleOpeningResolved, session && session.sessionStartTime, session && session.sessionEndTime);
   const liveProfit = Math.round((liveRevenue - liveExpenseTotal + Number.EPSILON) * 100) / 100;
   const detailP = detail ? players.find(p => p.id === detail) : null;
   const detailBill = detailP ? billBy(detailP.id) : null;
@@ -31756,6 +31958,7 @@ function QuanPaymentPanel({
     setSettings: setSettings,
     qrRef: qrRef,
     courtCount: courtCount,
+    setCourtCount: setCourtCount,
     courtLabels: courtLabels,
     players: players,
     session: session,
@@ -33048,12 +33251,17 @@ function TeamSide({
     // in this match is already filled, reorder/flag this slot's bench using the same scoring engine
     // buildMatch uses — teammates = already-placed players on THIS side (excluding this slot itself),
     // opponents = already-placed players on the OTHER side. Recomputed fresh on every render, so
-    // selecting P2 immediately re-ranks P3's candidates, and so on (spec section 3). Left untouched
-    // (original wait-priority order) when nobody else has been placed yet, so the very first pick's
-    // behavior is byte-for-byte unchanged from before this feature existed.
+    // selecting P2 immediately re-ranks P3's candidates, and so on (spec section 3).
+    // v1.12.13 (P0 manual matchmaking dropdown ordering fix): now ALWAYS routed through
+    // rankManualSlotCandidates, including the very first pick (teammateIds/opponentIds both empty) —
+    // the required NORMAL > YELLOW(resting) > RED(conflict) tiering must apply even before anyone else
+    // is placed (no conflicts are possible yet, but a resting candidate still must not outrank a
+    // normal one). With empty teammateIds/opponentIds the function computes zero conflicts and a flat
+    // score, so a pool with no resting candidates sorts identically to the old raw wait-priority order
+    // (verified: both reduce to "longest-waited first").
     const teammateIds = arr.filter((pid, i) => i !== idx && pid);
     const opponentIds = ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean);
-    const rankedBench = teammateIds.length + opponentIds.length > 0 ? rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap) : bench || [];
+    const rankedBench = rankManualSlotCandidates(bench || [], teammateIds, opponentIds, players, lockPairs, stats, latestMap);
     const nameLong = p && p.name.length > 7;
     const nameFs = nameLong ? compact ? 12.5 : 13 : compact ? 14 : 15;
     const lvlFs = nameLong ? 11 : compact ? 12 : 13;
@@ -33359,7 +33567,6 @@ function PlayerPicker({
       textAlign: "center"
     }
   }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E19\u0E23\u0E2D\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19") : bench.map(b =>
-  /*#__PURE__*/
   // v1.11.75 (Manual Matchmaking Smart Suggestion, spec section 2): a candidate flagged by
   // rankManualSlotCandidates with an "ไม่อยากคู่/ไม่อยากเจอ" conflict against someone already placed
   // in this match is still fully tappable (onPick unchanged) — only shown in red, at the bottom
@@ -33371,61 +33578,69 @@ function PlayerPicker({
   // error/warning banners elsewhere in this file (BackupSettingsEditor's import-error box), so
   // this stays visually consistent instead of inventing a new color. Purely a background swap:
   // still fully clickable/selectable (onPick unchanged), never disabled.
-  React.createElement("button", {
-    key: b.id,
-    onClick: () => onPick(b.id),
-    style: {
-      width: "100%",
-      display: "flex",
-      alignItems: "center",
-      gap: 9,
-      padding: "9px 11px",
-      background: b._conflict ? "#fdecea" : "none",
-      border: "none",
-      borderBottom: `1px solid ${T.border}`,
-      textAlign: "left"
-    }
-  }, /*#__PURE__*/React.createElement(Avatar, {
-    p: b,
-    size: 26
-  }), /*#__PURE__*/React.createElement("span", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      display: "block",
-      fontSize: 13,
-      fontWeight: 600,
-      overflow: "hidden",
-      textOverflow: "ellipsis",
-      whiteSpace: "nowrap",
-      color: b._conflict ? "#c0392b" : undefined
-    }
-  }, b._conflict ? "🔴 " : "", b.name, " ", /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: levelColor(b.skillIndex),
-      fontWeight: 800,
-      fontSize: 11.5
-    }
-  }, "(", b.level, ")")), b._conflict ? /*#__PURE__*/React.createElement("span", {
-    style: {
-      display: "block",
-      fontSize: 10.5,
-      fontWeight: 700,
-      color: "#c0392b",
-      marginTop: 1
-    }
-  }, b._conflict.label, " ", b._conflict.withName) : typeof now === "number" && /*#__PURE__*/React.createElement("span", {
-    style: {
-      display: "block",
-      fontSize: 10.5,
-      fontWeight: 700,
-      color: T.muted,
-      marginTop: 1
-    }
-  }, "\u0E23\u0E2D ", Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000)), " \u0E19\u0E32\u0E17\u0E35 \xB7 \u0E40\u0E25\u0E48\u0E19 ", b.games || 0, " \u0E40\u0E01\u0E21")))))), document.body);
+  // v1.12.13 (P0 manual matchmaking dropdown ordering fix): YELLOW visual state for a
+  // resting("ขอพัก") candidate with no conflict — reuses PSTATUS.resting's own existing color
+  // (#d97706 text / #fef3ec background, the same amber already used everywhere else "พัก" is shown)
+  // rather than inventing a new color. Still fully tappable (onPick unchanged) — resting candidates
+  // are selectable, never disabled, matching how RED/conflict candidates already behave.
+  (() => {
+    const isResting = !b._conflict && b.status === "resting";
+    return /*#__PURE__*/React.createElement("button", {
+      key: b.id,
+      onClick: () => onPick(b.id),
+      style: {
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        padding: "9px 11px",
+        background: b._conflict ? "#fdecea" : isResting ? "#fef3ec" : "none",
+        border: "none",
+        borderBottom: `1px solid ${T.border}`,
+        textAlign: "left"
+      }
+    }, /*#__PURE__*/React.createElement(Avatar, {
+      p: b,
+      size: 26
+    }), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "block",
+        fontSize: 13,
+        fontWeight: 600,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        color: b._conflict ? "#c0392b" : isResting ? "#d97706" : undefined
+      }
+    }, b._conflict ? "🔴 " : isResting ? "🟡 " : "", b.name, " ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: levelColor(b.skillIndex),
+        fontWeight: 800,
+        fontSize: 11.5
+      }
+    }, "(", b.level, ")")), b._conflict ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "block",
+        fontSize: 10.5,
+        fontWeight: 700,
+        color: "#c0392b",
+        marginTop: 1
+      }
+    }, b._conflict.label, " ", b._conflict.withName) : typeof now === "number" && /*#__PURE__*/React.createElement("span", {
+      style: {
+        display: "block",
+        fontSize: 10.5,
+        fontWeight: 700,
+        color: isResting ? "#d97706" : T.muted,
+        marginTop: 1
+      }
+    }, isResting ? "ขอพัก · " : "", "\u0E23\u0E2D ", Math.max(0, Math.floor((now - (b.waitingSince || now)) / 60000)), " \u0E19\u0E32\u0E17\u0E35 \xB7 \u0E40\u0E25\u0E48\u0E19 ", b.games || 0, " \u0E40\u0E01\u0E21")));
+  })()))), document.body);
 }
 
 // ===================== INLINE NEXT-MATCH EDITOR (v1.9.7) — replaces the old QueueNextSheet modal =====================
