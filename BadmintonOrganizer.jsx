@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.14";
+const APP_VERSION = "1.12.16";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -6736,6 +6736,16 @@ export default function App() {
     setSessionHistory((prev) => prev.map((s) => (s.id !== sessId ? s : { ...s, bill: s.bill.map((b) => (b.id === playerId ? { ...b, paid: !b.paid } : b)) })));
   };
   const deleteSessionHistory = (sessId) => setSessionHistory((prev) => prev.filter((s) => s.id !== sessId));
+  // v1.12.15 (retroactive session date edit): the live `session.date` field (see the date <input> in
+  // GroupSessionHeader) is only editable BEFORE the ก๊วน is archived — once endSession() moves it into
+  // sessionHistory, there was previously no way to correct it (e.g. a ก๊วน created in advance for a
+  // planned date, but actually opened/played and archived on a different real day). Same shape as
+  // toggleHistoricalPaid/addHistExpense above — a plain setSessionHistory patch, covered by the app's
+  // normal autosave. Never touches anything else on the record (bill/matches/expenses/photo all untouched).
+  const updateHistSessionDate = (sessId, newDate) => {
+    if (!newDate) return; // ignore a cleared/invalid date input — never let a session end up dateless
+    setSessionHistory((prev) => prev.map((s) => (s.id === sessId ? { ...s, date: newDate } : s)));
+  };
 
   // ---- Finance (v1.8.5) ----
   // Historical per-session expenses: an archived session starts with an empty `expenses` list — Expense is
@@ -7439,7 +7449,7 @@ export default function App() {
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members") }}
           summaryTabProps={{ players, history, current, getP, settings, session, tournamentHistory }}
         />}
-        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null) }} />}
+        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null) }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
       </div>
 
@@ -13164,7 +13174,7 @@ function GlobalRewardHistory({ rewardHistory }) {
     </>
   );
 }
-function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }) {
+function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
   const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
@@ -13321,7 +13331,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 
       {open && (
         <Overlay onClose={() => setOpenId(null)}>
-          <HistoricalDetail s={open} playersById={playersById} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} />
+          <HistoricalDetail s={open} playersById={playersById} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} updateHistSessionDate={updateHistSessionDate} />
         </Overlay>
       )}
 
@@ -13355,7 +13365,7 @@ function SettingsTab({
   settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory,
   changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData,
   archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer,
-  tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory,
+  tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate,
   openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint,
   exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog,
   autoOpen, onAutoOpenConsumed,
@@ -13380,7 +13390,7 @@ function SettingsTab({
     return (
       <div>
         <button onClick={() => setView(null)} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: T.muted, fontSize: 13, fontWeight: 700, padding: "2px 0 12px" }}>‹ ตั้งค่า</button>
-        <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }} />
+        <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }} />
       </div>
     );
   }
@@ -13454,7 +13464,14 @@ function SettingsTab({
   );
 }
 
-function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense }) {
+function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, updateHistSessionDate }) {
+  // v1.12.15 (retroactive session date edit): tap-to-edit, same pattern as the court-label inline editor
+  // (CourtLabelTag) elsewhere in this file — a small pencil button toggles a native <input type="date">
+  // in place of the static text; committing (onChange, since a native date picker's selection IS the
+  // commit gesture — there's no separate "confirm" step to wait for) calls updateHistSessionDate and
+  // closes the editor. Only the `date` field on this ONE archived session record changes — name/photo/
+  // bill/matches/expenses are completely untouched.
+  const [editingDate, setEditingDate] = useState(false);
   const stats = s.stats || {};
   const bill = s.bill || [];
   // v1.11.42 (Owner Payment Exemption): sessions archived from now on freeze bill entries with
@@ -13487,7 +13504,24 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 17, fontWeight: 800 }}>{s.name || "ก๊วนไม่มีชื่อ"}</div>
-          <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2 }}>{fmtThaiDate(s.date)} · {(s.players || []).length} คน · {s.courtCount || 1} สนาม · {fmtMode(s.settings || {}, s.mode)}</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+            {editingDate && updateHistSessionDate ? (
+              <input
+                type="date"
+                autoFocus
+                defaultValue={s.date}
+                onChange={(e) => { updateHistSessionDate(s.id, e.target.value); setEditingDate(false); }}
+                onBlur={() => setEditingDate(false)}
+                style={{ border: `1px solid ${T.border}`, borderRadius: 6, background: T.surface, color: T.text, fontSize: 12.5, padding: "2px 6px" }}
+              />
+            ) : (
+              <span>{fmtThaiDate(s.date)}</span>
+            )}
+            {updateHistSessionDate && !editingDate && (
+              <button onClick={() => setEditingDate(true)} title="แก้ไขวันที่ย้อนหลัง" style={{ background: "none", border: "none", padding: 0, display: "flex", color: T.muted }}><Calendar size={11} /></button>
+            )}
+            <span>· {(s.players || []).length} คน · {s.courtCount || 1} สนาม · {fmtMode(s.settings || {}, s.mode)}</span>
+          </div>
           {s.photo && <button onClick={() => clearHistPhoto(s.id)} style={{ background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700, padding: 0, marginTop: 3 }}>ลบรูปก๊วน</button>}
         </div>
       </div>
@@ -15165,6 +15199,12 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const [search, setSearch] = useState(""); // v1.11.15 — filters the displayed list only, never touches bill/payment data
   const [wheelFor, setWheelFor] = useState(null); // player id currently spinning the wheel
   const [confirmEnd, setConfirmEnd] = useState(false);
+  // v1.12.16 (จบก๊วน date-mismatch warning): if session.date has drifted from today (a ก๊วน created/set
+  // up for one date but actually played/ended on another real day — exactly the scenario that made the
+  // retroactive date-edit feature necessary in the first place), surface it BEFORE the "จบก๊วน" confirm
+  // dialog rather than silently archiving with a stale date. Purely a heads-up: either choice ("เปลี่ยน" /
+  // "ไม่เปลี่ยน") proceeds straight into the existing confirm-end flow afterward — never blocks ending.
+  const [confirmDateMismatch, setConfirmDateMismatch] = useState(false);
   const [openFinanceSettings, setOpenFinanceSettings] = useState(false);
   const doneCurrent = current.filter((m) => m.status === "done");
   const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered" && p.status !== "waiting"));
@@ -15342,7 +15382,13 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       })()}
 
       <button
-        onClick={() => allPaid && setConfirmEnd(true)}
+        onClick={() => {
+          if (!allPaid) return;
+          // v1.12.16: only checks when a real (non-empty) session date exists and genuinely differs from
+          // today — never fires for the normal same-day case, and never blocks ending either way.
+          if (session.date && session.date !== todayLocalISO()) setConfirmDateMismatch(true);
+          else setConfirmEnd(true);
+        }}
         disabled={!allPaid}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 0", borderRadius: 13, background: allPaid ? "none" : T.surface2, border: `1.5px solid ${allPaid ? T.accent : T.border}`, color: allPaid ? T.accent : T.muted, fontSize: 13.5, fontWeight: 800, marginBottom: 18, opacity: allPaid ? 1 : 0.6 }}
       >
@@ -15459,6 +15505,23 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
           onFinish={(prize) => applyWheelPrize(wheelFor, prize)}
           onClose={() => setWheelFor(null)}
         />
+      )}
+
+      {/* v1.12.16: date-mismatch heads-up, shown BEFORE the "จบก๊วน" confirm dialog whenever session.date
+          differs from today. "เปลี่ยน" updates session.date to today then proceeds to the normal confirm
+          dialog; "ไม่เปลี่ยน" leaves the date exactly as-is and proceeds to the same confirm dialog — this
+          never blocks ending a ก๊วน, it only makes the drift visible instead of silently archiving it. */}
+      {confirmDateMismatch && (
+        <div onClick={() => setConfirmDateMismatch(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>วันที่ก๊วนไม่ตรงกับวันนี้</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>วันที่ก๊วนของคุณคือวันที่ {fmtThaiDate(session.date)} ไม่ใช่วันนี้ ({fmtThaiDate(todayLocalISO())}) คุณต้องการเปลี่ยนเป็นวันที่ตามปัจจุบันหรือไม่?</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => { setConfirmDateMismatch(false); setConfirmEnd(true); }} style={btnSecondary}>ไม่เปลี่ยน</button>
+              <button onClick={() => { setSession((s) => ({ ...s, date: todayLocalISO() })); setConfirmDateMismatch(false); setConfirmEnd(true); }} style={{ ...btnPrimary, background: T.accent }}>เปลี่ยน</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {confirmEnd && (
