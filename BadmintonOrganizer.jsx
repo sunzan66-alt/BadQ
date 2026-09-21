@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.22";
+const APP_VERSION = "1.12.23";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -13243,6 +13243,22 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
   const [draft, setDraft] = useState(buildDraft);
   const draftRef = useRef(draft);
   useEffect(() => { draftRef.current = draft; }, [draft]);
+  // v1.12.23 (Score Warning Timing): the live on-screen validation warning (see `issue`/settledScores
+  // below) must NOT flash on every keystroke -- typing "21" digit-by-digit would otherwise show a bogus
+  // "below minimum" (or exceeds-target / bad-deuce-margin) warning at the intermediate "2" before the
+  // organizer finishes typing. `settledDraft` is a SEPARATE snapshot of `draft` that only catches up after
+  // a short pause (debounce) or an explicit "done typing" signal (blur/Enter, which already blurs via the
+  // existing onKeyDown handler below) -- never on every onChange. This only affects the WARNING DISPLAY;
+  // it does not touch `scorePairIssue` itself, the commit-on-unmount persistence gate (which already only
+  // ever runs once, when the popover closes, so it was never "every keystroke" to begin with), or any of
+  // the existing auto-winner/visible-set-count logic (those still read the live `draft` exactly as before,
+  // per the v1.11.80 "reflect the draft live" comment on `draftScores` -- only untouched here).
+  const [settledDraft, setSettledDraft] = useState(buildDraft);
+  useEffect(() => {
+    const t = setTimeout(() => setSettledDraft(draft), 550); // ~550ms pause = "done typing"
+    return () => clearTimeout(t);
+  }, [draft]);
+  const settleNow = () => setSettledDraft(draft); // explicit triggers: blur, Enter (blurs), focus leaving
   const mRef = useRef(m);
   useEffect(() => { mRef.current = m; });
   useEffect(() => {
@@ -13298,6 +13314,13 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
     return { a: d.a === "" ? null : Number(d.a), b: d.b === "" ? null : Number(d.b), win: (m.scores && m.scores[i] && m.scores[i].win) || null };
   });
   const visible = visibleSetCount({ scores: draftScores }, rounds || 1);
+  // v1.12.23: the settled (debounced/blurred) counterpart of `draftScores` above -- used ONLY to decide
+  // whether to show the validation warning, so the warning reflects a value the organizer has actually
+  // paused on or left, never a mid-keystroke fragment.
+  const settledScores = Array.from({ length: maxSets }, (_, i) => {
+    const d = (settledDraft[i] || { a: "", b: "" });
+    return { a: d.a === "" ? null : Number(d.a), b: d.b === "" ? null : Number(d.b) };
+  });
   return (
     <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginTop: 6 }}>
       {Array.from({ length: visible }).map((_, ri) => {
@@ -13312,11 +13335,14 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
           else setWin(m.id, ri, null);
         };
         const d = draftRow(ri);
-        // v1.11.80: live validation against this group's winScore/deuce settings, recomputed from the DRAFT
-        // (not just the last-committed value) so the error/red-highlight appears and clears immediately as
-        // the organizer types — same "reflect the draft live" principle already used for `auto`/`visible`
-        // above. `issue` is null while either side is still empty, so an in-progress entry never shows red.
-        const issue = scorePairIssue(r.a, r.b, wsc, deuceOn);
+        // v1.11.80 (logic) + v1.12.23 (timing): validated against this group's winScore/deuce settings, but
+        // now against the SETTLED snapshot (debounced ~550ms after the last keystroke, or immediately on
+        // blur/Enter/focus-away via settleNow()) rather than the raw live draft -- so the warning never
+        // flashes mid-type (e.g. typing "21" no longer trips a false warning at "2"), while still appearing
+        // promptly once the organizer actually pauses or moves on. `issue` is null while either settled
+        // side is still empty, so an in-progress entry never shows red.
+        const sr = settledScores[ri] || { a: null, b: null };
+        const issue = scorePairIssue(sr.a, sr.b, wsc, deuceOn);
         const badInput = { ...scoreInput, border: `1px solid ${T.accent}`, background: "#fdecea" };
         return (
           <div key={ri} style={{ marginBottom: ri < visible - 1 ? 8 : 0 }}>
@@ -13324,13 +13350,26 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
               {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
               {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} />}
               <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
-              <input type="number" min={0} value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={issue ? badInput : scoreInput} />
+              <input type="number" min={0} value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={settleNow} style={issue ? badInput : scoreInput} />
               <span style={{ color: T.muted, fontWeight: 800 }}>–</span>
-              <input type="number" min={0} value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} style={issue ? badInput : scoreInput} />
+              <input type="number" min={0} value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={settleNow} style={issue ? badInput : scoreInput} />
               <span style={{ fontSize: 11.5, fontWeight: 700, color: T.blue }}>B</span>
               {setWin && <WinLoseSelect state={stateFor("B")} onPick={pick("B")} locked={locked} />}
             </div>
-            {issue && <div style={{ fontSize: 10.5, color: T.accent, fontWeight: 700, marginTop: 3, paddingLeft: visible > 1 ? 46 : 0 }}>⚠️ {issue} — คะแนนนี้จะไม่ถูกบันทึก</div>}
+            {/* v1.12.23 (Warning Visual Style): reuses the SAME soft-warning box language already used
+                elsewhere in the app (e.g. the "ข้อมูลเดิมเสียหาย" boot-warning card) -- pale-red background,
+                a soft (not full-strength-accent) red border, an icon, and a two-tier text hierarchy (bold
+                dark headline + a smaller muted detail line) instead of a single flat accent-colored line
+                that read as a foreign strip of text dropped into the modal. */}
+            {issue && (
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 7, marginTop: 6, padding: "7px 9px", background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 10, marginLeft: visible > 1 ? 46 : 0 }}>
+                <span style={{ fontSize: 13, flexShrink: 0, lineHeight: "15px" }}>⚠️</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 800, color: T.text }}>{issue}</div>
+                  <div style={{ fontSize: 10, color: T.muted, marginTop: 1 }}>คะแนนนี้จะไม่ถูกบันทึก</div>
+                </div>
+              </div>
+            )}
           </div>
         );
       })}
