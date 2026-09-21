@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.20";
+const APP_VERSION = "1.12.21";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -4805,14 +4805,17 @@ export default function App() {
   // two levels (tab -> Settings card) so this one-shot flag tells SettingsTab which card to auto-open on
   // arrival, exactly preserving the old "one tap to recovery" behavior for this critical safeguard.
   const [settingsAutoOpen, setSettingsAutoOpen] = useState(null);
-  // v1.11.66 (Match Table Responsive Layout): every OTHER tab (ผู้เล่น/การเงิน/ประวัติ) keeps the exact
-  // existing 860/520 cap — untouched, out of this patch's scope. Only the "เกม" page's shell (which holds
-  // SessionTab's match table) is allowed to grow past 860px, and only on genuinely spacious viewports
-  // (iPad landscape and up) where that cap was leaving a large unused margin on both sides while the match
-  // table's player cards were still squeezed into the same fixed widths as a narrow phone. max(860px, …)
-  // guarantees this is never NARROWER than today's existing cap at any width — a phone in portrait/
-  // landscape or an iPad in portrait all land on exactly 860 or 520 here, identical to before.
-  const gameShellMaxWidth = tab === "session" && isWide ? "max(860px, min(96vw, 1400px))" : (isWide ? 860 : 520);
+  // v1.11.66 (Match Table Responsive Layout): originally ONLY the "เกม" tab's shell was allowed to grow
+  // past 860px on genuinely spacious viewports (iPad landscape and up) — every other tab kept a flat 860
+  // cap "out of that patch's scope." v1.12.21 (P0 RESPONSIVE CONSISTENCY — iPad landscape) removes that
+  // per-tab gate: a real iPad-landscape recording showed ผู้เล่น/การเงิน/ตั้งค่า sitting in a visibly
+  // narrower, phone-width-feeling column than เกม on the exact same screen, with large unused side margins
+  // — the SAME shell wraps every tab (see the single outer <div style={{maxWidth: gameShellMaxWidth, ...}}>
+  // just below App()'s return), so เกม's own layout never needed touching; only this one shared value did.
+  // max(860px, …) still guarantees this is never NARROWER than the old cap at any width — a phone in
+  // portrait/landscape or an iPad in portrait all land on exactly 860 or 520 here, identical to before;
+  // only iPad-landscape-and-roomier screens now get the wider shell on EVERY tab, not just เกม.
+  const gameShellMaxWidth = isWide ? "max(860px, min(96vw, 1400px))" : 520;
   const [players, setPlayers] = useState([]);
   // v1.12.13 (P0 offline persistence hotfix): timestamp of the most recent EXPLICIT, user-confirmed action
   // that intentionally emptied the player roster (ลบข้อมูลสมาชิก / ล้างข้อมูลทั้งหมด) — see
@@ -15971,6 +15974,12 @@ function DetailList({ title, map, getP }) {
   );
 }
 function Overlay({ children, onClose }) {
+  // v1.12.21 (P0 RESPONSIVE CONSISTENCY — iPad landscape): this ONE shared component backs nearly every
+  // bottom sheet/modal in the app (~50 call sites) — it was hardcoded to a flat 520px cap regardless of
+  // screen size, so every sheet with substantial content (editors, lists, settings forms) sat phone-width
+  // even on iPad landscape. Widened to a bounded 640px on isWide screens — still a "sheet", never edge-to-
+  // edge like a desktop dashboard, and every existing call site gets this for free with no other change.
+  const isWide = useIsWide();
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 40, display: "flex", alignItems: "flex-end", justifyContent: "center" }}>
       {/* v1.12.14 (P0 responsive fix): 88vh is computed off the browser's LARGE viewport height on iOS/
@@ -15979,7 +15988,7 @@ function Overlay({ children, onClose }) {
           so a long sheet's own bottom (its close/action buttons) can land below the visible viewport,
           forcing the whole background page to scroll instead of just this sheet scrolling internally.
           100dvh-based dvh tracks the ACTUAL visible viewport as browser chrome shows/hides. */}
-      <div onClick={(e) => e.stopPropagation()} style={{ background: T.bg, width: "100%", maxWidth: 520, maxHeight: "88dvh", overflowY: "auto", borderRadius: "18px 18px 0 0", padding: "18px 18px calc(18px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.bg, width: "100%", maxWidth: isWide ? 640 : 520, maxHeight: "88dvh", overflowY: "auto", borderRadius: "18px 18px 0 0", padding: "18px 18px calc(18px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
         <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4 }}><button onClick={onClose} style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 20, width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", color: T.muted }}><X size={17} /></button></div>
         {children}
       </div>

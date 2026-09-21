@@ -535,7 +535,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.20";
+      var CURRENT_VERSION = "1.12.21";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -920,7 +920,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.20";
+const APP_VERSION = "1.12.21";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -7867,14 +7867,17 @@ function App() {
   // two levels (tab -> Settings card) so this one-shot flag tells SettingsTab which card to auto-open on
   // arrival, exactly preserving the old "one tap to recovery" behavior for this critical safeguard.
   const [settingsAutoOpen, setSettingsAutoOpen] = useState(null);
-  // v1.11.66 (Match Table Responsive Layout): every OTHER tab (ผู้เล่น/การเงิน/ประวัติ) keeps the exact
-  // existing 860/520 cap — untouched, out of this patch's scope. Only the "เกม" page's shell (which holds
-  // SessionTab's match table) is allowed to grow past 860px, and only on genuinely spacious viewports
-  // (iPad landscape and up) where that cap was leaving a large unused margin on both sides while the match
-  // table's player cards were still squeezed into the same fixed widths as a narrow phone. max(860px, …)
-  // guarantees this is never NARROWER than today's existing cap at any width — a phone in portrait/
-  // landscape or an iPad in portrait all land on exactly 860 or 520 here, identical to before.
-  const gameShellMaxWidth = tab === "session" && isWide ? "max(860px, min(96vw, 1400px))" : isWide ? 860 : 520;
+  // v1.11.66 (Match Table Responsive Layout): originally ONLY the "เกม" tab's shell was allowed to grow
+  // past 860px on genuinely spacious viewports (iPad landscape and up) — every other tab kept a flat 860
+  // cap "out of that patch's scope." v1.12.21 (P0 RESPONSIVE CONSISTENCY — iPad landscape) removes that
+  // per-tab gate: a real iPad-landscape recording showed ผู้เล่น/การเงิน/ตั้งค่า sitting in a visibly
+  // narrower, phone-width-feeling column than เกม on the exact same screen, with large unused side margins
+  // — the SAME shell wraps every tab (see the single outer <div style={{maxWidth: gameShellMaxWidth, ...}}>
+  // just below App()'s return), so เกม's own layout never needed touching; only this one shared value did.
+  // max(860px, …) still guarantees this is never NARROWER than the old cap at any width — a phone in
+  // portrait/landscape or an iPad in portrait all land on exactly 860 or 520 here, identical to before;
+  // only iPad-landscape-and-roomier screens now get the wider shell on EVERY tab, not just เกม.
+  const gameShellMaxWidth = isWide ? "max(860px, min(96vw, 1400px))" : 520;
   const [players, setPlayers] = useState([]);
   // v1.12.13 (P0 offline persistence hotfix): timestamp of the most recent EXPLICIT, user-confirmed action
   // that intentionally emptied the player roster (ลบข้อมูลสมาชิก / ล้างข้อมูลทั้งหมด) — see
@@ -33930,6 +33933,12 @@ function Overlay({
   children,
   onClose
 }) {
+  // v1.12.21 (P0 RESPONSIVE CONSISTENCY — iPad landscape): this ONE shared component backs nearly every
+  // bottom sheet/modal in the app (~50 call sites) — it was hardcoded to a flat 520px cap regardless of
+  // screen size, so every sheet with substantial content (editors, lists, settings forms) sat phone-width
+  // even on iPad landscape. Widened to a bounded 640px on isWide screens — still a "sheet", never edge-to-
+  // edge like a desktop dashboard, and every existing call site gets this for free with no other change.
+  const isWide = useIsWide();
   return /*#__PURE__*/React.createElement("div", {
     onClick: onClose,
     style: {
@@ -33946,7 +33955,7 @@ function Overlay({
     style: {
       background: T.bg,
       width: "100%",
-      maxWidth: 520,
+      maxWidth: isWide ? 640 : 520,
       maxHeight: "88dvh",
       overflowY: "auto",
       borderRadius: "18px 18px 0 0",
