@@ -72,6 +72,18 @@
   // sequence (see BadmintonOrganizer.jsx) is what actually closes the "missing primary" gap, by
   // consulting the mirror / Last-Known-Good / Auto-Backup layers before ever concluding "new install".
   var IDB_NAME = "badq-shadow-store", IDB_STORE = "kv";
+  // v1.12.20 (P0 Image Storage & Reference Architecture): a SECOND object store, in the SAME database, for
+  // uploaded image assets (player photo / group photo / tournament logo / custom Rank image), keyed by a
+  // stable "imageRef" id. Kept in its own store — not stuffed into the "kv" store above — so entities can
+  // reference an image ONCE by a short id instead of embedding the (often 50-100KB+) Base64 string itself
+  // into `players`/`session`/`sessionHistory`/`activeTournament`/`tournamentHistory`/`rankingConfigs`,
+  // which is what was previously duplicating the SAME image's bytes into every historical snapshot that
+  // touched it (see BadmintonOrganizer.jsx's stripImagesForPersist/hydrateImageRefs for the read/write
+  // sides of this). Bumping IDB_NAME's version to 2 to add this store; the upgrade handler below checks
+  // `objectStoreNames.contains(...)` before creating EITHER store, so this is safe and idempotent for a
+  // fresh install (both created together), an existing v1 database (only IMAGE_STORE gets added, the
+  // existing "kv" store and all its data are completely untouched), and a repeat run (no-op either way).
+  var IMAGE_STORE = "images";
   // v1.12.17 (P0 iOS standalone PWA import performance hotfix): idbOpen() used to call indexedDB.open(...)
   // FRESH on every single idbGet/idbSet/idbSetIfNewer/idbDelete call — a large backup import calls into
   // window.storage 4-5+ times (pre-restore snapshot, primary write, LKG write, read-back verify, plus
@@ -93,8 +105,16 @@
     __idbConnPromise = new Promise(function(resolve, reject){
       try{
         if (!window.indexedDB) { reject(new Error("indexedDB unavailable")); return; }
-        var req = indexedDB.open(IDB_NAME, 1);
-        req.onupgradeneeded = function(){ try{ req.result.createObjectStore(IDB_STORE); }catch(e){} };
+        // v1.12.20: version bumped 1 -> 2 to add IMAGE_STORE (see its declaration above). Each createObjectStore
+        // call is independently guarded by `contains(...)`, so this upgrade is safe whether it's running on a
+        // brand-new database (both stores created), an existing v1 database (only IMAGE_STORE is added — the
+        // existing "kv" store and every key in it are untouched), or re-running with nothing to do.
+        var req = indexedDB.open(IDB_NAME, 2);
+        req.onupgradeneeded = function(){
+          var db = req.result;
+          try{ if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE); }catch(e){}
+          try{ if (!db.objectStoreNames.contains(IMAGE_STORE)) db.createObjectStore(IMAGE_STORE); }catch(e){}
+        };
         req.onsuccess = function(){
           var db = req.result;
           // If the connection is ever closed out from under us (another tab/version upgrade, or the
@@ -217,6 +237,70 @@
           tx.objectStore(IDB_STORE).delete(k);
           tx.oncomplete = function(){ resolve(); };
           tx.onerror = function(){ reject(tx.error || new Error("indexedDB delete failed")); };
+        }catch(e){ reject(e); }
+      });
+    });
+  }
+  // v1.12.20 (P0 Image Storage & Reference Architecture): the four IMAGE_STORE primitives, mirroring the
+  // "kv" store's own idbGet/idbSet/idbDelete shape but operating on the separate image object store (see
+  // IMAGE_STORE's own declaration above). Each record is { type, mimeType, dataUrl, updatedAt } keyed by a
+  // stable imageRef id minted in BadmintonOrganizer.jsx's uploadImage(). No self-heal/mirror logic here —
+  // images are local-cache-only for now (see window.storage.image.put's own comment on why there is
+  // currently no Cloud-backed write path), so there is nothing to reconcile against.
+  function idbImageGet(ref){
+    return idbOpen().then(function(db){
+      return new Promise(function(resolve, reject){
+        try{
+          var tx = db.transaction(IMAGE_STORE, "readonly");
+          var req = tx.objectStore(IMAGE_STORE).get(ref);
+          req.onsuccess = function(){ resolve(req.result == null ? null : req.result); };
+          req.onerror = function(){ reject(req.error || new Error("image store get failed")); };
+        }catch(e){ reject(e); }
+      });
+    });
+  }
+  function idbImagePut(ref, record){
+    return idbOpen().then(function(db){
+      return new Promise(function(resolve, reject){
+        try{
+          var tx = db.transaction(IMAGE_STORE, "readwrite");
+          tx.objectStore(IMAGE_STORE).put(record, ref);
+          tx.oncomplete = function(){ resolve(); };
+          tx.onerror = function(){ reject(tx.error || new Error("image store write failed")); };
+        }catch(e){ reject(e); }
+      });
+    });
+  }
+  function idbImageDelete(ref){
+    return idbOpen().then(function(db){
+      return new Promise(function(resolve, reject){
+        try{
+          var tx = db.transaction(IMAGE_STORE, "readwrite");
+          tx.objectStore(IMAGE_STORE).delete(ref);
+          tx.oncomplete = function(){ resolve(); };
+          tx.onerror = function(){ reject(tx.error || new Error("image store delete failed")); };
+        }catch(e){ reject(e); }
+      });
+    });
+  }
+  // Bulk read of every stored image asset — used ONCE at boot (BadmintonOrganizer.jsx) to populate the
+  // in-memory image cache Map, so every render site that already reads `.photo`/`.logo`/`.image` keeps
+  // working synchronously and unchanged; no per-render async IndexedDB lookups anywhere.
+  function idbImageGetAll(){
+    return idbOpen().then(function(db){
+      return new Promise(function(resolve, reject){
+        try{
+          var tx = db.transaction(IMAGE_STORE, "readonly");
+          var store = tx.objectStore(IMAGE_STORE);
+          var out = {};
+          var cursorReq = (store.openCursor) ? store.openCursor() : null;
+          if (!cursorReq) { resolve(out); return; }
+          cursorReq.onsuccess = function(e){
+            var cursor = e.target.result;
+            if (cursor) { out[cursor.key] = cursor.value; cursor.continue(); }
+            else resolve(out);
+          };
+          cursorReq.onerror = function(){ reject(cursorReq.error || new Error("image store cursor failed")); };
         }catch(e){ reject(e); }
       });
     });
@@ -368,6 +452,26 @@
       return { deleted: true, primaryOk: primaryOk, mirrorOk: mirrorOk };
     },
   };
+  // window.storage.image — the small storage-backend abstraction the image architecture calls through,
+  // never touching idbImage*/IndexedDB directly from BadmintonOrganizer.jsx. This keeps the actual UI/state
+  // code decoupled from the storage backend, exactly like window.storage itself already decouples the app
+  // from IndexedDB-vs-localStorage — so a Cloud-backed implementation can be swapped in later (put() calls
+  // Firebase Storage's upload + writes the local cache entry; get() checks the local cache first and falls
+  // back to a Cloud fetch) WITHOUT changing any call site in BadmintonOrganizer.jsx.
+  //
+  // v1.12.20: Cloud Storage is NOT configured for this project yet — firebase.json has no "storage" section
+  // and there is no deployed storage.rules (confirmed by inspection before writing this). put()/get() are
+  // therefore LOCAL-ONLY for now: images are deduplicated and referenced instead of duplicated across
+  // records, and are cached for offline use, but are not yet synced to a Cloud master copy that a second
+  // device could pull from on restore. See the completion report for exactly what Cloud-side configuration
+  // (enabling Storage, deploying rules, and wiring an authenticated upload) would be needed to complete that
+  // half of the architecture — nothing here was faked or hardcoded to pretend otherwise.
+  window.storage.image = {
+    async put(ref, record){ try{ await idbImagePut(ref, record); return true; }catch(e){ return false; } },
+    async get(ref){ try{ return await idbImageGet(ref); }catch(e){ return null; } },
+    async delete(ref){ try{ await idbImageDelete(ref); return true; }catch(e){ return false; } },
+    async getAll(){ try{ return await idbImageGetAll(); }catch(e){ return {}; } },
+  };
   // v1.11.47 (TEMPORARY DIAGNOSTICS — real-device "End Session blanks/restarts the app" investigation):
   // pageInstanceId is generated HERE, at script-evaluation time, in plain module scope — never persisted,
   // never re-derived from anything async. A genuine page reload / PWA process restart re-runs this whole
@@ -431,7 +535,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.19";
+      var CURRENT_VERSION = "1.12.20";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -816,7 +920,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.19";
+const APP_VERSION = "1.12.20";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -1227,6 +1331,72 @@ function useIsExtraWide() {
   return isExtraWide;
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// ===== v1.12.20 (P0 — Image Storage & Reference Architecture) — LOCAL IMAGE ASSET STORE =====
+// Every uploaded image (player photo, ก๊วน/Group photo, Tournament logo, custom Rank image) is written
+// here EXACTLY ONCE and referenced by a stable `*Ref` id from the business object that owns it (see
+// player.photoRef, session.photoRef, activeTournament.logoRef, rankTier.imageRef, etc.) instead of being
+// duplicated as inline Base64 wherever it's shown. This is deliberately MODULE-LEVEL (not a hook/ref
+// inside App()) — several unrelated components each have their own upload flow (Members, ก๊วน header,
+// Tournament wizard, Tournament profile editor, Rank tier editor) and none of them need to prop-drill a
+// shared cache just to call uploadImage()/resolveImageRef(); they already all share the same underlying
+// window.storage (also module/global-scoped, defined in index.html).
+//
+// Backed by window.storage.image (index.html) — a SECOND local IndexedDB object store, entirely separate
+// from the main "bg-v11" state blob, so large image bytes never have to travel through the per-keystroke
+// JSON.stringify/parse of ordinary saves (see the v1.12.19 P0 performance investigation — this is exactly
+// the kind of cost that fix was protecting; this module intentionally does not touch that hot path at all).
+//
+// Cloud Storage is NOT wired in for this pass: firebase.json has no "storage" section and no storage.rules
+// is deployed for this project (confirmed by inspection before writing this), and the task spec explicitly
+// says not to fabricate Cloud credentials/endpoints. put()/get() below are LOCAL-ONLY. The small function
+// surface (uploadImage/resolveImageRef) is the intended swap-in point for a future Cloud-backed
+// implementation (upload to Cloud Storage + write-through local cache; resolve from local cache first,
+// fall back to a Cloud fetch) — no caller below needs to change when that happens.
+const __imageAssetCache = new Map(); // ref -> data URL string. Populated once at boot (primeImageAssetCache) and kept up to date by every uploadImage() call.
+let __imageAssetCachePrimed = false;
+async function primeImageAssetCache() {
+  // Idempotent/safe to call more than once (only the App() boot effect does, but defensive regardless) —
+  // never throws, never blocks: a failure here just means resolveImageRef() returns null until the next
+  // successful upload populates that ref directly, and every render call site already has a graceful
+  // "no image yet" fallback (placeholder/emoji), per the spec's "never break the screen" requirement.
+  if (__imageAssetCachePrimed) return;
+  __imageAssetCachePrimed = true;
+  try {
+    const all = window.storage && window.storage.image ? await window.storage.image.getAll() : {};
+    Object.keys(all || {}).forEach(ref => {
+      const rec = all[ref];
+      if (rec && typeof rec.data === "string") __imageAssetCache.set(ref, rec.data);
+    });
+  } catch (e) {}
+}
+// Registers one image (already cropped/resized/compressed by ImageCropper — see its own comment on output
+// size per image type) into the local asset store and returns its stable ref id. Fire-and-forget safe:
+// the in-memory cache is updated SYNCHRONOUSLY before the async IndexedDB write even starts, so a caller
+// that immediately calls resolveImageRef(ref) right after awaiting this never sees a miss. Callers use this
+// ADDITIVELY alongside the existing inline field (never replacing it in this pass) — see each call site's
+// own comment for why that is the deliberately conservative, low-risk choice for this segment.
+async function uploadImage(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== "string") return null;
+  const ref = "img_" + uid() + Date.now().toString(36);
+  __imageAssetCache.set(ref, dataUrl);
+  try {
+    if (window.storage && window.storage.image) await window.storage.image.put(ref, {
+      data: dataUrl,
+      updatedAt: Date.now()
+    });
+  } catch (e) {}
+  return ref;
+}
+// Synchronous cache lookup — used by every render site that needs to resolve a `*Ref` back to a
+// displayable data URL (e.g. a frozen History/Tournament-history entry that only carries a ref, no inline
+// image). Returns null (never throws) when the ref is unknown/not yet cached locally — callers already
+// fall back to a placeholder/emoji in that case, exactly like a missing inline photo does today.
+function resolveImageRef(ref) {
+  if (!ref) return null;
+  return __imageAssetCache.get(ref) || null;
+}
+
 // v1.11.56 (Fix Game Ordering Logic): a genuine monotonic per-match creation-order stamp — NEVER court
 // number, never the shared/batchable `round` counter (root cause of the reported bug: `round` is stamped
 // identically across every court in a single batch — e.g. session start, or several "+ เพิ่มแมชใหม่" taps in
@@ -3735,8 +3905,13 @@ function RankTierImage({
   compact
 }) {
   if (!tier) return null;
-  return tier.image ? /*#__PURE__*/React.createElement("img", {
-    src: tier.image,
+  // v1.12.20 (Image Storage & Reference Architecture): resolve imageRef as a fallback when the inline
+  // `image` field is absent — this single shared renderer is exactly the "same Rank image reused
+  // everywhere" choke point the spec's section 9 asks for, so wiring the fallback here alone covers every
+  // call site (Player profile/Today/Ranking/History/Summary) at once.
+  const src = tier.image || resolveImageRef(tier.imageRef);
+  return src ? /*#__PURE__*/React.createElement("img", {
+    src: src,
     alt: "",
     style: {
       width: size,
@@ -3788,6 +3963,10 @@ function normRankingSettingsFor(rc) {
     order: Number(t.order) || i + 1,
     icon: t.icon || "🔰",
     image: t.image || null,
+    // v1.12.20 (Image Storage & Reference Architecture): preserve the custom image's asset-store
+    // reference across boot-load/backup-restore — this function reconstructs the tier object
+    // field-by-field (not a spread), so an unlisted field would otherwise be silently dropped here.
+    imageRef: t.imageRef || null,
     conditionType: ["winrate", "rp", "top", "rp_top"].includes(t.conditionType) ? t.conditionType : "rp",
     rpMin: Math.max(0, Number(t.rpMin) || 0),
     winRateMin: Math.max(0, Math.min(100, Number(t.winRateMin) || 0)),
@@ -5220,7 +5399,8 @@ function ImageCropper({
   circleGuide,
   title,
   onCancel,
-  onConfirm
+  onConfirm,
+  maxSize
 }) {
   const FRAME = 300;
   const MAX_ZOOM = 4;
@@ -5338,7 +5518,11 @@ function ImageCropper({
   };
   const confirm = () => {
     if (!natSize || !imgElRef.current) return;
-    const OUT = 640;
+    // v1.12.20 (Image Storage & Reference Architecture, spec: "resize/compress BEFORE upload, do not
+    // store full-size originals"): output size is now parameterized per image type instead of one fixed
+    // 640×640 for everything — Player/Custom-Rank 256, Group/Tournament 512, per the spec's targets.
+    // Any caller that doesn't pass maxSize keeps today's exact 640 behavior (backward compatible).
+    const OUT = Number(maxSize) > 0 ? Number(maxSize) : 640;
     const sx = -offset.x / scale,
       sy = -offset.y / scale,
       sw = FRAME / scale,
@@ -8230,6 +8414,12 @@ function App() {
     // tryRecoverFromAutoBackupEntry above for the shared validate-don't-guess recovery logic, and the
     // save effect below for the matching boot barrier that makes this waterfall actually matter (a
     // recovered/created state here is worthless if something can still save an empty one over it).
+    // v1.12.20 (Image Storage & Reference Architecture): prime the local Image Asset Store's in-memory
+    // cache in parallel with the state-recovery waterfall below — deliberately NOT awaited here and not
+    // part of that waterfall's own error handling: a slow/failed image-cache load must never delay or
+    // affect boot of the actual app state, and every render call site already tolerates a still-empty
+    // cache (falls back to a placeholder exactly like a never-uploaded image does today).
+    primeImageAssetCache();
     (async () => {
       const storageErrors = [];
       let primaryFound = false,
@@ -8841,6 +9031,11 @@ function App() {
     const n = name.trim();
     if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
+    // v1.12.20 (Image Storage & Reference Architecture): id generated up-front (not inside the setPlayers
+    // updater) so a photo passed in at creation time (Quick Add) can be registered into the local Image
+    // Asset Store and its ref backfilled onto this exact new player afterward — additive, same pattern as
+    // openPhoto/onPhotoFile above.
+    const newId = uid();
     setPlayers(prev => {
       const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
       const comingCount = prev.filter(p => p.status === "registered" || p.status === "ready").length;
@@ -8851,7 +9046,7 @@ function App() {
       // recurring membership only ever begins once a real payment is recorded (payMembership).
       const entranceFeeOn = !!(settings.membership && settings.membership.entranceFee && settings.membership.entranceFee.enabled);
       return [...prev, {
-        id: uid(),
+        id: newId,
         name: n,
         level: displayLevelFor(si, settings),
         skillIndex: si,
@@ -8886,6 +9081,12 @@ function App() {
         entranceFeePaidAt: null,
         membershipExpiry: null
       }];
+    });
+    if (photo) uploadImage(photo).then(ref => {
+      if (ref) setPlayers(prev => prev.map(p => p.id === newId ? {
+        ...p,
+        photoRef: ref
+      } : p));
     });
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
@@ -9231,14 +9432,27 @@ function App() {
     const raw = await fileToDataURL(f).catch(() => null);
     if (!raw) return;
     const id = photoTarget.current;
+    // v1.12.20 (Image Storage & Reference Architecture): Player photo target = 256×256 (spec). The
+    // asset-store registration (uploadImage) is ADDITIVE — it runs alongside the existing inline `photo`
+    // write, never replacing/blocking it, so this stays exactly as safe/instant as before if the async
+    // IndexedDB write is ever slow or fails; only `photoRef` gets backfilled once it succeeds.
     setCropJob({
       src: raw,
       circleGuide: true,
       title: "จัดตำแหน่งรูปโปรไฟล์",
-      onDone: data => setPlayers(prev => prev.map(p => p.id === id ? {
-        ...p,
-        photo: data
-      } : p))
+      maxSize: 256,
+      onDone: data => {
+        setPlayers(prev => prev.map(p => p.id === id ? {
+          ...p,
+          photo: data
+        } : p));
+        uploadImage(data).then(ref => {
+          if (ref) setPlayers(prev => prev.map(p => p.id === id ? {
+            ...p,
+            photoRef: ref
+          } : p));
+        });
+      }
     });
   };
   // ก๊วน (session) photo — shown on the History list/detail instead of the default 🏸 icon when set.
@@ -9259,10 +9473,12 @@ function App() {
     const raw = await fileToDataURL(f).catch(() => null);
     if (!raw) return;
     const target = histPhotoTarget.current;
+    // v1.12.20: ก๊วน/Group photo target = 512×512 (spec). Same additive photoRef backfill as player photo.
     setCropJob({
       src: raw,
       circleGuide: true,
       title: "จัดตำแหน่งรูปก๊วน",
+      maxSize: 512,
       onDone: data => {
         if (target) setSessionHistory(prev => prev.map(s => s.id === target ? {
           ...s,
@@ -9271,16 +9487,28 @@ function App() {
           ...s,
           photo: data
         }));
+        uploadImage(data).then(ref => {
+          if (!ref) return;
+          if (target) setSessionHistory(prev => prev.map(s => s.id === target ? {
+            ...s,
+            photoRef: ref
+          } : s));else setSession(s => ({
+            ...s,
+            photoRef: ref
+          }));
+        });
       }
     });
   };
   const clearSessionPhoto = () => setSession(s => ({
     ...s,
-    photo: null
+    photo: null,
+    photoRef: null
   }));
   const clearHistPhoto = sessId => setSessionHistory(prev => prev.map(s => s.id === sessId ? {
     ...s,
-    photo: null
+    photo: null,
+    photoRef: null
   } : s));
 
   // engine
@@ -10086,13 +10314,22 @@ function App() {
     if (!f) return;
     const raw = await fileToDataURL(f).catch(() => null);
     if (!raw) return;
+    // v1.12.20: Tournament logo target = 512×512 (spec); same additive logoRef backfill pattern.
     setCropJob({
       src: raw,
       circleGuide: false,
       title: "จัดตำแหน่งโลโก้ทัวร์นาเมนต์",
-      onDone: data => tUpdateProfile({
-        logo: data
-      })
+      maxSize: 512,
+      onDone: data => {
+        tUpdateProfile({
+          logo: data
+        });
+        uploadImage(data).then(ref => {
+          if (ref) tUpdateProfile({
+            logoRef: ref
+          });
+        });
+      }
     });
   };
   const tapSlot = (mid, team, idx, pid) => {
@@ -10359,7 +10596,15 @@ function App() {
       // reuse the live session's id (v1.9.1) so discountCredits' sourceSessionId/usedSessionId stay valid after archiving
       name: session.name || "ก๊วนไม่มีชื่อ",
       date: session.date,
-      photo: session.photo || null,
+      // v1.12.20 (Image Storage & Reference Architecture): freeze the STABLE ASSET REF only when one
+      // exists, instead of always re-embedding the full Base64 group photo into every historical session
+      // forever. This was a confirmed unbounded-growth bug identical in shape to the player-photo one fixed
+      // in v1.11.47 just below — a recurring group's photo got duplicated into EVERY archived session, with
+      // no existing protection at all. Historical rendering resolves photoRef via resolveImageRef() first;
+      // a group that hasn't been through the new upload flow yet (no photoRef) falls back to the exact
+      // original inline-freeze behavior below, so nothing regresses for not-yet-migrated data.
+      photoRef: session.photoRef || null,
+      photo: session.photoRef ? null : session.photo || null,
       // ก๊วน's own photo (distinct from any player's photo) — frozen into history as-is
       endedAt: Date.now(),
       courtCount,
@@ -10888,6 +11133,7 @@ function App() {
       format: draftWizard.format,
       matchMode: draftWizard.matchMode,
       logo: draftWizard.draftLogo,
+      logoRef: draftWizard.draftLogoRef,
       status: "draft",
       createdAt: Date.now(),
       draftWizard
@@ -11226,6 +11472,12 @@ function App() {
       const playerStats = computeTournamentPlayerStats(finished);
       const snapshot = {
         ...finished,
+        // v1.12.20 (Image Storage & Reference Architecture): same confirmed unbounded-growth bug as the
+        // ก๊วน/Group photo above — `...finished` (itself spread from `t`) carries the full Base64 `logo`
+        // into every archived tournamentHistory entry forever. Freeze `logoRef` only when available;
+        // legacy tournaments with no logoRef yet keep the original inline-freeze behavior unchanged.
+        logo: finished.logoRef ? null : finished.logo || null,
+        logoRef: finished.logoRef || null,
         playerSnapshots: players.map(p => ({
           id: p.id,
           name: p.name,
@@ -11983,6 +12235,7 @@ function App() {
       src: cropJob.src,
       circleGuide: cropJob.circleGuide,
       title: cropJob.title,
+      maxSize: cropJob.maxSize,
       onCancel: () => setCropJob(null),
       onConfirm: data => {
         cropJob.onDone(data);
@@ -12895,6 +13148,7 @@ function MembersTab({
     src: cropJob,
     circleGuide: true,
     title: "\u0E08\u0E31\u0E14\u0E15\u0E33\u0E41\u0E2B\u0E19\u0E48\u0E07\u0E23\u0E39\u0E1B\u0E42\u0E1B\u0E23\u0E44\u0E1F\u0E25\u0E4C",
+    maxSize: 256,
     onCancel: () => setCropJob(null),
     onConfirm: data => {
       setDraftPhoto(data);
@@ -16590,7 +16844,8 @@ function RankTierEditSheet({
   }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E44\u0E2D\u0E04\u0E2D\u0E19"), draft.image && /*#__PURE__*/React.createElement("button", {
     onClick: () => setDraft(d => ({
       ...d,
-      image: null
+      image: null,
+      imageRef: null
     })),
     style: {
       padding: "6px 10px",
@@ -16613,12 +16868,22 @@ function RankTierEditSheet({
     src: cropJob,
     circleGuide: false,
     title: "\u0E08\u0E31\u0E14\u0E15\u0E33\u0E41\u0E2B\u0E19\u0E48\u0E07\u0E44\u0E2D\u0E04\u0E2D\u0E19 Rank",
+    maxSize: 256,
     onCancel: () => setCropJob(null),
     onConfirm: data => {
+      // v1.12.20: Custom Rank image target = 256×256, transparency preserved (circleGuide=false already;
+      // ImageCropper's own PNG/JPEG choice — see canvasHasTransparency — is untouched). Additive imageRef
+      // backfill, same pattern as the other 3 upload flows.
       setDraft(d => ({
         ...d,
         image: data
       }));
+      uploadImage(data).then(ref => {
+        if (ref) setDraft(d => ({
+          ...d,
+          imageRef: ref
+        }));
+      });
       setCropJob(null);
     }
   }), /*#__PURE__*/React.createElement(Label, null, "\u0E0A\u0E37\u0E48\u0E2D Rank"), /*#__PURE__*/React.createElement("input", {
@@ -20214,6 +20479,7 @@ function TournamentWizard({
   // quick-adding a new member (see draftPhoto/cropJob in the Members list) or the ก๊วน header's own photo
   // button — previously a Tournament logo could only be added AFTER creation via the ✎ profile editor.
   const [draftLogo, setDraftLogo] = useState(() => iv.draftLogo || null);
+  const [draftLogoRef, setDraftLogoRef] = useState(() => iv.draftLogoRef || null); // v1.12.20: additive asset-store ref alongside draftLogo
   const wizardLogoFileRef = useRef();
   const [wizardCropJob, setWizardCropJob] = useState(null); // raw picked-image src awaiting crop, or null
   const onWizardLogoFile = async e => {
@@ -20284,6 +20550,7 @@ function TournamentWizard({
       format,
       matchMode,
       draftLogo,
+      draftLogoRef,
       teamEntryMode,
       selectedIds,
       guestPlayers,
@@ -20504,7 +20771,8 @@ function TournamentWizard({
       groupCount,
       matchMode,
       hasThirdPlaceMatch,
-      logo: draftLogo
+      logo: draftLogo,
+      logoRef: draftLogoRef
     });
     onCreate(tournament);
   };
@@ -20557,9 +20825,14 @@ function TournamentWizard({
     src: wizardCropJob,
     circleGuide: false,
     title: "\u0E08\u0E31\u0E14\u0E15\u0E33\u0E41\u0E2B\u0E19\u0E48\u0E07\u0E42\u0E25\u0E42\u0E01\u0E49\u0E17\u0E31\u0E27\u0E23\u0E4C\u0E19\u0E32\u0E40\u0E21\u0E19\u0E15\u0E4C",
+    maxSize: 512,
     onCancel: () => setWizardCropJob(null),
     onConfirm: data => {
       setDraftLogo(data);
+      setDraftLogoRef(null); // clear any stale ref from a previous image until the new upload resolves
+      uploadImage(data).then(ref => {
+        if (ref) setDraftLogoRef(ref);
+      });
       setWizardCropJob(null);
     }
   }), /*#__PURE__*/React.createElement("div", {
@@ -20612,7 +20885,10 @@ function TournamentWizard({
       fontWeight: 700
     }
   }, draftLogo ? "เปลี่ยนโลโก้" : "เพิ่มโลโก้ (ไม่บังคับ)"), draftLogo && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setDraftLogo(null),
+    onClick: () => {
+      setDraftLogo(null);
+      setDraftLogoRef(null);
+    },
     style: {
       marginLeft: 8,
       background: "none",
@@ -27424,8 +27700,8 @@ function HistoryTab({
           borderRadius: 13,
           padding: "12px 14px"
         }
-      }, t.logo ? /*#__PURE__*/React.createElement("img", {
-        src: t.logo,
+      }, t.logo || resolveImageRef(t.logoRef) ? /*#__PURE__*/React.createElement("img", {
+        src: t.logo || resolveImageRef(t.logoRef),
         alt: "",
         style: {
           width: 34,
@@ -27503,8 +27779,8 @@ function HistoryTab({
         borderRadius: 13,
         padding: "12px 14px"
       }
-    }, s.photo ? /*#__PURE__*/React.createElement("img", {
-      src: s.photo,
+    }, s.photo || resolveImageRef(s.photoRef) ? /*#__PURE__*/React.createElement("img", {
+      src: s.photo || resolveImageRef(s.photoRef),
       alt: "",
       style: {
         width: 34,
@@ -27942,8 +28218,8 @@ function HistoricalDetail({
       width: 48,
       height: 48
     }
-  }, s.photo ? /*#__PURE__*/React.createElement("img", {
-    src: s.photo,
+  }, s.photo || resolveImageRef(s.photoRef) ? /*#__PURE__*/React.createElement("img", {
+    src: s.photo || resolveImageRef(s.photoRef),
     alt: "",
     style: {
       width: 48,
@@ -28028,7 +28304,7 @@ function HistoricalDetail({
     }
   }, /*#__PURE__*/React.createElement(Calendar, {
     size: 11
-  })), /*#__PURE__*/React.createElement("span", null, "\xB7 ", (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.courtCount || 1, " \u0E2A\u0E19\u0E32\u0E21 \xB7 ", fmtMode(s.settings || {}, s.mode))), s.photo && /*#__PURE__*/React.createElement("button", {
+  })), /*#__PURE__*/React.createElement("span", null, "\xB7 ", (s.players || []).length, " \u0E04\u0E19 \xB7 ", s.courtCount || 1, " \u0E2A\u0E19\u0E32\u0E21 \xB7 ", fmtMode(s.settings || {}, s.mode))), (s.photo || s.photoRef) && /*#__PURE__*/React.createElement("button", {
     onClick: () => clearHistPhoto(s.id),
     style: {
       background: "none",
@@ -31432,8 +31708,8 @@ function TournamentResultHeader({
       gap: 10,
       marginBottom: 14
     }
-  }, t.logo ? /*#__PURE__*/React.createElement("img", {
-    src: t.logo,
+  }, t.logo || resolveImageRef(t.logoRef) ? /*#__PURE__*/React.createElement("img", {
+    src: t.logo || resolveImageRef(t.logoRef),
     alt: "",
     style: {
       width: 42,

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.19";
+const APP_VERSION = "1.12.20";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -255,6 +255,67 @@ function useIsExtraWide() {
   return isExtraWide;
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
+
+// ===== v1.12.20 (P0 — Image Storage & Reference Architecture) — LOCAL IMAGE ASSET STORE =====
+// Every uploaded image (player photo, ก๊วน/Group photo, Tournament logo, custom Rank image) is written
+// here EXACTLY ONCE and referenced by a stable `*Ref` id from the business object that owns it (see
+// player.photoRef, session.photoRef, activeTournament.logoRef, rankTier.imageRef, etc.) instead of being
+// duplicated as inline Base64 wherever it's shown. This is deliberately MODULE-LEVEL (not a hook/ref
+// inside App()) — several unrelated components each have their own upload flow (Members, ก๊วน header,
+// Tournament wizard, Tournament profile editor, Rank tier editor) and none of them need to prop-drill a
+// shared cache just to call uploadImage()/resolveImageRef(); they already all share the same underlying
+// window.storage (also module/global-scoped, defined in index.html).
+//
+// Backed by window.storage.image (index.html) — a SECOND local IndexedDB object store, entirely separate
+// from the main "bg-v11" state blob, so large image bytes never have to travel through the per-keystroke
+// JSON.stringify/parse of ordinary saves (see the v1.12.19 P0 performance investigation — this is exactly
+// the kind of cost that fix was protecting; this module intentionally does not touch that hot path at all).
+//
+// Cloud Storage is NOT wired in for this pass: firebase.json has no "storage" section and no storage.rules
+// is deployed for this project (confirmed by inspection before writing this), and the task spec explicitly
+// says not to fabricate Cloud credentials/endpoints. put()/get() below are LOCAL-ONLY. The small function
+// surface (uploadImage/resolveImageRef) is the intended swap-in point for a future Cloud-backed
+// implementation (upload to Cloud Storage + write-through local cache; resolve from local cache first,
+// fall back to a Cloud fetch) — no caller below needs to change when that happens.
+const __imageAssetCache = new Map(); // ref -> data URL string. Populated once at boot (primeImageAssetCache) and kept up to date by every uploadImage() call.
+let __imageAssetCachePrimed = false;
+async function primeImageAssetCache() {
+  // Idempotent/safe to call more than once (only the App() boot effect does, but defensive regardless) —
+  // never throws, never blocks: a failure here just means resolveImageRef() returns null until the next
+  // successful upload populates that ref directly, and every render call site already has a graceful
+  // "no image yet" fallback (placeholder/emoji), per the spec's "never break the screen" requirement.
+  if (__imageAssetCachePrimed) return;
+  __imageAssetCachePrimed = true;
+  try {
+    const all = (window.storage && window.storage.image) ? await window.storage.image.getAll() : {};
+    Object.keys(all || {}).forEach((ref) => {
+      const rec = all[ref];
+      if (rec && typeof rec.data === "string") __imageAssetCache.set(ref, rec.data);
+    });
+  } catch (e) {}
+}
+// Registers one image (already cropped/resized/compressed by ImageCropper — see its own comment on output
+// size per image type) into the local asset store and returns its stable ref id. Fire-and-forget safe:
+// the in-memory cache is updated SYNCHRONOUSLY before the async IndexedDB write even starts, so a caller
+// that immediately calls resolveImageRef(ref) right after awaiting this never sees a miss. Callers use this
+// ADDITIVELY alongside the existing inline field (never replacing it in this pass) — see each call site's
+// own comment for why that is the deliberately conservative, low-risk choice for this segment.
+async function uploadImage(dataUrl) {
+  if (!dataUrl || typeof dataUrl !== "string") return null;
+  const ref = "img_" + uid() + Date.now().toString(36);
+  __imageAssetCache.set(ref, dataUrl);
+  try { if (window.storage && window.storage.image) await window.storage.image.put(ref, { data: dataUrl, updatedAt: Date.now() }); } catch (e) {}
+  return ref;
+}
+// Synchronous cache lookup — used by every render site that needs to resolve a `*Ref` back to a
+// displayable data URL (e.g. a frozen History/Tournament-history entry that only carries a ref, no inline
+// image). Returns null (never throws) when the ref is unknown/not yet cached locally — callers already
+// fall back to a placeholder/emoji in that case, exactly like a missing inline photo does today.
+function resolveImageRef(ref) {
+  if (!ref) return null;
+  return __imageAssetCache.get(ref) || null;
+}
+
 // v1.11.56 (Fix Game Ordering Logic): a genuine monotonic per-match creation-order stamp — NEVER court
 // number, never the shared/batchable `round` counter (root cause of the reported bug: `round` is stamped
 // identically across every court in a single batch — e.g. session start, or several "+ เพิ่มแมชใหม่" taps in
@@ -2133,8 +2194,13 @@ function getDefaultRankTiers() {
 // text-align and gave both variants `flexShrink: 0`.
 function RankTierImage({ tier, size, radius, fontSize, compact }) {
   if (!tier) return null;
-  return tier.image ? (
-    <img src={tier.image} alt="" style={{ width: size, height: size, borderRadius: radius, objectFit: "contain", ...(compact ? { flexShrink: 0 } : null) }} />
+  // v1.12.20 (Image Storage & Reference Architecture): resolve imageRef as a fallback when the inline
+  // `image` field is absent — this single shared renderer is exactly the "same Rank image reused
+  // everywhere" choke point the spec's section 9 asks for, so wiring the fallback here alone covers every
+  // call site (Player profile/Today/Ranking/History/Summary) at once.
+  const src = tier.image || resolveImageRef(tier.imageRef);
+  return src ? (
+    <img src={src} alt="" style={{ width: size, height: size, borderRadius: radius, objectFit: "contain", ...(compact ? { flexShrink: 0 } : null) }} />
   ) : (
     <span style={{ fontSize, ...(compact ? { width: size, textAlign: "center", flexShrink: 0 } : null) }}>{tier.icon}</span>
   );
@@ -2159,6 +2225,10 @@ function normRankingSettingsFor(rc) {
     ? base.rankTiers.filter((t) => t && typeof t === "object").map((t, i) => ({
         id: t.id || uid(), name: String(t.name || `Rank ${i + 1}`), order: Number(t.order) || i + 1,
         icon: t.icon || "🔰", image: t.image || null,
+        // v1.12.20 (Image Storage & Reference Architecture): preserve the custom image's asset-store
+        // reference across boot-load/backup-restore — this function reconstructs the tier object
+        // field-by-field (not a spread), so an unlisted field would otherwise be silently dropped here.
+        imageRef: t.imageRef || null,
         conditionType: ["winrate", "rp", "top", "rp_top"].includes(t.conditionType) ? t.conditionType : "rp",
         rpMin: Math.max(0, Number(t.rpMin) || 0), winRateMin: Math.max(0, Math.min(100, Number(t.winRateMin) || 0)),
         topPct: Math.max(1, Math.min(100, Number(t.topPct) || 100)),
@@ -3189,7 +3259,7 @@ function canvasHasTransparency(ctx, w, h) {
 // v1.11.74: exports PNG instead of JPEG when the cropped result actually contains transparency (see
 // canvasHasTransparency + confirm() below) — preserves real alpha for uploaded Rank/Group/Tournament PNG
 // artwork instead of flattening it onto black. Ordinary opaque photos are unaffected (still JPEG).
-function ImageCropper({ src, circleGuide, title, onCancel, onConfirm }) {
+function ImageCropper({ src, circleGuide, title, onCancel, onConfirm, maxSize }) {
   const FRAME = 300;
   const MAX_ZOOM = 4;
   const [natSize, setNatSize] = useState(null); // { w, h } once the picked image has loaded
@@ -3258,7 +3328,11 @@ function ImageCropper({ src, circleGuide, title, onCancel, onConfirm }) {
 
   const confirm = () => {
     if (!natSize || !imgElRef.current) return;
-    const OUT = 640;
+    // v1.12.20 (Image Storage & Reference Architecture, spec: "resize/compress BEFORE upload, do not
+    // store full-size originals"): output size is now parameterized per image type instead of one fixed
+    // 640×640 for everything — Player/Custom-Rank 256, Group/Tournament 512, per the spec's targets.
+    // Any caller that doesn't pass maxSize keeps today's exact 640 behavior (backward compatible).
+    const OUT = Number(maxSize) > 0 ? Number(maxSize) : 640;
     const sx = -offset.x / scale, sy = -offset.y / scale, sw = FRAME / scale, sh = FRAME / scale;
     const cv = document.createElement("canvas"); cv.width = OUT; cv.height = OUT;
     const ctx = cv.getContext("2d");
@@ -5151,6 +5225,12 @@ export default function App() {
     // tryRecoverFromAutoBackupEntry above for the shared validate-don't-guess recovery logic, and the
     // save effect below for the matching boot barrier that makes this waterfall actually matter (a
     // recovered/created state here is worthless if something can still save an empty one over it).
+    // v1.12.20 (Image Storage & Reference Architecture): prime the local Image Asset Store's in-memory
+    // cache in parallel with the state-recovery waterfall below — deliberately NOT awaited here and not
+    // part of that waterfall's own error handling: a slow/failed image-cache load must never delay or
+    // affect boot of the actual app state, and every render call site already tolerates a still-empty
+    // cache (falls back to a placeholder exactly like a never-uploaded image does today).
+    primeImageAssetCache();
     (async () => {
       const storageErrors = [];
       let primaryFound = false, primaryValid = false, mirrorFound = false, lastKnownGoodFound = false, autoBackupFound = false;
@@ -5653,6 +5733,11 @@ export default function App() {
   const addPlayer = (name, skillIndex, photo) => {
     const n = name.trim(); if (!n) return;
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
+    // v1.12.20 (Image Storage & Reference Architecture): id generated up-front (not inside the setPlayers
+    // updater) so a photo passed in at creation time (Quick Add) can be registered into the local Image
+    // Asset Store and its ref backfilled onto this exact new player afterward — additive, same pattern as
+    // openPhoto/onPhotoFile above.
+    const newId = uid();
     setPlayers((prev) => {
       const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
       const comingCount = prev.filter((p) => p.status === "registered" || p.status === "ready").length;
@@ -5662,8 +5747,9 @@ export default function App() {
       // ever created with entranceFeePaid:false. membershipExpiry always starts null (never enrolled) —
       // recurring membership only ever begins once a real payment is recorded (payMembership).
       const entranceFeeOn = !!(settings.membership && settings.membership.entranceFee && settings.membership.entranceFee.enabled);
-      return [...prev, { id: uid(), name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null, isLocked: false, entranceFeePaid: !entranceFeeOn, entranceFeePaidAt: null, membershipExpiry: null }];
+      return [...prev, { id: newId, name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null, isLocked: false, entranceFeePaid: !entranceFeeOn, entranceFeePaidAt: null, membershipExpiry: null }];
     });
+    if (photo) uploadImage(photo).then((ref) => { if (ref) setPlayers((prev) => prev.map((p) => (p.id === newId ? { ...p, photoRef: ref } : p))); });
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
@@ -5877,7 +5963,14 @@ export default function App() {
     const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
     const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
     const id = photoTarget.current;
-    setCropJob({ src: raw, circleGuide: true, title: "จัดตำแหน่งรูปโปรไฟล์", onDone: (data) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photo: data } : p))) });
+    // v1.12.20 (Image Storage & Reference Architecture): Player photo target = 256×256 (spec). The
+    // asset-store registration (uploadImage) is ADDITIVE — it runs alongside the existing inline `photo`
+    // write, never replacing/blocking it, so this stays exactly as safe/instant as before if the async
+    // IndexedDB write is ever slow or fails; only `photoRef` gets backfilled once it succeeds.
+    setCropJob({ src: raw, circleGuide: true, title: "จัดตำแหน่งรูปโปรไฟล์", maxSize: 256, onDone: (data) => {
+      setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photo: data } : p)));
+      uploadImage(data).then((ref) => { if (ref) setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photoRef: ref } : p))); });
+    } });
   };
   // ก๊วน (session) photo — shown on the History list/detail instead of the default 🏸 icon when set.
   // Shared file input: histPhotoTarget=null -> photo goes on the CURRENT live session; a sessionHistory
@@ -5888,13 +5981,19 @@ export default function App() {
     const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
     const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
     const target = histPhotoTarget.current;
-    setCropJob({ src: raw, circleGuide: true, title: "จัดตำแหน่งรูปก๊วน", onDone: (data) => {
+    // v1.12.20: ก๊วน/Group photo target = 512×512 (spec). Same additive photoRef backfill as player photo.
+    setCropJob({ src: raw, circleGuide: true, title: "จัดตำแหน่งรูปก๊วน", maxSize: 512, onDone: (data) => {
       if (target) setSessionHistory((prev) => prev.map((s) => (s.id === target ? { ...s, photo: data } : s)));
       else setSession((s) => ({ ...s, photo: data }));
+      uploadImage(data).then((ref) => {
+        if (!ref) return;
+        if (target) setSessionHistory((prev) => prev.map((s) => (s.id === target ? { ...s, photoRef: ref } : s)));
+        else setSession((s) => ({ ...s, photoRef: ref }));
+      });
     } });
   };
-  const clearSessionPhoto = () => setSession((s) => ({ ...s, photo: null }));
-  const clearHistPhoto = (sessId) => setSessionHistory((prev) => prev.map((s) => (s.id === sessId ? { ...s, photo: null } : s)));
+  const clearSessionPhoto = () => setSession((s) => ({ ...s, photo: null, photoRef: null }));
+  const clearHistPhoto = (sessId) => setSessionHistory((prev) => prev.map((s) => (s.id === sessId ? { ...s, photo: null, photoRef: null } : s)));
 
   // engine
   const emptyTeam = () => (mode === "doubles" ? [null, null] : [null]);
@@ -6382,7 +6481,11 @@ export default function App() {
   const onTournamentLogoFile = async (e) => {
     const f = e.target.files?.[0]; e.target.value = ""; if (!f) return;
     const raw = await fileToDataURL(f).catch(() => null); if (!raw) return;
-    setCropJob({ src: raw, circleGuide: false, title: "จัดตำแหน่งโลโก้ทัวร์นาเมนต์", onDone: (data) => tUpdateProfile({ logo: data }) });
+    // v1.12.20: Tournament logo target = 512×512 (spec); same additive logoRef backfill pattern.
+    setCropJob({ src: raw, circleGuide: false, title: "จัดตำแหน่งโลโก้ทัวร์นาเมนต์", maxSize: 512, onDone: (data) => {
+      tUpdateProfile({ logo: data });
+      uploadImage(data).then((ref) => { if (ref) tUpdateProfile({ logoRef: ref }); });
+    } });
   };
 
   const tapSlot = (mid, team, idx, pid) => {
@@ -6582,7 +6685,15 @@ export default function App() {
       id: session.id || uid(), // reuse the live session's id (v1.9.1) so discountCredits' sourceSessionId/usedSessionId stay valid after archiving
       name: session.name || "ก๊วนไม่มีชื่อ",
       date: session.date,
-      photo: session.photo || null, // ก๊วน's own photo (distinct from any player's photo) — frozen into history as-is
+      // v1.12.20 (Image Storage & Reference Architecture): freeze the STABLE ASSET REF only when one
+      // exists, instead of always re-embedding the full Base64 group photo into every historical session
+      // forever. This was a confirmed unbounded-growth bug identical in shape to the player-photo one fixed
+      // in v1.11.47 just below — a recurring group's photo got duplicated into EVERY archived session, with
+      // no existing protection at all. Historical rendering resolves photoRef via resolveImageRef() first;
+      // a group that hasn't been through the new upload flow yet (no photoRef) falls back to the exact
+      // original inline-freeze behavior below, so nothing regresses for not-yet-migrated data.
+      photoRef: session.photoRef || null,
+      photo: session.photoRef ? null : (session.photo || null), // ก๊วน's own photo (distinct from any player's photo) — frozen into history as-is
       endedAt: Date.now(),
       courtCount, mode,
       settings: { ...settings },
@@ -6904,7 +7015,7 @@ export default function App() {
   const saveTournamentDraft = (draftWizard) => {
     setActiveTournament(makeTournament({
       name: draftWizard.name, date: draftWizard.date, courtCount: draftWizard.courtCount,
-      format: draftWizard.format, matchMode: draftWizard.matchMode, logo: draftWizard.draftLogo,
+      format: draftWizard.format, matchMode: draftWizard.matchMode, logo: draftWizard.draftLogo, logoRef: draftWizard.draftLogoRef,
       status: "draft", createdAt: Date.now(),
       draftWizard,
     }));
@@ -7093,6 +7204,12 @@ export default function App() {
       const playerStats = computeTournamentPlayerStats(finished);
       const snapshot = {
         ...finished,
+        // v1.12.20 (Image Storage & Reference Architecture): same confirmed unbounded-growth bug as the
+        // ก๊วน/Group photo above — `...finished` (itself spread from `t`) carries the full Base64 `logo`
+        // into every archived tournamentHistory entry forever. Freeze `logoRef` only when available;
+        // legacy tournaments with no logoRef yet keep the original inline-freeze behavior unchanged.
+        logo: finished.logoRef ? null : (finished.logo || null),
+        logoRef: finished.logoRef || null,
         playerSnapshots: players.map((p) => ({ id: p.id, name: p.name, level: p.level, skillIndex: p.skillIndex })), // level/skill frozen at archive time
         playerStats,
         courtCount: t.courtCount,
@@ -7516,6 +7633,7 @@ export default function App() {
           src={cropJob.src}
           circleGuide={cropJob.circleGuide}
           title={cropJob.title}
+          maxSize={cropJob.maxSize}
           onCancel={() => setCropJob(null)}
           onConfirm={(data) => { cropJob.onDone(data); setCropJob(null); }}
         />
@@ -7806,7 +7924,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
            already receives from App() at the ชำระเงิน tab, nothing new is created. */
         qrRef={qrRef} history={history} current={current}
       />
-      {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
+      {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" maxSize={256} onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
 
       {/* v1.12.1 (UX restructure, spec 3/5): simplified controls — "+ เพิ่มผู้เล่น" opens a compact modal
           (same addPlayer/draftPhoto/cropJob logic as before, just relocated behind a button instead of an
@@ -9165,7 +9283,7 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <button onClick={() => fileRef.current.click()} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>{draft.image ? "เปลี่ยนรูป" : "อัปโหลดรูป"}</button>
           <button onClick={() => setIconPickerOpen(true)} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>เลือกไอคอน</button>
-          {draft.image && <button onClick={() => setDraft((d) => ({ ...d, image: null }))} style={{ padding: "6px 10px", borderRadius: 8, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบรูป (ใช้ไอคอนเริ่มต้น)</button>}
+          {draft.image && <button onClick={() => setDraft((d) => ({ ...d, image: null, imageRef: null }))} style={{ padding: "6px 10px", borderRadius: 8, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบรูป (ใช้ไอคอนเริ่มต้น)</button>}
         </div>
       </div>
       {/* v1.12.3: purely informational — no logic change, no pixel inspection/guessing. Root-cause
@@ -9181,7 +9299,14 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
           หากไอคอนนี้ยังแสดงพื้นหลังสีดำใน Ranking Showcase ทั้งที่ไฟล์ต้นฉบับเป็น PNG โปร่งใส — ไฟล์นี้อาจถูกบันทึกไว้ตั้งแต่ก่อนอัปเดตที่แก้ปัญหาความโปร่งใส (แอปไม่สามารถกู้คืนความโปร่งใสของรูปที่บันทึกไปแล้วได้อัตโนมัติ) ลองกด "เปลี่ยนรูป" แล้วเลือกไฟล์ต้นฉบับเดิมอัปโหลดซ้ำอีกครั้ง
         </div>
       )}
-      {cropJob && <ImageCropper src={cropJob} circleGuide={false} title="จัดตำแหน่งไอคอน Rank" onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraft((d) => ({ ...d, image: data })); setCropJob(null); }} />}
+      {cropJob && <ImageCropper src={cropJob} circleGuide={false} title="จัดตำแหน่งไอคอน Rank" maxSize={256} onCancel={() => setCropJob(null)} onConfirm={(data) => {
+        // v1.12.20: Custom Rank image target = 256×256, transparency preserved (circleGuide=false already;
+        // ImageCropper's own PNG/JPEG choice — see canvasHasTransparency — is untouched). Additive imageRef
+        // backfill, same pattern as the other 3 upload flows.
+        setDraft((d) => ({ ...d, image: data }));
+        uploadImage(data).then((ref) => { if (ref) setDraft((d) => ({ ...d, imageRef: ref })); });
+        setCropJob(null);
+      }} />}
 
       <Label>ชื่อ Rank</Label>
       <input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder="เช่น Diamond" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, color: T.text, marginBottom: 12, boxSizing: "border-box" }} />
@@ -10746,6 +10871,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
   // quick-adding a new member (see draftPhoto/cropJob in the Members list) or the ก๊วน header's own photo
   // button — previously a Tournament logo could only be added AFTER creation via the ✎ profile editor.
   const [draftLogo, setDraftLogo] = useState(() => iv.draftLogo || null);
+  const [draftLogoRef, setDraftLogoRef] = useState(() => iv.draftLogoRef || null); // v1.12.20: additive asset-store ref alongside draftLogo
   const wizardLogoFileRef = useRef();
   const [wizardCropJob, setWizardCropJob] = useState(null); // raw picked-image src awaiting crop, or null
   const onWizardLogoFile = async (e) => {
@@ -10798,7 +10924,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
   // real running tournament, and TournamentPanel reopens this same wizard pre-filled next time.
   const saveDraft = () => {
     onSaveDraft({
-      step, name, date, courtCount, format, matchMode, draftLogo,
+      step, name, date, courtCount, format, matchMode, draftLogo, draftLogoRef,
       teamEntryMode, selectedIds, guestPlayers, fixedPairs,
       teamBuildMode, teams,
       divisionMode, divisionPreset, divisionRanges, teamDivisionMap,
@@ -10891,7 +11017,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
       guestPlayers, teams: allTeams, divisions: divisionsClean,
       pointsConfig: { win: 3, draw: 1, loss: 0 }, handicap: { mode: handicapMode }, doubleRound,
       qualifyTopN, groupCount, matchMode, hasThirdPlaceMatch,
-      logo: draftLogo,
+      logo: draftLogo, logoRef: draftLogoRef,
     });
     onCreate(tournament);
   };
@@ -10916,8 +11042,14 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
               src={wizardCropJob}
               circleGuide={false}
               title="จัดตำแหน่งโลโก้ทัวร์นาเมนต์"
+              maxSize={512}
               onCancel={() => setWizardCropJob(null)}
-              onConfirm={(data) => { setDraftLogo(data); setWizardCropJob(null); }}
+              onConfirm={(data) => {
+                setDraftLogo(data);
+                setDraftLogoRef(null); // clear any stale ref from a previous image until the new upload resolves
+                uploadImage(data).then((ref) => { if (ref) setDraftLogoRef(ref); });
+                setWizardCropJob(null);
+              }}
             />
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
@@ -10926,7 +11058,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
             </button>
             <div style={{ flex: 1, minWidth: 0 }}>
               <button onClick={() => wizardLogoFileRef.current.click()} style={{ padding: "7px 12px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{draftLogo ? "เปลี่ยนโลโก้" : "เพิ่มโลโก้ (ไม่บังคับ)"}</button>
-              {draftLogo && <button onClick={() => setDraftLogo(null)} style={{ marginLeft: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบ</button>}
+              {draftLogo && <button onClick={() => { setDraftLogo(null); setDraftLogoRef(null); }} style={{ marginLeft: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบ</button>}
             </div>
           </div>
           <Label>ชื่อ Tournament</Label>
@@ -13444,8 +13576,10 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
                   {/* v1.11.3: Tournament rows now show their logo, exactly like ก๊วน sessions show s.photo
                       just below — previously this row skipped straight to the 🏆 emoji even when the
                       organizer had set a logo (see the wizard's step-1 logo picker, added in v1.11.1). */}
-                  {t.logo ? (
-                    <img src={t.logo} alt="" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                  {/* v1.12.20: resolve a ref-only frozen logo (see logoRef fix above) back through the
+                      local Image Asset Store before falling back to the 🏆 placeholder. */}
+                  {(t.logo || resolveImageRef(t.logoRef)) ? (
+                    <img src={t.logo || resolveImageRef(t.logoRef)} alt="" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
                   ) : (
                     <div style={{ width: 34, height: 34, borderRadius: 10, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0 }}>🏆</div>
                   )}
@@ -13469,8 +13603,10 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
             const paidCount = payableSBill.filter((b) => b.paid).length;
             return (
               <button key={s.id} onClick={() => setOpenId(s.id)} style={{ textAlign: "left", display: "flex", alignItems: "flex-start", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 14px" }}>
-                {s.photo ? (
-                  <img src={s.photo} alt="" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                {/* v1.12.20: resolve a ref-only frozen photo (see photoRef fix above) back through the
+                    local Image Asset Store before falling back to the 🏸 placeholder. */}
+                {(s.photo || resolveImageRef(s.photoRef)) ? (
+                  <img src={s.photo || resolveImageRef(s.photoRef)} alt="" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
                 ) : (
                   <div style={{ width: 34, height: 34, borderRadius: 10, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0 }}>🏸</div>
                 )}
@@ -13657,8 +13793,9 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <button onClick={() => openHistPhoto(s.id)} title="แตะเพื่อเพิ่ม/เปลี่ยนรูปก๊วน" style={{ position: "relative", flexShrink: 0, border: "none", background: "none", padding: 0, width: 48, height: 48 }}>
-          {s.photo ? (
-            <img src={s.photo} alt="" style={{ width: 48, height: 48, borderRadius: 13, objectFit: "cover" }} />
+          {/* v1.12.20: resolve a ref-only frozen photo back through the local Image Asset Store first. */}
+          {(s.photo || resolveImageRef(s.photoRef)) ? (
+            <img src={s.photo || resolveImageRef(s.photoRef)} alt="" style={{ width: 48, height: 48, borderRadius: 13, objectFit: "cover" }} />
           ) : (
             <div style={{ width: 48, height: 48, borderRadius: 13, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 }}>🏸</div>
           )}
@@ -13684,7 +13821,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
             )}
             <span>· {(s.players || []).length} คน · {s.courtCount || 1} สนาม · {fmtMode(s.settings || {}, s.mode)}</span>
           </div>
-          {s.photo && <button onClick={() => clearHistPhoto(s.id)} style={{ background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700, padding: 0, marginTop: 3 }}>ลบรูปก๊วน</button>}
+          {(s.photo || s.photoRef) && <button onClick={() => clearHistPhoto(s.id)} style={{ background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700, padding: 0, marginTop: 3 }}>ลบรูปก๊วน</button>}
         </div>
       </div>
 
@@ -15008,8 +15145,9 @@ function ApplyCreditsConfirm({ player, credits, applyDiscountCredits, onClose })
 function TournamentResultHeader({ t, totals, statusLabel }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 14 }}>
-      {t.logo ? (
-        <img src={t.logo} alt="" style={{ width: 42, height: 42, borderRadius: 12, objectFit: "cover", flexShrink: 0 }} />
+      {/* v1.12.20: resolve a ref-only frozen logo back through the local Image Asset Store first. */}
+      {(t.logo || resolveImageRef(t.logoRef)) ? (
+        <img src={t.logo || resolveImageRef(t.logoRef)} alt="" style={{ width: 42, height: 42, borderRadius: 12, objectFit: "cover", flexShrink: 0 }} />
       ) : (
         <div style={{ width: 42, height: 42, borderRadius: 12, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>🏆</div>
       )}
