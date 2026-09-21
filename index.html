@@ -17,7 +17,44 @@
   html,body{margin:0;padding:0;background:#f3f6f4;-webkit-tap-highlight-color:transparent;}
   *{ -webkit-touch-callout:none; }
   #boot{font-family:ui-sans-serif,system-ui,sans-serif;color:#6b7d74;text-align:center;padding:60px 16px;font-size:14px;}
+  /* v1.12.18 (P0 interaction responsiveness / tap-feedback hotfix): a single shared, CSS-only press-feedback
+     mechanism for every tappable control in the app, instead of adding local React press-state to each one.
+     Root cause of the reported "กดแล้วคับ ๆ" (tap feels stiff/delayed) complaint: -webkit-tap-highlight-color
+     was already set to transparent above (to kill the ugly gray flash box on tap) but NOTHING was ever added
+     to replace it, so every tap gave literally zero visual feedback until the click handler's resulting state
+     change finished re-rendering — on a slow render that reads as "did my tap even register?". This rule set
+     gives every <button> (the codebase's near-universal convention for tappable controls — confirmed by
+     auditing all cursor:pointer sites in BadmintonOrganizer.jsx) an immediate scale-down + slight fade on
+     press, released immediately on release, via the native CSS :active pseudo-class — no JS, no React state,
+     no per-element listeners. `.tap-press` is an opt-in escape hatch for the rare genuinely-tappable elements
+     that are NOT a real <button> (e.g. a player-picker row rendered as a <div onClick> for layout reasons);
+     `.tap-press-disabled` mirrors the native `disabled` exclusion for those. `touch-action:manipulation`
+     removes the old ~300ms tap-delay on these controls specifically (NOT applied globally, and never
+     `touch-action:none`, per spec) without disabling normal page scrolling anywhere else. `:not(:disabled)`
+     ensures a disabled control never shows the pressed visual (it also never receives real pointer/touch
+     events in most browsers, but this makes the intent explicit and safe across browsers). The transition is
+     symmetric (~80ms) both into and out of the pressed state, matching the "immediate, light, no bouncy/slow
+     animation" feel of the Werewolf Party PWA this was benchmarked against. */
+  button, .tap-press {
+    touch-action: manipulation;
+    transition: transform 80ms ease-out, opacity 80ms ease-out;
+  }
+  button:not(:disabled):active,
+  .tap-press:active:not(.tap-press-disabled) {
+    transform: scale(0.97);
+    opacity: 0.85;
+  }
 </style>
+<script>
+  // v1.12.18 (P0 interaction responsiveness hotfix): iOS Safari (including standalone "Add to Home Screen"
+  // PWAs) only activates the CSS :active pseudo-class on elements once SOME element on the page has a real
+  // touchstart listener attached — without one, iOS treats taps as simple clicks with no separate "active"
+  // phase, so the :active press-feedback rule above would silently never fire on iPhone/iPad despite working
+  // correctly in Chrome DevTools / Android. This is WebKit's long-documented ":active state not triggered"
+  // quirk (dates back to iOS 1) and is normally worked around with exactly this empty, passive, capture-phase
+  // listener at the document level — added once here, globally, rather than on every individual control.
+  document.addEventListener("touchstart", function () {}, { passive: true, capture: true });
+</script>
 <script>
   // v1.11.0 PERSISTENCE REWRITE: IndexedDB is now the PRIMARY store; localStorage is the MIRROR.
   // Background: "Add to Home Screen" standalone web apps on iOS run in their own isolated storage
@@ -369,7 +406,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.17";
+      var CURRENT_VERSION = "1.12.18";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -753,7 +790,8 @@ const Share2=__mk('<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><
 const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>');
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
-const APP_VERSION = "1.12.17";
+function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
+const APP_VERSION = "1.12.18";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -18597,6 +18635,539 @@ function GameTab({
 }
 
 /* ============ SESSION ============ */
+// v1.12.18 (P0 interaction responsiveness / score-entry keyboard-focus stability hotfix): MatchRow is
+// now a STABLE top-level function declaration instead of being defined as `const MatchRow = (...) => {}`
+// INSIDE SessionTab's own render body (as it was from v1.11.29 through v1.12.17). That inline pattern
+// created a BRAND NEW function object on every single SessionTab re-render — which happens on every
+// player/match/session state change anywhere in the app, and periodically from the `now` ticking clock
+// (every 15s) — and React treats a changed component "type" at the same tree position as a different
+// component, unmounting and remounting the ENTIRE row subtree underneath it, including any open
+// ScoreEditor/score-input DOM nodes. This was ALREADY correctly diagnosed as the root cause of the
+// v1.11.60 shuttle-input bug and the v1.11.64 score-input bug — but both of those were fixed by making
+// their OWN inputs buffer locally and commit only on blur/unmount, working around the remount rather
+// than stopping it. A remount still visibly happens on every affected keystroke window: the mobile
+// on-screen keyboard is tied to DOM focus, and destroying+recreating the focused <input> (even one that
+// safely re-syncs its value afterward) closes the keyboard / produces the reported "editor looks stuck
+// for a moment" flash during REPEATED score entry. Making MatchRow a genuine top-level function (the
+// same pattern TeamSide/ScoreEditor/ScorePopover already use) gives it a PERMANENTLY STABLE reference —
+// React now correctly diffs/updates props on the existing DOM instead of unmounting it, so an open
+// ScoreEditor/shuttle-input/court-select is never torn down by an unrelated re-render again. Every value
+// this component used to reach via closure (SessionTab's props/local state/derived useMemo values) is
+// now passed explicitly — see the two call sites in SessionTab below for the full prop list.
+function MatchRow({
+  m,
+  no,
+  done,
+  reassignHistoryCourt,
+  reassignCourt,
+  replaceHistorySlot,
+  replaceSlot,
+  waitQueue,
+  manualBenchPool,
+  openSlot,
+  setOpenSlot,
+  current,
+  courtCount,
+  lockPairs,
+  players,
+  latestMap,
+  mode,
+  courtLabels,
+  getP,
+  tapSlot,
+  isSel,
+  now,
+  stats,
+  scoreOpen,
+  setScoreOpen,
+  rounds,
+  setScore,
+  setWin,
+  clearScore,
+  settings,
+  setMatchShuttleUsed,
+  setMatchStatus,
+  toggleCurrentLock,
+  regenCourt,
+  deleteMatch,
+  COLW,
+  TABLE_MIN_WIDTH
+}) {
+  // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
+  // this patch) recreated as a new component instance on every SessionTab re-render — confirmed via
+  // direct inspection that even an unrelated state change (e.g. opening the ใส่ผล score popup) causes
+  // every row to fully unmount/remount. Since the old ลูก input was FULLY CONTROLLED straight off
+  // `matchShuttleUsed(m)` and called `setMatchShuttleUsed` on every keystroke, EVERY keystroke itself
+  // triggered exactly that remount — which drops DOM focus immediately after the first character lands,
+  // so a second keystroke never reaches the (now-replaced) input element at all. That, combined with no
+  // select-all-on-focus, is what produced the reported "types once, appends instead of replacing" bug.
+  // Fix: buffer the typed text in local state and only commit it (call setMatchShuttleUsed, the one
+  // thing that can trigger a remount) on blur/Enter — so typing itself never causes a re-render, and the
+  // field keeps focus for as many keystrokes as needed. Re-syncs from the real value whenever this exact
+  // match (m.id) or its committed shuttleUsed changes from elsewhere (e.g. a fresh mount after a
+  // different remount, or the value being edited from History instead).
+  const [shuttleDraft, setShuttleDraft] = useState(String(matchShuttleUsed(m)));
+  useEffect(() => {
+    setShuttleDraft(String(matchShuttleUsed(m)));
+  }, [m.id, m.shuttleUsed]);
+  const st = done ? "done" : m.status;
+  const reassign = done ? reassignHistoryCourt : reassignCourt;
+  const replace = done ? replaceHistorySlot : replaceSlot;
+  // v1.11.36 REDESIGN (real-world testing feedback — "player picker still shows people already assigned
+  // to another upcoming game"): a "next" row's bench used to also offer players already paired into
+  // OTHER not-yet-started courts (nextPoolFor) so they could be swapped across courts before either
+  // started. That's exactly the bug: a player belonging to Upcoming Game 1 must NOT be selectable while
+  // editing Upcoming Game 2. waitQueue alone is the single reusable eligibility source for every status
+  // here — it already excludes anyone seated ANYWHERE in `current` right now (any match, any status,
+  // including this very row's own other slot — see `inPlay`), and it recomputes live off `current`, so
+  // removing/deleting a game frees its players again immediately with zero extra bookkeeping.
+  const bench = waitQueue;
+  // v1.12.13 (P0 manual matchmaking dropdown ordering fix): the picker itself gets the wider pool
+  // (includes YELLOW/resting candidates) — `bench` above stays waitQueue-only for benchIds/warnings
+  // (unchanged, see manualBenchPool's own comment for why those two must not widen).
+  const pickerBench = manualBenchPool;
+  const rowOpenSlot = openSlot && openSlot.mid === m.id ? {
+    team: openSlot.team,
+    idx: openSlot.idx,
+    rect: openSlot.rect
+  } : null;
+  const setRowOpenSlot = v => setOpenSlot(v ? {
+    mid: m.id,
+    ...v
+  } : null);
+  const allowed = allowedNextStatuses(st);
+  // v1.11.29: a "next" row's court might already be occupied by its own playing/paused primary match
+  // (the prep-ahead companion case) — its "▶ เริ่มเกม" button stays disabled until that court frees up,
+  // instead of letting the tap through and relying only on startGame's alert as the only guard.
+  const busyCourt = !done && st === "next" && m.court != null && current.some(c => c.id !== m.id && c.court === m.court && (c.status === "playing" || c.status === "paused"));
+  // v1.11.36: an upcoming game with no court assigned yet (see addExtraMatch) can't start until one is —
+  // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
+  const noCourt = !done && st === "next" && m.court == null;
+  const canStart = !done && st === "next" && startReadyMatch(m) && !busyCourt && !noCourt;
+  // v1.12.13 (Court Dropdown Availability): for a NOT-YET-STARTED ("next") row, the court dropdown must
+  // only ever offer courts genuinely free right now — never one currently occupied by a live
+  // (playing/paused) match, and never one another "next" row has already claimed. This deliberately
+  // removes the old "assign a next row onto a still-playing court to queue behind it" prep-ahead-via-
+  // dropdown capability (v1.11.29/39's `busyCourt`) per explicit request — `busyCourt` itself is left
+  // completely unchanged above (still gates the start button/เกมต่อไป badge exactly as before) since
+  // that's a separate concern from what the SELECT may newly offer. Rows that are NOT "next" (playing/
+  // paused/done) keep the full, unfiltered court list exactly as before (v1.11.39/58 intentionally never
+  // touch a live/historical row's own already-occupied or already-recorded court).
+  const takenCourts = !done && st === "next" ? new Set(current.filter(c => c.id !== m.id && c.court != null && (c.status === "playing" || c.status === "paused" || c.status === "next")).map(c => c.court)) : new Set();
+  const availableCourtNumbers = Array.from({
+    length: courtCount
+  }, (_, i) => i + 1).filter(c => !takenCourts.has(c));
+  // A previously-picked court that has SINCE become occupied/claimed elsewhere (by a match that started,
+  // or another next row grabbing it first) before THIS match started must never be silently kept as if
+  // nothing happened — flagged so the select can show an explicit conflict state instead (spec: "clear it
+  // or show an explicit conflict state according to the existing architecture" — the existing
+  // busyCourt-driven "เกมต่อไป" badge already IS that architecture for the live-occupant case; this
+  // extends the same idea to the select itself, and to the other-next-row case).
+  const courtNowConflicting = !done && st === "next" && m.court != null && takenCourts.has(m.court);
+  const showNoCourtAvailable = !done && st === "next" && m.court == null && availableCourtNumbers.length === 0;
+  // v1.12.1 (Manual Matchmaking — spec sections 1,3,4,5,6): constraint warnings (Lock Pair /
+  // ไม่อยากคู่ / ไม่อยากเจอ) and recent teammate/opponent warnings, both WARNING ONLY — never affect
+  // canStart/startReady below (constraints are warnings, organizer choice stays authoritative).
+  // Scoped to the same !done && st === "next" window the recent-pair warning already used pre-v1.12.1
+  // (manual matchmaking happens before a match starts). computeManualConstraintWarnings/
+  // computeRecentPairWarnings are pure module-level functions (see above, near buildMatch/
+  // rankManualSlotCandidates) — recent-pair detection reuses the EXISTING latestMap.partnerOf/
+  // opponentsOf, no second history algorithm. Each unique warning also carries a highlight color so
+  // the exact player cards it refers to can be visually tied to its text (spec 4) — constraint
+  // warnings always use the existing conflict red; recent-pair warnings cycle through a small
+  // non-red palette so multiple simultaneous relationships stay visually distinguishable.
+  const manualWarnScope = !done && st === "next";
+  const benchIds = new Set(bench.map(p => p.id)); // same eligibility pool replaceSlot's own auto-fill assist trusts (see spec Case C)
+  const constraintWarnings = (manualWarnScope ? computeManualConstraintWarnings(m.teamA, m.teamB, lockPairs, players, benchIds) : []).map(w => ({
+    ...w,
+    color: "#c0392b"
+  }));
+  const RECENT_WARN_COLORS = ["#c2650a", "#7c3aed", "#2f6fb2", "#0f9d58"];
+  const recentWarnings = (manualWarnScope ? computeRecentPairWarnings(m.teamA, m.teamB, latestMap, mode, lockPairs, players) : []).map((w, i) => ({
+    ...w,
+    color: RECENT_WARN_COLORS[i % RECENT_WARN_COLORS.length]
+  }));
+  const allManualWarnings = [...constraintWarnings, ...recentWarnings]; // priority order per spec 6
+  // first warning to claim a player wins the highlight color (constraint warnings are listed first,
+  // so they take visual priority over a recent-pair warning touching the same player).
+  const warnHighlight = {};
+  allManualWarnings.forEach(w => {
+    if (!warnHighlight[w.a]) warnHighlight[w.a] = w.color;
+    if (!warnHighlight[w.b]) warnHighlight[w.b] = w.color;
+  });
+  // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
+  // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
+  // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
+  // apart at a glance while scrolling, without adding any extra header/divider rows to the table.
+  // v1.11.57 (Finished Game Row Visual Indicator): จบแล้ว rows changed from the old neutral gray
+  // ("#f4f6f5") to a very pale red/coral tint — same warm-red family as T.accent ("#ef5a44") — so a
+  // finished game is distinguishable from กำลังเล่น/เกมต่อไป at a glance, purely via this row's own
+  // background (no new badge/icon/text/column/border — see this row's existing borderBottom/borderLeft,
+  // both untouched). กำลังเล่น/พักเกม/เกมต่อไป colors are completely unchanged.
+  const rowBg = done ? "#FFF4F2" : st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : st === "next" ? "#f5f8ff" : "transparent";
+  return /*#__PURE__*/React.createElement("div", {
+    key: m.id
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      padding: "9px 11px",
+      borderBottom: `1px solid ${T.border}`,
+      borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`,
+      background: rowBg,
+      minWidth: TABLE_MIN_WIDTH
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: COLW.no,
+      flexShrink: 0,
+      fontSize: 11,
+      fontWeight: 800,
+      color: T.muted
+    }
+  }, String(no).padStart(2, "0")), showNoCourtAvailable ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: COLW.court,
+      flexShrink: 0,
+      fontSize: 10,
+      fontWeight: 700,
+      padding: "6px 2px",
+      borderRadius: 8,
+      border: `1px dashed ${T.border}`,
+      background: T.surface2,
+      color: T.muted,
+      textAlign: "center"
+    }
+  }, "\u0E23\u0E2D\u0E2A\u0E19\u0E32\u0E21\u0E27\u0E48\u0E32\u0E07") : /*#__PURE__*/React.createElement("select", {
+    value: m.court == null ? "" : m.court,
+    onChange: e => reassign(m.id, e.target.value === "" ? null : Number(e.target.value)),
+    style: {
+      width: COLW.court,
+      flexShrink: 0,
+      fontSize: 11.5,
+      fontWeight: 700,
+      padding: "6px 4px",
+      borderRadius: 8,
+      border: `1px solid ${courtNowConflicting ? "#c0392b" : T.border}`,
+      background: T.surface2,
+      color: m.court == null ? T.muted : courtNowConflicting ? "#c0392b" : T.text
+    }
+  }, (m.court == null || !done && st === "next") && /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E2A\u0E19\u0E32\u0E21"), (!done && st === "next" ? availableCourtNumbers : Array.from({
+    length: courtCount
+  }, (_, i) => i + 1)).map(c => /*#__PURE__*/React.createElement("option", {
+    key: c,
+    value: c
+  }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, c))), courtNowConflicting && !availableCourtNumbers.includes(m.court) && /*#__PURE__*/React.createElement("option", {
+    value: m.court
+  }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, m.court), " (\u0E16\u0E39\u0E01\u0E43\u0E0A\u0E49\u0E41\u0E25\u0E49\u0E27)")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: COLW.team,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement(TeamSide, {
+    arr: m.teamA,
+    team: "A",
+    m: m,
+    getP: getP,
+    editable: true,
+    replaceSlot: replace,
+    tapSlot: tapSlot,
+    isSel: isSel,
+    bench: pickerBench,
+    openSlot: rowOpenSlot,
+    setOpenSlot: setRowOpenSlot,
+    big: st === "playing",
+    now: now,
+    done: done,
+    lockPairs: lockPairs,
+    players: players,
+    stats: stats,
+    latestMap: latestMap,
+    warnHighlight: warnHighlight
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: COLW.team,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement(TeamSide, {
+    arr: m.teamB,
+    team: "B",
+    m: m,
+    getP: getP,
+    editable: true,
+    replaceSlot: replace,
+    tapSlot: tapSlot,
+    isSel: isSel,
+    bench: pickerBench,
+    openSlot: rowOpenSlot,
+    setOpenSlot: setRowOpenSlot,
+    big: st === "playing",
+    now: now,
+    done: done,
+    lockPairs: lockPairs,
+    players: players,
+    stats: stats,
+    latestMap: latestMap,
+    warnHighlight: warnHighlight
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: COLW.result,
+      flexShrink: 0,
+      position: "relative"
+    }
+  }, (() => {
+    const scoreLines = matchScoreParts(m);
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: e => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : {
+        mid: m.id,
+        rect: rectOf(e.currentTarget)
+      }),
+      title: "\u0E41\u0E15\u0E30\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E43\u0E2A\u0E48\u0E1C\u0E25\u0E01\u0E32\u0E23\u0E41\u0E02\u0E48\u0E07\u0E02\u0E31\u0E19",
+      style: {
+        width: "100%",
+        padding: scoreLines ? "4px 2px" : "8px 0",
+        borderRadius: 8,
+        background: T.surface2,
+        border: `1px solid ${T.border}`,
+        fontSize: 11.5,
+        fontWeight: 800,
+        color: T.text,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        lineHeight: 1.25
+      }
+    }, scoreLines ? scoreLines.map((line, i) => /*#__PURE__*/React.createElement("span", {
+      key: i,
+      style: {
+        display: "block",
+        textAlign: "center"
+      }
+    }, line)) : "ใส่ผล");
+  })(), scoreOpen && scoreOpen.mid === m.id && ReactDOM.createPortal(/*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    onClick: () => setScoreOpen(null),
+    style: {
+      position: "fixed",
+      inset: 0,
+      zIndex: 199,
+      background: "transparent"
+    }
+  }), /*#__PURE__*/React.createElement(ScorePopover, {
+    anchorRect: scoreOpen.rect
+  }, /*#__PURE__*/React.createElement(ScoreEditor, {
+    m: m,
+    rounds: rounds,
+    setScore: setScore,
+    setWin: setWin,
+    clearScore: clearScore,
+    winScore: settings.winScore,
+    deuce: settings.deuce
+  }))), document.body)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: COLW.shuttle,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: 0,
+    value: shuttleDraft,
+    onChange: e => setShuttleDraft(e.target.value),
+    onBlur: () => setMatchShuttleUsed(m.id, shuttleDraft),
+    onKeyDown: e => {
+      if (e.key === "Enter") e.currentTarget.blur();
+    },
+    onFocus: e => e.target.select(),
+    title: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E25\u0E39\u0E01\u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49\u0E43\u0E19\u0E40\u0E01\u0E21\u0E19\u0E35\u0E49",
+    style: {
+      width: "100%",
+      padding: "7px 2px",
+      borderRadius: 8,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 11.5,
+      fontWeight: 800,
+      color: T.text,
+      textAlign: "center"
+    }
+  })), !done && st === "next" && busyCourt ?
+  /*#__PURE__*/
+  // v1.11.30: a prep-ahead companion whose court is still busy (primary match still playing/
+  // paused) shows a plain "เกมต่อไป" badge — same as before v1.11.29 — NOT the "เริ่มเกม" button.
+  // The button only appears once that court actually frees up (see the branch below), per explicit
+  // request: "ถ้าเป็นคิวที่สนามนั้นยังแข่งไม่เสร็จ ให้แสดงสถานะเป็นเกมถัดไปแบบเดิม ไม่สนามนั้นเล่น
+  // จบแล้วจะขึ้นเป็นเริ่มเกม".
+  React.createElement("div", {
+    style: {
+      width: COLW.status,
+      flexShrink: 0,
+      fontSize: 11.5,
+      fontWeight: 800,
+      padding: "7px 4px",
+      borderRadius: 8,
+      textAlign: "center",
+      color: STATUS.next.color,
+      background: STATUS.next.bg
+    }
+  }, STATUS.next.label) : !done && st === "next" ?
+  /*#__PURE__*/
+  // v1.11.29: starting a queued match (once its court is actually free) is a dedicated "▶ เริ่ม
+  // เกม" button instead of picking a status off the สถานะ dropdown — a queued row has nothing
+  // else it can validly become via the dropdown anyway (see allowedNextStatuses), so this replaces
+  // it in the same column/width.
+  React.createElement("button", {
+    onClick: () => setMatchStatus(m.id, "playing"),
+    disabled: !canStart,
+    title: !startReadyMatch(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : noCourt ? "กรุณาเลือกสนามก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม",
+    style: {
+      width: COLW.status,
+      flexShrink: 0,
+      fontSize: 11.5,
+      fontWeight: 800,
+      padding: "7px 4px",
+      borderRadius: 8,
+      border: "none",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 4,
+      color: canStart ? STATUS.playing.color : T.muted,
+      background: canStart ? STATUS.playing.bg : T.surface2,
+      opacity: canStart ? 1 : 0.6
+    }
+  }, /*#__PURE__*/React.createElement(Play, {
+    size: 12
+  }), " \u0E40\u0E23\u0E34\u0E48\u0E21\u0E40\u0E01\u0E21") :
+  /*#__PURE__*/
+  // v1.11.31: the closed box must show the row's CURRENT STATUS as a noun ("กำลังเล่น"/"จบแล้ว"/
+  // "พักเกม" — STATUS[st].label), while the opened list must still offer the 3 ACTION-labeled
+  // choices from v1.11.30 ("เริ่มเกม"/"พักเกม"/"จบเกม" — STATUS_OPTIONS). A native <select> can't
+  // show different text in its closed box vs. its option list for the very same selected value, so
+  // this renders a purely visual badge (STATUS[st].label) and stacks the real <select> on top of it
+  // with opacity 0 — taps land on the invisible select (which still opens the OS's native picker
+  // showing the real <option> labels/checkmark), while what the user actually SEES before tapping
+  // is the visual badge underneath. onChange/value/disabled logic is unchanged from before.
+  React.createElement("div", {
+    style: {
+      position: "relative",
+      width: COLW.status,
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: "100%",
+      fontSize: 11.5,
+      fontWeight: 800,
+      padding: "7px 4px",
+      borderRadius: 8,
+      textAlign: "center",
+      color: STATUS[st].color,
+      background: STATUS[st].bg,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 3
+    }
+  }, STATUS[st].label, " ", /*#__PURE__*/React.createElement(ChevronDown, {
+    size: 11
+  })), /*#__PURE__*/React.createElement("select", {
+    value: st,
+    onChange: e => setMatchStatus(m.id, e.target.value),
+    style: {
+      position: "absolute",
+      inset: 0,
+      width: "100%",
+      height: "100%",
+      opacity: 0,
+      border: "none",
+      padding: 0,
+      margin: 0
+    }
+  }, STATUS_OPTIONS.map(o => /*#__PURE__*/React.createElement("option", {
+    key: o.key,
+    value: o.key,
+    disabled: !allowed.has(o.key)
+  }, o.label)))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      width: COLW.actions,
+      flexShrink: 0,
+      display: "flex",
+      justifyContent: "center",
+      gap: 2
+    }
+  }, !done && st === "next" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+    onClick: () => toggleCurrentLock(m.id),
+    title: m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)",
+    style: {
+      background: "none",
+      border: "none",
+      padding: 3,
+      color: m.locked ? T.accent : T.muted
+    }
+  }, m.locked ? /*#__PURE__*/React.createElement(Lock, {
+    size: 14
+  }) : /*#__PURE__*/React.createElement(Unlock, {
+    size: 14
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => regenCourt(m.id),
+    disabled: m.locked,
+    title: "\u0E2A\u0E38\u0E48\u0E21\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E43\u0E2B\u0E49\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34 (\u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E31\u0E49\u0E07\u0E42\u0E2B\u0E21\u0E14\u0E2A\u0E38\u0E48\u0E21/\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E40\u0E2D\u0E07)",
+    style: {
+      background: "none",
+      border: "none",
+      padding: 3,
+      color: m.locked ? T.border : T.muted,
+      opacity: m.locked ? 0.5 : 1
+    }
+  }, /*#__PURE__*/React.createElement(Shuffle, {
+    size: 14
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => deleteMatch(m.id),
+    disabled: m.locked,
+    title: "\u0E25\u0E1A\u0E40\u0E01\u0E21\u0E19\u0E35\u0E49 (\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E43\u0E19\u0E40\u0E01\u0E21\u0E19\u0E35\u0E49\u0E08\u0E30\u0E01\u0E25\u0E31\u0E1A\u0E44\u0E1B\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E25\u0E48\u0E19\u0E17\u0E31\u0E19\u0E17\u0E35)",
+    style: {
+      background: "none",
+      border: "none",
+      padding: 3,
+      color: m.locked ? T.border : T.accent,
+      opacity: m.locked ? 0.5 : 1
+    }
+  }, /*#__PURE__*/React.createElement(Trash2, {
+    size: 14
+  }))))), allManualWarnings.length > 0 &&
+  /*#__PURE__*/
+  // v1.12.1 (spec sections 1/3/4/5/6 — replaces the old generic "ทีม A/ทีม B" text): Lock Pair /
+  // ไม่อยากคู่ / ไม่อยากเจอ constraint warnings first (higher priority per spec 6), then recent
+  // teammate/opponent warnings — every line now names the exact players involved (spec 3.1) and
+  // its color matches the highlighted player cards in TeamSide above (spec 4). WARNING ONLY,
+  // never blocks selection (see canStart/startReady — this has no effect on either).
+  React.createElement("div", {
+    style: {
+      padding: "0 11px 8px",
+      minWidth: TABLE_MIN_WIDTH,
+      display: "flex",
+      flexDirection: "column",
+      gap: 3
+    }
+  }, constraintWarnings.map(w => /*#__PURE__*/React.createElement("div", {
+    key: w.id,
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: w.color
+    }
+  }, w.kind === "lock" ? "⚠️ ล็อคคู่ — " : "⚠️ ข้อจำกัดการจับคู่ — ", w.text)), recentWarnings.map(w => /*#__PURE__*/React.createElement("div", {
+    key: w.id,
+    style: {
+      fontSize: 11,
+      fontWeight: 700,
+      color: w.color
+    }
+  }, w.kind === "teammate" ? "⚠️ เพิ่งคู่กัน — " : "⚠️ เจอกันเกมล่าสุด — ", w.text, " (\u0E22\u0E31\u0E07\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E04\u0E39\u0E48\u0E19\u0E35\u0E49\u0E44\u0E14\u0E49\u0E15\u0E32\u0E21\u0E1B\u0E01\u0E15\u0E34)"))));
+}
 function SessionTab(props) {
   const {
     players,
@@ -18881,486 +19452,9 @@ function SessionTab(props) {
   // single 4-option dropdown (จบแล้ว/กำลังเล่น/พักเกม/เกมต่อไป) backed by setMatchStatus, replacing the
   // old จัดใหม่/เริ่มเกม/จบเกม button row entirely (จัดใหม่ survives as a small icon action instead, since
   // it's a reshuffle that doesn't change สถานะ — an explicitly-preserved existing system).
-  const MatchRow = ({
-    m,
-    no,
-    done
-  }) => {
-    // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
-    // this patch) recreated as a new component instance on every SessionTab re-render — confirmed via
-    // direct inspection that even an unrelated state change (e.g. opening the ใส่ผล score popup) causes
-    // every row to fully unmount/remount. Since the old ลูก input was FULLY CONTROLLED straight off
-    // `matchShuttleUsed(m)` and called `setMatchShuttleUsed` on every keystroke, EVERY keystroke itself
-    // triggered exactly that remount — which drops DOM focus immediately after the first character lands,
-    // so a second keystroke never reaches the (now-replaced) input element at all. That, combined with no
-    // select-all-on-focus, is what produced the reported "types once, appends instead of replacing" bug.
-    // Fix: buffer the typed text in local state and only commit it (call setMatchShuttleUsed, the one
-    // thing that can trigger a remount) on blur/Enter — so typing itself never causes a re-render, and the
-    // field keeps focus for as many keystrokes as needed. Re-syncs from the real value whenever this exact
-    // match (m.id) or its committed shuttleUsed changes from elsewhere (e.g. a fresh mount after a
-    // different remount, or the value being edited from History instead).
-    const [shuttleDraft, setShuttleDraft] = useState(String(matchShuttleUsed(m)));
-    useEffect(() => {
-      setShuttleDraft(String(matchShuttleUsed(m)));
-    }, [m.id, m.shuttleUsed]);
-    const st = done ? "done" : m.status;
-    const reassign = done ? reassignHistoryCourt : reassignCourt;
-    const replace = done ? replaceHistorySlot : replaceSlot;
-    // v1.11.36 REDESIGN (real-world testing feedback — "player picker still shows people already assigned
-    // to another upcoming game"): a "next" row's bench used to also offer players already paired into
-    // OTHER not-yet-started courts (nextPoolFor) so they could be swapped across courts before either
-    // started. That's exactly the bug: a player belonging to Upcoming Game 1 must NOT be selectable while
-    // editing Upcoming Game 2. waitQueue alone is the single reusable eligibility source for every status
-    // here — it already excludes anyone seated ANYWHERE in `current` right now (any match, any status,
-    // including this very row's own other slot — see `inPlay`), and it recomputes live off `current`, so
-    // removing/deleting a game frees its players again immediately with zero extra bookkeeping.
-    const bench = waitQueue;
-    // v1.12.13 (P0 manual matchmaking dropdown ordering fix): the picker itself gets the wider pool
-    // (includes YELLOW/resting candidates) — `bench` above stays waitQueue-only for benchIds/warnings
-    // (unchanged, see manualBenchPool's own comment for why those two must not widen).
-    const pickerBench = manualBenchPool;
-    const rowOpenSlot = openSlot && openSlot.mid === m.id ? {
-      team: openSlot.team,
-      idx: openSlot.idx,
-      rect: openSlot.rect
-    } : null;
-    const setRowOpenSlot = v => setOpenSlot(v ? {
-      mid: m.id,
-      ...v
-    } : null);
-    const allowed = allowedNextStatuses(st);
-    // v1.11.29: a "next" row's court might already be occupied by its own playing/paused primary match
-    // (the prep-ahead companion case) — its "▶ เริ่มเกม" button stays disabled until that court frees up,
-    // instead of letting the tap through and relying only on startGame's alert as the only guard.
-    const busyCourt = !done && st === "next" && m.court != null && current.some(c => c.id !== m.id && c.court === m.court && (c.status === "playing" || c.status === "paused"));
-    // v1.11.36: an upcoming game with no court assigned yet (see addExtraMatch) can't start until one is —
-    // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
-    const noCourt = !done && st === "next" && m.court == null;
-    const canStart = !done && st === "next" && startReady(m) && !busyCourt && !noCourt;
-    // v1.12.13 (Court Dropdown Availability): for a NOT-YET-STARTED ("next") row, the court dropdown must
-    // only ever offer courts genuinely free right now — never one currently occupied by a live
-    // (playing/paused) match, and never one another "next" row has already claimed. This deliberately
-    // removes the old "assign a next row onto a still-playing court to queue behind it" prep-ahead-via-
-    // dropdown capability (v1.11.29/39's `busyCourt`) per explicit request — `busyCourt` itself is left
-    // completely unchanged above (still gates the start button/เกมต่อไป badge exactly as before) since
-    // that's a separate concern from what the SELECT may newly offer. Rows that are NOT "next" (playing/
-    // paused/done) keep the full, unfiltered court list exactly as before (v1.11.39/58 intentionally never
-    // touch a live/historical row's own already-occupied or already-recorded court).
-    const takenCourts = !done && st === "next" ? new Set(current.filter(c => c.id !== m.id && c.court != null && (c.status === "playing" || c.status === "paused" || c.status === "next")).map(c => c.court)) : new Set();
-    const availableCourtNumbers = Array.from({
-      length: courtCount
-    }, (_, i) => i + 1).filter(c => !takenCourts.has(c));
-    // A previously-picked court that has SINCE become occupied/claimed elsewhere (by a match that started,
-    // or another next row grabbing it first) before THIS match started must never be silently kept as if
-    // nothing happened — flagged so the select can show an explicit conflict state instead (spec: "clear it
-    // or show an explicit conflict state according to the existing architecture" — the existing
-    // busyCourt-driven "เกมต่อไป" badge already IS that architecture for the live-occupant case; this
-    // extends the same idea to the select itself, and to the other-next-row case).
-    const courtNowConflicting = !done && st === "next" && m.court != null && takenCourts.has(m.court);
-    const showNoCourtAvailable = !done && st === "next" && m.court == null && availableCourtNumbers.length === 0;
-    // v1.12.1 (Manual Matchmaking — spec sections 1,3,4,5,6): constraint warnings (Lock Pair /
-    // ไม่อยากคู่ / ไม่อยากเจอ) and recent teammate/opponent warnings, both WARNING ONLY — never affect
-    // canStart/startReady below (constraints are warnings, organizer choice stays authoritative).
-    // Scoped to the same !done && st === "next" window the recent-pair warning already used pre-v1.12.1
-    // (manual matchmaking happens before a match starts). computeManualConstraintWarnings/
-    // computeRecentPairWarnings are pure module-level functions (see above, near buildMatch/
-    // rankManualSlotCandidates) — recent-pair detection reuses the EXISTING latestMap.partnerOf/
-    // opponentsOf, no second history algorithm. Each unique warning also carries a highlight color so
-    // the exact player cards it refers to can be visually tied to its text (spec 4) — constraint
-    // warnings always use the existing conflict red; recent-pair warnings cycle through a small
-    // non-red palette so multiple simultaneous relationships stay visually distinguishable.
-    const manualWarnScope = !done && st === "next";
-    const benchIds = new Set(bench.map(p => p.id)); // same eligibility pool replaceSlot's own auto-fill assist trusts (see spec Case C)
-    const constraintWarnings = (manualWarnScope ? computeManualConstraintWarnings(m.teamA, m.teamB, lockPairs, players, benchIds) : []).map(w => ({
-      ...w,
-      color: "#c0392b"
-    }));
-    const RECENT_WARN_COLORS = ["#c2650a", "#7c3aed", "#2f6fb2", "#0f9d58"];
-    const recentWarnings = (manualWarnScope ? computeRecentPairWarnings(m.teamA, m.teamB, latestMap, mode, lockPairs, players) : []).map((w, i) => ({
-      ...w,
-      color: RECENT_WARN_COLORS[i % RECENT_WARN_COLORS.length]
-    }));
-    const allManualWarnings = [...constraintWarnings, ...recentWarnings]; // priority order per spec 6
-    // first warning to claim a player wins the highlight color (constraint warnings are listed first,
-    // so they take visual priority over a recent-pair warning touching the same player).
-    const warnHighlight = {};
-    allManualWarnings.forEach(w => {
-      if (!warnHighlight[w.a]) warnHighlight[w.a] = w.color;
-      if (!warnHighlight[w.b]) warnHighlight[w.b] = w.color;
-    });
-    // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
-    // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
-    // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
-    // apart at a glance while scrolling, without adding any extra header/divider rows to the table.
-    // v1.11.57 (Finished Game Row Visual Indicator): จบแล้ว rows changed from the old neutral gray
-    // ("#f4f6f5") to a very pale red/coral tint — same warm-red family as T.accent ("#ef5a44") — so a
-    // finished game is distinguishable from กำลังเล่น/เกมต่อไป at a glance, purely via this row's own
-    // background (no new badge/icon/text/column/border — see this row's existing borderBottom/borderLeft,
-    // both untouched). กำลังเล่น/พักเกม/เกมต่อไป colors are completely unchanged.
-    const rowBg = done ? "#FFF4F2" : st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : st === "next" ? "#f5f8ff" : "transparent";
-    return /*#__PURE__*/React.createElement("div", {
-      key: m.id
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 6,
-        padding: "9px 11px",
-        borderBottom: `1px solid ${T.border}`,
-        borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`,
-        background: rowBg,
-        minWidth: TABLE_MIN_WIDTH
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        width: COLW.no,
-        flexShrink: 0,
-        fontSize: 11,
-        fontWeight: 800,
-        color: T.muted
-      }
-    }, String(no).padStart(2, "0")), showNoCourtAvailable ? /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: COLW.court,
-        flexShrink: 0,
-        fontSize: 10,
-        fontWeight: 700,
-        padding: "6px 2px",
-        borderRadius: 8,
-        border: `1px dashed ${T.border}`,
-        background: T.surface2,
-        color: T.muted,
-        textAlign: "center"
-      }
-    }, "\u0E23\u0E2D\u0E2A\u0E19\u0E32\u0E21\u0E27\u0E48\u0E32\u0E07") : /*#__PURE__*/React.createElement("select", {
-      value: m.court == null ? "" : m.court,
-      onChange: e => reassign(m.id, e.target.value === "" ? null : Number(e.target.value)),
-      style: {
-        width: COLW.court,
-        flexShrink: 0,
-        fontSize: 11.5,
-        fontWeight: 700,
-        padding: "6px 4px",
-        borderRadius: 8,
-        border: `1px solid ${courtNowConflicting ? "#c0392b" : T.border}`,
-        background: T.surface2,
-        color: m.court == null ? T.muted : courtNowConflicting ? "#c0392b" : T.text
-      }
-    }, (m.court == null || !done && st === "next") && /*#__PURE__*/React.createElement("option", {
-      value: ""
-    }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E2A\u0E19\u0E32\u0E21"), (!done && st === "next" ? availableCourtNumbers : Array.from({
-      length: courtCount
-    }, (_, i) => i + 1)).map(c => /*#__PURE__*/React.createElement("option", {
-      key: c,
-      value: c
-    }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, c))), courtNowConflicting && !availableCourtNumbers.includes(m.court) && /*#__PURE__*/React.createElement("option", {
-      value: m.court
-    }, "\u0E2A\u0E19\u0E32\u0E21 ", courtLabelFor(courtLabels, m.court), " (\u0E16\u0E39\u0E01\u0E43\u0E0A\u0E49\u0E41\u0E25\u0E49\u0E27)")), /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: COLW.team,
-        flexShrink: 0
-      }
-    }, /*#__PURE__*/React.createElement(TeamSide, {
-      arr: m.teamA,
-      team: "A",
-      m: m,
-      getP: getP,
-      editable: true,
-      replaceSlot: replace,
-      tapSlot: tapSlot,
-      isSel: isSel,
-      bench: pickerBench,
-      openSlot: rowOpenSlot,
-      setOpenSlot: setRowOpenSlot,
-      big: st === "playing",
-      now: now,
-      done: done,
-      lockPairs: lockPairs,
-      players: players,
-      stats: stats,
-      latestMap: latestMap,
-      warnHighlight: warnHighlight
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: COLW.team,
-        flexShrink: 0
-      }
-    }, /*#__PURE__*/React.createElement(TeamSide, {
-      arr: m.teamB,
-      team: "B",
-      m: m,
-      getP: getP,
-      editable: true,
-      replaceSlot: replace,
-      tapSlot: tapSlot,
-      isSel: isSel,
-      bench: pickerBench,
-      openSlot: rowOpenSlot,
-      setOpenSlot: setRowOpenSlot,
-      big: st === "playing",
-      now: now,
-      done: done,
-      lockPairs: lockPairs,
-      players: players,
-      stats: stats,
-      latestMap: latestMap,
-      warnHighlight: warnHighlight
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: COLW.result,
-        flexShrink: 0,
-        position: "relative"
-      }
-    }, (() => {
-      const scoreLines = matchScoreParts(m);
-      return /*#__PURE__*/React.createElement("button", {
-        onClick: e => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : {
-          mid: m.id,
-          rect: rectOf(e.currentTarget)
-        }),
-        title: "\u0E41\u0E15\u0E30\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E43\u0E2A\u0E48\u0E1C\u0E25\u0E01\u0E32\u0E23\u0E41\u0E02\u0E48\u0E07\u0E02\u0E31\u0E19",
-        style: {
-          width: "100%",
-          padding: scoreLines ? "4px 2px" : "8px 0",
-          borderRadius: 8,
-          background: T.surface2,
-          border: `1px solid ${T.border}`,
-          fontSize: 11.5,
-          fontWeight: 800,
-          color: T.text,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          lineHeight: 1.25
-        }
-      }, scoreLines ? scoreLines.map((line, i) => /*#__PURE__*/React.createElement("span", {
-        key: i,
-        style: {
-          display: "block",
-          textAlign: "center"
-        }
-      }, line)) : "ใส่ผล");
-    })(), scoreOpen && scoreOpen.mid === m.id && ReactDOM.createPortal(/*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-      onClick: () => setScoreOpen(null),
-      style: {
-        position: "fixed",
-        inset: 0,
-        zIndex: 199,
-        background: "transparent"
-      }
-    }), /*#__PURE__*/React.createElement(ScorePopover, {
-      anchorRect: scoreOpen.rect
-    }, /*#__PURE__*/React.createElement(ScoreEditor, {
-      m: m,
-      rounds: rounds,
-      setScore: setScore,
-      setWin: setWin,
-      clearScore: clearScore,
-      winScore: settings.winScore,
-      deuce: settings.deuce
-    }))), document.body)), /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: COLW.shuttle,
-        flexShrink: 0
-      }
-    }, /*#__PURE__*/React.createElement("input", {
-      type: "number",
-      min: 0,
-      value: shuttleDraft,
-      onChange: e => setShuttleDraft(e.target.value),
-      onBlur: () => setMatchShuttleUsed(m.id, shuttleDraft),
-      onKeyDown: e => {
-        if (e.key === "Enter") e.currentTarget.blur();
-      },
-      onFocus: e => e.target.select(),
-      title: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E25\u0E39\u0E01\u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49\u0E43\u0E19\u0E40\u0E01\u0E21\u0E19\u0E35\u0E49",
-      style: {
-        width: "100%",
-        padding: "7px 2px",
-        borderRadius: 8,
-        background: T.surface2,
-        border: `1px solid ${T.border}`,
-        fontSize: 11.5,
-        fontWeight: 800,
-        color: T.text,
-        textAlign: "center"
-      }
-    })), !done && st === "next" && busyCourt ?
-    /*#__PURE__*/
-    // v1.11.30: a prep-ahead companion whose court is still busy (primary match still playing/
-    // paused) shows a plain "เกมต่อไป" badge — same as before v1.11.29 — NOT the "เริ่มเกม" button.
-    // The button only appears once that court actually frees up (see the branch below), per explicit
-    // request: "ถ้าเป็นคิวที่สนามนั้นยังแข่งไม่เสร็จ ให้แสดงสถานะเป็นเกมถัดไปแบบเดิม ไม่สนามนั้นเล่น
-    // จบแล้วจะขึ้นเป็นเริ่มเกม".
-    React.createElement("div", {
-      style: {
-        width: COLW.status,
-        flexShrink: 0,
-        fontSize: 11.5,
-        fontWeight: 800,
-        padding: "7px 4px",
-        borderRadius: 8,
-        textAlign: "center",
-        color: STATUS.next.color,
-        background: STATUS.next.bg
-      }
-    }, STATUS.next.label) : !done && st === "next" ?
-    /*#__PURE__*/
-    // v1.11.29: starting a queued match (once its court is actually free) is a dedicated "▶ เริ่ม
-    // เกม" button instead of picking a status off the สถานะ dropdown — a queued row has nothing
-    // else it can validly become via the dropdown anyway (see allowedNextStatuses), so this replaces
-    // it in the same column/width.
-    React.createElement("button", {
-      onClick: () => setMatchStatus(m.id, "playing"),
-      disabled: !canStart,
-      title: !startReady(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : noCourt ? "กรุณาเลือกสนามก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม",
-      style: {
-        width: COLW.status,
-        flexShrink: 0,
-        fontSize: 11.5,
-        fontWeight: 800,
-        padding: "7px 4px",
-        borderRadius: 8,
-        border: "none",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 4,
-        color: canStart ? STATUS.playing.color : T.muted,
-        background: canStart ? STATUS.playing.bg : T.surface2,
-        opacity: canStart ? 1 : 0.6
-      }
-    }, /*#__PURE__*/React.createElement(Play, {
-      size: 12
-    }), " \u0E40\u0E23\u0E34\u0E48\u0E21\u0E40\u0E01\u0E21") :
-    /*#__PURE__*/
-    // v1.11.31: the closed box must show the row's CURRENT STATUS as a noun ("กำลังเล่น"/"จบแล้ว"/
-    // "พักเกม" — STATUS[st].label), while the opened list must still offer the 3 ACTION-labeled
-    // choices from v1.11.30 ("เริ่มเกม"/"พักเกม"/"จบเกม" — STATUS_OPTIONS). A native <select> can't
-    // show different text in its closed box vs. its option list for the very same selected value, so
-    // this renders a purely visual badge (STATUS[st].label) and stacks the real <select> on top of it
-    // with opacity 0 — taps land on the invisible select (which still opens the OS's native picker
-    // showing the real <option> labels/checkmark), while what the user actually SEES before tapping
-    // is the visual badge underneath. onChange/value/disabled logic is unchanged from before.
-    React.createElement("div", {
-      style: {
-        position: "relative",
-        width: COLW.status,
-        flexShrink: 0
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: "100%",
-        fontSize: 11.5,
-        fontWeight: 800,
-        padding: "7px 4px",
-        borderRadius: 8,
-        textAlign: "center",
-        color: STATUS[st].color,
-        background: STATUS[st].bg,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 3
-      }
-    }, STATUS[st].label, " ", /*#__PURE__*/React.createElement(ChevronDown, {
-      size: 11
-    })), /*#__PURE__*/React.createElement("select", {
-      value: st,
-      onChange: e => setMatchStatus(m.id, e.target.value),
-      style: {
-        position: "absolute",
-        inset: 0,
-        width: "100%",
-        height: "100%",
-        opacity: 0,
-        border: "none",
-        padding: 0,
-        margin: 0
-      }
-    }, STATUS_OPTIONS.map(o => /*#__PURE__*/React.createElement("option", {
-      key: o.key,
-      value: o.key,
-      disabled: !allowed.has(o.key)
-    }, o.label)))), /*#__PURE__*/React.createElement("div", {
-      style: {
-        width: COLW.actions,
-        flexShrink: 0,
-        display: "flex",
-        justifyContent: "center",
-        gap: 2
-      }
-    }, !done && st === "next" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
-      onClick: () => toggleCurrentLock(m.id),
-      title: m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)",
-      style: {
-        background: "none",
-        border: "none",
-        padding: 3,
-        color: m.locked ? T.accent : T.muted
-      }
-    }, m.locked ? /*#__PURE__*/React.createElement(Lock, {
-      size: 14
-    }) : /*#__PURE__*/React.createElement(Unlock, {
-      size: 14
-    })), /*#__PURE__*/React.createElement("button", {
-      onClick: () => regenCourt(m.id),
-      disabled: m.locked,
-      title: "\u0E2A\u0E38\u0E48\u0E21\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E43\u0E2B\u0E49\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34 (\u0E43\u0E0A\u0E49\u0E44\u0E14\u0E49\u0E17\u0E31\u0E49\u0E07\u0E42\u0E2B\u0E21\u0E14\u0E2A\u0E38\u0E48\u0E21/\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E40\u0E2D\u0E07)",
-      style: {
-        background: "none",
-        border: "none",
-        padding: 3,
-        color: m.locked ? T.border : T.muted,
-        opacity: m.locked ? 0.5 : 1
-      }
-    }, /*#__PURE__*/React.createElement(Shuffle, {
-      size: 14
-    })), /*#__PURE__*/React.createElement("button", {
-      onClick: () => deleteMatch(m.id),
-      disabled: m.locked,
-      title: "\u0E25\u0E1A\u0E40\u0E01\u0E21\u0E19\u0E35\u0E49 (\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E43\u0E19\u0E40\u0E01\u0E21\u0E19\u0E35\u0E49\u0E08\u0E30\u0E01\u0E25\u0E31\u0E1A\u0E44\u0E1B\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E40\u0E25\u0E48\u0E19\u0E17\u0E31\u0E19\u0E17\u0E35)",
-      style: {
-        background: "none",
-        border: "none",
-        padding: 3,
-        color: m.locked ? T.border : T.accent,
-        opacity: m.locked ? 0.5 : 1
-      }
-    }, /*#__PURE__*/React.createElement(Trash2, {
-      size: 14
-    }))))), allManualWarnings.length > 0 &&
-    /*#__PURE__*/
-    // v1.12.1 (spec sections 1/3/4/5/6 — replaces the old generic "ทีม A/ทีม B" text): Lock Pair /
-    // ไม่อยากคู่ / ไม่อยากเจอ constraint warnings first (higher priority per spec 6), then recent
-    // teammate/opponent warnings — every line now names the exact players involved (spec 3.1) and
-    // its color matches the highlighted player cards in TeamSide above (spec 4). WARNING ONLY,
-    // never blocks selection (see canStart/startReady — this has no effect on either).
-    React.createElement("div", {
-      style: {
-        padding: "0 11px 8px",
-        minWidth: TABLE_MIN_WIDTH,
-        display: "flex",
-        flexDirection: "column",
-        gap: 3
-      }
-    }, constraintWarnings.map(w => /*#__PURE__*/React.createElement("div", {
-      key: w.id,
-      style: {
-        fontSize: 11,
-        fontWeight: 700,
-        color: w.color
-      }
-    }, w.kind === "lock" ? "⚠️ ล็อคคู่ — " : "⚠️ ข้อจำกัดการจับคู่ — ", w.text)), recentWarnings.map(w => /*#__PURE__*/React.createElement("div", {
-      key: w.id,
-      style: {
-        fontSize: 11,
-        fontWeight: 700,
-        color: w.color
-      }
-    }, w.kind === "teammate" ? "⚠️ เพิ่งคู่กัน — " : "⚠️ เจอกันเกมล่าสุด — ", w.text, " (\u0E22\u0E31\u0E07\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E04\u0E39\u0E48\u0E19\u0E35\u0E49\u0E44\u0E14\u0E49\u0E15\u0E32\u0E21\u0E1B\u0E01\u0E15\u0E34)"))));
-  };
+  // v1.12.18: MatchRow moved to a top-level function declaration (see just above `function SessionTab`)
+  // so it has a stable identity across re-renders instead of being recreated as a new closure on every
+  // SessionTab render — see that function's own header comment for the full root-cause explanation.
 
   // an unoccupied court — same "ว่าง" + "จัดเกม" placeholder as before, now a table row (no Match No yet,
   // since no match record exists there until fillCourt creates one). Kept at the same min-width as the
@@ -19726,25 +19820,63 @@ function SessionTab(props) {
       verticalAlign: -2,
       marginRight: 4
     }
-  }), " \u0E41\u0E2A\u0E14\u0E07\u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E17\u0E35\u0E48\u0E08\u0E1A\u0E41\u0E25\u0E49\u0E27\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E40\u0E15\u0E34\u0E21 (", hiddenFinishedCount, ")"), finishedShown.map(({
-    m,
-    no,
-    done
-  }) => /*#__PURE__*/React.createElement(MatchRow, {
-    key: m.id,
-    m: m,
-    no: no,
-    done: done
-  })), liveOrdered.map(({
-    m,
-    no,
-    done
-  }) => /*#__PURE__*/React.createElement(MatchRow, {
-    key: m.id,
-    m: m,
-    no: no,
-    done: done
-  })), settings.pairingMode !== "manual" && empties.map(EmptyRow), started && /*#__PURE__*/React.createElement("button", {
+  }), " \u0E41\u0E2A\u0E14\u0E07\u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E17\u0E35\u0E48\u0E08\u0E1A\u0E41\u0E25\u0E49\u0E27\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E40\u0E15\u0E34\u0E21 (", hiddenFinishedCount, ")"), (() => {
+    const matchRowProps = {
+      reassignHistoryCourt,
+      reassignCourt,
+      replaceHistorySlot,
+      replaceSlot,
+      waitQueue,
+      manualBenchPool,
+      openSlot,
+      setOpenSlot,
+      current,
+      courtCount,
+      lockPairs,
+      players,
+      latestMap,
+      mode,
+      courtLabels,
+      getP,
+      tapSlot,
+      isSel,
+      now,
+      stats,
+      scoreOpen,
+      setScoreOpen,
+      rounds,
+      setScore,
+      setWin,
+      clearScore,
+      settings,
+      setMatchShuttleUsed,
+      setMatchStatus,
+      toggleCurrentLock,
+      regenCourt,
+      deleteMatch,
+      COLW,
+      TABLE_MIN_WIDTH
+    };
+    return /*#__PURE__*/React.createElement(React.Fragment, null, finishedShown.map(({
+      m,
+      no,
+      done
+    }) => /*#__PURE__*/React.createElement(MatchRow, _extends({
+      key: m.id,
+      m: m,
+      no: no,
+      done: done
+    }, matchRowProps))), liveOrdered.map(({
+      m,
+      no,
+      done
+    }) => /*#__PURE__*/React.createElement(MatchRow, _extends({
+      key: m.id,
+      m: m,
+      no: no,
+      done: done
+    }, matchRowProps))));
+  })(), settings.pairingMode !== "manual" && empties.map(EmptyRow), started && /*#__PURE__*/React.createElement("button", {
     onClick: addExtraMatch,
     style: {
       width: "100%",
@@ -20684,6 +20816,7 @@ function TournamentWizard({
     const sel = selectedIds.includes(p.id);
     return /*#__PURE__*/React.createElement("div", {
       key: p.id,
+      className: "tap-press",
       onClick: () => teamEntryMode === "fixedTeam" ? sel && tapForPair(p.id) : toggleSelect(p.id),
       style: {
         display: "flex",

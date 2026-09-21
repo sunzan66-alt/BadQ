@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.17";
+const APP_VERSION = "1.12.18";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -10015,6 +10015,328 @@ function GameTab({ sessionTabProps, summaryTabProps }) {
 }
 
 /* ============ SESSION ============ */
+// v1.12.18 (P0 interaction responsiveness / score-entry keyboard-focus stability hotfix): MatchRow is
+// now a STABLE top-level function declaration instead of being defined as `const MatchRow = (...) => {}`
+// INSIDE SessionTab's own render body (as it was from v1.11.29 through v1.12.17). That inline pattern
+// created a BRAND NEW function object on every single SessionTab re-render — which happens on every
+// player/match/session state change anywhere in the app, and periodically from the `now` ticking clock
+// (every 15s) — and React treats a changed component "type" at the same tree position as a different
+// component, unmounting and remounting the ENTIRE row subtree underneath it, including any open
+// ScoreEditor/score-input DOM nodes. This was ALREADY correctly diagnosed as the root cause of the
+// v1.11.60 shuttle-input bug and the v1.11.64 score-input bug — but both of those were fixed by making
+// their OWN inputs buffer locally and commit only on blur/unmount, working around the remount rather
+// than stopping it. A remount still visibly happens on every affected keystroke window: the mobile
+// on-screen keyboard is tied to DOM focus, and destroying+recreating the focused <input> (even one that
+// safely re-syncs its value afterward) closes the keyboard / produces the reported "editor looks stuck
+// for a moment" flash during REPEATED score entry. Making MatchRow a genuine top-level function (the
+// same pattern TeamSide/ScoreEditor/ScorePopover already use) gives it a PERMANENTLY STABLE reference —
+// React now correctly diffs/updates props on the existing DOM instead of unmounting it, so an open
+// ScoreEditor/shuttle-input/court-select is never torn down by an unrelated re-render again. Every value
+// this component used to reach via closure (SessionTab's props/local state/derived useMemo values) is
+// now passed explicitly — see the two call sites in SessionTab below for the full prop list.
+function MatchRow({
+  m, no, done, reassignHistoryCourt, reassignCourt, replaceHistorySlot, replaceSlot, waitQueue,
+  manualBenchPool, openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, mode,
+  courtLabels, getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin,
+  clearScore, settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
+  COLW, TABLE_MIN_WIDTH,
+}) {
+  // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
+  // this patch) recreated as a new component instance on every SessionTab re-render — confirmed via
+  // direct inspection that even an unrelated state change (e.g. opening the ใส่ผล score popup) causes
+  // every row to fully unmount/remount. Since the old ลูก input was FULLY CONTROLLED straight off
+  // `matchShuttleUsed(m)` and called `setMatchShuttleUsed` on every keystroke, EVERY keystroke itself
+  // triggered exactly that remount — which drops DOM focus immediately after the first character lands,
+  // so a second keystroke never reaches the (now-replaced) input element at all. That, combined with no
+  // select-all-on-focus, is what produced the reported "types once, appends instead of replacing" bug.
+  // Fix: buffer the typed text in local state and only commit it (call setMatchShuttleUsed, the one
+  // thing that can trigger a remount) on blur/Enter — so typing itself never causes a re-render, and the
+  // field keeps focus for as many keystrokes as needed. Re-syncs from the real value whenever this exact
+  // match (m.id) or its committed shuttleUsed changes from elsewhere (e.g. a fresh mount after a
+  // different remount, or the value being edited from History instead).
+  const [shuttleDraft, setShuttleDraft] = useState(String(matchShuttleUsed(m)));
+  useEffect(() => { setShuttleDraft(String(matchShuttleUsed(m))); }, [m.id, m.shuttleUsed]);
+  const st = done ? "done" : m.status;
+  const reassign = done ? reassignHistoryCourt : reassignCourt;
+  const replace = done ? replaceHistorySlot : replaceSlot;
+  // v1.11.36 REDESIGN (real-world testing feedback — "player picker still shows people already assigned
+  // to another upcoming game"): a "next" row's bench used to also offer players already paired into
+  // OTHER not-yet-started courts (nextPoolFor) so they could be swapped across courts before either
+  // started. That's exactly the bug: a player belonging to Upcoming Game 1 must NOT be selectable while
+  // editing Upcoming Game 2. waitQueue alone is the single reusable eligibility source for every status
+  // here — it already excludes anyone seated ANYWHERE in `current` right now (any match, any status,
+  // including this very row's own other slot — see `inPlay`), and it recomputes live off `current`, so
+  // removing/deleting a game frees its players again immediately with zero extra bookkeeping.
+  const bench = waitQueue;
+  // v1.12.13 (P0 manual matchmaking dropdown ordering fix): the picker itself gets the wider pool
+  // (includes YELLOW/resting candidates) — `bench` above stays waitQueue-only for benchIds/warnings
+  // (unchanged, see manualBenchPool's own comment for why those two must not widen).
+  const pickerBench = manualBenchPool;
+  const rowOpenSlot = openSlot && openSlot.mid === m.id ? { team: openSlot.team, idx: openSlot.idx, rect: openSlot.rect } : null;
+  const setRowOpenSlot = (v) => setOpenSlot(v ? { mid: m.id, ...v } : null);
+  const allowed = allowedNextStatuses(st);
+  // v1.11.29: a "next" row's court might already be occupied by its own playing/paused primary match
+  // (the prep-ahead companion case) — its "▶ เริ่มเกม" button stays disabled until that court frees up,
+  // instead of letting the tap through and relying only on startGame's alert as the only guard.
+  const busyCourt = !done && st === "next" && m.court != null && current.some((c) => c.id !== m.id && c.court === m.court && (c.status === "playing" || c.status === "paused"));
+  // v1.11.36: an upcoming game with no court assigned yet (see addExtraMatch) can't start until one is —
+  // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
+  const noCourt = !done && st === "next" && m.court == null;
+  const canStart = !done && st === "next" && startReadyMatch(m) && !busyCourt && !noCourt;
+  // v1.12.13 (Court Dropdown Availability): for a NOT-YET-STARTED ("next") row, the court dropdown must
+  // only ever offer courts genuinely free right now — never one currently occupied by a live
+  // (playing/paused) match, and never one another "next" row has already claimed. This deliberately
+  // removes the old "assign a next row onto a still-playing court to queue behind it" prep-ahead-via-
+  // dropdown capability (v1.11.29/39's `busyCourt`) per explicit request — `busyCourt` itself is left
+  // completely unchanged above (still gates the start button/เกมต่อไป badge exactly as before) since
+  // that's a separate concern from what the SELECT may newly offer. Rows that are NOT "next" (playing/
+  // paused/done) keep the full, unfiltered court list exactly as before (v1.11.39/58 intentionally never
+  // touch a live/historical row's own already-occupied or already-recorded court).
+  const takenCourts = !done && st === "next"
+    ? new Set(current.filter((c) => c.id !== m.id && c.court != null && (c.status === "playing" || c.status === "paused" || c.status === "next")).map((c) => c.court))
+    : new Set();
+  const availableCourtNumbers = Array.from({ length: courtCount }, (_, i) => i + 1).filter((c) => !takenCourts.has(c));
+  // A previously-picked court that has SINCE become occupied/claimed elsewhere (by a match that started,
+  // or another next row grabbing it first) before THIS match started must never be silently kept as if
+  // nothing happened — flagged so the select can show an explicit conflict state instead (spec: "clear it
+  // or show an explicit conflict state according to the existing architecture" — the existing
+  // busyCourt-driven "เกมต่อไป" badge already IS that architecture for the live-occupant case; this
+  // extends the same idea to the select itself, and to the other-next-row case).
+  const courtNowConflicting = !done && st === "next" && m.court != null && takenCourts.has(m.court);
+  const showNoCourtAvailable = !done && st === "next" && m.court == null && availableCourtNumbers.length === 0;
+  // v1.12.1 (Manual Matchmaking — spec sections 1,3,4,5,6): constraint warnings (Lock Pair /
+  // ไม่อยากคู่ / ไม่อยากเจอ) and recent teammate/opponent warnings, both WARNING ONLY — never affect
+  // canStart/startReady below (constraints are warnings, organizer choice stays authoritative).
+  // Scoped to the same !done && st === "next" window the recent-pair warning already used pre-v1.12.1
+  // (manual matchmaking happens before a match starts). computeManualConstraintWarnings/
+  // computeRecentPairWarnings are pure module-level functions (see above, near buildMatch/
+  // rankManualSlotCandidates) — recent-pair detection reuses the EXISTING latestMap.partnerOf/
+  // opponentsOf, no second history algorithm. Each unique warning also carries a highlight color so
+  // the exact player cards it refers to can be visually tied to its text (spec 4) — constraint
+  // warnings always use the existing conflict red; recent-pair warnings cycle through a small
+  // non-red palette so multiple simultaneous relationships stay visually distinguishable.
+  const manualWarnScope = !done && st === "next";
+  const benchIds = new Set(bench.map((p) => p.id)); // same eligibility pool replaceSlot's own auto-fill assist trusts (see spec Case C)
+  const constraintWarnings = (manualWarnScope ? computeManualConstraintWarnings(m.teamA, m.teamB, lockPairs, players, benchIds) : []).map((w) => ({ ...w, color: "#c0392b" }));
+  const RECENT_WARN_COLORS = ["#c2650a", "#7c3aed", "#2f6fb2", "#0f9d58"];
+  const recentWarnings = (manualWarnScope ? computeRecentPairWarnings(m.teamA, m.teamB, latestMap, mode, lockPairs, players) : [])
+    .map((w, i) => ({ ...w, color: RECENT_WARN_COLORS[i % RECENT_WARN_COLORS.length] }));
+  const allManualWarnings = [...constraintWarnings, ...recentWarnings]; // priority order per spec 6
+  // first warning to claim a player wins the highlight color (constraint warnings are listed first,
+  // so they take visual priority over a recent-pair warning touching the same player).
+  const warnHighlight = {};
+  allManualWarnings.forEach((w) => {
+    if (!warnHighlight[w.a]) warnHighlight[w.a] = w.color;
+    if (!warnHighlight[w.b]) warnHighlight[w.b] = w.color;
+  });
+  // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
+  // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
+  // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
+  // apart at a glance while scrolling, without adding any extra header/divider rows to the table.
+  // v1.11.57 (Finished Game Row Visual Indicator): จบแล้ว rows changed from the old neutral gray
+  // ("#f4f6f5") to a very pale red/coral tint — same warm-red family as T.accent ("#ef5a44") — so a
+  // finished game is distinguishable from กำลังเล่น/เกมต่อไป at a glance, purely via this row's own
+  // background (no new badge/icon/text/column/border — see this row's existing borderBottom/borderLeft,
+  // both untouched). กำลังเล่น/พักเกม/เกมต่อไป colors are completely unchanged.
+  const rowBg = done ? "#FFF4F2" : st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : st === "next" ? "#f5f8ff" : "transparent";
+  return (
+    <div key={m.id}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`, background: rowBg, minWidth: TABLE_MIN_WIDTH }}>
+        <span style={{ width: COLW.no, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>{String(no).padStart(2, "0")}</span>
+        {/* v1.12.13 (Court Dropdown Availability): when a "next" row has no court yet AND every court is
+            currently taken (playing/paused, or already claimed by another next row), show an explicit
+            "รอสนามว่าง" state instead of an oddly-empty selectable dropdown. */}
+        {showNoCourtAvailable ? (
+          <div style={{ width: COLW.court, flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "6px 2px", borderRadius: 8, border: `1px dashed ${T.border}`, background: T.surface2, color: T.muted, textAlign: "center" }}>
+            รอสนามว่าง
+          </div>
+        ) : (
+          <select
+            value={m.court == null ? "" : m.court}
+            onChange={(e) => reassign(m.id, e.target.value === "" ? null : Number(e.target.value))}
+            style={{ width: COLW.court, flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "6px 4px", borderRadius: 8, border: `1px solid ${courtNowConflicting ? "#c0392b" : T.border}`, background: T.surface2, color: m.court == null ? T.muted : (courtNowConflicting ? "#c0392b" : T.text) }}
+          >
+            {/* v1.11.36: a freshly-added upcoming game (see addExtraMatch) starts with no court at all —
+                this placeholder is what actually renders as "เลือกสนาม" until the organizer assigns one.
+                v1.11.58 (Section 2): also offered on any NOT-YET-STARTED ("next") row even after a court has
+                already been picked, so the organizer can revert back to "ยังไม่แน่ใจ" from the dropdown
+                itself instead of it only ever appearing before the first pick. Deliberately excluded for
+                กำลังเล่น/พักเกม (a physically-occupying match must never lose its court label — see
+                reassignCourt's v1.11.39 comment) and for finished/history rows (a factual past record, not
+                a "to be decided" one) — this only ever appears while st === "next". */}
+            {(m.court == null || (!done && st === "next")) && <option value="">เลือกสนาม</option>}
+            {/* v1.12.13: for a "next" row, only genuinely-free courts are offered (see availableCourtNumbers
+                above); playing/paused/done rows keep the full, unfiltered 1..courtCount list unchanged. */}
+            {(!done && st === "next" ? availableCourtNumbers : Array.from({ length: courtCount }, (_, i) => i + 1)).map((c) => (
+              <option key={c} value={c}>สนาม {courtLabelFor(courtLabels, c)}</option>
+            ))}
+            {/* v1.12.13: the row's OWN currently-selected court is always kept visible even if it has since
+                become conflicting (see courtNowConflicting) — never silently hidden out from under an
+                existing selection, per spec's explicit conflict-state requirement. */}
+            {courtNowConflicting && !availableCourtNumbers.includes(m.court) && (
+              <option value={m.court}>สนาม {courtLabelFor(courtLabels, m.court)} (ถูกใช้แล้ว)</option>
+            )}
+          </select>
+        )}
+        <div style={{ width: COLW.team, flexShrink: 0 }}>
+          <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
+        </div>
+        <div style={{ width: COLW.team, flexShrink: 0 }}>
+          <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
+        </div>
+        <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
+          {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
+              the old single-line text (e.g. "21–23 · 21–19 · 20–17") wrapped unpredictably at this
+              column's narrow fixed width and read as a run-on. scoreLines is null for an unscored match
+              (falls back to the original "ใส่ผล" label, unchanged); otherwise each set renders as its own
+              centered line with a tight line-height so 2-3 sets stay compact instead of ballooning the
+              row's height. Column width (COLW.result) is untouched — splitting into per-set lines only
+              ever needs enough width for ONE score pair ("21–23") at a time, which is narrower than the
+              old joined string ever needed, so this is a pure vertical-layout change with no truncation
+              risk. Purely presentational: sc itself (from matchScoreText, same scores/winner data) is
+              unchanged — no scoring/winner/status logic touched. */}
+          {(() => {
+            const scoreLines = matchScoreParts(m);
+            return (
+              <button
+                onClick={(e) => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : { mid: m.id, rect: rectOf(e.currentTarget) })}
+                title="แตะเพื่อใส่ผลการแข่งขัน"
+                style={{
+                  width: "100%", padding: scoreLines ? "4px 2px" : "8px 0", borderRadius: 8, background: T.surface2,
+                  border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text,
+                  display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                  lineHeight: 1.25,
+                }}
+              >
+                {scoreLines
+                  ? scoreLines.map((line, i) => <span key={i} style={{ display: "block", textAlign: "center" }}>{line}</span>)
+                  : "ใส่ผล"}
+              </button>
+            );
+          })()}
+          {scoreOpen && scoreOpen.mid === m.id && ReactDOM.createPortal(
+            <>
+              <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
+              <ScorePopover anchorRect={scoreOpen.rect}>
+                <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} winScore={settings.winScore} deuce={settings.deuce} />
+              </ScorePopover>
+            </>,
+            document.body
+          )}
+        </div>
+        {/* v1.11.55 (Per-Match Shuttle Usage spec C/M): compact per-match "ลูก" (shuttle used) field —
+            default 1 (matchShuttleUsed's read-time fallback), always editable regardless of match status,
+            so the organizer can bump 1→2/1→3 right before or while marking a match "จบแล้ว" without any
+            separate step. Kept intentionally narrow (COLW.shuttle, 1-2 digit width) — mobile table space is
+            already tight and the spec explicitly forbids widening the table meaningfully. Label is just
+            "ลูก", not the full "จำนวนลูกแบดที่ใช้" (too long for a per-row header). */}
+        <div style={{ width: COLW.shuttle, flexShrink: 0 }}>
+          <input
+            type="number"
+            min={0}
+            value={shuttleDraft}
+            onChange={(e) => setShuttleDraft(e.target.value)}
+            onBlur={() => setMatchShuttleUsed(m.id, shuttleDraft)}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+            onFocus={(e) => e.target.select()}
+            title="จำนวนลูกที่ใช้ในเกมนี้"
+            style={{ width: "100%", padding: "7px 2px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text, textAlign: "center" }}
+          />
+        </div>
+        {!done && st === "next" && busyCourt ? (
+          // v1.11.30: a prep-ahead companion whose court is still busy (primary match still playing/
+          // paused) shows a plain "เกมต่อไป" badge — same as before v1.11.29 — NOT the "เริ่มเกม" button.
+          // The button only appears once that court actually frees up (see the branch below), per explicit
+          // request: "ถ้าเป็นคิวที่สนามนั้นยังแข่งไม่เสร็จ ให้แสดงสถานะเป็นเกมถัดไปแบบเดิม ไม่สนามนั้นเล่น
+          // จบแล้วจะขึ้นเป็นเริ่มเกม".
+          <div style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS.next.color, background: STATUS.next.bg }}>
+            {STATUS.next.label}
+          </div>
+        ) : !done && st === "next" ? (
+          // v1.11.29: starting a queued match (once its court is actually free) is a dedicated "▶ เริ่ม
+          // เกม" button instead of picking a status off the สถานะ dropdown — a queued row has nothing
+          // else it can validly become via the dropdown anyway (see allowedNextStatuses), so this replaces
+          // it in the same column/width.
+          <button
+            onClick={() => setMatchStatus(m.id, "playing")}
+            disabled={!canStart}
+            title={!startReadyMatch(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : noCourt ? "กรุณาเลือกสนามก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
+            style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, color: canStart ? STATUS.playing.color : T.muted, background: canStart ? STATUS.playing.bg : T.surface2, opacity: canStart ? 1 : 0.6 }}
+          >
+            <Play size={12} /> เริ่มเกม
+          </button>
+        ) : (
+          // v1.11.31: the closed box must show the row's CURRENT STATUS as a noun ("กำลังเล่น"/"จบแล้ว"/
+          // "พักเกม" — STATUS[st].label), while the opened list must still offer the 3 ACTION-labeled
+          // choices from v1.11.30 ("เริ่มเกม"/"พักเกม"/"จบเกม" — STATUS_OPTIONS). A native <select> can't
+          // show different text in its closed box vs. its option list for the very same selected value, so
+          // this renders a purely visual badge (STATUS[st].label) and stacks the real <select> on top of it
+          // with opacity 0 — taps land on the invisible select (which still opens the OS's native picker
+          // showing the real <option> labels/checkmark), while what the user actually SEES before tapping
+          // is the visual badge underneath. onChange/value/disabled logic is unchanged from before.
+          <div style={{ position: "relative", width: COLW.status, flexShrink: 0 }}>
+            <div style={{ width: "100%", fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS[st].color, background: STATUS[st].bg, display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
+              {STATUS[st].label} <ChevronDown size={11} />
+            </div>
+            <select
+              value={st}
+              onChange={(e) => setMatchStatus(m.id, e.target.value)}
+              style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, border: "none", padding: 0, margin: 0 }}
+            >
+              {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{o.label}</option>)}
+            </select>
+          </div>
+        )}
+        <div style={{ width: COLW.actions, flexShrink: 0, display: "flex", justifyContent: "center", gap: 2 }}>
+          {/* lock + จัดใหม่ (existing pre-1.11.24 systems, explicitly preserved) only ever applied to a
+              not-yet-started "next" match — locking/reshuffling a live or finished game doesn't apply,
+              so both icons live together here exactly as before, just moved from the old button row. */}
+          {!done && st === "next" && (
+            <>
+              <button onClick={() => toggleCurrentLock(m.id)} title={m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)"} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.accent : T.muted }}>
+                {m.locked ? <Lock size={14} /> : <Unlock size={14} />}
+              </button>
+              <button onClick={() => regenCourt(m.id)} disabled={m.locked} title="สุ่มผู้เล่นให้อัตโนมัติ (ใช้ได้ทั้งโหมดสุ่ม/เลือกเอง)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.muted, opacity: m.locked ? 0.5 : 1 }}>
+                <Shuffle size={14} />
+              </button>
+              {/* v1.11.36: cancel/delete this upcoming game entirely (see deleteMatch) — needed now that a
+                  game can be created before a court is chosen, so the organizer can back out of one they
+                  no longer want without leaving an empty court-less row sitting in the table. */}
+              <button onClick={() => deleteMatch(m.id)} disabled={m.locked} title="ลบเกมนี้ (ผู้เล่นในเกมนี้จะกลับไปพร้อมเล่นทันที)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.accent, opacity: m.locked ? 0.5 : 1 }}>
+                <Trash2 size={14} />
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      {/* v1.11.33: explicit request to remove this repeated red hint line — with "+ เพิ่มแมชใหม่" (v1.11.32)
+          now able to add several empty "เกมต่อไป" rows at once, this text appeared under every one of them
+          and was noisy (see the screenshot: 3+ copies of the same line stacked down the table). The
+          disabled "▶ เริ่มเกม" button and its title="เลือกผู้เล่นให้ครบก่อนเริ่มเกม" tooltip already convey
+          the same thing on tap/hover, so nothing is lost — this was purely the extra always-visible line. */}
+      {allManualWarnings.length > 0 && (
+        // v1.12.1 (spec sections 1/3/4/5/6 — replaces the old generic "ทีม A/ทีม B" text): Lock Pair /
+        // ไม่อยากคู่ / ไม่อยากเจอ constraint warnings first (higher priority per spec 6), then recent
+        // teammate/opponent warnings — every line now names the exact players involved (spec 3.1) and
+        // its color matches the highlighted player cards in TeamSide above (spec 4). WARNING ONLY,
+        // never blocks selection (see canStart/startReady — this has no effect on either).
+        <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, display: "flex", flexDirection: "column", gap: 3 }}>
+          {constraintWarnings.map((w) => (
+            <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
+              {w.kind === "lock" ? "⚠️ ล็อคคู่ — " : "⚠️ ข้อจำกัดการจับคู่ — "}{w.text}
+            </div>
+          ))}
+          {recentWarnings.map((w) => (
+            <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
+              {w.kind === "teammate" ? "⚠️ เพิ่งคู่กัน — " : "⚠️ เจอกันเกมล่าสุด — "}{w.text} (ยังเลือกคู่นี้ได้ตามปกติ)
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SessionTab(props) {
   const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint, onGoToMembers } = props;
@@ -10156,302 +10478,9 @@ function SessionTab(props) {
   // single 4-option dropdown (จบแล้ว/กำลังเล่น/พักเกม/เกมต่อไป) backed by setMatchStatus, replacing the
   // old จัดใหม่/เริ่มเกม/จบเกม button row entirely (จัดใหม่ survives as a small icon action instead, since
   // it's a reshuffle that doesn't change สถานะ — an explicitly-preserved existing system).
-  const MatchRow = ({ m, no, done }) => {
-    // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
-    // this patch) recreated as a new component instance on every SessionTab re-render — confirmed via
-    // direct inspection that even an unrelated state change (e.g. opening the ใส่ผล score popup) causes
-    // every row to fully unmount/remount. Since the old ลูก input was FULLY CONTROLLED straight off
-    // `matchShuttleUsed(m)` and called `setMatchShuttleUsed` on every keystroke, EVERY keystroke itself
-    // triggered exactly that remount — which drops DOM focus immediately after the first character lands,
-    // so a second keystroke never reaches the (now-replaced) input element at all. That, combined with no
-    // select-all-on-focus, is what produced the reported "types once, appends instead of replacing" bug.
-    // Fix: buffer the typed text in local state and only commit it (call setMatchShuttleUsed, the one
-    // thing that can trigger a remount) on blur/Enter — so typing itself never causes a re-render, and the
-    // field keeps focus for as many keystrokes as needed. Re-syncs from the real value whenever this exact
-    // match (m.id) or its committed shuttleUsed changes from elsewhere (e.g. a fresh mount after a
-    // different remount, or the value being edited from History instead).
-    const [shuttleDraft, setShuttleDraft] = useState(String(matchShuttleUsed(m)));
-    useEffect(() => { setShuttleDraft(String(matchShuttleUsed(m))); }, [m.id, m.shuttleUsed]);
-    const st = done ? "done" : m.status;
-    const reassign = done ? reassignHistoryCourt : reassignCourt;
-    const replace = done ? replaceHistorySlot : replaceSlot;
-    // v1.11.36 REDESIGN (real-world testing feedback — "player picker still shows people already assigned
-    // to another upcoming game"): a "next" row's bench used to also offer players already paired into
-    // OTHER not-yet-started courts (nextPoolFor) so they could be swapped across courts before either
-    // started. That's exactly the bug: a player belonging to Upcoming Game 1 must NOT be selectable while
-    // editing Upcoming Game 2. waitQueue alone is the single reusable eligibility source for every status
-    // here — it already excludes anyone seated ANYWHERE in `current` right now (any match, any status,
-    // including this very row's own other slot — see `inPlay`), and it recomputes live off `current`, so
-    // removing/deleting a game frees its players again immediately with zero extra bookkeeping.
-    const bench = waitQueue;
-    // v1.12.13 (P0 manual matchmaking dropdown ordering fix): the picker itself gets the wider pool
-    // (includes YELLOW/resting candidates) — `bench` above stays waitQueue-only for benchIds/warnings
-    // (unchanged, see manualBenchPool's own comment for why those two must not widen).
-    const pickerBench = manualBenchPool;
-    const rowOpenSlot = openSlot && openSlot.mid === m.id ? { team: openSlot.team, idx: openSlot.idx, rect: openSlot.rect } : null;
-    const setRowOpenSlot = (v) => setOpenSlot(v ? { mid: m.id, ...v } : null);
-    const allowed = allowedNextStatuses(st);
-    // v1.11.29: a "next" row's court might already be occupied by its own playing/paused primary match
-    // (the prep-ahead companion case) — its "▶ เริ่มเกม" button stays disabled until that court frees up,
-    // instead of letting the tap through and relying only on startGame's alert as the only guard.
-    const busyCourt = !done && st === "next" && m.court != null && current.some((c) => c.id !== m.id && c.court === m.court && (c.status === "playing" || c.status === "paused"));
-    // v1.11.36: an upcoming game with no court assigned yet (see addExtraMatch) can't start until one is —
-    // see setMatchStatus's matching guard for the actual enforcement, this only drives the button's look.
-    const noCourt = !done && st === "next" && m.court == null;
-    const canStart = !done && st === "next" && startReady(m) && !busyCourt && !noCourt;
-    // v1.12.13 (Court Dropdown Availability): for a NOT-YET-STARTED ("next") row, the court dropdown must
-    // only ever offer courts genuinely free right now — never one currently occupied by a live
-    // (playing/paused) match, and never one another "next" row has already claimed. This deliberately
-    // removes the old "assign a next row onto a still-playing court to queue behind it" prep-ahead-via-
-    // dropdown capability (v1.11.29/39's `busyCourt`) per explicit request — `busyCourt` itself is left
-    // completely unchanged above (still gates the start button/เกมต่อไป badge exactly as before) since
-    // that's a separate concern from what the SELECT may newly offer. Rows that are NOT "next" (playing/
-    // paused/done) keep the full, unfiltered court list exactly as before (v1.11.39/58 intentionally never
-    // touch a live/historical row's own already-occupied or already-recorded court).
-    const takenCourts = !done && st === "next"
-      ? new Set(current.filter((c) => c.id !== m.id && c.court != null && (c.status === "playing" || c.status === "paused" || c.status === "next")).map((c) => c.court))
-      : new Set();
-    const availableCourtNumbers = Array.from({ length: courtCount }, (_, i) => i + 1).filter((c) => !takenCourts.has(c));
-    // A previously-picked court that has SINCE become occupied/claimed elsewhere (by a match that started,
-    // or another next row grabbing it first) before THIS match started must never be silently kept as if
-    // nothing happened — flagged so the select can show an explicit conflict state instead (spec: "clear it
-    // or show an explicit conflict state according to the existing architecture" — the existing
-    // busyCourt-driven "เกมต่อไป" badge already IS that architecture for the live-occupant case; this
-    // extends the same idea to the select itself, and to the other-next-row case).
-    const courtNowConflicting = !done && st === "next" && m.court != null && takenCourts.has(m.court);
-    const showNoCourtAvailable = !done && st === "next" && m.court == null && availableCourtNumbers.length === 0;
-    // v1.12.1 (Manual Matchmaking — spec sections 1,3,4,5,6): constraint warnings (Lock Pair /
-    // ไม่อยากคู่ / ไม่อยากเจอ) and recent teammate/opponent warnings, both WARNING ONLY — never affect
-    // canStart/startReady below (constraints are warnings, organizer choice stays authoritative).
-    // Scoped to the same !done && st === "next" window the recent-pair warning already used pre-v1.12.1
-    // (manual matchmaking happens before a match starts). computeManualConstraintWarnings/
-    // computeRecentPairWarnings are pure module-level functions (see above, near buildMatch/
-    // rankManualSlotCandidates) — recent-pair detection reuses the EXISTING latestMap.partnerOf/
-    // opponentsOf, no second history algorithm. Each unique warning also carries a highlight color so
-    // the exact player cards it refers to can be visually tied to its text (spec 4) — constraint
-    // warnings always use the existing conflict red; recent-pair warnings cycle through a small
-    // non-red palette so multiple simultaneous relationships stay visually distinguishable.
-    const manualWarnScope = !done && st === "next";
-    const benchIds = new Set(bench.map((p) => p.id)); // same eligibility pool replaceSlot's own auto-fill assist trusts (see spec Case C)
-    const constraintWarnings = (manualWarnScope ? computeManualConstraintWarnings(m.teamA, m.teamB, lockPairs, players, benchIds) : []).map((w) => ({ ...w, color: "#c0392b" }));
-    const RECENT_WARN_COLORS = ["#c2650a", "#7c3aed", "#2f6fb2", "#0f9d58"];
-    const recentWarnings = (manualWarnScope ? computeRecentPairWarnings(m.teamA, m.teamB, latestMap, mode, lockPairs, players) : [])
-      .map((w, i) => ({ ...w, color: RECENT_WARN_COLORS[i % RECENT_WARN_COLORS.length] }));
-    const allManualWarnings = [...constraintWarnings, ...recentWarnings]; // priority order per spec 6
-    // first warning to claim a player wins the highlight color (constraint warnings are listed first,
-    // so they take visual priority over a recent-pair warning touching the same player).
-    const warnHighlight = {};
-    allManualWarnings.forEach((w) => {
-      if (!warnHighlight[w.a]) warnHighlight[w.a] = w.color;
-      if (!warnHighlight[w.b]) warnHighlight[w.b] = w.color;
-    });
-    // v1.11.29: light per-group background tinting (requested: "ช่วงแบ่งสีอ่อนๆพื้นหลัง แยกระหว่าง เกมที่
-    // จบแล้ว เกมที่กำลังเล่น เกมถัดไป") — จบแล้ว/กำลังเล่น(+พักเกม)/เกมต่อไป each get their own pale tint so
-    // the three status groups (already grouped by orderedMatches' sort — see v1.11.25) are easy to tell
-    // apart at a glance while scrolling, without adding any extra header/divider rows to the table.
-    // v1.11.57 (Finished Game Row Visual Indicator): จบแล้ว rows changed from the old neutral gray
-    // ("#f4f6f5") to a very pale red/coral tint — same warm-red family as T.accent ("#ef5a44") — so a
-    // finished game is distinguishable from กำลังเล่น/เกมต่อไป at a glance, purely via this row's own
-    // background (no new badge/icon/text/column/border — see this row's existing borderBottom/borderLeft,
-    // both untouched). กำลังเล่น/พักเกม/เกมต่อไป colors are completely unchanged.
-    const rowBg = done ? "#FFF4F2" : st === "playing" ? "#f3faf7" : st === "paused" ? STATUS.paused.bg : st === "next" ? "#f5f8ff" : "transparent";
-    return (
-      <div key={m.id}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, borderLeft: `3px solid ${!done && m.locked ? T.accent : "transparent"}`, background: rowBg, minWidth: TABLE_MIN_WIDTH }}>
-          <span style={{ width: COLW.no, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>{String(no).padStart(2, "0")}</span>
-          {/* v1.12.13 (Court Dropdown Availability): when a "next" row has no court yet AND every court is
-              currently taken (playing/paused, or already claimed by another next row), show an explicit
-              "รอสนามว่าง" state instead of an oddly-empty selectable dropdown. */}
-          {showNoCourtAvailable ? (
-            <div style={{ width: COLW.court, flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "6px 2px", borderRadius: 8, border: `1px dashed ${T.border}`, background: T.surface2, color: T.muted, textAlign: "center" }}>
-              รอสนามว่าง
-            </div>
-          ) : (
-            <select
-              value={m.court == null ? "" : m.court}
-              onChange={(e) => reassign(m.id, e.target.value === "" ? null : Number(e.target.value))}
-              style={{ width: COLW.court, flexShrink: 0, fontSize: 11.5, fontWeight: 700, padding: "6px 4px", borderRadius: 8, border: `1px solid ${courtNowConflicting ? "#c0392b" : T.border}`, background: T.surface2, color: m.court == null ? T.muted : (courtNowConflicting ? "#c0392b" : T.text) }}
-            >
-              {/* v1.11.36: a freshly-added upcoming game (see addExtraMatch) starts with no court at all —
-                  this placeholder is what actually renders as "เลือกสนาม" until the organizer assigns one.
-                  v1.11.58 (Section 2): also offered on any NOT-YET-STARTED ("next") row even after a court has
-                  already been picked, so the organizer can revert back to "ยังไม่แน่ใจ" from the dropdown
-                  itself instead of it only ever appearing before the first pick. Deliberately excluded for
-                  กำลังเล่น/พักเกม (a physically-occupying match must never lose its court label — see
-                  reassignCourt's v1.11.39 comment) and for finished/history rows (a factual past record, not
-                  a "to be decided" one) — this only ever appears while st === "next". */}
-              {(m.court == null || (!done && st === "next")) && <option value="">เลือกสนาม</option>}
-              {/* v1.12.13: for a "next" row, only genuinely-free courts are offered (see availableCourtNumbers
-                  above); playing/paused/done rows keep the full, unfiltered 1..courtCount list unchanged. */}
-              {(!done && st === "next" ? availableCourtNumbers : Array.from({ length: courtCount }, (_, i) => i + 1)).map((c) => (
-                <option key={c} value={c}>สนาม {courtLabelFor(courtLabels, c)}</option>
-              ))}
-              {/* v1.12.13: the row's OWN currently-selected court is always kept visible even if it has since
-                  become conflicting (see courtNowConflicting) — never silently hidden out from under an
-                  existing selection, per spec's explicit conflict-state requirement. */}
-              {courtNowConflicting && !availableCourtNumbers.includes(m.court) && (
-                <option value={m.court}>สนาม {courtLabelFor(courtLabels, m.court)} (ถูกใช้แล้ว)</option>
-              )}
-            </select>
-          )}
-          <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
-          </div>
-          <div style={{ width: COLW.team, flexShrink: 0 }}>
-            <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
-          </div>
-          <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
-            {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
-                the old single-line text (e.g. "21–23 · 21–19 · 20–17") wrapped unpredictably at this
-                column's narrow fixed width and read as a run-on. scoreLines is null for an unscored match
-                (falls back to the original "ใส่ผล" label, unchanged); otherwise each set renders as its own
-                centered line with a tight line-height so 2-3 sets stay compact instead of ballooning the
-                row's height. Column width (COLW.result) is untouched — splitting into per-set lines only
-                ever needs enough width for ONE score pair ("21–23") at a time, which is narrower than the
-                old joined string ever needed, so this is a pure vertical-layout change with no truncation
-                risk. Purely presentational: sc itself (from matchScoreText, same scores/winner data) is
-                unchanged — no scoring/winner/status logic touched. */}
-            {(() => {
-              const scoreLines = matchScoreParts(m);
-              return (
-                <button
-                  onClick={(e) => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : { mid: m.id, rect: rectOf(e.currentTarget) })}
-                  title="แตะเพื่อใส่ผลการแข่งขัน"
-                  style={{
-                    width: "100%", padding: scoreLines ? "4px 2px" : "8px 0", borderRadius: 8, background: T.surface2,
-                    border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text,
-                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-                    lineHeight: 1.25,
-                  }}
-                >
-                  {scoreLines
-                    ? scoreLines.map((line, i) => <span key={i} style={{ display: "block", textAlign: "center" }}>{line}</span>)
-                    : "ใส่ผล"}
-                </button>
-              );
-            })()}
-            {scoreOpen && scoreOpen.mid === m.id && ReactDOM.createPortal(
-              <>
-                <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
-                <ScorePopover anchorRect={scoreOpen.rect}>
-                  <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} winScore={settings.winScore} deuce={settings.deuce} />
-                </ScorePopover>
-              </>,
-              document.body
-            )}
-          </div>
-          {/* v1.11.55 (Per-Match Shuttle Usage spec C/M): compact per-match "ลูก" (shuttle used) field —
-              default 1 (matchShuttleUsed's read-time fallback), always editable regardless of match status,
-              so the organizer can bump 1→2/1→3 right before or while marking a match "จบแล้ว" without any
-              separate step. Kept intentionally narrow (COLW.shuttle, 1-2 digit width) — mobile table space is
-              already tight and the spec explicitly forbids widening the table meaningfully. Label is just
-              "ลูก", not the full "จำนวนลูกแบดที่ใช้" (too long for a per-row header). */}
-          <div style={{ width: COLW.shuttle, flexShrink: 0 }}>
-            <input
-              type="number"
-              min={0}
-              value={shuttleDraft}
-              onChange={(e) => setShuttleDraft(e.target.value)}
-              onBlur={() => setMatchShuttleUsed(m.id, shuttleDraft)}
-              onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-              onFocus={(e) => e.target.select()}
-              title="จำนวนลูกที่ใช้ในเกมนี้"
-              style={{ width: "100%", padding: "7px 2px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text, textAlign: "center" }}
-            />
-          </div>
-          {!done && st === "next" && busyCourt ? (
-            // v1.11.30: a prep-ahead companion whose court is still busy (primary match still playing/
-            // paused) shows a plain "เกมต่อไป" badge — same as before v1.11.29 — NOT the "เริ่มเกม" button.
-            // The button only appears once that court actually frees up (see the branch below), per explicit
-            // request: "ถ้าเป็นคิวที่สนามนั้นยังแข่งไม่เสร็จ ให้แสดงสถานะเป็นเกมถัดไปแบบเดิม ไม่สนามนั้นเล่น
-            // จบแล้วจะขึ้นเป็นเริ่มเกม".
-            <div style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS.next.color, background: STATUS.next.bg }}>
-              {STATUS.next.label}
-            </div>
-          ) : !done && st === "next" ? (
-            // v1.11.29: starting a queued match (once its court is actually free) is a dedicated "▶ เริ่ม
-            // เกม" button instead of picking a status off the สถานะ dropdown — a queued row has nothing
-            // else it can validly become via the dropdown anyway (see allowedNextStatuses), so this replaces
-            // it in the same column/width.
-            <button
-              onClick={() => setMatchStatus(m.id, "playing")}
-              disabled={!canStart}
-              title={!startReady(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : noCourt ? "กรุณาเลือกสนามก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
-              style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, color: canStart ? STATUS.playing.color : T.muted, background: canStart ? STATUS.playing.bg : T.surface2, opacity: canStart ? 1 : 0.6 }}
-            >
-              <Play size={12} /> เริ่มเกม
-            </button>
-          ) : (
-            // v1.11.31: the closed box must show the row's CURRENT STATUS as a noun ("กำลังเล่น"/"จบแล้ว"/
-            // "พักเกม" — STATUS[st].label), while the opened list must still offer the 3 ACTION-labeled
-            // choices from v1.11.30 ("เริ่มเกม"/"พักเกม"/"จบเกม" — STATUS_OPTIONS). A native <select> can't
-            // show different text in its closed box vs. its option list for the very same selected value, so
-            // this renders a purely visual badge (STATUS[st].label) and stacks the real <select> on top of it
-            // with opacity 0 — taps land on the invisible select (which still opens the OS's native picker
-            // showing the real <option> labels/checkmark), while what the user actually SEES before tapping
-            // is the visual badge underneath. onChange/value/disabled logic is unchanged from before.
-            <div style={{ position: "relative", width: COLW.status, flexShrink: 0 }}>
-              <div style={{ width: "100%", fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS[st].color, background: STATUS[st].bg, display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
-                {STATUS[st].label} <ChevronDown size={11} />
-              </div>
-              <select
-                value={st}
-                onChange={(e) => setMatchStatus(m.id, e.target.value)}
-                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, border: "none", padding: 0, margin: 0 }}
-              >
-                {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{o.label}</option>)}
-              </select>
-            </div>
-          )}
-          <div style={{ width: COLW.actions, flexShrink: 0, display: "flex", justifyContent: "center", gap: 2 }}>
-            {/* lock + จัดใหม่ (existing pre-1.11.24 systems, explicitly preserved) only ever applied to a
-                not-yet-started "next" match — locking/reshuffling a live or finished game doesn't apply,
-                so both icons live together here exactly as before, just moved from the old button row. */}
-            {!done && st === "next" && (
-              <>
-                <button onClick={() => toggleCurrentLock(m.id)} title={m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)"} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.accent : T.muted }}>
-                  {m.locked ? <Lock size={14} /> : <Unlock size={14} />}
-                </button>
-                <button onClick={() => regenCourt(m.id)} disabled={m.locked} title="สุ่มผู้เล่นให้อัตโนมัติ (ใช้ได้ทั้งโหมดสุ่ม/เลือกเอง)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.muted, opacity: m.locked ? 0.5 : 1 }}>
-                  <Shuffle size={14} />
-                </button>
-                {/* v1.11.36: cancel/delete this upcoming game entirely (see deleteMatch) — needed now that a
-                    game can be created before a court is chosen, so the organizer can back out of one they
-                    no longer want without leaving an empty court-less row sitting in the table. */}
-                <button onClick={() => deleteMatch(m.id)} disabled={m.locked} title="ลบเกมนี้ (ผู้เล่นในเกมนี้จะกลับไปพร้อมเล่นทันที)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.accent, opacity: m.locked ? 0.5 : 1 }}>
-                  <Trash2 size={14} />
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-        {/* v1.11.33: explicit request to remove this repeated red hint line — with "+ เพิ่มแมชใหม่" (v1.11.32)
-            now able to add several empty "เกมต่อไป" rows at once, this text appeared under every one of them
-            and was noisy (see the screenshot: 3+ copies of the same line stacked down the table). The
-            disabled "▶ เริ่มเกม" button and its title="เลือกผู้เล่นให้ครบก่อนเริ่มเกม" tooltip already convey
-            the same thing on tap/hover, so nothing is lost — this was purely the extra always-visible line. */}
-        {allManualWarnings.length > 0 && (
-          // v1.12.1 (spec sections 1/3/4/5/6 — replaces the old generic "ทีม A/ทีม B" text): Lock Pair /
-          // ไม่อยากคู่ / ไม่อยากเจอ constraint warnings first (higher priority per spec 6), then recent
-          // teammate/opponent warnings — every line now names the exact players involved (spec 3.1) and
-          // its color matches the highlighted player cards in TeamSide above (spec 4). WARNING ONLY,
-          // never blocks selection (see canStart/startReady — this has no effect on either).
-          <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, display: "flex", flexDirection: "column", gap: 3 }}>
-            {constraintWarnings.map((w) => (
-              <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
-                {w.kind === "lock" ? "⚠️ ล็อคคู่ — " : "⚠️ ข้อจำกัดการจับคู่ — "}{w.text}
-              </div>
-            ))}
-            {recentWarnings.map((w) => (
-              <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
-                {w.kind === "teammate" ? "⚠️ เพิ่งคู่กัน — " : "⚠️ เจอกันเกมล่าสุด — "}{w.text} (ยังเลือกคู่นี้ได้ตามปกติ)
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    );
-  };
+  // v1.12.18: MatchRow moved to a top-level function declaration (see just above `function SessionTab`)
+  // so it has a stable identity across re-renders instead of being recreated as a new closure on every
+  // SessionTab render — see that function's own header comment for the full root-cause explanation.
 
   // an unoccupied court — same "ว่าง" + "จัดเกม" placeholder as before, now a table row (no Match No yet,
   // since no match record exists there until fillCourt creates one). Kept at the same min-width as the
@@ -10560,8 +10589,25 @@ function SessionTab(props) {
             <History size={13} style={{ verticalAlign: -2, marginRight: 4 }} /> แสดงแมตช์ที่จบแล้วเพิ่มเติม ({hiddenFinishedCount})
           </button>
         )}
-        {finishedShown.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
-        {liveOrdered.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} />)}
+        {/* v1.12.18: MatchRow is now a stable top-level component (see its own definition above SessionTab)
+            — every value it used to reach via closure is threaded through explicitly here instead. Built
+            once and spread into both call sites so the two lists below stay a single source of truth for
+            "everything a row needs" rather than two independently-maintained prop lists that could drift. */}
+        {(() => {
+          const matchRowProps = {
+            reassignHistoryCourt, reassignCourt, replaceHistorySlot, replaceSlot, waitQueue, manualBenchPool,
+            openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, mode, courtLabels,
+            getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin, clearScore,
+            settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
+            COLW, TABLE_MIN_WIDTH,
+          };
+          return (
+            <>
+              {finishedShown.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} {...matchRowProps} />)}
+              {liveOrdered.map(({ m, no, done }) => <MatchRow key={m.id} m={m} no={no} done={done} {...matchRowProps} />)}
+            </>
+          );
+        })()}
         {settings.pairingMode !== "manual" && empties.map(EmptyRow)}
         {/* v1.11.32: "+ เพิ่มแมชใหม่" — a way to add an extra "เกมต่อไป" row to hand-pick, on demand.
             v1.11.37: this button is now the ONLY way a new upcoming row gets created; see addExtraMatch above.
@@ -10926,7 +10972,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
               const inFixed = fixedPairs.some((pair) => pair.includes(p.id));
               const sel = selectedIds.includes(p.id);
               return (
-                <div key={p.id} onClick={() => (teamEntryMode === "fixedTeam" ? (sel && tapForPair(p.id)) : toggleSelect(p.id))} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, cursor: "pointer", opacity: inFixed ? 0.4 : 1, background: pendingPick === p.id ? "#e2f5ec" : "none" }}>
+                <div key={p.id} className="tap-press" onClick={() => (teamEntryMode === "fixedTeam" ? (sel && tapForPair(p.id)) : toggleSelect(p.id))} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, cursor: "pointer", opacity: inFixed ? 0.4 : 1, background: pendingPick === p.id ? "#e2f5ec" : "none" }}>
                   <input type="checkbox" checked={sel || inFixed} disabled={inFixed} onChange={() => toggleSelect(p.id)} onClick={(e) => e.stopPropagation()} />
                   <span style={{ fontSize: 13.5, fontWeight: 700 }}>{p.name}</span>
                   <span style={{ fontSize: 11, color: T.muted, marginLeft: "auto" }}>{p.id.startsWith("guest-") ? "Guest" : displayLevelFor(p.skillIndex, settings)}</span>
