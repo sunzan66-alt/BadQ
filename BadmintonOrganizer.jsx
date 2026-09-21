@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.18";
+const APP_VERSION = "1.12.19";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -5109,7 +5109,11 @@ export default function App() {
   // Returns true iff a newer save was found and applied.
   const refreshFromStorageIfNewer = async (announce) => {
     try {
-      const r = await window.storage.get("bg-v11");
+      // v1.12.19 (P0 performance regression fix): getPrimaryFirst (not the full self-healing get()) — this
+      // is a pure "is storage ahead of what I know" comparison read that runs on EVERY ordinary state
+      // change; it never needed get()'s extra mirror-read/compare/rewrite (that exists for BOOT-time
+      // primary/mirror reconciliation, handled separately). See getPrimaryFirst's own comment in index.html.
+      const r = await window.storage.getPrimaryFirst("bg-v11");
       if (!r?.value) return false;
       const s = JSON.parse(r.value);
       const storedSavedAt = typeof s.savedAt === "number" ? s.savedAt : 0;
@@ -5436,10 +5440,19 @@ export default function App() {
         // risk writing stale data over the newer run's write later (see saveGenerationRef comment).
         if (saveGenerationRef.current !== mySaveGeneration) return;
         const savedAt = Date.now();
-        try { window.__pushDiag && window.__pushDiag("beforeStorageSerialize", { gen: mySaveGeneration }); } catch (e) {}
+        // v1.12.19 (P0 performance regression fix): the "beforeStorageSerialize"/"afterStorageSerialize"
+        // sub-phase pushDiag markers that used to sit around this stringify were temporary instrumentation
+        // from the original v1.11.47/48 real-device investigation into a specific end-session data-loss bug
+        // (long since fixed and covered by its own regression tests). Each pushDiag call does a full
+        // synchronous localStorage read+parse+append+stringify+write of its own small diagnostic log — cheap
+        // individually, but these fired unconditionally on EVERY ordinary save, forever, long after the
+        // investigation that needed this level of granularity concluded. The start ("afterReactCommit") and
+        // end ("afterIDBWrite", a few lines below) markers alone still fully answer "did a save happen, did
+        // it reach IndexedDB, did it succeed" — the only things anything still reads this log for — so the
+        // redundant middle markers are removed rather than kept "just in case." See "beforeIDBWrite"'s own
+        // removal below for the third one trimmed from this same save cycle.
         // v1.11.76: pageInstanceId tags every "bg-v11" write — see the same note on applyUpdateNow's write.
         const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
-        try { window.__pushDiag && window.__pushDiag("afterStorageSerialize", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
         // newer run to have started in the meantime (this is the exact check that closes the race that
@@ -5458,7 +5471,11 @@ export default function App() {
         // blocks a tab's own sequential writes) and is absent-safe (requirement 7: no pageInstanceId on
         // disk -> skip, exactly the pre-v1.11.76 behavior).
         try {
-          const preWriteRead = await window.storage.get("bg-v11");
+          // v1.12.19 (P0 performance regression fix): getPrimaryFirst here too — same reasoning as
+          // refreshFromStorageIfNewer above. This guard only ever compares pageInstanceId/ids against
+          // whatever PRIMARY currently holds (exactly what a concurrent instance's own set() call would
+          // have just written there first); it never relied on get()'s mirror self-heal side effects.
+          const preWriteRead = await window.storage.getPrimaryFirst("bg-v11");
           // v1.11.44 pattern applied again here: this guard's own read is itself async, which reopens the
           // exact "a newer run started while we awaited" window the checks above already closed once — so
           // re-check the generation the instant the await resolves, before evaluating/acting on the result.
@@ -5486,9 +5503,11 @@ export default function App() {
             }
           }
         } catch (e) {}
-        try { window.__pushDiag && window.__pushDiag("beforeIDBWrite", { gen: mySaveGeneration, jsonLen: json.length }); } catch (e) {}
+        // v1.12.19: "beforeIDBWrite" marker removed — see the removal note above "afterStorageSerialize";
+        // "afterIDBWrite" just below (with jsonLen + primaryOk/mirrorOk) still fully covers "did the write
+        // happen and did it succeed", which is the only thing this log is still actually used to answer.
         const result = await window.storage.set("bg-v11", json);
-        try { window.__pushDiag && window.__pushDiag("afterIDBWrite", { gen: mySaveGeneration, primaryOk: result?.primaryOk, mirrorOk: result?.mirrorOk }); } catch (e) {}
+        try { window.__pushDiag && window.__pushDiag("afterIDBWrite", { gen: mySaveGeneration, jsonLen: json.length, primaryOk: result?.primaryOk, mirrorOk: result?.mirrorOk }); } catch (e) {}
         lastKnownSavedAtRef.current = savedAt;
         // Last Known Good: only ever updated from HERE, i.e. only once bootStatus has already resolved
         // to a trustworthy state — so a failed/interrupted boot can never overwrite a good LKG with an

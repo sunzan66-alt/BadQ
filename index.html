@@ -266,6 +266,31 @@
       }
       return { value: null, source: null };
     },
+    // v1.12.19 (P0 performance regression fix): a lean read for the app's two MID-SESSION comparison
+    // reads (refreshFromStorageIfNewer's staleness check, and the pre-write cross-instance guard in the
+    // main save effect) — see BadmintonOrganizer.jsx. Both call sites only ever need "what does PRIMARY
+    // currently hold" to compare savedAt/pageInstanceId/ids against; neither needs — and neither ever
+    // used — the mirror self-heal side effects get() performs above (reading the full mirror string,
+    // comparing it against primary, and conditionally rewriting one side). That self-heal logic exists to
+    // reconcile primary/mirror divergence found at BOOT (a real scenario: a crash or partial write can
+    // leave the two sides disagreeing) — boot already gets it via getBothRaw()+the recovery waterfall,
+    // completely independently of this function. Mid-session, every write goes through window.storage.set
+    // above, which always writes primary THEN mirror from the exact same string — so the two are already
+    // kept in lockstep by construction, and get()'s extra mirror-read + full-string-compare + conditional
+    // rewrite was doing genuinely redundant work on every single ordinary save, at the full cost of the
+    // ENTIRE state string (which scales with embedded player photos — confirmed via profiling to run
+    // several full-payload string reads/compares per ordinary tap, a measurable contributor to sluggish
+    // interaction on slower devices). This still falls back to the mirror if primary is empty/unavailable
+    // (matching get()'s own fallback), preserving the exact same "don't miss a value" guarantee — it only
+    // skips the extra compare-and-rewrite step, never the read itself.
+    async getPrimaryFirst(k){
+      var idbVal = null;
+      try { idbVal = await idbGet(k); } catch(e) { idbVal = null; }
+      if (idbVal != null) return { value: idbVal, source: "primary" };
+      var mirrorVal = null;
+      try { mirrorVal = localStorage.getItem("bg:"+k); } catch(e) { mirrorVal = null; }
+      return { value: mirrorVal, source: mirrorVal != null ? "mirror" : null };
+    },
     // Diagnostic dual-read: returns BOTH backends independently, with no self-heal side effects. Used
     // when the app needs to know if the two disagree (e.g. primary is present but fails JSON.parse —
     // the normal get() above would never even try the mirror in that case, since it stops as soon as
@@ -406,7 +431,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.18";
+      var CURRENT_VERSION = "1.12.19";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -791,7 +816,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.18";
+const APP_VERSION = "1.12.19";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -8145,7 +8170,11 @@ function App() {
   // Returns true iff a newer save was found and applied.
   const refreshFromStorageIfNewer = async announce => {
     try {
-      const r = await window.storage.get("bg-v11");
+      // v1.12.19 (P0 performance regression fix): getPrimaryFirst (not the full self-healing get()) — this
+      // is a pure "is storage ahead of what I know" comparison read that runs on EVERY ordinary state
+      // change; it never needed get()'s extra mirror-read/compare/rewrite (that exists for BOOT-time
+      // primary/mirror reconciliation, handled separately). See getPrimaryFirst's own comment in index.html.
+      const r = await window.storage.getPrimaryFirst("bg-v11");
       if (!r?.value) return false;
       const s = JSON.parse(r.value);
       const storedSavedAt = typeof s.savedAt === "number" ? s.savedAt : 0;
@@ -8556,11 +8585,17 @@ function App() {
         // risk writing stale data over the newer run's write later (see saveGenerationRef comment).
         if (saveGenerationRef.current !== mySaveGeneration) return;
         const savedAt = Date.now();
-        try {
-          window.__pushDiag && window.__pushDiag("beforeStorageSerialize", {
-            gen: mySaveGeneration
-          });
-        } catch (e) {}
+        // v1.12.19 (P0 performance regression fix): the "beforeStorageSerialize"/"afterStorageSerialize"
+        // sub-phase pushDiag markers that used to sit around this stringify were temporary instrumentation
+        // from the original v1.11.47/48 real-device investigation into a specific end-session data-loss bug
+        // (long since fixed and covered by its own regression tests). Each pushDiag call does a full
+        // synchronous localStorage read+parse+append+stringify+write of its own small diagnostic log — cheap
+        // individually, but these fired unconditionally on EVERY ordinary save, forever, long after the
+        // investigation that needed this level of granularity concluded. The start ("afterReactCommit") and
+        // end ("afterIDBWrite", a few lines below) markers alone still fully answer "did a save happen, did
+        // it reach IndexedDB, did it succeed" — the only things anything still reads this log for — so the
+        // redundant middle markers are removed rather than kept "just in case." See "beforeIDBWrite"'s own
+        // removal below for the third one trimmed from this same save cycle.
         // v1.11.76: pageInstanceId tags every "bg-v11" write — see the same note on applyUpdateNow's write.
         const json = JSON.stringify({
           players,
@@ -8588,12 +8623,6 @@ function App() {
           savedAt,
           pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null
         });
-        try {
-          window.__pushDiag && window.__pushDiag("afterStorageSerialize", {
-            gen: mySaveGeneration,
-            jsonLen: json.length
-          });
-        } catch (e) {}
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
         // newer run to have started in the meantime (this is the exact check that closes the race that
@@ -8612,7 +8641,11 @@ function App() {
         // blocks a tab's own sequential writes) and is absent-safe (requirement 7: no pageInstanceId on
         // disk -> skip, exactly the pre-v1.11.76 behavior).
         try {
-          const preWriteRead = await window.storage.get("bg-v11");
+          // v1.12.19 (P0 performance regression fix): getPrimaryFirst here too — same reasoning as
+          // refreshFromStorageIfNewer above. This guard only ever compares pageInstanceId/ids against
+          // whatever PRIMARY currently holds (exactly what a concurrent instance's own set() call would
+          // have just written there first); it never relied on get()'s mirror self-heal side effects.
+          const preWriteRead = await window.storage.getPrimaryFirst("bg-v11");
           // v1.11.44 pattern applied again here: this guard's own read is itself async, which reopens the
           // exact "a newer run started while we awaited" window the checks above already closed once — so
           // re-check the generation the instant the await resolves, before evaluating/acting on the result.
@@ -8642,16 +8675,14 @@ function App() {
             }
           }
         } catch (e) {}
-        try {
-          window.__pushDiag && window.__pushDiag("beforeIDBWrite", {
-            gen: mySaveGeneration,
-            jsonLen: json.length
-          });
-        } catch (e) {}
+        // v1.12.19: "beforeIDBWrite" marker removed — see the removal note above "afterStorageSerialize";
+        // "afterIDBWrite" just below (with jsonLen + primaryOk/mirrorOk) still fully covers "did the write
+        // happen and did it succeed", which is the only thing this log is still actually used to answer.
         const result = await window.storage.set("bg-v11", json);
         try {
           window.__pushDiag && window.__pushDiag("afterIDBWrite", {
             gen: mySaveGeneration,
+            jsonLen: json.length,
             primaryOk: result?.primaryOk,
             mirrorOk: result?.mirrorOk
           });
