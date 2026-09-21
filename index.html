@@ -535,7 +535,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.21";
+      var CURRENT_VERSION = "1.12.22";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -920,7 +920,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.21";
+const APP_VERSION = "1.12.22";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -26772,6 +26772,16 @@ function WinLoseSelect({
 function scorePairIssue(aNum, bNum, winScore, deuceOn) {
   if (aNum != null && aNum < 0 || bNum != null && bNum < 0) return "ห้ามติดลบ";
   if (aNum == null || bNum == null) return null; // one side still empty -- nothing to compare yet
+  // v1.12.22 (Winning Score Minimum): ADDED ON TOP of the existing v1.11.80 checks below (none removed or
+  // altered) -- a set is never valid/complete unless at least one side has actually reached the configured
+  // target score (เล่นถึง), regardless of deuce being on or off and regardless of which side is picked as
+  // winner. e.g. target 21, score 15-17 must be blocked even though 17 > 15 picks a "winner" -- neither side
+  // reached 21. This runs BEFORE the deuce/non-deuce rules below, which only ever govern scores that have
+  // already cleared this bar. Both call sites share this one function (the commit-on-unmount persistence
+  // gate and the live on-screen warning), and each set of a multi-set match is checked independently since
+  // ScoreEditor calls this once per set row.
+  const maxScore = Math.max(aNum, bNum);
+  if (maxScore < winScore) return `คะแนนยังไม่ถึงเกณฑ์ชนะ เกมนี้กำหนดชนะที่ ${winScore} คะแนน แต่คะแนนสูงสุดปัจจุบันคือ ${maxScore} กรุณาตรวจสอบคะแนนอีกครั้ง`;
   if (!deuceOn) return aNum > winScore || bNum > winScore ? `เกิน ${winScore} แต้ม` : null;
   const hi = Math.max(aNum, bNum),
     lo = Math.min(aNum, bNum);

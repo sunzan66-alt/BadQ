@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.21";
+const APP_VERSION = "1.12.22";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -13191,6 +13191,16 @@ function WinLoseSelect({ state, onPick, locked }) {
 function scorePairIssue(aNum, bNum, winScore, deuceOn) {
   if ((aNum != null && aNum < 0) || (bNum != null && bNum < 0)) return "ห้ามติดลบ";
   if (aNum == null || bNum == null) return null; // one side still empty -- nothing to compare yet
+  // v1.12.22 (Winning Score Minimum): ADDED ON TOP of the existing v1.11.80 checks below (none removed or
+  // altered) -- a set is never valid/complete unless at least one side has actually reached the configured
+  // target score (เล่นถึง), regardless of deuce being on or off and regardless of which side is picked as
+  // winner. e.g. target 21, score 15-17 must be blocked even though 17 > 15 picks a "winner" -- neither side
+  // reached 21. This runs BEFORE the deuce/non-deuce rules below, which only ever govern scores that have
+  // already cleared this bar. Both call sites share this one function (the commit-on-unmount persistence
+  // gate and the live on-screen warning), and each set of a multi-set match is checked independently since
+  // ScoreEditor calls this once per set row.
+  const maxScore = Math.max(aNum, bNum);
+  if (maxScore < winScore) return `คะแนนยังไม่ถึงเกณฑ์ชนะ เกมนี้กำหนดชนะที่ ${winScore} คะแนน แต่คะแนนสูงสุดปัจจุบันคือ ${maxScore} กรุณาตรวจสอบคะแนนอีกครั้ง`;
   if (!deuceOn) return aNum > winScore || bNum > winScore ? `เกิน ${winScore} แต้ม` : null;
   const hi = Math.max(aNum, bNum), lo = Math.min(aNum, bNum);
   if (lo < winScore - 1) return hi > winScore ? `เกิน ${winScore} แต้ม (ยังไม่ดิว)` : null; // deuce not reached yet
