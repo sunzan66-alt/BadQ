@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.23";
+const APP_VERSION = "1.12.24";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -4119,6 +4119,59 @@ function wouldRegressProgress(liveState, incomingData) {
   const playerRegression = isSuspiciousPlayerLoss(incomingData, liveState);
   return historyRegression || playerRegression;
 }
+// v1.12.24 (P0 iPad Force-Close Partial Progress Rollback): a scoped, BOOT-safe counterpart to
+// wouldRegressProgress just above. Deliberately narrower than that function's blanket "any id missing from
+// a monotonic archive is a regression" rule — that rule is safe at RUNTIME (wouldRegressProgress's existing
+// call sites only ever compare against another tab/instance that was live moments ago), but is too strict
+// for cold BOOT, where the "other" candidate can be a Last-Known-Good or Auto-Backup snapshot from far
+// earlier — a session or Tournament id present there and absent from the current candidate is at least as
+// likely to be a legitimate LATER deletion (deleteSessionHistory has no intentional-delete marker, unlike
+// players' lastIntentionalPlayerWipeAt) as it is a genuine regression. Spec-mandated Test H ("intentional
+// legitimate delete must not be resurrected") is exactly this risk, so this function only ever flags
+// something scoped to the CANDIDATE'S OWN currently-active session/Tournament — never an entity the
+// candidate doesn't reference as active at all, which is precisely what keeps an intentional deletion safe:
+//   1. "Ended session/Tournament dominance": `candidate`'s own live session (or activeTournament) id is
+//      proven already ended/completed elsewhere (its id appears in `other`'s sessionHistory/
+//      tournamentHistory) while `candidate` still shows it as live — this is the exact real-device bug
+//      this version fixes (a stale Primary/Mirror stuck mid-session while LKG/Auto-Backup already has it
+//      archived with more matches).
+//   2. Same still-open session on both sides: `other` proves more live match progress happened in that
+//      SAME active session than `candidate` knows about (covers ordinary staleness even before any
+//      archiving/End-Session occurs, e.g. ended up comparing a stale mid-session Mirror against a newer
+//      mid-session Auto-Backup).
+// Plus the existing, already wipe-marker-protected player-collapse check (isSuspiciousPlayerLoss), reused
+// as-is since it already has exactly this kind of intentional-action carve-out.
+function bootCandidateLosesProgress(candidate, other) {
+  if (!candidate || !other) return false;
+  if (isSuspiciousPlayerLoss(candidate, other)) return true;
+  const idsOf = (arr) => new Set((Array.isArray(arr) ? arr : []).map((x) => x && x.id).filter(Boolean));
+  const archiveMap = (state) => new Map(
+    (Array.isArray(state && state.sessionHistory) ? state.sessionHistory : [])
+      .filter((s) => s && s.id)
+      .map((s) => [s.id, idsOf(s.matches)])
+  );
+  const otherSessionArchive = archiveMap(other);
+  const candSessionArchive = archiveMap(candidate);
+  const activeSid = candidate.session && candidate.session.id;
+  if (activeSid && otherSessionArchive.has(activeSid)) {
+    const otherIds = otherSessionArchive.get(activeSid);
+    const candIds = candSessionArchive.get(activeSid);
+    if (!candIds) return true; // candidate still treats an already-ended session as live -- resurrection
+    for (const id of otherIds) if (!candIds.has(id)) return true; // candidate's own archive of it is incomplete
+  }
+  if (activeSid && other.session && other.session.id === activeSid) {
+    const otherLive = idsOf([...(other.history || []), ...(other.current || [])]);
+    const candLive = idsOf([...(candidate.history || []), ...(candidate.current || [])]);
+    for (const id of otherLive) if (!candLive.has(id)) return true;
+  }
+  const activeTid = candidate.activeTournament && candidate.activeTournament.id;
+  if (activeTid) {
+    const otherTHas = Array.isArray(other.tournamentHistory) && other.tournamentHistory.some((t) => t && t.id === activeTid);
+    const candTHas = Array.isArray(candidate.tournamentHistory) && candidate.tournamentHistory.some((t) => t && t.id === activeTid);
+    if (otherTHas && !candTHas) return true; // candidate still treats an already-completed Tournament as active
+  }
+  return false;
+}
 // v1.11.0 PERSISTENCE REWRITE — recovery helpers shared by the boot-sequence waterfall (primary /
 // mirror / Last-Known-Good / Auto-Backup). Both funnel through the EXACT SAME migrate+validate pipeline
 // already used for manual backup-file restores above (migrateBackupData/validateBackupIntegrity),
@@ -4951,6 +5004,25 @@ export default function App() {
   // every actual write and silently no-ops if a newer run has since started — closing the exact
   // check-then-act window that let a slow, stale run clobber a fast, correct one.
   const saveGenerationRef = useRef(0);
+  // v1.12.24 (P0 iPad Force-Close Partial Progress Rollback — SAVE-GENERATION STARVATION FIX): confirmed by
+  // reading the save effect below that saveGenerationRef's own existing comment ("no cancellation of a
+  // still-in-flight PREVIOUS run") has a sharper edge than previously documented: a superseded run bails
+  // out at its OWN generation-check, but nothing guarantees the run that superseded it will itself survive
+  // long enough to reach the actual `window.storage.set` write before yet another commit supersedes IT —
+  // under genuinely rapid, back-to-back state changes (e.g. several courts finishing within moments of each
+  // other), every generation in the burst can in principle bail before ANY of them completes a primary
+  // write, leaving IndexedDB silently stuck on whatever generation last managed to win a clean run. This is
+  // the leading suspect for the reported real-iPad "stuck at match 9" failure (Phase 5 of this version's own
+  // investigation) — not just a boot-recovery selection gap. Fix (see the save effect's own comment for the
+  // mechanism): a short debounce before starting the expensive IO chain means only the generation still
+  // current once a burst actually pauses ever attempts real work, so superseded generations bail for free
+  // (no wasted/overlapping IO) instead of racing each other. `highPrioritySaveGenerationRef` is the escape
+  // hatch for the ONE transition that must never wait out that debounce: endSession() stamps it `true`
+  // synchronously (same pattern as lastEndedSessionIdRef below) so the very next save-effect run — which
+  // will be the one carrying the just-archived, just-ended session — skips the debounce entirely and starts
+  // its durability-critical write immediately (see "END SESSION DURABILITY BOUNDARY" spec section).
+  const highPrioritySaveRef = useRef(false);
+  const SAVE_DEBOUNCE_MS = 260;
   // v1.11.58: guards endSession() against being invoked twice for the same session (e.g. a fast real
   // double-tap on "จบก๊วน" before React removes the confirm dialog). Keyed on session.id rather than a
   // plain boolean so it correctly blocks a second call sharing the same stale `session` closure regardless
@@ -5241,6 +5313,9 @@ export default function App() {
       // v1.12.13 (P0 offline persistence hotfix): diagnostics for the new Step 5 player-loss-guard below —
       // non-PII (source label + boolean only), surfaced via pushBootLog same as every other boot diagnostic.
       let playerLossGuardTriggered = false, playerLossGuardRejectedSource = null;
+      // v1.12.24: diagnostics for the new Step 6 business-progress regression guard below — same non-PII
+      // shape (source label + boolean only) as the player-loss-guard diagnostics just above.
+      let businessProgressGuardTriggered = false, businessProgressGuardRejectedSource = null;
       let corrupted = false; // legacy flag — kept in sync so the existing recovery banner/tests (which key off `loadCorrupted`) keep working unchanged; true exactly when bootStatus lands on "recovery-required"
 
       let mirrorValid = false, chosenReason = null, primarySavedAtDiag = null, mirrorSavedAtDiag = null;
@@ -5363,6 +5438,84 @@ export default function App() {
             }
           } catch (e) { storageErrors.push("player-loss-guard check: " + (e?.message || e)); }
         }
+
+        // Step 6 (v1.12.24, P0 iPad FORCE-CLOSE PARTIAL PROGRESS ROLLBACK): everything above only ever
+        // falls back to Last-Known-Good/Auto-Backup when NEITHER primary nor mirror produced ANY valid
+        // candidate at all (Steps 3-4), or when the winner has zero players (Step 5) — it never asks
+        // "does a source we're NOT using actually prove MORE completed business progress than the one we
+        // picked?" A structurally-valid Primary/Mirror stuck at an OLDER point (e.g. match 9, active
+        // session) still wins outright even when Last-Known-Good or Auto-Backup independently proves the
+        // session reached match 18 and was already archived via "จบก๊วน" — exactly the real-device report
+        // this version fixes (see also the save-generation debounce fix elsewhere in this version, which
+        // addresses why that divergence could happen in the first place; this step is the second, defense-
+        // in-depth layer for whenever it does). Applies the EXACT SAME "reuse the monotonic-archive-id
+        // principle already enforced at RUNTIME" idea the spec asked for, via bootCandidateLosesProgress
+        // (declared next to wouldRegressProgress above) — a pairwise check across every independently-valid
+        // candidate this boot found, deliberately SCOPED to the candidate's own currently-active session/
+        // Tournament (see that function's own header comment for why: wouldRegressProgress's blanket "any
+        // missing archive id" rule is safe at runtime but too strict at boot, where a missing id in an old
+        // LKG/Auto-Backup snapshot is at least as likely to be a legitimate later deletion as a real
+        // regression — spec Test H). This still naturally covers "ended session dominance" with no bespoke
+        // "is this ended?" flag: an ended session's id lives in sessionHistory, so a candidate that still
+        // shows it as the live, un-archived session is — by construction — missing that id from its OWN
+        // sessionHistory. Deliberately does NOT prefer "the biggest arrays" or "the newest savedAt" (Phase 4
+        // requirement): it only ever overrides the existing pick when a SPECIFIC other candidate
+        // demonstrably contains progress on the candidate's own active session/Tournament that the chosen
+        // one lacks, exactly like the existing player-loss-guard above overrides only on a specific,
+        // demonstrable zero-player regression.
+        if (finalState) {
+          try {
+            const guardStartSource = recoverySource;
+            // Reuse whatever this boot cycle already fetched/validated where possible; only re-fetch
+            // LKG/Auto-Backup if this boot's earlier steps skipped them (because primary/mirror already
+            // produced a candidate before Steps 3-4 ever ran).
+            let lkgCandidateForGuard = recoverySource === "last-known-good" ? finalState : null;
+            if (!lkgCandidateForGuard) {
+              try {
+                const lkgR3 = await window.storage.get(LKG_KEY);
+                if (lkgR3?.value) lkgCandidateForGuard = tryRecoverFlatState(lkgR3.value);
+              } catch (e) {}
+            }
+            let autoBackupCandidateForGuard = recoverySource === "auto-backup" ? finalState : null;
+            if (!autoBackupCandidateForGuard) {
+              try {
+                const abR3 = await window.storage.get(AUTO_BACKUP_KEY);
+                const list3 = abR3?.value ? JSON.parse(abR3.value) : [];
+                if (Array.isArray(list3)) {
+                  for (const entry of list3) {
+                    const rec = tryRecoverFromAutoBackupEntry(entry);
+                    if (rec) { autoBackupCandidateForGuard = rec; break; } // newest-first -> first valid entry is freshest
+                  }
+                }
+              } catch (e) {}
+            }
+            const guardCandidates = [
+              { source: "primary", state: primaryCandidate },
+              { source: "mirror", state: mirrorCandidate },
+              { source: "last-known-good", state: lkgCandidateForGuard },
+              { source: "auto-backup", state: autoBackupCandidateForGuard },
+            ].filter((c) => c.state);
+            let guardChosenSource = recoverySource;
+            // Bounded loop (at most one pass per candidate) — settles on whichever candidate no OTHER
+            // candidate demonstrably out-progresses; if genuinely conflicting divergent evidence exists
+            // (extremely unlikely with these 4 sources, which are all written by the SAME device), this
+            // simply stops rather than oscillating forever.
+            for (let iter = 0; iter < guardCandidates.length + 1; iter++) {
+              const dominator = guardCandidates.find((c) => c.source !== guardChosenSource && bootCandidateLosesProgress(finalState, c.state));
+              if (!dominator) break;
+              businessProgressGuardTriggered = true;
+              businessProgressGuardRejectedSource = guardChosenSource;
+              finalState = dominator.state;
+              guardChosenSource = dominator.source;
+            }
+            if (guardChosenSource !== guardStartSource) {
+              recoverySource = "progress-regression-guard";
+              recoveryAction = "restored-from-progress-regression-guard";
+              chosenReason = "progress-regression-guard:" + guardChosenSource;
+              storageErrors.push("progress-regression-guard: rejected " + guardStartSource + " in favor of " + guardChosenSource + " (would have discarded proven business progress)");
+            }
+          } catch (e) { storageErrors.push("progress-regression-guard check: " + (e?.message || e)); }
+        }
       } catch (e) { storageErrors.push("waterfall: " + (e?.message || e)); }
 
       let bootStatusResult, recoveredPlayerCount = 0, recoveredHistoryCount = 0, loadedSavedAt = null;
@@ -5446,6 +5599,7 @@ export default function App() {
         lastKnownGoodFound, autoBackupFound,
         recoveredPlayerCount, recoveredHistoryCount, loadedSavedAt,
         playerLossGuardTriggered, playerLossGuardRejectedSource, // v1.12.13: non-PII (source label only) — see Step 5 above
+        businessProgressGuardTriggered, businessProgressGuardRejectedSource, // v1.12.24: non-PII (source label only) — see Step 6 above
         playerCount: recoveredPlayerCount, sessionHistoryCount: recoveredHistoryCount, corrupted, // legacy field names, kept so older boot-log entries/consumers read consistently
         saveBlockedDuringBoot: bootStatusResult === "recovery-required",
         storageErrors: storageErrors.length ? storageErrors : undefined,
@@ -5510,9 +5664,26 @@ export default function App() {
     // v1.11.44: bumped SYNCHRONOUSLY here (React commit time, not inside the async IIFE below) — see
     // saveGenerationRef's declaration above for why this must happen here to be a reliable ordering signal.
     const mySaveGeneration = ++saveGenerationRef.current;
-    try { window.__pushDiag && window.__pushDiag("afterReactCommit", { gen: mySaveGeneration, sessionHistoryCount: sessionHistory.length }); } catch (e) {}
+    // v1.12.24: consume the high-priority flag SYNCHRONOUSLY, in the same commit that observes it, so it
+    // can never leak forward onto some LATER unrelated generation if this one gets superseded before its
+    // debounce elapses (see the flag's own declaration comment above).
+    const isHighPrioritySave = highPrioritySaveRef.current;
+    if (isHighPrioritySave) highPrioritySaveRef.current = false;
+    try { window.__pushDiag && window.__pushDiag("afterReactCommit", { gen: mySaveGeneration, sessionHistoryCount: sessionHistory.length, highPriority: isHighPrioritySave }); } catch (e) {}
     (async () => {
       try {
+        // v1.12.24 (P0 SAVE-GENERATION STARVATION FIX): wait out a short quiet period before doing ANY IO
+        // for this generation — unless this is the high-priority End-Session generation, which must start
+        // immediately (see highPrioritySaveRef's declaration comment / "END SESSION DURABILITY BOUNDARY").
+        // A generation superseded during this wait bails here for free, before touching storage at all,
+        // instead of racing an in-flight IndexedDB read/write against whichever generation comes next — the
+        // mechanism that closes the starvation gap this version's investigation found. Once a burst of rapid
+        // state changes actually pauses for SAVE_DEBOUNCE_MS, exactly one generation (the last one) reaches
+        // this point uncontested and proceeds through the existing IO chain below completely unchanged.
+        if (!isHighPrioritySave) {
+          await new Promise((resolve) => setTimeout(resolve, SAVE_DEBOUNCE_MS));
+          if (saveGenerationRef.current !== mySaveGeneration) return;
+        }
         // Guard: never write this instance's in-memory state over a newer save made elsewhere — pull
         // that newer data in instead (see refreshFromStorageIfNewer above) and skip this write. The
         // effect re-fires naturally (its deps just changed) and saves cleanly once state has settled.
@@ -5656,6 +5827,23 @@ export default function App() {
           if (existingRaw) existingSavedAt = JSON.parse(existingRaw)?.savedAt ?? -1;
         } catch (e) {}
         if (mineSavedAt < existingSavedAt) return;
+        // v1.12.24 (P0 iPad Force-Close Partial Progress Rollback — diagnostics only, no behavior change):
+        // this synchronous flush was unconditionally attempting `localStorage.setItem` regardless of size —
+        // for a state over the SAME MIRROR_SIZE_LIMIT_CHARS cap window.storage.set() already respects for
+        // the normal async mirror write, this call would simply throw (QuotaExceededError, most browsers'
+        // per-origin localStorage ceiling is ~5-10MB) and be silently swallowed by the catch below, giving
+        // false confidence that this "safety net" engaged when it never actually wrote anything. This is a
+        // real, currently-unclosed gap for a large/photo-heavy roster (spec: "do not pretend pagehide
+        // guarantees persistence on iOS" for exactly this case) — there is no reliable SYNCHRONOUS
+        // alternative (IndexedDB has none), so the actual fix is making sure the async IndexedDB primary
+        // write reaches disk promptly (see the save-generation debounce + End-Session-durability-boundary
+        // fixes elsewhere in this version), not pretending this fallback can cover it. This only adds a
+        // cheap size pre-check (skip the guaranteed-to-throw attempt, matching window.storage.set's own
+        // mirrorSkipped convention) and a non-PII diagnostic so this condition is at least visible.
+        if (typeof MIRROR_SIZE_LIMIT_CHARS === "number" && latestStateJsonRef.current.length > MIRROR_SIZE_LIMIT_CHARS) {
+          try { window.__pushDiag && window.__pushDiag("pagehideFlushSkippedTooLarge", { jsonLen: latestStateJsonRef.current.length }); } catch (e2) {}
+          return;
+        }
         localStorage.setItem("bg:bg-v11", latestStateJsonRef.current);
       } catch (e) {}
     };
@@ -6648,6 +6836,13 @@ export default function App() {
     // unaffected.
     if (lastEndedSessionIdRef.current === session.id) return;
     lastEndedSessionIdRef.current = session.id;
+    // v1.12.24 (P0 iPad Force-Close Partial Progress Rollback — END SESSION DURABILITY BOUNDARY): mark the
+    // NEXT save-effect run (the one carrying every state change this function makes below, all batched into
+    // one React commit) as high-priority so it skips the normal save debounce and starts writing to
+    // IndexedDB Primary immediately — see highPrioritySaveRef's own declaration comment. "จบก๊วน" is not an
+    // ordinary cosmetic state change; a force-close in the first moment after this click must not be able to
+    // resurrect the session at its last mid-session match.
+    highPrioritySaveRef.current = true;
     // v1.11.47 (TEMPORARY DIAGNOSTICS): approximate payload sizes at the moment the organizer confirms End
     // Session — logged BEFORE any state mutation, so a crash immediately after this point still leaves a
     // record of exactly how large things were right before it happened (Section B's size measurements).
@@ -7192,6 +7387,11 @@ export default function App() {
   // tournamentHistory (player display level / skillIndex frozen at archive time, exactly like
   // sessionHistory's endSession() snapshot), then clears activeTournament.
   const tCompleteTournament = () => {
+    // v1.12.24 (P0 iPad Force-Close Partial Progress Rollback — END SESSION DURABILITY BOUNDARY, extended
+    // to Tournament): the exact same archiving transition as endSession() (moves a completed record into a
+    // monotonic history array) deserves the same durability priority — see highPrioritySaveRef's own
+    // declaration comment.
+    highPrioritySaveRef.current = true;
     setActiveTournament((t) => {
       if (!t) return t;
       const teamsById = Object.fromEntries(t.teams.map((tm) => [tm.id, tm]));
