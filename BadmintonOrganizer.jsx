@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.25";
+const APP_VERSION = "1.12.26";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -16400,8 +16400,20 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
   // which naturally re-expands to the normal 2-card Doubles look the instant it's filled (matchType is
   // re-derived live from the actual slots on every edit — see replaceSlot).
   const collapsedSingles = inferMatchTypeFromTeams(m.teamA, m.teamB) === "singles";
-  const visibleArr = collapsedSingles ? arr.slice(0, 1) : arr;
-  const compact = visibleArr.length > 1; // doubles: tighten padding so both teams fit on one line
+  // v1.12.26 (P0 FOLLOW-UP — Singles Slot Position Preserved): when collapsed, render ONLY the slot the
+  // organizer actually filled — NEVER renormalize/slide the lone player into index 0. `arr` (m.teamA/
+  // m.teamB) already carries real slot identity: replaceSlot always writes to the exact idx it's given
+  // (line ~6774, `dstArr[idx] = newPid || null`) and never shifts/compacts the array, so a manually-built
+  // "- | A" (player at idx 1, idx 0 empty) is a perfectly valid, intentional selection that must stay
+  // exactly where the organizer put it. The old `arr.slice(0, 1)` here always grabbed index 0 regardless of
+  // which slot actually held the player — for "- | A" that's the EMPTY slot, so the real player at idx 1
+  // silently vanished from the rendered row entirely (not just visually reordered) while still sitting in
+  // the underlying data, an orphaned, confusing state. Fixed by finding which index is actually filled and
+  // rendering exactly that one; the other index is what the "+" affordance below reveals to re-expand.
+  const filledIdx = collapsedSingles ? arr.findIndex(Boolean) : -1;
+  const emptyIdx = collapsedSingles ? (filledIdx === 0 ? 1 : 0) : -1;
+  const visibleIndices = collapsedSingles ? [filledIdx] : arr.map((_, i) => i);
+  const compact = visibleIndices.length > 1; // doubles: tighten padding so both teams fit on one line
   const avatarSize = isWide
     ? (big ? (compact ? 46 : 54) : (compact ? 38 : 44))
     : (big ? (compact ? 34 : 40) : (compact ? 26 : 30)); // bigger photos on courts that are actively playing — easier to spot/call the right person
@@ -16447,7 +16459,8 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
   return (
     <>
     <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 4, alignItems: "center" }}>
-      {visibleArr.map((id, idx) => {
+      {visibleIndices.map((idx) => {
+        const id = arr[idx];
         const p = id ? getP(id) : null;
         const selected = isSel && isSel(id, m.id, team, idx);
         const isOpen = !!(openSlot && openSlot.team === team && openSlot.idx === idx);
@@ -16532,23 +16545,26 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
           </div>
         );
       })}
-      {/* v1.12.25 (P0 Mixed Singles + Doubles): the small affordance that brings a collapsed Singles row
-          back to Doubles — tapping it opens the SAME PlayerPicker used for any other empty slot, targeting
-          the hidden idx=1. Picking someone there re-fills the slot, which replaceSlot then re-derives as
-          matchType "doubles" on its own (see replaceSlot's matchType stamping) — this button has no other
-          special-cased logic, it just reveals the slot that was already there. */}
+      {/* v1.12.25 (P0 Mixed Singles + Doubles), fixed v1.12.26 (Singles Slot Position Preserved): the small
+          affordance that brings a collapsed Singles row back to Doubles — tapping it opens the SAME
+          PlayerPicker used for any other empty slot, targeting `emptyIdx` (the ACTUAL empty slot on this
+          side — whichever of idx 0/1 the organizer didn't already fill, computed above; never a hardcoded
+          idx=1, which would silently overwrite an already-filled idx=1 whenever the organizer had instead
+          left idx=0 empty, e.g. "- | A"). Picking someone there re-fills the slot, which replaceSlot then
+          re-derives as matchType "doubles" on its own (see replaceSlot's matchType stamping) — this button
+          has no other special-cased logic, it just reveals the slot that was already there. */}
       {collapsedSingles && editable && (
         <div style={{ position: "relative", flexShrink: 0 }}>
           <button
-            onClick={(e) => setOpenSlot(openSlot && openSlot.team === team && openSlot.idx === 1 ? null : { team, idx: 1, rect: rectOf(e.currentTarget) })}
+            onClick={(e) => setOpenSlot(openSlot && openSlot.team === team && openSlot.idx === emptyIdx ? null : { team, idx: emptyIdx, rect: rectOf(e.currentTarget) })}
             title="เพิ่มคู่ (เกมคู่)"
             style={{ width: 30, height: 30, borderRadius: "50%", border: `1.5px dashed ${T.green}`, background: "none", color: T.green, fontSize: 16, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}
           >+</button>
-          {openSlot && openSlot.team === team && openSlot.idx === 1 && (
+          {openSlot && openSlot.team === team && openSlot.idx === emptyIdx && (
             <PlayerPicker
-              bench={rankManualSlotCandidates(bench || [], arr.filter((pid, i) => i !== 1 && pid), ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean), players, lockPairs, stats, latestMap, now)}
+              bench={rankManualSlotCandidates(bench || [], arr.filter((pid, i) => i !== emptyIdx && pid), ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean), players, lockPairs, stats, latestMap, now)}
               align={team === "A" ? "left" : "right"}
-              onPick={(newId) => { replaceSlot && replaceSlot(m.id, team, 1, newId); setOpenSlot(null); }}
+              onPick={(newId) => { replaceSlot && replaceSlot(m.id, team, emptyIdx, newId); setOpenSlot(null); }}
               onClose={() => setOpenSlot(null)}
               now={now}
               anchorRect={openSlot.rect}

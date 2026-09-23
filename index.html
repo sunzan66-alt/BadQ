@@ -535,7 +535,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.25";
+      var CURRENT_VERSION = "1.12.26";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -920,7 +920,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.25";
+const APP_VERSION = "1.12.26";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -34519,8 +34519,20 @@ function TeamSide({
   // which naturally re-expands to the normal 2-card Doubles look the instant it's filled (matchType is
   // re-derived live from the actual slots on every edit — see replaceSlot).
   const collapsedSingles = inferMatchTypeFromTeams(m.teamA, m.teamB) === "singles";
-  const visibleArr = collapsedSingles ? arr.slice(0, 1) : arr;
-  const compact = visibleArr.length > 1; // doubles: tighten padding so both teams fit on one line
+  // v1.12.26 (P0 FOLLOW-UP — Singles Slot Position Preserved): when collapsed, render ONLY the slot the
+  // organizer actually filled — NEVER renormalize/slide the lone player into index 0. `arr` (m.teamA/
+  // m.teamB) already carries real slot identity: replaceSlot always writes to the exact idx it's given
+  // (line ~6774, `dstArr[idx] = newPid || null`) and never shifts/compacts the array, so a manually-built
+  // "- | A" (player at idx 1, idx 0 empty) is a perfectly valid, intentional selection that must stay
+  // exactly where the organizer put it. The old `arr.slice(0, 1)` here always grabbed index 0 regardless of
+  // which slot actually held the player — for "- | A" that's the EMPTY slot, so the real player at idx 1
+  // silently vanished from the rendered row entirely (not just visually reordered) while still sitting in
+  // the underlying data, an orphaned, confusing state. Fixed by finding which index is actually filled and
+  // rendering exactly that one; the other index is what the "+" affordance below reveals to re-expand.
+  const filledIdx = collapsedSingles ? arr.findIndex(Boolean) : -1;
+  const emptyIdx = collapsedSingles ? filledIdx === 0 ? 1 : 0 : -1;
+  const visibleIndices = collapsedSingles ? [filledIdx] : arr.map((_, i) => i);
+  const compact = visibleIndices.length > 1; // doubles: tighten padding so both teams fit on one line
   const avatarSize = isWide ? big ? compact ? 46 : 54 : compact ? 38 : 44 : big ? compact ? 34 : 40 : compact ? 26 : 30; // bigger photos on courts that are actively playing — easier to spot/call the right person
   // v1.11.34: LONG PRESS avatar -> photo preview (spec section 3). Single tap anywhere in the slot
   // (avatar OR name) must keep opening the existing change-player dropdown exactly as before — so this
@@ -34581,7 +34593,8 @@ function TeamSide({
       gap: 4,
       alignItems: "center"
     }
-  }, visibleArr.map((id, idx) => {
+  }, visibleIndices.map(idx => {
+    const id = arr[idx];
     const p = id ? getP(id) : null;
     const selected = isSel && isSel(id, m.id, team, idx);
     const isOpen = !!(openSlot && openSlot.team === team && openSlot.idx === idx);
@@ -34763,9 +34776,9 @@ function TeamSide({
       flexShrink: 0
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: e => setOpenSlot(openSlot && openSlot.team === team && openSlot.idx === 1 ? null : {
+    onClick: e => setOpenSlot(openSlot && openSlot.team === team && openSlot.idx === emptyIdx ? null : {
       team,
-      idx: 1,
+      idx: emptyIdx,
       rect: rectOf(e.currentTarget)
     }),
     title: "\u0E40\u0E1E\u0E34\u0E48\u0E21\u0E04\u0E39\u0E48 (\u0E40\u0E01\u0E21\u0E04\u0E39\u0E48)",
@@ -34784,11 +34797,11 @@ function TeamSide({
       justifyContent: "center",
       lineHeight: 1
     }
-  }, "+"), openSlot && openSlot.team === team && openSlot.idx === 1 && /*#__PURE__*/React.createElement(PlayerPicker, {
-    bench: rankManualSlotCandidates(bench || [], arr.filter((pid, i) => i !== 1 && pid), ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean), players, lockPairs, stats, latestMap, now),
+  }, "+"), openSlot && openSlot.team === team && openSlot.idx === emptyIdx && /*#__PURE__*/React.createElement(PlayerPicker, {
+    bench: rankManualSlotCandidates(bench || [], arr.filter((pid, i) => i !== emptyIdx && pid), ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean), players, lockPairs, stats, latestMap, now),
     align: team === "A" ? "left" : "right",
     onPick: newId => {
-      replaceSlot && replaceSlot(m.id, team, 1, newId);
+      replaceSlot && replaceSlot(m.id, team, emptyIdx, newId);
       setOpenSlot(null);
     },
     onClose: () => setOpenSlot(null),
