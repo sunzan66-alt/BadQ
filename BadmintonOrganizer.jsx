@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.24";
+const APP_VERSION = "1.12.25";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -728,6 +728,50 @@ function buildMatch(pool, mode, lockPairs, players, stats, latestMap) {
   return best;
 }
 
+// ===================== v1.12.25 — P0 MIXED SINGLES + DOUBLES (per-match matchType) =====================
+// Every match now carries its own canonical `matchType` ("singles" | "doubles"), inferred automatically
+// from which slots in teamA/teamB are actually filled — NOT from the session-wide `mode` alone. This is
+// scoped to MANUAL pairing mode's hand-built rows (spec: "primarily manual mixed Singles/Doubles support
+// inside the same session"); Auto Matchmaking (buildMatch/genRound above) is completely untouched and
+// keeps constructing whole foursomes/pairs from session `mode` exactly as before.
+//
+// inferMatchTypeFromTeams: pure slot-count inference. 1 filled + 1 filled = singles, 2 filled + 2 filled =
+// doubles, anything else (a side still at 0, i.e. not built yet, OR a genuine 2-vs-1 mismatch) returns null
+// — "not a determined type yet", which callers use to gate Start (see matchSlotStateInvalid) rather than
+// silently guessing.
+function inferMatchTypeFromTeams(teamA, teamB) {
+  const a = (teamA || []).filter(Boolean).length;
+  const b = (teamB || []).filter(Boolean).length;
+  if (a === 1 && b === 1) return "singles";
+  if (a === 2 && b === 2) return "doubles";
+  return null;
+}
+// The ONE invalid state this feature must block Start on (spec: "do NOT allow A A vs B - or A - vs B B to
+// start"): exactly one side has 2 filled and the other has exactly 1. Any other incomplete state (a side
+// still at 0) is just "not built yet" — Start is already disabled for that the same way it always was,
+// with no new warning message needed.
+function matchSlotStateInvalid(teamA, teamB) {
+  const a = (teamA || []).filter(Boolean).length;
+  const b = (teamB || []).filter(Boolean).length;
+  return (a === 2 && b === 1) || (a === 1 && b === 2);
+}
+// The ONE canonical resolver every other piece of code (billing, stats, display, history) must call to
+// find out what a match actually is — never read m.mode or a team array's LENGTH directly for this.
+// Priority: (1) an explicit m.matchType already stamped on this match (set going forward whenever a manual
+// row's slots change — see replaceSlot), (2) live inference from the match's own current teamA/teamB fill
+// state (covers a match that predates this version's matchType field but still has clean 1v1/2v2 team
+// arrays), (3) legacy fallback to the match's own `mode` field — every match record, old or new, has
+// always carried `mode` copied from the session-wide mode at the moment it was created, so this is a safe,
+// always-available last resort that reproduces the exact pre-v1.12.25 behavior for any data this can't
+// otherwise resolve.
+function resolveMatchType(m) {
+  if (!m) return "doubles";
+  if (m.matchType === "singles" || m.matchType === "doubles") return m.matchType;
+  const inferred = inferMatchTypeFromTeams(m.teamA, m.teamB);
+  if (inferred) return inferred;
+  return m.mode === "singles" ? "singles" : "doubles";
+}
+
 // v1.11.75 — Manual Matchmaking Smart Suggestion (spec sections 1-3). Reorders/flags the candidate list
 // PlayerPicker shows when the Organizer is hand-filling a slot, using the SAME scoring ingredients as the
 // automatic buildMatch() engine above (skill balance, partner/opponent repeat counts via `stats`, the
@@ -1025,7 +1069,14 @@ function fairnessTag(pct) {
 // every team slot filled — used to block starting a match with unfilled slots (Requirement 16), both
 // from SessionTab's own `startReady` (UI hint/disabled state) and from App()'s setMatchStatus dispatcher
 // (guards the unified สถานะ dropdown's "กำลังเล่น" option the same way).
-function startReadyMatch(m) { return [...m.teamA, ...m.teamB].every(Boolean); }
+// v1.12.25 (P0 Mixed Singles + Doubles): a manual row is now ALSO ready to start the moment it's a clean
+// 1-vs-1 (Singles, inferred automatically — see inferMatchTypeFromTeams), even though its teamA/teamB
+// arrays may still be declared at length 2 (the doubles-session default). The plain `.every(Boolean)` OR
+// branch is kept as the fallback so every pre-existing shape (a true 1-slot-per-side singles session, or a
+// fully-filled 2-vs-2) keeps behaving byte-for-byte as before — this only ever ADDS the new 1v1-out-of-2
+// case, never removes readiness from anything that used to be ready. The genuinely invalid 2-vs-1 mismatch
+// stays NOT ready either way (see matchSlotStateInvalid, which drives its own explicit blocking message).
+function startReadyMatch(m) { return inferMatchTypeFromTeams(m.teamA, m.teamB) !== null || [...m.teamA, ...m.teamB].every(Boolean); }
 // ---- scoring / stats (win/loss from matches that have a score OR an explicit win/lose pick) ----
 // a round counts as "scored" if it has a numeric a/b OR a manually-picked win side (no numbers needed).
 function hasScore(m) { return !!(m && m.scores && m.scores.some((r) => r && (r.a != null || r.b != null || r.win != null))); }
@@ -1457,7 +1508,16 @@ function computeSplitExpenseSummary(players, settings) {
   return { total, attendedCount: attended.length, projectedRegistered, hasAttendance, roundingMode, perPersonRaw, perPersonEstimate, charge, totalCollected, diff };
 }
 // expense: reuse existing court+shuttle logic; split "other" equally among attendees
-function computeBill(players, settings) {
+// v1.12.25 (P0 Mixed Singles + Doubles): `finishedMatches` is the new (optional, backward-compatible —
+// every call site not yet updated simply gets [] and behaves like 0 games billed, never a crash) 3rd
+// param — the actual finished-match records (real source of truth, see resolveMatchType) this bill's
+// shuttle/game charge is derived from, REPLACING the old fragile "p.games (a single cumulative counter) ×
+// one flat rate" model. A mixed session bills each player's DOUBLES games at settings.shuttleDoubles and
+// SINGLES games at settings.shuttleSingles (each independently falling back to the legacy settings.shuttle
+// when not explicitly configured, so a group that never touches the new fields sees byte-identical bills
+// to before this version). Callers pass every match that counts as "finished" so far (existing rule
+// unchanged: only done matches are billable — see playerHasLiveMatch/endGame for where "done" is decided).
+function computeBill(players, settings, finishedMatches) {
   // v1.9.17: "registered" (said they're coming, not arrived/eligible yet) is excluded from billing same
   // as "absent" — only players who actually attended in some capacity (ready/resting/left) are payers.
   const payers = players.filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
@@ -1472,9 +1532,23 @@ function computeBill(players, settings) {
   const perPerson = settings.costModel === "perPerson";
   const splitEq = settings.costModel === "splitExpenses";
   const splitSummary = splitEq ? computeSplitExpenseSummary(players, settings) : null;
+  const matches = finishedMatches || [];
+  const doublesRate = Number(settings.shuttleDoubles ?? settings.shuttle) || 0;
+  const singlesRate = Number(settings.shuttleSingles ?? settings.shuttle) || 0;
   return payers.map((p) => {
     const court = perPerson ? (settings.perPersonRate || 0) : splitEq ? splitSummary.charge : (settings.court || 0);
-    const shuttle = (perPerson || splitEq) ? 0 : (p.games || 0) * (settings.shuttle || 0);
+    // Derive real per-type participation from the actual finished-match records instead of trusting the
+    // single cumulative p.games counter — a player with 3 doubles + 2 singles games in the SAME session
+    // must be billed 3×doublesRate + 2×singlesRate, not 5×one-rate (see spec's worked example: ฿245).
+    let doublesGames = 0, singlesGames = 0;
+    if (!perPerson && !splitEq) {
+      for (const m of matches) {
+        if (!m) continue;
+        if (!((m.teamA || []).includes(p.id) || (m.teamB || []).includes(p.id))) continue;
+        if (resolveMatchType(m) === "singles") singlesGames++; else doublesGames++;
+      }
+    }
+    const shuttle = (perPerson || splitEq) ? 0 : (doublesGames * doublesRate + singlesGames * singlesRate);
     const other = otherShare;
     const discount = p.discount || 0; // per-person discount, entered manually in the player's summary detail
     const wheelDiscount = p.wheelDiscount || 0; // locked discount won from the spin wheel (not manually editable)
@@ -1490,7 +1564,7 @@ function computeBill(players, settings) {
     // Owner is exempted from what THEY owe, never removed from the pool real costs are shared across.
     const isOwnerExempt = p.memberType === "owner";
     const total = isOwnerExempt ? 0 : rawTotal;
-    return { ...p, eCourt: isOwnerExempt ? 0 : court, eShuttle: isOwnerExempt ? 0 : shuttle, eOther: isOwnerExempt ? 0 : other, eDiscount: discount, eWheelDiscount: wheelDiscount, eCarriedInDiscount: carriedInDiscount, total, isOwnerExempt };
+    return { ...p, eCourt: isOwnerExempt ? 0 : court, eShuttle: isOwnerExempt ? 0 : shuttle, eOther: isOwnerExempt ? 0 : other, eDiscount: discount, eWheelDiscount: wheelDiscount, eCarriedInDiscount: carriedInDiscount, total, isOwnerExempt, doublesGames, singlesGames, doublesRate, singlesRate };
   });
 }
 // v1.11.38: true if this player is still mid-match (playing or paused, i.e. NOT finished yet) right now —
@@ -6740,6 +6814,16 @@ export default function App() {
           }
         }
       }
+      // v1.12.25 (P0 Mixed Singles + Doubles): keep every touched match's canonical `matchType` in sync
+      // with its ACTUAL current slot-fill state on every single slot edit — this is what lets a manual row
+      // silently collapse to Singles the moment the organizer leaves a second slot empty (1 filled per
+      // side), and return to Doubles the moment a second player is added back (2 filled per side). Re-derive
+      // for every match in `next`, not just `dst` — a true player SWAP above can also change a DIFFERENT
+      // match's team composition (e.g. pulling someone out of another "next" row's slot). Left as `null`
+      // while a row is still mid-build or genuinely mismatched (2 vs 1) — resolveMatchType's own legacy
+      // fallback handles that transiently, and Start is blocked for the mismatched case regardless (see
+      // matchSlotStateInvalid / canStart in MatchRow).
+      next.forEach((mm) => { mm.matchType = inferMatchTypeFromTeams(mm.teamA, mm.teamB); });
       return next;
     });
   };
@@ -6875,7 +6959,9 @@ export default function App() {
     // was previously dragging minGames down to 0 even when every real attendee played several).
     const attendedPlayers = players.filter((p) => p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "waiting");
     const gamesArr = attendedPlayers.map((p) => p.games || 0);
-    const bill = computeBill(players, settings);
+    // v1.12.25: bill each player's real finished matches (history + this session's own doneCurrent, already
+    // computed above) by their own resolveMatchType, not a flat games-count × one rate — see computeBill.
+    const bill = computeBill(players, settings, [...history, ...doneCurrent]);
     const wc = players.reduce((s, p) => s + (p.waitCount || 0), 0);
     const wt = players.reduce((s, p) => s + (p.waitTotal || 0), 0);
     const wmax = players.reduce((s, p) => Math.max(s, p.waitMax || 0), 0);
@@ -10469,6 +10555,11 @@ function MatchRow({
   const recentWarnings = (manualWarnScope ? computeRecentPairWarnings(m.teamA, m.teamB, latestMap, mode, lockPairs, players) : [])
     .map((w, i) => ({ ...w, color: RECENT_WARN_COLORS[i % RECENT_WARN_COLORS.length] }));
   const allManualWarnings = [...constraintWarnings, ...recentWarnings]; // priority order per spec 6
+  // v1.12.25 (P0 Mixed Singles + Doubles): the ONE invalid slot state this feature must actively BLOCK
+  // Start on (not just leave silently disabled like an ordinary still-building row) — exactly one side has
+  // 2 players and the other has 1 (see matchSlotStateInvalid). Scoped to the same manual-editing window as
+  // the constraint/recent-pair warnings above.
+  const slotMismatch = manualWarnScope && matchSlotStateInvalid(m.teamA, m.teamB);
   // first warning to claim a player wins the highlight color (constraint warnings are listed first,
   // so they take visual priority over a recent-pair warning touching the same player).
   const warnHighlight = {};
@@ -10661,6 +10752,18 @@ function MatchRow({
           and was noisy (see the screenshot: 3+ copies of the same line stacked down the table). The
           disabled "▶ เริ่มเกม" button and its title="เลือกผู้เล่นให้ครบก่อนเริ่มเกม" tooltip already convey
           the same thing on tap/hover, so nothing is lost — this was purely the extra always-visible line. */}
+      {slotMismatch && (
+        // v1.12.25 (P0 Mixed Singles + Doubles): unlike the constraint/recent-pair warnings below (advisory
+        // only, organizer choice stays authoritative), this ONE state genuinely blocks Start (see
+        // startReadyMatch/canStart above) — valid combinations are only 1-vs-1 (Singles) or 2-vs-2
+        // (Doubles); one side having 2 and the other 1 can never be started, so this message is shown
+        // unconditionally whenever that exact mismatch exists, not gated behind allManualWarnings.
+        <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: "#c0392b", background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 8, padding: "6px 9px" }}>
+            ⚠️ จำนวนผู้เล่นไม่ครบ<br />เกมเดี่ยวต้องมีฝั่งละ 1 คน และเกมคู่ต้องมีฝั่งละ 2 คน
+          </div>
+        </div>
+      )}
       {allManualWarnings.length > 0 && (
         // v1.12.1 (spec sections 1/3/4/5/6 — replaces the old generic "ทีม A/ทีม B" text): Lock Pair /
         // ไม่อยากคู่ / ไม่อยากเจอ constraint warnings first (higher priority per spec 6), then recent
@@ -13180,9 +13283,20 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCour
 
           {model === "simple" && (<>
             <Label>อัตราเรียกเก็บจากผู้เล่น</Label>
-            <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>
               <NumField label="ค่าสนาม/คน (฿)" value={settings.court} onChange={(v) => setSettings((s) => ({ ...s, court: v }))} />
-              <NumField label="ค่าลูก/เกม (฿)" value={settings.shuttle} onChange={(v) => setSettings((s) => ({ ...s, shuttle: v }))} />
+            </div>
+            {/* v1.12.25 (P0 Mixed Singles + Doubles): the old single "ค่าลูก/เกม" field is now split into a
+                doubles rate and a singles rate, so a group that plays both in the same session can charge
+                each correctly (see computeBill). Both read/write their OWN settings field
+                (shuttleDoubles/shuttleSingles) but DISPLAY the legacy settings.shuttle value until the
+                organizer explicitly sets one — so an existing group's saved rate keeps showing/working
+                exactly as before, with zero action required, and nothing about historical bills changes
+                unless they deliberately configure a different singles rate. */}
+            <Label>ค่าลูก/คน/เกม (฿)</Label>
+            <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+              <NumField label="เกมคู่" value={settings.shuttleDoubles ?? settings.shuttle ?? 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleDoubles: v }))} />
+              <NumField label="เกมเดี่ยว" value={settings.shuttleSingles ?? settings.shuttle ?? 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleSingles: v }))} />
             </div>
           </>)}
 
@@ -15618,7 +15732,7 @@ function SummaryTab({ players, history, current, getP, settings, session, tourna
   const maxWaitMin = wc > 0 ? Math.round(wmax / 60000) : null;
   const ranking = [...played].sort((a, b) => (b.games || 0) - (a.games || 0) || a.name.localeCompare(b.name));
   const allHist = [...history, ...doneCurrent];
-  const grandTotal = computeBill(players, settings).reduce((s, b) => s + b.total, 0); // for the share-text total only
+  const grandTotal = computeBill(players, settings, allHist).reduce((s, b) => s + b.total, 0); // for the share-text total only
   const detailP = detail ? players.find((p) => p.id === detail) : null;
   const detailStats = detailP ? playerStats(detailP.id, allHist) : null;
   const detailTStats = detailP ? tournamentStatsForPlayer(detailP.id, tournamentHistory) : null;
@@ -15760,7 +15874,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const [openFinanceSettings, setOpenFinanceSettings] = useState(false);
   const doneCurrent = current.filter((m) => m.status === "done");
   const played = players.filter((p) => (p.games || 0) > 0 || (p.status !== "absent" && p.status !== "registered" && p.status !== "waiting"));
-  const bill = computeBill(players, settings);
+  const bill = computeBill(players, settings, [...history, ...doneCurrent]);
   const billBy = (id) => bill.find((b) => b.id === id);
   // v1.11.42 (Owner Payment Exemption): the Owner is kept IN `bill` (so they still show up in the finance
   // player list — spec requirement) but is never counted toward the payable denominator/receivable/"all
@@ -15957,7 +16071,23 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
           <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginTop: 6 }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 8 }}>รายละเอียดค่าก๊วน</div>
             <BillRow label="ค่าสนาม" v={detailBill.eCourt} />
-            <BillRow label="ค่าลูก" v={detailBill.eShuttle} />
+            {/* v1.12.25 (Mixed Singles + Doubles): only show the คู่/เดี่ยว game-count breakdown when the
+                player actually has BOTH types this session (per spec — never an ugly empty "0 เกม" line for
+                someone who only ever played one type, and byte-identical to the old single line for every
+                pre-existing doubles-only or singles-only session — see Test O). */}
+            {!detailBill.isOwnerExempt && detailBill.doublesGames > 0 && detailBill.singlesGames > 0 ? (
+              <div style={{ padding: "3px 0" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                  <span>ค่าลูกแบด</span><span>{formatCurrency(detailBill.eShuttle)}</span>
+                </div>
+                <div style={{ fontSize: 11, color: T.muted, paddingLeft: 8, lineHeight: 1.6 }}>
+                  <div>คู่ {detailBill.doublesGames} เกม × ฿{detailBill.doublesRate} = {formatCurrency(detailBill.doublesGames * detailBill.doublesRate)}</div>
+                  <div>เดี่ยว {detailBill.singlesGames} เกม × ฿{detailBill.singlesRate} = {formatCurrency(detailBill.singlesGames * detailBill.singlesRate)}</div>
+                </div>
+              </div>
+            ) : (
+              <BillRow label="ค่าลูก" v={detailBill.eShuttle} />
+            )}
             <BillRow label="อื่น ๆ" v={Math.round(detailBill.eOther)} />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, padding: "3px 0", color: T.green }}>
               <span>ส่วนลด</span>
@@ -16261,7 +16391,17 @@ function MatchTeams({ m, getP, editable, tapSlot, isSel, replaceSlot, bench, big
 let _avatarHintClaimed = false;
 function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done, lockPairs = [], players = [], stats, latestMap, warnHighlight }) {
   const isWide = useIsWide(); // iPad / landscape phone (≥700px) — only the photo scales up further here; text stays the same size on every screen
-  const compact = arr.length > 1; // doubles: tighten padding so both teams fit on one line
+  // v1.12.25 (P0 Mixed Singles + Doubles): once the WHOLE match resolves to a clean 1-vs-1 (both sides have
+  // exactly one filled slot — see inferMatchTypeFromTeams), this side only renders its ONE filled slot —
+  // never an ugly empty "+ เลือก"/"ว่าง" second card taking up space for a slot the organizer has no
+  // intention of filling right now (spec: "Do not leave ugly empty player cards occupying large blank
+  // space"). Applies regardless of `editable` (a done/playing Singles match must look just as clean as a
+  // still-editable one). A small "+" affordance below lets an EDITABLE row bring the second slot back,
+  // which naturally re-expands to the normal 2-card Doubles look the instant it's filled (matchType is
+  // re-derived live from the actual slots on every edit — see replaceSlot).
+  const collapsedSingles = inferMatchTypeFromTeams(m.teamA, m.teamB) === "singles";
+  const visibleArr = collapsedSingles ? arr.slice(0, 1) : arr;
+  const compact = visibleArr.length > 1; // doubles: tighten padding so both teams fit on one line
   const avatarSize = isWide
     ? (big ? (compact ? 46 : 54) : (compact ? 38 : 44))
     : (big ? (compact ? 34 : 40) : (compact ? 26 : 30)); // bigger photos on courts that are actively playing — easier to spot/call the right person
@@ -16306,8 +16446,8 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
   }, []);
   return (
     <>
-    <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 4 }}>
-      {arr.map((id, idx) => {
+    <div style={{ flex: 1, minWidth: 0, display: "flex", gap: 4, alignItems: "center" }}>
+      {visibleArr.map((id, idx) => {
         const p = id ? getP(id) : null;
         const selected = isSel && isSel(id, m.id, team, idx);
         const isOpen = !!(openSlot && openSlot.team === team && openSlot.idx === idx);
@@ -16392,6 +16532,30 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
           </div>
         );
       })}
+      {/* v1.12.25 (P0 Mixed Singles + Doubles): the small affordance that brings a collapsed Singles row
+          back to Doubles — tapping it opens the SAME PlayerPicker used for any other empty slot, targeting
+          the hidden idx=1. Picking someone there re-fills the slot, which replaceSlot then re-derives as
+          matchType "doubles" on its own (see replaceSlot's matchType stamping) — this button has no other
+          special-cased logic, it just reveals the slot that was already there. */}
+      {collapsedSingles && editable && (
+        <div style={{ position: "relative", flexShrink: 0 }}>
+          <button
+            onClick={(e) => setOpenSlot(openSlot && openSlot.team === team && openSlot.idx === 1 ? null : { team, idx: 1, rect: rectOf(e.currentTarget) })}
+            title="เพิ่มคู่ (เกมคู่)"
+            style={{ width: 30, height: 30, borderRadius: "50%", border: `1.5px dashed ${T.green}`, background: "none", color: T.green, fontSize: 16, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}
+          >+</button>
+          {openSlot && openSlot.team === team && openSlot.idx === 1 && (
+            <PlayerPicker
+              bench={rankManualSlotCandidates(bench || [], arr.filter((pid, i) => i !== 1 && pid), ((team === "A" ? m.teamB : m.teamA) || []).filter(Boolean), players, lockPairs, stats, latestMap, now)}
+              align={team === "A" ? "left" : "right"}
+              onPick={(newId) => { replaceSlot && replaceSlot(m.id, team, 1, newId); setOpenSlot(null); }}
+              onClose={() => setOpenSlot(null)}
+              now={now}
+              anchorRect={openSlot.rect}
+            />
+          )}
+        </div>
+      )}
     </div>
     {/* v1.11.34: fullscreen photo preview (spec section 3) — dark backdrop, aspect-ratio preserved,
         player name shown, tap X or anywhere outside (here: anywhere at all, matching the existing
