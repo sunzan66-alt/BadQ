@@ -535,7 +535,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.26";
+      var CURRENT_VERSION = "1.12.27";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -920,7 +920,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.26";
+const APP_VERSION = "1.12.27";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -27270,6 +27270,45 @@ function ScoreEditor({
     clearScore(m.id);
   };
 
+  // v1.12.27 (P0 SCORE ENTRY COMMIT BUG): a reliable commit trigger, IN ADDITION to the commit-on-unmount
+  // above (kept as-is, unchanged, as a safety net). Real iPad repro: the organizer typed a fully valid set
+  // (21–16), started a second set, then finished/left the popover — and the row still showed "ใส่ผล", the
+  // typed score never appearing. Root cause: this component only ever committed the draft when it actually
+  // UNMOUNTED (the popover's `scoreOpen` state going back to null), which depends on an explicit close the
+  // organizer doesn't reliably take on a real device — dismissing the on-screen numeric keypad by tapping
+  // elsewhere blurs the focused input but does not by itself guarantee the transparent backdrop's onClick
+  // registers as a distinct action, and simply moving on without ever formally closing the popover left a
+  // fully-typed, fully-valid score sitting in local `draft` state forever, uncommitted.
+  // Fix: commit a ROW (both sides together, matching setScore's own shape) the moment it becomes COMPLETE
+  // (both sides filled — never on every digit, never for a still-half-typed row) AND valid (same
+  // `scorePairIssue` gate the unmount path already uses) — triggered from onBlur, which already fires for
+  // every one of the spec's listed triggers: tapping outside the modal, pressing Enter/Done (the existing
+  // onKeyDown handler below already calls `.blur()` for Enter), and dismissing the on-screen keyboard (all
+  // of these move focus OFF the input, which is exactly what onBlur observes — no new event plumbing
+  // needed). An invalid or still-incomplete row is deliberately left uncommitted here, exactly like before.
+  // This is now SAFE to do per-field (it was NOT safe when v1.11.64 wrote the unmount-only strategy — see
+  // that comment above): MatchRow became a genuine stable top-level function in v1.12.18, so a setScore
+  // call's resulting SessionTab re-render no longer unmounts/remounts this ScoreEditor or steals focus —
+  // the exact failure mode v1.11.64 was working around no longer exists, so committing earlier than
+  // unmount is no longer risky. Idempotent (only calls setScore for a value that still differs from what's
+  // already committed), so it never conflicts with the unmount-time cleanup running afterward too.
+  const commitRow = ri => {
+    const row = draft[ri] || {
+      a: "",
+      b: ""
+    };
+    const aNum = row.a === "" ? null : Number(row.a),
+      bNum = row.b === "" ? null : Number(row.b);
+    if (aNum == null || bNum == null) return; // incomplete -- nothing to commit yet, never on every digit
+    if (scorePairIssue(aNum, bNum, wsc, deuceOn)) return; // invalid -- never silently committed
+    ["a", "b"].forEach(side => {
+      const val = row[side];
+      const committedRaw = m.scores && m.scores[ri] ? m.scores[ri][side] : null;
+      const committedStr = committedRaw != null ? String(committedRaw) : "";
+      if (val !== committedStr) setScore(m.id, ri, side, val);
+    });
+  };
+
   // visibility/derived-winner reflects the DRAFT (what's on screen right now), not just the last committed
   // value — otherwise finishing a set's 2nd score wouldn't reveal the next set row until blur, which would
   // feel laggy/broken compared to the existing live-decide behavior this must not regress.
@@ -27378,7 +27417,10 @@ function ScoreEditor({
         if (e.key === "Enter") e.currentTarget.blur();
       },
       onFocus: e => e.target.select(),
-      onBlur: settleNow,
+      onBlur: () => {
+        settleNow();
+        commitRow(ri);
+      },
       style: issue ? badInput : scoreInput
     }), /*#__PURE__*/React.createElement("span", {
       style: {
@@ -27394,7 +27436,10 @@ function ScoreEditor({
         if (e.key === "Enter") e.currentTarget.blur();
       },
       onFocus: e => e.target.select(),
-      onBlur: settleNow,
+      onBlur: () => {
+        settleNow();
+        commitRow(ri);
+      },
       style: issue ? badInput : scoreInput
     }), /*#__PURE__*/React.createElement("span", {
       style: {

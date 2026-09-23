@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.26";
+const APP_VERSION = "1.12.27";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -13620,6 +13620,41 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
     clearScore(m.id);
   };
 
+  // v1.12.27 (P0 SCORE ENTRY COMMIT BUG): a reliable commit trigger, IN ADDITION to the commit-on-unmount
+  // above (kept as-is, unchanged, as a safety net). Real iPad repro: the organizer typed a fully valid set
+  // (21–16), started a second set, then finished/left the popover — and the row still showed "ใส่ผล", the
+  // typed score never appearing. Root cause: this component only ever committed the draft when it actually
+  // UNMOUNTED (the popover's `scoreOpen` state going back to null), which depends on an explicit close the
+  // organizer doesn't reliably take on a real device — dismissing the on-screen numeric keypad by tapping
+  // elsewhere blurs the focused input but does not by itself guarantee the transparent backdrop's onClick
+  // registers as a distinct action, and simply moving on without ever formally closing the popover left a
+  // fully-typed, fully-valid score sitting in local `draft` state forever, uncommitted.
+  // Fix: commit a ROW (both sides together, matching setScore's own shape) the moment it becomes COMPLETE
+  // (both sides filled — never on every digit, never for a still-half-typed row) AND valid (same
+  // `scorePairIssue` gate the unmount path already uses) — triggered from onBlur, which already fires for
+  // every one of the spec's listed triggers: tapping outside the modal, pressing Enter/Done (the existing
+  // onKeyDown handler below already calls `.blur()` for Enter), and dismissing the on-screen keyboard (all
+  // of these move focus OFF the input, which is exactly what onBlur observes — no new event plumbing
+  // needed). An invalid or still-incomplete row is deliberately left uncommitted here, exactly like before.
+  // This is now SAFE to do per-field (it was NOT safe when v1.11.64 wrote the unmount-only strategy — see
+  // that comment above): MatchRow became a genuine stable top-level function in v1.12.18, so a setScore
+  // call's resulting SessionTab re-render no longer unmounts/remounts this ScoreEditor or steals focus —
+  // the exact failure mode v1.11.64 was working around no longer exists, so committing earlier than
+  // unmount is no longer risky. Idempotent (only calls setScore for a value that still differs from what's
+  // already committed), so it never conflicts with the unmount-time cleanup running afterward too.
+  const commitRow = (ri) => {
+    const row = draft[ri] || { a: "", b: "" };
+    const aNum = row.a === "" ? null : Number(row.a), bNum = row.b === "" ? null : Number(row.b);
+    if (aNum == null || bNum == null) return; // incomplete -- nothing to commit yet, never on every digit
+    if (scorePairIssue(aNum, bNum, wsc, deuceOn)) return; // invalid -- never silently committed
+    ["a", "b"].forEach((side) => {
+      const val = row[side];
+      const committedRaw = m.scores && m.scores[ri] ? m.scores[ri][side] : null;
+      const committedStr = committedRaw != null ? String(committedRaw) : "";
+      if (val !== committedStr) setScore(m.id, ri, side, val);
+    });
+  };
+
   // visibility/derived-winner reflects the DRAFT (what's on screen right now), not just the last committed
   // value — otherwise finishing a set's 2nd score wouldn't reveal the next set row until blur, which would
   // feel laggy/broken compared to the existing live-decide behavior this must not regress.
@@ -13664,9 +13699,9 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
               {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
               {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} />}
               <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
-              <input type="number" min={0} value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={settleNow} style={issue ? badInput : scoreInput} />
+              <input type="number" min={0} value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={() => { settleNow(); commitRow(ri); }} style={issue ? badInput : scoreInput} />
               <span style={{ color: T.muted, fontWeight: 800 }}>–</span>
-              <input type="number" min={0} value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={settleNow} style={issue ? badInput : scoreInput} />
+              <input type="number" min={0} value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={() => { settleNow(); commitRow(ri); }} style={issue ? badInput : scoreInput} />
               <span style={{ fontSize: 11.5, fontWeight: 700, color: T.blue }}>B</span>
               {setWin && <WinLoseSelect state={stateFor("B")} onPick={pick("B")} locked={locked} />}
             </div>
