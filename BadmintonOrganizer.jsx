@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.27";
+const APP_VERSION = "1.12.28";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -9797,6 +9797,16 @@ function cloudErrorMessage(e) {
     EMAIL_NOT_VERIFIED: "กรุณายืนยันอีเมลก่อนใช้งาน BadQ Online",
     WORKSPACE_NOT_FOUND: "ไม่พบ Workspace กรุณาลองเข้าสู่ระบบใหม่อีกครั้ง",
     NOT_WORKSPACE_OWNER: "บัญชีนี้ไม่มีสิทธิ์เข้าถึง Workspace นี้",
+    // v1.12.28 — BUG-2 fix (see project doc badq-v11227-review-p22-initial-cloud-data-safety.md): these 4
+    // P2.2 Cloud Function markers (functions/index.js, normalized by firebase-sync.js's KNOWN_MARKERS) had no
+    // Thai copy here and fell through to line ~9804's raw-message fallback, showing the bare English marker
+    // string to the Owner. Not reachable from any call site today (doConfirmInitialCloudData always creates
+    // with confirmedInitialData:true and no clubId; upsertSession is never called yet) — added now so this
+    // stays correct the moment either is extended.
+    CLOUD_INIT_CONFIRMATION_REQUIRED: "ต้องยืนยันก่อนสร้างข้อมูลก๊วนแรกบน Cloud",
+    VERSION_CONFLICT: "ข้อมูลนี้ถูกแก้ไขจากที่อื่นแล้ว กรุณาโหลดข้อมูลใหม่แล้วลองอีกครั้ง",
+    CLUB_NOT_FOUND: "ไม่พบก๊วนนี้บน Cloud",
+    TOO_MANY_OPEN_SESSIONS: "ก๊วนนี้มีรอบที่เปิดอยู่ครบจำนวนสูงสุดแล้ว (สูงสุด 3 รอบ)",
     unauthenticated: "กรุณาเข้าสู่ระบบใหม่อีกครั้ง",
     "functions/unavailable": "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง",
   };
@@ -10009,10 +10019,16 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
   const localGroupCount = Object.keys(groupDefaults || {}).length;
   const localSessionCount = (sessionHistory || []).length;
   const localMostRecentAt = (sessionHistory || []).reduce((max, h) => Math.max(max, Number(h && h.endedAt) || 0), 0);
+  // v1.12.28 — BUG-1 fix (see project doc badq-v11227-review-p22-initial-cloud-data-safety.md): this is the
+  // EXACT and ONLY value doConfirmInitialCloudData below ever uploads (a single Club doc's `name` field, and
+  // nothing else — no other groups, no session history). Hoisted here, out of doConfirmInitialCloudData, so
+  // the confirmation dialog and the success message can quote this SAME value instead of each restating the
+  // upload's scope on their own and risking drifting out of sync with what's actually sent again.
+  const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
+  const otherLocalGroupCount = Math.max(0, localGroupCount - 1);
   const doConfirmInitialCloudData = async () => {
     setInitBusy(true); setInitErr("");
     try {
-      const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
       await cloud.upsertClub(deviceId, activeSessionId, { club: { name: firstGroupName }, confirmedInitialData: true });
       setInitConfirmOpen(false); setInitDone(true);
       setCloudInitState({ clubsInitialized: true });
@@ -10198,12 +10214,20 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
           )}
           {initConfirmOpen && (
             <Overlay onClose={() => { if (!initBusy) setInitConfirmOpen(false); }}>
-              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>ใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้น?</div>
-              <div style={{ fontSize: 12, color: T.muted, marginBottom: 14, lineHeight: 1.7 }}>
-                ข้อมูลสรุปจากอุปกรณ์นี้ ({navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? "มือถือ" : "เดสก์ท็อป/แท็บเล็ต"}):
-                <div style={{ marginTop: 6 }}>• จำนวนก๊วนที่บันทึกไว้: {localGroupCount}</div>
-                <div>• จำนวนประวัติก๊วนที่ผ่านมา: {localSessionCount}</div>
-                {localMostRecentAt > 0 && <div>• อัปเดตล่าสุด: {new Date(localMostRecentAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}</div>}
+              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>สร้างก๊วนแรกบน Cloud?</div>
+              {/* v1.12.28 — BUG-1 fix: state precisely what this action uploads (a single Club name) and, just
+                  as clearly, what it does NOT upload (other groups, all session history) — this dialog
+                  previously implied the counts below were becoming Cloud's starting data, when only
+                  `firstGroupName` is ever sent. Upload payload/scope itself is unchanged (still P2.7 scope). */}
+              <div style={{ fontSize: 12, color: T.text, marginBottom: 8, lineHeight: 1.7 }}>
+                จะอัปโหลดเฉพาะ <b>ชื่อก๊วน "{firstGroupName}"</b> ขึ้น Cloud เท่านั้น
+              </div>
+              <div style={{ fontSize: 11.5, color: T.accent, marginBottom: 10, lineHeight: 1.7, background: "#fdeae7", borderRadius: 8, padding: "8px 10px" }}>
+                ยังไม่อัปโหลด: {otherLocalGroupCount > 0 ? `ก๊วนอื่นอีก ${otherLocalGroupCount} ก๊วน, ` : ""}ประวัติก๊วนที่ผ่านมา ({localSessionCount} ครั้ง) และรายละเอียด/การเงินอื่นๆ ของก๊วน — ฟีเจอร์นี้ยังไม่รองรับในเวอร์ชันนี้
+              </div>
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 14, lineHeight: 1.6 }}>
+                ข้อมูลจากอุปกรณ์นี้ ({navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? "มือถือ" : "เดสก์ท็อป/แท็บเล็ต"}) — จำนวนก๊วนทั้งหมดที่บันทึกไว้ในเครื่อง: {localGroupCount}
+                {localMostRecentAt > 0 && <div>อัปเดตล่าสุดในเครื่องนี้: {new Date(localMostRecentAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}</div>}
               </div>
               {initErr && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{initErr}</div>}
               <div style={{ display: "flex", gap: 8 }}>
@@ -10213,7 +10237,9 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
             </Overlay>
           )}
           {initDone && (
-            <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>สร้างข้อมูลก๊วนตั้งต้นบน Cloud แล้ว</div>
+            // v1.12.28 — BUG-1 fix: name the exact club created and restate the scope limit, instead of the
+            // old "สร้างข้อมูลก๊วนตั้งต้นบน Cloud แล้ว" which read as if all local data had just been seeded.
+            <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>สร้างก๊วน "{firstGroupName}" บน Cloud แล้ว (เฉพาะชื่อก๊วน — ยังไม่รวมก๊วนอื่นหรือประวัติ)</div>
           )}
 
           {err && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{err}</div>}

@@ -535,7 +535,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.27";
+      var CURRENT_VERSION = "1.12.28";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -920,7 +920,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.27";
+const APP_VERSION = "1.12.28";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -17619,6 +17619,16 @@ function cloudErrorMessage(e) {
     EMAIL_NOT_VERIFIED: "กรุณายืนยันอีเมลก่อนใช้งาน BadQ Online",
     WORKSPACE_NOT_FOUND: "ไม่พบ Workspace กรุณาลองเข้าสู่ระบบใหม่อีกครั้ง",
     NOT_WORKSPACE_OWNER: "บัญชีนี้ไม่มีสิทธิ์เข้าถึง Workspace นี้",
+    // v1.12.28 — BUG-2 fix (see project doc badq-v11227-review-p22-initial-cloud-data-safety.md): these 4
+    // P2.2 Cloud Function markers (functions/index.js, normalized by firebase-sync.js's KNOWN_MARKERS) had no
+    // Thai copy here and fell through to line ~9804's raw-message fallback, showing the bare English marker
+    // string to the Owner. Not reachable from any call site today (doConfirmInitialCloudData always creates
+    // with confirmedInitialData:true and no clubId; upsertSession is never called yet) — added now so this
+    // stays correct the moment either is extended.
+    CLOUD_INIT_CONFIRMATION_REQUIRED: "ต้องยืนยันก่อนสร้างข้อมูลก๊วนแรกบน Cloud",
+    VERSION_CONFLICT: "ข้อมูลนี้ถูกแก้ไขจากที่อื่นแล้ว กรุณาโหลดข้อมูลใหม่แล้วลองอีกครั้ง",
+    CLUB_NOT_FOUND: "ไม่พบก๊วนนี้บน Cloud",
+    TOO_MANY_OPEN_SESSIONS: "ก๊วนนี้มีรอบที่เปิดอยู่ครบจำนวนสูงสุดแล้ว (สูงสุด 3 รอบ)",
     unauthenticated: "กรุณาเข้าสู่ระบบใหม่อีกครั้ง",
     "functions/unavailable": "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง"
   };
@@ -17939,11 +17949,17 @@ function BadQOnlineSheet({
   const localGroupCount = Object.keys(groupDefaults || {}).length;
   const localSessionCount = (sessionHistory || []).length;
   const localMostRecentAt = (sessionHistory || []).reduce((max, h) => Math.max(max, Number(h && h.endedAt) || 0), 0);
+  // v1.12.28 — BUG-1 fix (see project doc badq-v11227-review-p22-initial-cloud-data-safety.md): this is the
+  // EXACT and ONLY value doConfirmInitialCloudData below ever uploads (a single Club doc's `name` field, and
+  // nothing else — no other groups, no session history). Hoisted here, out of doConfirmInitialCloudData, so
+  // the confirmation dialog and the success message can quote this SAME value instead of each restating the
+  // upload's scope on their own and risking drifting out of sync with what's actually sent again.
+  const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
+  const otherLocalGroupCount = Math.max(0, localGroupCount - 1);
   const doConfirmInitialCloudData = async () => {
     setInitBusy(true);
     setInitErr("");
     try {
-      const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
       await cloud.upsertClub(deviceId, activeSessionId, {
         club: {
           name: firstGroupName
@@ -18488,18 +18504,31 @@ function BadQOnlineSheet({
       fontWeight: 800,
       marginBottom: 8
     }
-  }, "\u0E43\u0E0A\u0E49\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19?"), /*#__PURE__*/React.createElement("div", {
+  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E23\u0E01\u0E1A\u0E19 Cloud?"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
-      color: T.muted,
-      marginBottom: 14,
+      color: T.text,
+      marginBottom: 8,
       lineHeight: 1.7
     }
-  }, "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2A\u0E23\u0E38\u0E1B\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49 (", navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? "มือถือ" : "เดสก์ท็อป/แท็บเล็ต", "):", /*#__PURE__*/React.createElement("div", {
+  }, "\u0E08\u0E30\u0E2D\u0E31\u0E1B\u0E42\u0E2B\u0E25\u0E14\u0E40\u0E09\u0E1E\u0E32\u0E30 ", /*#__PURE__*/React.createElement("b", null, "\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \"", firstGroupName, "\""), " \u0E02\u0E36\u0E49\u0E19 Cloud \u0E40\u0E17\u0E48\u0E32\u0E19\u0E31\u0E49\u0E19"), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginTop: 6
+      fontSize: 11.5,
+      color: T.accent,
+      marginBottom: 10,
+      lineHeight: 1.7,
+      background: "#fdeae7",
+      borderRadius: 8,
+      padding: "8px 10px"
     }
-  }, "\u2022 \u0E08\u0E33\u0E19\u0E27\u0E19\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49: ", localGroupCount), /*#__PURE__*/React.createElement("div", null, "\u2022 \u0E08\u0E33\u0E19\u0E27\u0E19\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E1C\u0E48\u0E32\u0E19\u0E21\u0E32: ", localSessionCount), localMostRecentAt > 0 && /*#__PURE__*/React.createElement("div", null, "\u2022 \u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14: ", new Date(localMostRecentAt).toLocaleString("th-TH", {
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E2D\u0E31\u0E1B\u0E42\u0E2B\u0E25\u0E14: ", otherLocalGroupCount > 0 ? `ก๊วนอื่นอีก ${otherLocalGroupCount} ก๊วน, ` : "", "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E1C\u0E48\u0E32\u0E19\u0E21\u0E32 (", localSessionCount, " \u0E04\u0E23\u0E31\u0E49\u0E07) \u0E41\u0E25\u0E30\u0E23\u0E32\u0E22\u0E25\u0E30\u0E40\u0E2D\u0E35\u0E22\u0E14/\u0E01\u0E32\u0E23\u0E40\u0E07\u0E34\u0E19\u0E2D\u0E37\u0E48\u0E19\u0E46 \u0E02\u0E2D\u0E07\u0E01\u0E4A\u0E27\u0E19 \u2014 \u0E1F\u0E35\u0E40\u0E08\u0E2D\u0E23\u0E4C\u0E19\u0E35\u0E49\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E23\u0E2D\u0E07\u0E23\u0E31\u0E1A\u0E43\u0E19\u0E40\u0E27\u0E2D\u0E23\u0E4C\u0E0A\u0E31\u0E19\u0E19\u0E35\u0E49"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginBottom: 14,
+      lineHeight: 1.6
+    }
+  }, "\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49 (", navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? "มือถือ" : "เดสก์ท็อป/แท็บเล็ต", ") \u2014 \u0E08\u0E33\u0E19\u0E27\u0E19\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14\u0E17\u0E35\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49\u0E43\u0E19\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07: ", localGroupCount, localMostRecentAt > 0 && /*#__PURE__*/React.createElement("div", null, "\u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14\u0E43\u0E19\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E19\u0E35\u0E49: ", new Date(localMostRecentAt).toLocaleString("th-TH", {
     dateStyle: "medium",
     timeStyle: "short"
   }))), initErr && /*#__PURE__*/React.createElement("div", {
@@ -18524,13 +18553,17 @@ function BadQOnlineSheet({
       ...btnPrimary,
       opacity: initBusy ? 0.6 : 1
     }
-  }, initBusy ? "กำลังบันทึก..." : "ยืนยัน"))), initDone && /*#__PURE__*/React.createElement("div", {
+  }, initBusy ? "กำลังบันทึก..." : "ยืนยัน"))), initDone &&
+  /*#__PURE__*/
+  // v1.12.28 — BUG-1 fix: name the exact club created and restate the scope limit, instead of the
+  // old "สร้างข้อมูลก๊วนตั้งต้นบน Cloud แล้ว" which read as if all local data had just been seeded.
+  React.createElement("div", {
     style: {
       marginBottom: 10,
       fontSize: 12,
       color: T.green
     }
-  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19\u0E1A\u0E19 Cloud \u0E41\u0E25\u0E49\u0E27"), err && /*#__PURE__*/React.createElement("div", {
+  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19 \"", firstGroupName, "\" \u0E1A\u0E19 Cloud \u0E41\u0E25\u0E49\u0E27 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \u2014 \u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E23\u0E27\u0E21\u0E01\u0E4A\u0E27\u0E19\u0E2D\u0E37\u0E48\u0E19\u0E2B\u0E23\u0E37\u0E2D\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34)"), err && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10,
       fontSize: 12,
