@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.28";
+const APP_VERSION = "1.12.29";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -9874,7 +9874,7 @@ function BadQOnlineNavRow({ deviceId, onOpen }) {
 // Workspace resolution (create-once, idempotent) + Single Active Device (auto-register when none exists,
 // explicit-confirm takeover when one already exists, live revoked-state detection via a real-time Firestore
 // listener). Does not read or write ANY BadQ business data — see the file-level comment block above.
-function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
+function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroupName, onClose }) {
   const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
   const available = !!(cloud && cloud.available);
   const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
@@ -10009,6 +10009,29 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
     cloud.checkCloudInitState().then((res) => { if (!cancelled) setCloudInitState(res); }).catch(() => { if (!cancelled) setCloudInitState(null); });
     return () => { cancelled = true; };
   }, [workspace && workspace.id, workspace && workspace.activeDeviceId, deviceId]);
+
+  // v1.12.29 — UX-2 (see project doc badq-v11228-review-p22-followup.md): once Cloud genuinely has a Club,
+  // show its real name(s) instead of a flat "already has data" line with no detail. This is a plain,
+  // read-only Firestore query against workspaces/{id}/clubs (cloud.listClubs, firebase-sync.js) — the SAME
+  // collection, and the SAME pre-existing owner-only Rule, that checkCloudInitState's own Function already
+  // relies on being readable. No Cloud Function or Firestore Rules change was needed or made for this.
+  const [cloudClubs, setCloudClubs] = useState(null); // null = not fetched yet; [] = fetched, empty; array = {name} entries
+  const [cloudClubsLoading, setCloudClubsLoading] = useState(false);
+  const [cloudClubsErr, setCloudClubsErr] = useState("");
+  useEffect(() => {
+    if (!cloud || !cloud.listClubs || !workspace || !cloudInitState || cloudInitState.clubsInitialized !== true) {
+      setCloudClubs(null); setCloudClubsErr(""); setCloudClubsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setCloudClubsLoading(true); setCloudClubsErr("");
+    cloud.listClubs(workspace.id)
+      .then((clubs) => { if (!cancelled) setCloudClubs(Array.isArray(clubs) ? clubs : []); })
+      .catch((e) => { if (!cancelled) { setCloudClubs(null); setCloudClubsErr((e && e.message) || "โหลดรายชื่อก๊วนไม่สำเร็จ"); } })
+      .finally(() => { if (!cancelled) setCloudClubsLoading(false); });
+    return () => { cancelled = true; };
+  }, [workspace && workspace.id, cloudInitState && cloudInitState.clubsInitialized]);
+
   const [initConfirmOpen, setInitConfirmOpen] = useState(false);
   const [initBusy, setInitBusy] = useState(false);
   const [initErr, setInitErr] = useState("");
@@ -10016,20 +10039,29 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
   // Summary shown to the Owner BEFORE they confirm (spec: "number of clubs/groups, number of current
   // sessions, most recent local update timestamp, device/browser context where practical") — built entirely
   // from data THIS device already has locally; never fetched from anywhere else.
-  const localGroupCount = Object.keys(groupDefaults || {}).length;
+  const localGroupNames = Object.keys(groupDefaults || {});
+  const localGroupCount = localGroupNames.length;
   const localSessionCount = (sessionHistory || []).length;
   const localMostRecentAt = (sessionHistory || []).reduce((max, h) => Math.max(max, Number(h && h.endedAt) || 0), 0);
-  // v1.12.28 — BUG-1 fix (see project doc badq-v11227-review-p22-initial-cloud-data-safety.md): this is the
-  // EXACT and ONLY value doConfirmInitialCloudData below ever uploads (a single Club doc's `name` field, and
-  // nothing else — no other groups, no session history). Hoisted here, out of doConfirmInitialCloudData, so
-  // the confirmation dialog and the success message can quote this SAME value instead of each restating the
-  // upload's scope on their own and risking drifting out of sync with what's actually sent again.
-  const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
-  const otherLocalGroupCount = Math.max(0, localGroupCount - 1);
+  // v1.12.29 — UX-1 (see project doc badq-v11228-review-p22-followup.md): the Owner can now pick WHICH local
+  // group seeds the Cloud Club, instead of it always silently being whichever group was created earliest on
+  // this device. `defaultGroupName` prefers the group the Owner is CURRENTLY using (`currentGroupName`, i.e.
+  // session.name) when it's one of the saved local groups — the group they most likely mean — else falls back
+  // to the first saved group (the old, only, behavior), else to the pre-existing "ก๊วนของฉัน" placeholder when
+  // there are no saved local groups at all (that last fallback is byte-for-byte unchanged from before this
+  // patch). `selectedGroupName` is null until the Owner explicitly touches the picker; `cloudInitGroupName` is
+  // the ONE value actually used everywhere below — the upload payload, the confirmation dialog, and the
+  // success message all read this same value, so none of them can ever disagree about which name is being
+  // uploaded (same single-source-of-truth discipline the v1.12.28 BUG-1 fix established, now extended to a
+  // value the Owner can also change).
+  const defaultGroupName = (currentGroupName && localGroupNames.includes(currentGroupName)) ? currentGroupName : (localGroupNames[0] || "ก๊วนของฉัน");
+  const [selectedGroupName, setSelectedGroupName] = useState(null);
+  const cloudInitGroupName = (selectedGroupName && localGroupNames.includes(selectedGroupName)) ? selectedGroupName : defaultGroupName;
+  const otherLocalGroupCount = Math.max(0, localGroupCount - (localGroupNames.includes(cloudInitGroupName) ? 1 : 0));
   const doConfirmInitialCloudData = async () => {
     setInitBusy(true); setInitErr("");
     try {
-      await cloud.upsertClub(deviceId, activeSessionId, { club: { name: firstGroupName }, confirmedInitialData: true });
+      await cloud.upsertClub(deviceId, activeSessionId, { club: { name: cloudInitGroupName }, confirmedInitialData: true });
       setInitConfirmOpen(false); setInitDone(true);
       setCloudInitState({ clubsInitialized: true });
     } catch (e) { setInitErr(cloudErrorMessage(e)); }
@@ -10200,27 +10232,50 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
           {status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === false && !initDone && (
             <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
               <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text, marginBottom: 4 }}>ยังไม่มีข้อมูลก๊วนบน Cloud</div>
-              <div style={{ fontSize: 11, color: T.muted, marginBottom: 8, lineHeight: 1.6 }}>ยังไม่เคยสร้างก๊วน (Club) บน Cloud สำหรับบัญชีนี้ — เลือกได้ว่าจะใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้นหรือไม่</div>
-              <button disabled={initBusy} onClick={() => setInitConfirmOpen(true)} style={{ width: "100%", padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: initBusy ? 0.6 : 1 }}>ใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้น</button>
+              {/* v1.12.29 — item 1: this offer card previously said "ใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้น" (use
+                  this device's data as the starting data), the same vague framing the v1.12.28 BUG-1 fix
+                  already corrected one screen later (the confirm dialog). Worded precisely here too now — see
+                  project doc badq-v11228-review-p22-followup.md's "residual finding". */}
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 8, lineHeight: 1.6 }}>ยังไม่เคยสร้างก๊วน (Club) บน Cloud สำหรับบัญชีนี้ — เลือกก๊วนหนึ่งก๊วนจากเครื่องนี้เพื่อสร้างเป็นก๊วนแรกบน Cloud (อัปโหลดเฉพาะชื่อก๊วนเท่านั้น ไม่ใช่ข้อมูลทั้งหมดในเครื่อง)</div>
+              <button disabled={initBusy} onClick={() => setInitConfirmOpen(true)} style={{ width: "100%", padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: initBusy ? 0.6 : 1 }}>สร้างก๊วนแรกบน Cloud</button>
             </div>
           )}
           {/* Cloud ALREADY has Club data — safe state only, per spec NEVER silently overwritten just because
               this device is Active. No upload/merge action is offered here at all; full reconciliation
-              between divergent datasets is out of scope for this phase (P2.7). */}
+              between divergent datasets is out of scope for this phase (P2.7). v1.12.29 — UX-2: now also
+              shows the real Club name(s) (loading/empty/error states handled below) instead of just this flat
+              line, via a read-only Firestore query (cloud.listClubs) — see the effect above. */}
           {status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === true && (
             <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, fontSize: 11.5, color: T.muted }}>
-              มีข้อมูลก๊วน (Club) บน Cloud อยู่แล้วสำหรับบัญชีนี้
+              <div>มีข้อมูลก๊วน (Club) บน Cloud อยู่แล้วสำหรับบัญชีนี้</div>
+              {cloudClubsLoading && <div style={{ marginTop: 6 }}>กำลังโหลดรายชื่อก๊วน...</div>}
+              {!cloudClubsLoading && cloudClubsErr && <div style={{ marginTop: 6, color: T.accent }}>โหลดรายชื่อก๊วนไม่สำเร็จ — {cloudClubsErr}</div>}
+              {!cloudClubsLoading && !cloudClubsErr && cloudClubs && cloudClubs.length === 0 && <div style={{ marginTop: 6 }}>ยังไม่พบรายชื่อก๊วน (อาจกำลังซิงก์อยู่)</div>}
+              {!cloudClubsLoading && !cloudClubsErr && cloudClubs && cloudClubs.length > 0 && (
+                <div style={{ marginTop: 6, color: T.text, fontWeight: 700 }}>{cloudClubs.map((c) => (c && c.name) || "(ไม่มีชื่อ)").join(", ")}</div>
+              )}
             </div>
           )}
           {initConfirmOpen && (
             <Overlay onClose={() => { if (!initBusy) setInitConfirmOpen(false); }}>
               <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>สร้างก๊วนแรกบน Cloud?</div>
-              {/* v1.12.28 — BUG-1 fix: state precisely what this action uploads (a single Club name) and, just
-                  as clearly, what it does NOT upload (other groups, all session history) — this dialog
-                  previously implied the counts below were becoming Cloud's starting data, when only
-                  `firstGroupName` is ever sent. Upload payload/scope itself is unchanged (still P2.7 scope). */}
+              {/* v1.12.29 — UX-1: let the Owner pick which local group seeds the Cloud Club, defaulting to the
+                  group they're currently using (or the first saved group when that one isn't saved). v1.12.28's
+                  BUG-1 fix is preserved and extended: whichever name shows here, in the "will upload" line
+                  below, and in the success message afterward, is always `cloudInitGroupName` — the exact same
+                  value the payload sends, never restated independently. */}
+              {localGroupNames.length > 0 ? (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, color: T.muted, marginBottom: 4 }}>เลือกก๊วนจากเครื่องนี้เพื่อใช้เป็นชื่อก๊วนแรกบน Cloud:</div>
+                  <select value={cloudInitGroupName} onChange={(e) => setSelectedGroupName(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, background: T.surface, color: T.text }}>
+                    {localGroupNames.map((name) => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: T.text, marginBottom: 8, lineHeight: 1.7 }}>ยังไม่มีก๊วนที่บันทึกไว้ในเครื่องนี้ — จะใช้ชื่อ "{cloudInitGroupName}" แทน</div>
+              )}
               <div style={{ fontSize: 12, color: T.text, marginBottom: 8, lineHeight: 1.7 }}>
-                จะอัปโหลดเฉพาะ <b>ชื่อก๊วน "{firstGroupName}"</b> ขึ้น Cloud เท่านั้น
+                จะอัปโหลดเฉพาะ <b>ชื่อก๊วน "{cloudInitGroupName}"</b> ขึ้น Cloud เท่านั้น
               </div>
               <div style={{ fontSize: 11.5, color: T.accent, marginBottom: 10, lineHeight: 1.7, background: "#fdeae7", borderRadius: 8, padding: "8px 10px" }}>
                 ยังไม่อัปโหลด: {otherLocalGroupCount > 0 ? `ก๊วนอื่นอีก ${otherLocalGroupCount} ก๊วน, ` : ""}ประวัติก๊วนที่ผ่านมา ({localSessionCount} ครั้ง) และรายละเอียด/การเงินอื่นๆ ของก๊วน — ฟีเจอร์นี้ยังไม่รองรับในเวอร์ชันนี้
@@ -10237,9 +10292,9 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, onClose }) {
             </Overlay>
           )}
           {initDone && (
-            // v1.12.28 — BUG-1 fix: name the exact club created and restate the scope limit, instead of the
-            // old "สร้างข้อมูลก๊วนตั้งต้นบน Cloud แล้ว" which read as if all local data had just been seeded.
-            <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>สร้างก๊วน "{firstGroupName}" บน Cloud แล้ว (เฉพาะชื่อก๊วน — ยังไม่รวมก๊วนอื่นหรือประวัติ)</div>
+            // v1.12.29: still names the exact club created (now Owner-selectable via UX-1) and restates the
+            // scope limit, same discipline as the v1.12.28 BUG-1 fix.
+            <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>สร้างก๊วน "{cloudInitGroupName}" บน Cloud แล้ว (เฉพาะชื่อก๊วน — ยังไม่รวมก๊วนอื่นหรือประวัติ)</div>
           )}
 
           {err && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{err}</div>}
@@ -14173,7 +14228,7 @@ function SettingsTab({
           BadQOnlineNavRow/BadQOnlineSheet components P2.1 already shipped — only where they're mounted from
           has changed, nothing about their own behavior/authority logic. */}
       {view === "online" && (
-        <BadQOnlineSheet deviceId={deviceId} groupDefaults={groupDefaults} sessionHistory={sessionHistory} onClose={() => setView(null)} />
+        <BadQOnlineSheet deviceId={deviceId} groupDefaults={groupDefaults} sessionHistory={sessionHistory} currentGroupName={session && session.name} onClose={() => setView(null)} />
       )}
       {view === "backup" && (
         <Overlay onClose={() => setView(null)}>

@@ -535,7 +535,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.28";
+      var CURRENT_VERSION = "1.12.29";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -920,7 +920,7 @@ const LogOut=__mk('<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline 
 const Download=__mk('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>');
 
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.28";
+const APP_VERSION = "1.12.29";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -17753,6 +17753,7 @@ function BadQOnlineSheet({
   deviceId,
   groupDefaults,
   sessionHistory,
+  currentGroupName,
   onClose
 }) {
   const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
@@ -17939,6 +17940,39 @@ function BadQOnlineSheet({
       cancelled = true;
     };
   }, [workspace && workspace.id, workspace && workspace.activeDeviceId, deviceId]);
+
+  // v1.12.29 — UX-2 (see project doc badq-v11228-review-p22-followup.md): once Cloud genuinely has a Club,
+  // show its real name(s) instead of a flat "already has data" line with no detail. This is a plain,
+  // read-only Firestore query against workspaces/{id}/clubs (cloud.listClubs, firebase-sync.js) — the SAME
+  // collection, and the SAME pre-existing owner-only Rule, that checkCloudInitState's own Function already
+  // relies on being readable. No Cloud Function or Firestore Rules change was needed or made for this.
+  const [cloudClubs, setCloudClubs] = useState(null); // null = not fetched yet; [] = fetched, empty; array = {name} entries
+  const [cloudClubsLoading, setCloudClubsLoading] = useState(false);
+  const [cloudClubsErr, setCloudClubsErr] = useState("");
+  useEffect(() => {
+    if (!cloud || !cloud.listClubs || !workspace || !cloudInitState || cloudInitState.clubsInitialized !== true) {
+      setCloudClubs(null);
+      setCloudClubsErr("");
+      setCloudClubsLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setCloudClubsLoading(true);
+    setCloudClubsErr("");
+    cloud.listClubs(workspace.id).then(clubs => {
+      if (!cancelled) setCloudClubs(Array.isArray(clubs) ? clubs : []);
+    }).catch(e => {
+      if (!cancelled) {
+        setCloudClubs(null);
+        setCloudClubsErr(e && e.message || "โหลดรายชื่อก๊วนไม่สำเร็จ");
+      }
+    }).finally(() => {
+      if (!cancelled) setCloudClubsLoading(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace && workspace.id, cloudInitState && cloudInitState.clubsInitialized]);
   const [initConfirmOpen, setInitConfirmOpen] = useState(false);
   const [initBusy, setInitBusy] = useState(false);
   const [initErr, setInitErr] = useState("");
@@ -17946,23 +17980,32 @@ function BadQOnlineSheet({
   // Summary shown to the Owner BEFORE they confirm (spec: "number of clubs/groups, number of current
   // sessions, most recent local update timestamp, device/browser context where practical") — built entirely
   // from data THIS device already has locally; never fetched from anywhere else.
-  const localGroupCount = Object.keys(groupDefaults || {}).length;
+  const localGroupNames = Object.keys(groupDefaults || {});
+  const localGroupCount = localGroupNames.length;
   const localSessionCount = (sessionHistory || []).length;
   const localMostRecentAt = (sessionHistory || []).reduce((max, h) => Math.max(max, Number(h && h.endedAt) || 0), 0);
-  // v1.12.28 — BUG-1 fix (see project doc badq-v11227-review-p22-initial-cloud-data-safety.md): this is the
-  // EXACT and ONLY value doConfirmInitialCloudData below ever uploads (a single Club doc's `name` field, and
-  // nothing else — no other groups, no session history). Hoisted here, out of doConfirmInitialCloudData, so
-  // the confirmation dialog and the success message can quote this SAME value instead of each restating the
-  // upload's scope on their own and risking drifting out of sync with what's actually sent again.
-  const firstGroupName = Object.keys(groupDefaults || {})[0] || "ก๊วนของฉัน";
-  const otherLocalGroupCount = Math.max(0, localGroupCount - 1);
+  // v1.12.29 — UX-1 (see project doc badq-v11228-review-p22-followup.md): the Owner can now pick WHICH local
+  // group seeds the Cloud Club, instead of it always silently being whichever group was created earliest on
+  // this device. `defaultGroupName` prefers the group the Owner is CURRENTLY using (`currentGroupName`, i.e.
+  // session.name) when it's one of the saved local groups — the group they most likely mean — else falls back
+  // to the first saved group (the old, only, behavior), else to the pre-existing "ก๊วนของฉัน" placeholder when
+  // there are no saved local groups at all (that last fallback is byte-for-byte unchanged from before this
+  // patch). `selectedGroupName` is null until the Owner explicitly touches the picker; `cloudInitGroupName` is
+  // the ONE value actually used everywhere below — the upload payload, the confirmation dialog, and the
+  // success message all read this same value, so none of them can ever disagree about which name is being
+  // uploaded (same single-source-of-truth discipline the v1.12.28 BUG-1 fix established, now extended to a
+  // value the Owner can also change).
+  const defaultGroupName = currentGroupName && localGroupNames.includes(currentGroupName) ? currentGroupName : localGroupNames[0] || "ก๊วนของฉัน";
+  const [selectedGroupName, setSelectedGroupName] = useState(null);
+  const cloudInitGroupName = selectedGroupName && localGroupNames.includes(selectedGroupName) ? selectedGroupName : defaultGroupName;
+  const otherLocalGroupCount = Math.max(0, localGroupCount - (localGroupNames.includes(cloudInitGroupName) ? 1 : 0));
   const doConfirmInitialCloudData = async () => {
     setInitBusy(true);
     setInitErr("");
     try {
       await cloud.upsertClub(deviceId, activeSessionId, {
         club: {
-          name: firstGroupName
+          name: cloudInitGroupName
         },
         confirmedInitialData: true
       });
@@ -18470,7 +18513,7 @@ function BadQOnlineSheet({
       marginBottom: 8,
       lineHeight: 1.6
     }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E40\u0E04\u0E22\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19 (Club) \u0E1A\u0E19 Cloud \u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E19\u0E35\u0E49 \u2014 \u0E40\u0E25\u0E37\u0E2D\u0E01\u0E44\u0E14\u0E49\u0E27\u0E48\u0E32\u0E08\u0E30\u0E43\u0E0A\u0E49\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19\u0E2B\u0E23\u0E37\u0E2D\u0E44\u0E21\u0E48"), /*#__PURE__*/React.createElement("button", {
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E40\u0E04\u0E22\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19 (Club) \u0E1A\u0E19 Cloud \u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E19\u0E35\u0E49 \u2014 \u0E40\u0E25\u0E37\u0E2D\u0E01\u0E01\u0E4A\u0E27\u0E19\u0E2B\u0E19\u0E36\u0E48\u0E07\u0E01\u0E4A\u0E27\u0E19\u0E08\u0E32\u0E01\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E19\u0E35\u0E49\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E40\u0E1B\u0E47\u0E19\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E23\u0E01\u0E1A\u0E19 Cloud (\u0E2D\u0E31\u0E1B\u0E42\u0E2B\u0E25\u0E14\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E40\u0E17\u0E48\u0E32\u0E19\u0E31\u0E49\u0E19 \u0E44\u0E21\u0E48\u0E43\u0E0A\u0E48\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14\u0E43\u0E19\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07)"), /*#__PURE__*/React.createElement("button", {
     disabled: initBusy,
     onClick: () => setInitConfirmOpen(true),
     style: {
@@ -18484,7 +18527,7 @@ function BadQOnlineSheet({
       fontWeight: 800,
       opacity: initBusy ? 0.6 : 1
     }
-  }, "\u0E43\u0E0A\u0E49\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E08\u0E32\u0E01\u0E2D\u0E38\u0E1B\u0E01\u0E23\u0E13\u0E4C\u0E19\u0E35\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E31\u0E49\u0E07\u0E15\u0E49\u0E19")), status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === true && /*#__PURE__*/React.createElement("div", {
+  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E23\u0E01\u0E1A\u0E19 Cloud")), status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === true && /*#__PURE__*/React.createElement("div", {
     style: {
       padding: 12,
       borderRadius: 11,
@@ -18494,7 +18537,26 @@ function BadQOnlineSheet({
       fontSize: 11.5,
       color: T.muted
     }
-  }, "\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19 (Club) \u0E1A\u0E19 Cloud \u0E2D\u0E22\u0E39\u0E48\u0E41\u0E25\u0E49\u0E27\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E19\u0E35\u0E49"), initConfirmOpen && /*#__PURE__*/React.createElement(Overlay, {
+  }, /*#__PURE__*/React.createElement("div", null, "\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19 (Club) \u0E1A\u0E19 Cloud \u0E2D\u0E22\u0E39\u0E48\u0E41\u0E25\u0E49\u0E27\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E1A\u0E31\u0E0D\u0E0A\u0E35\u0E19\u0E35\u0E49"), cloudClubsLoading && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6
+    }
+  }, "\u0E01\u0E33\u0E25\u0E31\u0E07\u0E42\u0E2B\u0E25\u0E14\u0E23\u0E32\u0E22\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19..."), !cloudClubsLoading && cloudClubsErr && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6,
+      color: T.accent
+    }
+  }, "\u0E42\u0E2B\u0E25\u0E14\u0E23\u0E32\u0E22\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E44\u0E21\u0E48\u0E2A\u0E33\u0E40\u0E23\u0E47\u0E08 \u2014 ", cloudClubsErr), !cloudClubsLoading && !cloudClubsErr && cloudClubs && cloudClubs.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6
+    }
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E1E\u0E1A\u0E23\u0E32\u0E22\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 (\u0E2D\u0E32\u0E08\u0E01\u0E33\u0E25\u0E31\u0E07\u0E0B\u0E34\u0E07\u0E01\u0E4C\u0E2D\u0E22\u0E39\u0E48)"), !cloudClubsLoading && !cloudClubsErr && cloudClubs && cloudClubs.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6,
+      color: T.text,
+      fontWeight: 700
+    }
+  }, cloudClubs.map(c => c && c.name || "(ไม่มีชื่อ)").join(", "))), initConfirmOpen && /*#__PURE__*/React.createElement(Overlay, {
     onClose: () => {
       if (!initBusy) setInitConfirmOpen(false);
     }
@@ -18504,14 +18566,47 @@ function BadQOnlineSheet({
       fontWeight: 800,
       marginBottom: 8
     }
-  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E23\u0E01\u0E1A\u0E19 Cloud?"), /*#__PURE__*/React.createElement("div", {
+  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E23\u0E01\u0E1A\u0E19 Cloud?"), localGroupNames.length > 0 ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      marginBottom: 4
+    }
+  }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E01\u0E4A\u0E27\u0E19\u0E08\u0E32\u0E01\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E19\u0E35\u0E49\u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E43\u0E0A\u0E49\u0E40\u0E1B\u0E47\u0E19\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19\u0E41\u0E23\u0E01\u0E1A\u0E19 Cloud:"), /*#__PURE__*/React.createElement("select", {
+    value: cloudInitGroupName,
+    onChange: e => setSelectedGroupName(e.target.value),
+    style: {
+      width: "100%",
+      boxSizing: "border-box",
+      padding: "8px 10px",
+      borderRadius: 9,
+      border: `1px solid ${T.border}`,
+      fontSize: 13,
+      background: T.surface,
+      color: T.text
+    }
+  }, localGroupNames.map(name => /*#__PURE__*/React.createElement("option", {
+    key: name,
+    value: name
+  }, name)))) : /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: T.text,
       marginBottom: 8,
       lineHeight: 1.7
     }
-  }, "\u0E08\u0E30\u0E2D\u0E31\u0E1B\u0E42\u0E2B\u0E25\u0E14\u0E40\u0E09\u0E1E\u0E32\u0E30 ", /*#__PURE__*/React.createElement("b", null, "\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \"", firstGroupName, "\""), " \u0E02\u0E36\u0E49\u0E19 Cloud \u0E40\u0E17\u0E48\u0E32\u0E19\u0E31\u0E49\u0E19"), /*#__PURE__*/React.createElement("div", {
+  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E01\u0E4A\u0E27\u0E19\u0E17\u0E35\u0E48\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E44\u0E27\u0E49\u0E43\u0E19\u0E40\u0E04\u0E23\u0E37\u0E48\u0E2D\u0E07\u0E19\u0E35\u0E49 \u2014 \u0E08\u0E30\u0E43\u0E0A\u0E49\u0E0A\u0E37\u0E48\u0E2D \"", cloudInitGroupName, "\" \u0E41\u0E17\u0E19"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: T.text,
+      marginBottom: 8,
+      lineHeight: 1.7
+    }
+  }, "\u0E08\u0E30\u0E2D\u0E31\u0E1B\u0E42\u0E2B\u0E25\u0E14\u0E40\u0E09\u0E1E\u0E32\u0E30 ", /*#__PURE__*/React.createElement("b", null, "\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \"", cloudInitGroupName, "\""), " \u0E02\u0E36\u0E49\u0E19 Cloud \u0E40\u0E17\u0E48\u0E32\u0E19\u0E31\u0E49\u0E19"), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11.5,
       color: T.accent,
@@ -18555,15 +18650,15 @@ function BadQOnlineSheet({
     }
   }, initBusy ? "กำลังบันทึก..." : "ยืนยัน"))), initDone &&
   /*#__PURE__*/
-  // v1.12.28 — BUG-1 fix: name the exact club created and restate the scope limit, instead of the
-  // old "สร้างข้อมูลก๊วนตั้งต้นบน Cloud แล้ว" which read as if all local data had just been seeded.
+  // v1.12.29: still names the exact club created (now Owner-selectable via UX-1) and restates the
+  // scope limit, same discipline as the v1.12.28 BUG-1 fix.
   React.createElement("div", {
     style: {
       marginBottom: 10,
       fontSize: 12,
       color: T.green
     }
-  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19 \"", firstGroupName, "\" \u0E1A\u0E19 Cloud \u0E41\u0E25\u0E49\u0E27 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \u2014 \u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E23\u0E27\u0E21\u0E01\u0E4A\u0E27\u0E19\u0E2D\u0E37\u0E48\u0E19\u0E2B\u0E23\u0E37\u0E2D\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34)"), err && /*#__PURE__*/React.createElement("div", {
+  }, "\u0E2A\u0E23\u0E49\u0E32\u0E07\u0E01\u0E4A\u0E27\u0E19 \"", cloudInitGroupName, "\" \u0E1A\u0E19 Cloud \u0E41\u0E25\u0E49\u0E27 (\u0E40\u0E09\u0E1E\u0E32\u0E30\u0E0A\u0E37\u0E48\u0E2D\u0E01\u0E4A\u0E27\u0E19 \u2014 \u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E23\u0E27\u0E21\u0E01\u0E4A\u0E27\u0E19\u0E2D\u0E37\u0E48\u0E19\u0E2B\u0E23\u0E37\u0E2D\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34)"), err && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10,
       fontSize: 12,
@@ -28640,6 +28735,7 @@ function SettingsTab({
     deviceId: deviceId,
     groupDefaults: groupDefaults,
     sessionHistory: sessionHistory,
+    currentGroupName: session && session.name,
     onClose: () => setView(null)
   }), view === "backup" && /*#__PURE__*/React.createElement(Overlay, {
     onClose: () => setView(null)
