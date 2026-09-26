@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.31";
+const APP_VERSION = "1.12.32";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -4205,6 +4205,45 @@ function isSuspiciousPlayerLoss(candidate, priorEvidence) {
 // (moves into `history`) or gets cleared, so a smaller current/future is completely normal, not a sign of
 // data loss — only `history`/`sessionHistory`/`tournamentHistory` are treated as monotonic archives that
 // normal operation (finishAndAdvance/endSession/Tournament completion) only ever appends to.
+// v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): the save effect's own
+// `window.storage.set("bg-v11", json)` call (see the effect below) only ever looked at `primaryOk`/
+// `mirrorOk` for a diagnostic log entry — a resolved `{ primaryOk: false, error }` or an outright rejected
+// write both passed through completely silently, with no visible sign to the organizer that their latest
+// edit never actually reached disk. These two small, pure, generation-gated decision functions are the
+// entire "should the persistent save-failure warning be showing right now" logic, kept OUTSIDE the effect
+// (and outside any React state) specifically so they can be unit-tested directly, exactly like every other
+// small pure helper in this file (wouldRegressProgress, resolveMatchType, etc.), without needing to render
+// the whole app or fake out IndexedDB.
+//
+// Generation numbers (from the existing, already-established `saveGenerationRef` monotonic counter — see
+// its own declaration comment) are the ONLY thing these two functions compare on, which is what satisfies
+// finding #3's requirement 4 ("a successful older or unrelated write must not clear a newer failure") for
+// free: a generation is a strictly-increasing stand-in for "how new is this particular snapshot of app
+// state," so "is this outcome for data at least as new as what's already reflected on screen" reduces to a
+// single integer comparison, with no need to inspect the state contents themselves.
+//
+// `computeSaveWarningOnFailure`: called when a save attempt for `failedGen` failed (either a resolved
+// `primaryOk: false` or a thrown/rejected write). Returns the warning object that should be shown, or the
+// previous one unchanged. A failure for a generation that is NOT newer than the highest generation already
+// confirmed persisted (`lastSuccessGen`) is stale/moot — some later save already succeeded, so the data on
+// disk is already at least as fresh as what this particular attempt was trying to save — and must never
+// resurrect (or downgrade) a warning; this is what stops a slow, delayed failure callback from an
+// already-superseded generation from showing a misleading banner after the fact.
+function computeSaveWarningOnFailure(prevWarning, failedGen, lastSuccessGen, reason) {
+  if (failedGen <= lastSuccessGen) return prevWarning;
+  if (prevWarning && prevWarning.gen > failedGen) return prevWarning; // never regress to an older failure's info
+  return { gen: failedGen, reason: reason || "unknown", at: Date.now() };
+}
+// `computeSaveWarningOnSuccess`: called when a save attempt for `succeededGen` is CONFIRMED persisted
+// (`primaryOk !== false`, no thrown error). Clears the currently-shown warning ONLY when that warning's own
+// generation is covered by (less than or equal to) this success — i.e. the data this success just persisted
+// is at least as new as whatever failed to save before. An older/unrelated generation succeeding (e.g. a
+// slow retry of stale data, or an out-of-order resolution) can never clear a warning for a NEWER failure,
+// satisfying finding #3's requirement 4 exactly.
+function computeSaveWarningOnSuccess(prevWarning, succeededGen) {
+  if (prevWarning && prevWarning.gen <= succeededGen) return null;
+  return prevWarning;
+}
 function wouldRegressProgress(liveState, incomingData) {
   const idsOf = (arr) => new Set((Array.isArray(arr) ? arr : []).map((x) => x && x.id).filter(Boolean));
   const liveHistory = idsOf(liveState.history), liveSessionHistory = idsOf(liveState.sessionHistory), liveTournamentHistory = idsOf(liveState.tournamentHistory);
@@ -5254,6 +5293,21 @@ function AppInner() {
   // of the exact timing between the two clicks, while still allowing a genuinely later End Session call to
   // proceed once session.id has actually changed (which only happens after endSession() itself completes).
   const lastEndedSessionIdRef = useRef(null);
+  // v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): `lastSuccessGenRef` is the
+  // highest saveGenerationRef generation CONFIRMED persisted to Primary storage (`primaryOk !== false`,
+  // write did not throw) — the "lastSuccessGen" input to computeSaveWarningOnFailure/OnSuccess above.
+  // `latestAttemptedSaveRef` mirrors `latestStateJsonRef` (already used by the pagehide/visibility flush)
+  // but also remembers WHICH generation that cached JSON belongs to, so the manual "ลองบันทึกใหม่" retry
+  // button below can re-attempt the exact same write and report its outcome against the right generation
+  // number, without needing its own separate save pipeline (per the "no new storage architecture"
+  // constraint — this reuses the very same `window.storage.set("bg-v11", json)` call the effect uses).
+  const lastSuccessGenRef = useRef(0);
+  const latestAttemptedSaveRef = useRef({ json: null, gen: 0 });
+  // Drives the persistent Thai save-failure banner: null (hidden) | { gen, reason, at }. React state (not a
+  // ref) because it must re-render the banner; kept as the single source of truth for the UI so multiple
+  // failed generations never stack into multiple banners (requirement 5 — no duplicate warnings).
+  const [saveWarning, setSaveWarning] = useState(null);
+  const [saveRetrying, setSaveRetrying] = useState(false); // disables the retry button mid-attempt, prevents overlapping manual retries
   const [staleSyncNotice, setStaleSyncNotice] = useState(null); // brief banner text, or null when hidden
   // v1.9.23: mobile browsers (iOS Safari standalone "Add to Home Screen" apps especially) can and do
   // clear a site's localStorage under storage pressure or after enough time unvisited — there is no way
@@ -5872,6 +5926,18 @@ function AppInner() {
   // The trigger logic (the "did sessionHistory/tournamentHistory grow" check using prevHistLenRef) has been
   // moved INTO the main save effect below, and is only reached AFTER that effect's own primary write has
   // been confirmed successful — see the "afterPrimaryEndSessionPersist" block a few lines down.
+  // v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): thin wiring around the pure
+  // computeSaveWarningOnFailure/OnSuccess helpers (module scope, above) — kept as two tiny named functions
+  // (not inlined at each call site) so the automatic save effect below AND the manual "ลองบันทึกใหม่" retry
+  // button (in the render below) both go through the exact same generation-gated logic, never two slightly
+  // different copies of it.
+  const recordSaveFailure = (gen, reason) => {
+    setSaveWarning((prev) => computeSaveWarningOnFailure(prev, gen, lastSuccessGenRef.current, reason));
+  };
+  const recordSaveSuccess = (gen) => {
+    lastSuccessGenRef.current = Math.max(lastSuccessGenRef.current, gen);
+    setSaveWarning((prev) => computeSaveWarningOnSuccess(prev, gen));
+  };
   useEffect(() => {
     // v1.11.0 BOOT BARRIER (CRITICAL): saves are blocked for any bootStatus other than "restored" or
     // "new-install" — i.e. while the recovery waterfall is still running ("loading") or concluded that
@@ -5933,6 +5999,11 @@ function AppInner() {
         // v1.11.76: pageInstanceId tags every "bg-v11" write — see the same note on applyUpdateNow's write.
         const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
+        // v1.12.32 (P1 Launch Fix Batch C): kept fresh alongside latestStateJsonRef above, regardless of
+        // whether the write below succeeds — this is what lets the manual "ลองบันทึกใหม่" retry button
+        // (in the render below) re-attempt exactly this generation's own payload on demand, without a
+        // second independent save pipeline.
+        latestAttemptedSaveRef.current = { json, gen: mySaveGeneration };
         // v1.11.44: re-check immediately before the actual write — the narrowest possible window for a
         // newer run to have started in the meantime (this is the exact check that closes the race that
         // caused "ended session missing from History": without it, an older run delayed by IndexedDB
@@ -5985,9 +6056,34 @@ function AppInner() {
         // v1.12.19: "beforeIDBWrite" marker removed — see the removal note above "afterStorageSerialize";
         // "afterIDBWrite" just below (with jsonLen + primaryOk/mirrorOk) still fully covers "did the write
         // happen and did it succeed", which is the only thing this log is still actually used to answer.
-        const result = await window.storage.set("bg-v11", json);
+        // v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): the write itself is now
+        // wrapped in its own try/catch, distinct from the big outer try/catch around this whole IIFE. Before
+        // this fix, a REJECTED window.storage.set (as opposed to a resolved-but-unsuccessful result) fell
+        // straight into that outer catch and stopped everything silently — no diag entry, no warning, no
+        // sign to the organizer their edit never reached disk. It is caught here instead so the failure can
+        // be recorded and surfaced, then this generation's remaining work (LKG write, Auto Backup trigger)
+        // is skipped exactly as it already was before this fix — a thrown primary write was never treated
+        // as "safe to build on" and still isn't now; only the VISIBILITY of that failure has changed.
+        let result;
+        try {
+          result = await window.storage.set("bg-v11", json);
+        } catch (writeErr) {
+          try { window.__pushDiag && window.__pushDiag("afterIDBWrite", { gen: mySaveGeneration, jsonLen: json.length, primaryOk: false, mirrorOk: false, threw: true, errorMessage: writeErr && writeErr.message }); } catch (e) {}
+          recordSaveFailure(mySaveGeneration, "exception");
+          return;
+        }
         try { window.__pushDiag && window.__pushDiag("afterIDBWrite", { gen: mySaveGeneration, jsonLen: json.length, primaryOk: result?.primaryOk, mirrorOk: result?.mirrorOk }); } catch (e) {}
         lastKnownSavedAtRef.current = savedAt;
+        // v1.12.32 (P1 Launch Fix Batch C): the resolved-but-unsuccessful case (`primaryOk: false`) — this
+        // is the exact scenario finding #3 named directly ("the autosave effect ignores storage.set results
+        // such as {primaryOk:false,error}"). Recorded/cleared through the SAME generation-gated helpers as
+        // the thrown-write case above and the success path below, so exactly one warning banner can ever be
+        // showing at a time regardless of which failure mode produced it.
+        if (result?.primaryOk === false) {
+          recordSaveFailure(mySaveGeneration, "primaryOk-false");
+        } else {
+          recordSaveSuccess(mySaveGeneration);
+        }
         // Last Known Good: only ever updated from HERE, i.e. only once bootStatus has already resolved
         // to a trustworthy state — so a failed/interrupted boot can never overwrite a good LKG with an
         // empty or corrupted one (section 9's explicit warning). A normal save landing safely on the
@@ -6025,6 +6121,39 @@ function AppInner() {
       } catch (e) {}
     })();
   }, [players, lastIntentionalPlayerWipeAt, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus]);
+  // v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): manual retry for the persistent
+  // save-failure warning banner below. Deliberately reuses the EXACT same `window.storage.set("bg-v11", ...)`
+  // call the automatic save effect above uses (per the "do not introduce a new storage architecture"
+  // constraint) against the most recently ATTEMPTED payload (`latestAttemptedSaveRef`, kept fresh by that
+  // effect regardless of outcome) rather than building a fresh one — this is a deliberate retry of the same
+  // failed write, not a new save cycle. `saveRetrying` guards against a second tap starting an overlapping
+  // retry while one is already in flight (requirement 5: no overlapping/duplicate attempts from this button).
+  // If a genuinely NEWER edit happens while a manual retry is in flight, the automatic effect's own
+  // generation bump naturally supersedes whatever this retry reports (computeSaveWarningOnSuccess/OnFailure
+  // are gated on generation number either way), so the two paths can never fight over which one "wins."
+  const retrySaveNow = async () => {
+    if (saveRetrying) return;
+    const attempt = latestAttemptedSaveRef.current;
+    if (!attempt || !attempt.json) return;
+    setSaveRetrying(true);
+    try {
+      const result = await window.storage.set("bg-v11", attempt.json);
+      try { window.__pushDiag && window.__pushDiag("afterManualSaveRetry", { gen: attempt.gen, jsonLen: attempt.json.length, primaryOk: result?.primaryOk, mirrorOk: result?.mirrorOk }); } catch (e) {}
+      if (result?.primaryOk === false) {
+        recordSaveFailure(attempt.gen, "primaryOk-false");
+      } else {
+        recordSaveSuccess(attempt.gen);
+        // A manual retry succeeding is exactly as good as the LKG write the automatic path would have done
+        // right after its own successful primary write — keep LKG in sync too, best-effort, same as above.
+        try { await window.storage.set(LKG_KEY, attempt.json); } catch (e) {}
+      }
+    } catch (writeErr) {
+      try { window.__pushDiag && window.__pushDiag("afterManualSaveRetry", { gen: attempt.gen, jsonLen: attempt.json.length, primaryOk: false, mirrorOk: false, threw: true, errorMessage: writeErr && writeErr.message }); } catch (e) {}
+      recordSaveFailure(attempt.gen, "exception");
+    } finally {
+      setSaveRetrying(false);
+    }
+  };
   // v1.11.0 iOS LIFECYCLE SAFEGUARD (section 14): a best-effort SYNCHRONOUS localStorage flush of the
   // most recently computed save payload when the app backgrounds — insurance for the narrow window
   // where the async IndexedDB-primary write above might still be in flight the instant iOS terminates
@@ -8164,6 +8293,28 @@ function AppInner() {
               <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
                 <button onClick={() => { setTab("settings"); setSettingsAutoOpen("backup"); }} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>ไปกู้คืนข้อมูล</button>
                 <button onClick={() => { setLoadCorrupted(false); setBootStatus("new-install"); }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>เริ่มต้นใหม่ (ไม่กู้คืน)</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): persistent, clearly
+            visible warning while the latest edit has not been confirmed saved to this device — either a
+            resolved {primaryOk:false} result or a rejected/thrown write (see the save effect and
+            computeSaveWarningOnFailure/OnSuccess above). Deliberately has NO dismiss (X) button, unlike
+            showBackupReminder below — this is a live risk warning, not a one-time nudge, and it clears
+            itself automatically (never by the organizer dismissing it) the moment the SAME OR a newer
+            generation of data is confirmed persisted. Wording is careful to describe a RISK, never a
+            confirmed loss — the data is still safely held in this page's memory; it is disk that hasn't
+            confirmed it yet — per the explicit instruction not to falsely claim data has been lost. */}
+        {saveWarning && (
+          <div style={{ background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
+            <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>⚠️</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800 }}>บันทึกข้อมูลล่าสุดยังไม่สำเร็จ</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ข้อมูลที่เห็นอยู่ตอนนี้ยังอยู่ครบในหน้าจอนี้ แต่ระบบยังบันทึกลงเครื่องไม่สำเร็จ — ถ้าปิดแอปหรือปิดหน้านี้ตอนนี้ การเปลี่ยนแปลงล่าสุดอาจไม่ถูกบันทึกไว้ อย่าเพิ่งปิดแอป แล้วลองกดปุ่มด้านล่าง หรือรอสักครู่แล้วลองอีกครั้ง</div>
+              <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
+                <button onClick={retrySaveNow} disabled={saveRetrying} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800, opacity: saveRetrying ? 0.6 : 1 }}>{saveRetrying ? "กำลังลองบันทึก…" : "ลองบันทึกใหม่"}</button>
               </div>
             </div>
           </div>
