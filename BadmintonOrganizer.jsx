@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.29";
+const APP_VERSION = "1.12.31";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -192,7 +192,17 @@ const LEVEL_HELP = "เรียงจากเริ่มต้น → เก�
 // players/backups have none of these fields, so default them here exactly like every other back-compat
 // field: memberType defaults to "member" (never silently "guest"), phone/lineId default to "" (never
 // null, so controlled <input> elements never warn about switching from uncontrolled).
-const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false, discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member", phone: p.phone || "", lineId: p.lineId || "", archived: p.archived === true, archivedAt: p.archivedAt || null,
+const normPlayer = (p) => ({ ...p, status: p.status || (p.present ? "ready" : "absent"), waitTotal: p.waitTotal || 0, waitCount: p.waitCount || 0, waitMax: p.waitMax || 0, paid: p.paid || false,
+  // v1.12.31 (P1 Launch Fix Batch B, finding #2 — frozen paid amount): PERMANENT-shaped but session-scoped
+  // fields, same back-compat category as `paid` just above — old players/backups have neither field at all,
+  // so they default/sanitize to null here exactly like every other field in this function. `null` is always
+  // the safe direction: computeBill()'s hasFrozenPayment check requires BOTH a numeric paidAmount AND an
+  // object paidBreakdown, so a missing/malformed value on either one (a corrupted or hand-edited backup, a
+  // pre-v1.12.31 record) simply falls through to computeBill's normal live recalculation — never a crash,
+  // never a fabricated historical amount.
+  paidAmount: typeof p.paidAmount === "number" && isFinite(p.paidAmount) ? p.paidAmount : null,
+  paidBreakdown: p.paidBreakdown && typeof p.paidBreakdown === "object" ? p.paidBreakdown : null,
+  discount: p.discount || 0, wheelDiscount: p.wheelDiscount || 0, pendingDiscount: p.pendingDiscount || 0, carriedInDiscount: p.carriedInDiscount || 0, spun: p.spun || false, wheelResult: p.wheelResult || null, skillIndex: p.skillIndex || WEIGHT[p.level] || 1, handedness: p.handedness === "left" ? "left" : "right", handPref: p.handPref === "preferLeft" || p.handPref === "avoidLeft" ? p.handPref : null, memberType: p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member", phone: p.phone || "", lineId: p.lineId || "", archived: p.archived === true, archivedAt: p.archivedAt || null,
   // v1.11.34: "ล็อกสมาชิก" — permanent player data, same back-compat category as handedness/memberType
   // above. Purely a guard against accidental Archive/Delete (see archivePlayer/delPlayer/bulkArchivePlayers
   // in App()); never read by matchmaking, billing, or attendance. Missing on every pre-existing player ->
@@ -1563,8 +1573,29 @@ function computeBill(players, settings, finishedMatches) {
     // per-person math above so every OTHER player's own charge/split-divisor is completely unaffected: the
     // Owner is exempted from what THEY owe, never removed from the pool real costs are shared across.
     const isOwnerExempt = p.memberType === "owner";
-    const total = isOwnerExempt ? 0 : rawTotal;
-    return { ...p, eCourt: isOwnerExempt ? 0 : court, eShuttle: isOwnerExempt ? 0 : shuttle, eOther: isOwnerExempt ? 0 : other, eDiscount: discount, eWheelDiscount: wheelDiscount, eCarriedInDiscount: carriedInDiscount, total, isOwnerExempt, doublesGames, singlesGames, doublesRate, singlesRate };
+    // v1.12.31 (P1 Launch Fix Batch B, finding #2 — frozen paid amount): once a player is marked paid,
+    // togglePaid() snapshots the exact amount/breakdown they were charged at that moment into
+    // p.paidAmount/p.paidBreakdown. From then on this function must keep returning that frozen snapshot for
+    // them instead of the live recalculation above, so a later change to court cost, shuttle cost, or
+    // attendance can never retroactively alter what an already-paid player owes/paid. `!isOwnerExempt` is a
+    // defensive guard only (Owner is always ฿0 regardless of any snapshot). The `typeof`/shape checks are
+    // what make this fully backward-compatible: on every pre-existing player/backup, paidAmount is
+    // undefined, hasFrozenPayment is false, and every line below evaluates to the exact same expression as
+    // before this patch — byte-identical behavior, no migration needed.
+    const hasFrozenPayment = !isOwnerExempt && !!p.paid && typeof p.paidAmount === "number" && p.paidBreakdown && typeof p.paidBreakdown === "object";
+    const fb = hasFrozenPayment ? p.paidBreakdown : null;
+    const total = isOwnerExempt ? 0 : (hasFrozenPayment ? p.paidAmount : rawTotal);
+    const outCourt = isOwnerExempt ? 0 : (hasFrozenPayment ? (fb.eCourt || 0) : court);
+    const outShuttle = isOwnerExempt ? 0 : (hasFrozenPayment ? (fb.eShuttle || 0) : shuttle);
+    const outOther = isOwnerExempt ? 0 : (hasFrozenPayment ? (fb.eOther || 0) : other);
+    const outDiscount = hasFrozenPayment ? (fb.eDiscount || 0) : discount;
+    const outWheelDiscount = hasFrozenPayment ? (fb.eWheelDiscount || 0) : wheelDiscount;
+    const outCarriedInDiscount = hasFrozenPayment ? (fb.eCarriedInDiscount || 0) : carriedInDiscount;
+    const outDoublesGames = hasFrozenPayment ? (fb.doublesGames || 0) : doublesGames;
+    const outSinglesGames = hasFrozenPayment ? (fb.singlesGames || 0) : singlesGames;
+    const outDoublesRate = hasFrozenPayment ? (fb.doublesRate || 0) : doublesRate;
+    const outSinglesRate = hasFrozenPayment ? (fb.singlesRate || 0) : singlesRate;
+    return { ...p, eCourt: outCourt, eShuttle: outShuttle, eOther: outOther, eDiscount: outDiscount, eWheelDiscount: outWheelDiscount, eCarriedInDiscount: outCarriedInDiscount, total, isOwnerExempt, doublesGames: outDoublesGames, singlesGames: outSinglesGames, doublesRate: outDoublesRate, singlesRate: outSinglesRate };
   });
 }
 // v1.11.38: true if this player is still mid-match (playing or paused, i.e. NOT finished yet) right now —
@@ -4906,7 +4937,127 @@ function suggestNextTMatch(t) {
   return [...pool].sort((a, b) => a.roundIndex - b.roundIndex || (a.startedAt || 0) - (b.startedAt || 0))[0];
 }
 
+// v1.12.30 (P1 Launch Fix Batch A, finding #1 of the P1 Owner Launch Readiness Review,
+// claude/badq-v11229-p1-owner-launch-readiness-review.md): before this, there was no React error boundary
+// anywhere in the app (confirmed by exhaustive grep for ErrorBoundary/componentDidCatch/
+// getDerivedStateFromError — zero matches). Any uncaught exception during render, anywhere in the tree (a
+// match card, a score popup, a history row, etc.), unmounted the ENTIRE React tree per React's default
+// behavior — a white screen with no in-app way back, even though the app's own autosave/IndexedDB data was
+// almost certainly still intact on disk. This boundary only catches RENDER-phase exceptions (React's own
+// contract for error boundaries — it cannot catch errors in event handlers, effects, or async callbacks;
+// those are handled separately by the window.onerror/unhandledrejection listeners added just below). It
+// deliberately does NOT claim any data was saved/backed up when it renders — it has no way to verify that,
+// since IndexedDB/localStorage writes happen entirely independently of this component (see the autosave
+// effect inside AppInner) — it only reports that an error occurred and offers a reload.
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error, info) {
+    // Best-effort diagnostic only, reusing the existing window.__pushDiag infrastructure (index.html) —
+    // same small, bounded, synchronous-localStorage-only log already used for boot/lifecycle events,
+    // viewable in-app under ตั้งค่า → ข้อมูลและการสำรอง → Diagnostic Log. Never throws, never blocks the
+    // fallback UI below, and never logs PII (message/stack only, no application data).
+    try {
+      if (typeof window !== "undefined" && window.__pushDiag) {
+        window.__pushDiag("renderError", {
+          message: error && error.message ? String(error.message).slice(0, 300) : String(error).slice(0, 300),
+          componentStack: info && info.componentStack ? String(info.componentStack).slice(0, 500) : null,
+        });
+      }
+    } catch (e) {}
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, background: "#f7f7f8", textAlign: "center" }}>
+          <div style={{ maxWidth: 360 }}>
+            <div style={{ fontSize: 42, marginBottom: 14 }}>⚠️</div>
+            <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 8, color: "#1a1a1a" }}>เกิดข้อผิดพลาดที่ไม่คาดคิด</div>
+            {/* Deliberately does NOT say "ข้อมูลถูกบันทึกแล้ว" (data has been saved) — this component has no
+                way to verify that; it only reports the error and offers the one safe recovery action. */}
+            <div style={{ fontSize: 13.5, color: "#666", marginBottom: 20, lineHeight: 1.7 }}>
+              แอปพบปัญหาและไม่สามารถแสดงหน้านี้ต่อไปได้ กดปุ่มด้านล่างเพื่อโหลดแอปใหม่อีกครั้ง<br />
+              หากปัญหายังเกิดซ้ำ ลองตรวจสอบข้อมูลของคุณที่ ตั้งค่า → ข้อมูลและการสำรอง หลังโหลดใหม่
+            </div>
+            <button onClick={() => { try { window.location.reload(); } catch (e) {} }} style={{ padding: "13px 30px", borderRadius: 12, background: "#1f8a4c", border: "none", color: "#fff", fontSize: 14.5, fontWeight: 800 }}>
+              โหลดแอปใหม่
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// v1.12.30: window.onerror / unhandledrejection are NOT caught by the React error boundary above (React
+// boundaries only see render-phase exceptions) — an exception thrown from an event handler, a setTimeout
+// callback, or a rejected Promise anywhere in the app would otherwise be a completely silent failure with
+// no signal to the user at all, which is its own data-loss risk (e.g. a save-triggering handler throwing
+// halfway through). This is a single, de-duplicated, best-effort diagnostic hook only — it does not attempt
+// to show a user-facing banner for every such event (many are harmless/expected, e.g. a benign browser
+// extension error), to avoid the "duplicate or misleading notifications" risk explicitly called out for
+// this fix; it exists purely so these events are at least visible in the existing Diagnostic Log rather
+// than vanishing with zero trace. Installed once per script evaluation (module-level, not inside App), and
+// itself never throws.
+if (typeof window !== "undefined" && !window.__badqGlobalErrorHooksInstalled) {
+  window.__badqGlobalErrorHooksInstalled = true;
+  try {
+    window.addEventListener("error", function (e) {
+      try {
+        window.__pushDiag && window.__pushDiag("windowError", {
+          message: e && e.message ? String(e.message).slice(0, 300) : "unknown",
+        });
+      } catch (err) {}
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      try {
+        const reason = e && e.reason;
+        const message = reason && reason.message ? reason.message : (typeof reason === "string" ? reason : "unknown");
+        window.__pushDiag && window.__pushDiag("unhandledRejection", { message: String(message).slice(0, 300) });
+      } catch (err) {}
+    });
+  } catch (e) {}
+}
+
 export default function App() {
+  return (
+    <AppErrorBoundary>
+      <AppInner />
+    </AppErrorBoundary>
+  );
+}
+
+function AppInner() {
+  // v1.12.30 (test-only hook, see test_v11230_p1_errorboundary_and_unstart_crash_e2e.js): completely inert
+  // in normal use — this line has zero effect unless a test explicitly sets window.__badqForceRenderError
+  // beforehand, which never happens outside that one automated test. It exists solely because reliably
+  // forcing a genuine React render-phase exception from OUTSIDE this bundle (without depending on which
+  // specific data-driven list happens to be mapped in whichever tab/state the app is currently in) has no
+  // other deterministic attachment point — this makes the AppErrorBoundary above verifiable by an actual
+  // automated test rather than only by manual QA.
+  // v1.12.31 (P1 Launch Fix Batch B): restricted to Development/Test hosts — this codebase ships as a
+  // single static bundle with no separate dev/prod build step, so the only available "is this a real
+  // production install" signal is the page's own hostname. A real club always opens BadQ from its actual
+  // hosting domain (or as an installed PWA / `file://` shell) — never from `localhost`/`127.0.0.1` — while
+  // every automated test in this project (including test_v11230_p1_errorboundary_and_unstart_crash_e2e.js,
+  // unchanged) explicitly serves the compiled bundle from `http://localhost:PORT/index.html`. Gating on
+  // hostname here means even if some other bug ever set window.__badqForceRenderError on a real production
+  // install, this branch could still never fire there. KNOWN LIMITATION: a club that chose to self-host
+  // this PWA on a machine reachable via the literal hostname "localhost"/"127.0.0.1" would remain exposed —
+  // judged acceptable since real BadQ installs are always opened via a real hosting domain or as an
+  // installed PWA, never that way.
+  if (
+    typeof window !== "undefined" && window.__badqForceRenderError &&
+    typeof location !== "undefined" && /^(localhost|127\.0\.0\.1)$/.test(location.hostname || "")
+  ) {
+    throw new Error("BADQ_TEST_FORCED_RENDER_ERROR");
+  }
   // v1.11.47 (TEMPORARY DIAGNOSTICS): fires exactly once per real App mount. window.__pageInstanceId is
   // assigned at script-evaluation time in index.html (see its comment there) — it changes ONLY on a true
   // page reload / PWA process restart, never on a React re-render. Comparing it against the last id this
@@ -6473,6 +6624,13 @@ export default function App() {
       .filter((c) => !companion || c.id !== companion.id)
       .map((x) => (x.id === mid ? { ...x, status: "next", startedAt: null } : x));
     setCurrent(updated);
+    // v1.12.30 (P1 Launch Fix Batch A, finding #4 of the P1 Owner Launch Readiness Review): every other
+    // function that removes/replaces `current` entries this way already calls setSel(null) right after
+    // (nextCourt/finishAndAdvance/fillCourt/deleteMatch/etc.) — this was the one exception. Without it, a
+    // `sel` left pointing at the companion match just removed above (the `companion` filter) survives into
+    // the next tapSlot call and crashes it on the now-missing match. tapSlot itself also gained a defensive
+    // guard below as a second layer of protection, but clearing `sel` here is the actual root-cause fix.
+    setSel(null);
   };
   // organizer picked a status on an ALREADY-ARCHIVED (history[]) match via the dropdown — pulls it back into
   // `current` on its original court. Blocked (with an explanation) if another live match already sits on
@@ -6716,11 +6874,61 @@ export default function App() {
   // in their attendance status too ("กลับแล้ว"), so the organizer doesn't have to flip status separately
   // right after every payment. Only forced on the way TO paid; un-marking (undo a mistaken tap) leaves
   // status alone, since we don't know whether they'd actually already left before that tap.
-  const togglePaid = (id) => setPlayers((prev) => prev.map((p) => {
-    if (p.id !== id) return p;
-    const nowPaid = !p.paid;
-    return { ...p, paid: nowPaid, status: nowPaid ? "left" : p.status };
-  }));
+  // v1.12.31 (P1 Launch Fix Batch B, finding #2 — frozen paid amount): marking a player paid now also
+  // snapshots the exact amount/breakdown they owe AT THIS MOMENT (via the same computeBill() every live
+  // payment display already uses, with the exact same [...history, ...doneCurrent] finished-match list
+  // QuanPaymentPanel builds its own `bill` from — so the number frozen here is always identical to the
+  // number the organizer just saw on screen when they tapped "รับเงิน"). That snapshot (paidAmount/
+  // paidBreakdown) is what computeBill() now returns for this player going forward instead of a live
+  // recalculation, so a later change to court cost, shuttle cost, or attendance can never retroactively
+  // change what an already-paid player owes/paid.
+  //
+  // Un-marking (paid -> unpaid) clears both fields back to null — the old snapshot is discarded, never kept
+  // around stale. Marking paid again after that always captures a brand-new snapshot from whatever the
+  // price inputs are at THAT moment (never reuses the discarded one) — this is the deliberate, documented
+  // choice for the paid/unpaid/paid cycle: it avoids double-counting (there is only ever at most one
+  // snapshot alive per player at a time) at the cost of a genuinely re-negotiated/edited charge between the
+  // unpaid and paid-again taps being what gets frozen the second time, which matches how every other
+  // "what does this player owe right now" figure in the app already works.
+  //
+  // If, for some edge-case reason, this player doesn't appear in computeBill()'s own payer list at the
+  // moment of marking paid (e.g. their `status` fell outside computeBill's own "attended" filter), no
+  // snapshot can be reliably captured — paidAmount/paidBreakdown are left null and computeBill's own
+  // hasFrozenPayment check then falls back to its normal LIVE recalculation for them, exactly as it already
+  // does for every pre-existing player/backup that predates these two fields. This is the documented
+  // fallback for finding #2's "do not fabricate historical paid amounts" requirement — never a guess.
+  const togglePaid = (id) => setPlayers((prev) => {
+    const target = prev.find((p) => p.id === id);
+    if (!target) return prev;
+    const willBePaid = !target.paid;
+    let snapshot = null;
+    if (willBePaid) {
+      const doneCurrent = current.filter((m) => m.status === "done");
+      const liveBill = computeBill(prev, settings, [...history, ...doneCurrent]);
+      const b = liveBill.find((x) => x.id === id);
+      if (b && !b.isOwnerExempt) {
+        snapshot = {
+          paidAmount: b.total,
+          paidBreakdown: {
+            eCourt: b.eCourt, eShuttle: b.eShuttle, eOther: b.eOther,
+            eDiscount: b.eDiscount, eWheelDiscount: b.eWheelDiscount, eCarriedInDiscount: b.eCarriedInDiscount,
+            doublesGames: b.doublesGames, singlesGames: b.singlesGames, doublesRate: b.doublesRate, singlesRate: b.singlesRate,
+          },
+        };
+      }
+    }
+    return prev.map((p) => {
+      if (p.id !== id) return p;
+      const nowPaid = !p.paid;
+      return {
+        ...p,
+        paid: nowPaid,
+        status: nowPaid ? "left" : p.status,
+        paidAmount: nowPaid && snapshot ? snapshot.paidAmount : null,
+        paidBreakdown: nowPaid && snapshot ? snapshot.paidBreakdown : null,
+      };
+    });
+  });
 
   // undo a mistakenly-finished match (only while still in current round, not yet advanced)
   const undoFinish = (mid) => {
@@ -6757,9 +6965,18 @@ export default function App() {
     if (!sel) { if (pid) setSel({ playerId: pid, mid, team, idx }); return; }
     setCurrent((prev) => {
       const next = prev.map((m) => ({ ...m, teamA: [...m.teamA], teamB: [...m.teamB] }));
-      const dst = next.find((m) => m.id === mid); const dstArr = team === "A" ? dst.teamA : dst.teamB; const old = dstArr[idx];
+      const dst = next.find((m) => m.id === mid);
+      const src = next.find((m) => m.id === sel.mid);
+      // v1.12.30 (P1 Launch Fix Batch A, finding #4): defensive guard against a stale `sel` pointing at a
+      // match no longer in `current` (e.g. a companion match removed by unstartMatch, or any other future
+      // removal path). Previously this unconditionally dereferenced `dst.teamA`/`src.teamA` and threw a
+      // TypeError with no error boundary to catch it cleanly, crashing the whole matchmaking UI. Now: a
+      // no-op (returns the previous state unchanged) instead of a crash when either side is missing; `sel`
+      // is still cleared below either way so a stale selection never lingers past this tap.
+      if (!dst || !src) return prev;
+      const dstArr = team === "A" ? dst.teamA : dst.teamB; const old = dstArr[idx];
       dstArr[idx] = sel.playerId;
-      const src = next.find((m) => m.id === sel.mid); const srcArr = sel.team === "A" ? src.teamA : src.teamB; srcArr[sel.idx] = old;
+      const srcArr = sel.team === "A" ? src.teamA : src.teamB; srcArr[sel.idx] = old;
       return next;
     });
     setSel(null);
@@ -7122,7 +7339,12 @@ export default function App() {
     // จบก๊วน also clears everyone's attendance back to "ไม่ได้มา" — the next session starts from a
     // clean slate and the organizer marks people "พร้อมเล่น" again as they actually show up, instead of
     // carrying over today's roster as still-checked-in into a brand new quan.
-    setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", games: 0, paid: false, discount: 0, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, spun: false, wheelResult: null, wheelDiscount: p.pendingDiscount || 0, pendingDiscount: 0, carriedInDiscount: p.pendingDiscount || 0, arrivalTime: null, departureTime: null, waitlistedAt: null })));
+    // v1.12.31 (P1 Launch Fix Batch B): also clear the frozen paid-amount snapshot along with `paid` itself
+    // — a fresh new session must never start with a leftover paidAmount/paidBreakdown from the session that
+    // was just archived. This is belt-and-suspenders (computeBill's own hasFrozenPayment check already
+    // requires paid===true, which is being reset to false right here on the very same line either way) but
+    // keeps the persisted player record itself clean rather than relying solely on that other guard.
+    setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", games: 0, paid: false, paidAmount: null, paidBreakdown: null, discount: 0, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, spun: false, wheelResult: null, wheelDiscount: p.pendingDiscount || 0, pendingDiscount: 0, carriedInDiscount: p.pendingDiscount || 0, arrivalTime: null, departureTime: null, waitlistedAt: null })));
     setHistory([]); setCurrent([]); setFuture([]); setRoundNo(0); setLockPairs([]); setSel(null);
     // v1.11.17 (spec section 4/F): restock every wheel prize back to full stock at the start of each new
     // session — prizes used up in the session just archived must never carry over depleted into the next
