@@ -18503,6 +18503,36 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
     </div>
   );
 }
+// v1.12.38 (P0 Numeric Input Fix — ส่วนลด/discount amount): SAME root cause already diagnosed and fixed for
+// the "ลูก" shuttle-count field (v1.11.60, `shuttleDraft` in MatchRow) and reused everywhere else a single
+// committed number needs live typing (ScoreEditor's per-set draft, the reward-wheel editors). This field was
+// fully controlled straight off `detailP.discount` (a number, default 0) and called `setPDiscount` on every
+// keystroke — so with the field showing "0" and the caret landing after it (no reliable select-all on every
+// keyboard/device), typing "2" could land as "02"/"20" instead of replacing the 0, exactly the class of bug
+// already fixed once for score/shuttle/reward inputs. Do NOT invent a new pattern here: buffer the typed text
+// in local draft state (a string, so it can sit temporarily empty mid-edit — never coerced to a number while
+// typing), keep the existing onFocus select-all as a first line of defense, and commit — via the EXISTING
+// `setPDiscount(id, v)`, unchanged, which already does the clamping (`Math.max(0, Number(v) || 0)`) used by
+// every persistence/payment-calc path — only on blur or Enter, never per keystroke. Re-syncs the draft from
+// the real value whenever the player being edited changes, or their discount changes from elsewhere (e.g. a
+// discount credit applied, a wheel prize, or the "ล้างข้อมูล" reset) while this popover happens to be open.
+function DiscountAmountInput({ id, discount, setPDiscount }) {
+  const [draft, setDraft] = useState(String(discount || 0));
+  useEffect(() => { setDraft(String(discount || 0)); }, [id, discount]);
+  const commit = () => setPDiscount(id, draft === "" ? 0 : draft);
+  return (
+    <input
+      type="number"
+      min={0}
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onFocus={(e) => e.target.select()}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      onBlur={commit}
+      style={{ width: 64, padding: "4px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 700, color: T.green, outline: "none" }}
+    />
+  );
+}
 function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
@@ -18764,12 +18794,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               <span>ส่วนลด</span>
               <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <span>-฿</span>
-                <input
-                  type="number"
-                  value={detailP.discount || 0}
-                  onChange={(e) => setPDiscount(detailP.id, e.target.value)}
-                  style={{ width: 64, padding: "4px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 700, color: T.green, outline: "none" }}
-                />
+                <DiscountAmountInput id={detailP.id} discount={detailP.discount} setPDiscount={setPDiscount} />
               </span>
             </div>
             {detailBill.eCarriedInDiscount > 0 && (
