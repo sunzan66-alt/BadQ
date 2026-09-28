@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.38";
+const APP_VERSION = "1.12.40";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -289,20 +289,200 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 // fall back to a Cloud fetch) — no caller below needs to change when that happens.
 const __imageAssetCache = new Map(); // ref -> data URL string. Populated once at boot (primeImageAssetCache) and kept up to date by every uploadImage() call.
 let __imageAssetCachePrimed = false;
-async function primeImageAssetCache() {
-  // Idempotent/safe to call more than once (only the App() boot effect does, but defensive regardless) —
-  // never throws, never blocks: a failure here just means resolveImageRef() returns null until the next
-  // successful upload populates that ref directly, and every render call site already has a graceful
-  // "no image yet" fallback (placeholder/emoji), per the spec's "never break the screen" requirement.
-  if (__imageAssetCachePrimed) return;
+let __imageAssetCachePrimePromise = null;
+function primeImageAssetCache() {
+  // Idempotent/safe to call more than once — never throws. v1.12.39: returns ONE shared promise so the boot
+  // waterfall can await it before parsing any checkpoint (checkpoints may now carry "@img:" references that
+  // must be hydrated back to their exact inline data; see IMAGE REFS IN PERSISTED STATE below).
+  if (__imageAssetCachePrimePromise) return __imageAssetCachePrimePromise;
   __imageAssetCachePrimed = true;
+  __imageAssetCachePrimePromise = (async () => {
+    try {
+      const all = (window.storage && window.storage.image) ? await window.storage.image.getAll() : {};
+      Object.keys(all || {}).forEach((ref) => {
+        const rec = all[ref];
+        if (rec && typeof rec.data === "string") registerVerifiedImageAsset(ref, rec.data);
+      });
+    } catch (e) {}
+  })();
+  return __imageAssetCachePrimePromise;
+}
+// ===== v1.12.39 (Codex P1 — "the image architecture does not remove image payloads from full-state saves") =====
+// IMAGE REFS IN PERSISTED STATE. In memory, React state keeps every image INLINE exactly as before (every render
+// site, digest and business function is unchanged). Only at the PERSISTENCE BOUNDARY — every checkpoint write
+// (autosave Primary/LKG, boot rebuild, pagehide mirror flush, update handoff, auto-backup checkpoints, the
+// pre-restore safety snapshot and restore promotion) — is an inline image string replaced by a short reference
+// "@img:<assetKey>", and ONLY when that exact string is already stored in the image store and has been read back
+// (a VERIFIED asset: __imageSentinelByData only ever receives strings that came out of the store or were
+// read back after a write). Loading reverses it: every "@img:" string is hydrated from the store back to the
+// identical inline string. Consequences:
+//   * one copy per distinct image on disk instead of one per player + one per legacy history snapshot + one
+//     per checkpoint key (the tester fixture: 114 inline copies / 22.45 M chars -> 69 assets / 13.83 M chars,
+//     and the state blob itself shrinks to a few hundred KB — see the v1.12.39 report);
+//   * an image that is NOT a verified asset stays inline — nothing is ever dropped, recompressed or resized;
+//   * a reference whose asset cannot be found at load stays as the reference text (never replaced by null), so
+//     a later save can never turn a temporarily-missing image into a permanent loss.
+// Manual export stays fully INLINE (portable to every app version), plus a digest manifest (see exportBackup).
+const IMG_REF_PREFIX = "@img:";
+const __imageSentinelByData = new Map(); // exact inline data string -> "@img:<assetKey>" (verified assets only)
+function registerVerifiedImageAsset(key, data) {
+  if (!key || typeof data !== "string") return;
+  __imageAssetCache.set(key, data);
+  if (!__imageSentinelByData.has(data)) __imageSentinelByData.set(data, IMG_REF_PREFIX + key);
+  if (/^sha256-[0-9a-f]{64}$/.test(key) && !__imageDigestByData.has(data)) __imageDigestByData.set(data, key.slice(7));
+}
+// v1.12.39 (review F10 / export nit): digest of each image string computed once per page (content-addressed keys
+// seed it for free), and a back-off for images whose asset write failed, so a storage problem does not turn
+// into re-hashing and re-writing megabytes after every autosave.
+const __imageDigestByData = new Map();
+const __imageAssetFailures = new Map(); // data -> { count, retryAt }
+function imageAssetWriteAllowed(data) { const f = __imageAssetFailures.get(data); return !f || Date.now() >= f.retryAt; }
+function noteImageAssetFailure(data) { const f = __imageAssetFailures.get(data) || { count: 0, retryAt: 0 }; f.count++; f.retryAt = Date.now() + Math.min(30 * 60000, 15000 * Math.pow(2, f.count - 1)); __imageAssetFailures.set(data, f); }
+async function digestImageData(data) {
+  const c = __imageDigestByData.get(data);
+  if (c) return c;
+  const h = await digestTextHex(data);
+  __imageDigestByData.set(data, h);
+  return h;
+}
+function isInlineImageData(v) { return typeof v === "string" && v.length > 64 && v.charCodeAt(0) === 100 /* d */ && v.startsWith("data:image/"); }
+function isImageRefString(v) { return typeof v === "string" && v.length < 200 && v.startsWith(IMG_REF_PREFIX); }
+function persistImageReplacer(key, value) {
+  if (typeof value === "string" && value.length > 64 && value.charCodeAt(0) === 100) {
+    const ref = __imageSentinelByData.get(value);
+    if (ref) return ref;
+  }
+  return value;
+}
+// JSON for any checkpoint/persisted copy of the state (see above). Same key order and bytes as JSON.stringify
+// except that verified inline images become "@img:" references.
+function serializeForPersist(obj) { return JSON.stringify(obj, persistImageReplacer); }
+// The ONE persisted ("bg-v11"/LKG/mirror) state shape — same keys, same order as every pre-v1.12.39 save, plus
+// `restoreEpoch` (v1.12.39, only when a staged restore has ever been promoted on this device; see
+// bootCandidatePredatesRestore).
+const PERSISTED_STATE_KEYS = ["players", "history", "current", "future", "roundNo", "courtCount", "courtLabels", "mode", "settings", "session", "lockPairs", "sessionHistory", "generalExpenses", "otherIncome", "discountCredits", "rewardHistory", "activeTournament", "tournamentHistory", "groupDefaults", "rankingConfigs", "cloudClub", "lastIntentionalPlayerWipeAt", "journalReceipts"];
+function buildPersistedStateObject(src) {
+  const o = {};
+  for (const k of PERSISTED_STATE_KEYS) o[k] = src[k];
+  if (typeof src.restoreEpoch === "number" && src.restoreEpoch > 0) o.restoreEpoch = src.restoreEpoch;
+  return o;
+}
+// Returns { body, json }: `json` is byte-identical to JSON.stringify({ ...obj, savedAt, pageInstanceId }) with
+// verified image references; `body` is the same without the two trailing stamps.
+function serializePersistedState(obj, savedAt) {
+  const body = serializeForPersist(obj);
+  const pid = typeof window !== "undefined" ? (window.__pageInstanceId || null) : null;
+  const json = body.slice(0, -1) + (body.length > 2 ? "," : "") + '"savedAt":' + JSON.stringify(savedAt) + ',"pageInstanceId":' + JSON.stringify(pid) + "}";
+  return { body, json };
+}
+// In-place hydration of a freshly parsed object; returns { resolved, unresolved }.
+function hydrateImageRefs(node) {
+  const stats = { resolved: 0, unresolved: 0 };
+  const walk = (o) => {
+    if (Array.isArray(o)) { for (let i = 0; i < o.length; i++) { const v = o[i]; if (typeof v === "string") { if (isImageRefString(v)) { const d = __imageAssetCache.get(v.slice(IMG_REF_PREFIX.length)); if (d) { o[i] = d; stats.resolved++; } else stats.unresolved++; } } else if (v && typeof v === "object") walk(v); } return; }
+    for (const k in o) { const v = o[k]; if (typeof v === "string") { if (isImageRefString(v)) { const d = __imageAssetCache.get(v.slice(IMG_REF_PREFIX.length)); if (d) { o[k] = d; stats.resolved++; } else stats.unresolved++; } } else if (v && typeof v === "object") walk(v); }
+  };
+  if (node && typeof node === "object") walk(node);
+  return stats;
+}
+// v1.12.39 (review F3): "@img:" keys in `node` whose asset is not in the in-memory cache.
+function missingImageRefKeys(node) {
+  const out = new Set();
+  const walk = (o) => {
+    if (Array.isArray(o)) { for (const v of o) { if (isImageRefString(v)) { const k = v.slice(IMG_REF_PREFIX.length); if (!__imageAssetCache.has(k)) out.add(k); } else if (v && typeof v === "object") walk(v); } return; }
+    for (const kk in o) { const v = o[kk]; if (isImageRefString(v)) { const k = v.slice(IMG_REF_PREFIX.length); if (!__imageAssetCache.has(k)) out.add(k); } else if (v && typeof v === "object") walk(v); }
+  };
+  if (node && typeof node === "object") walk(node);
+  return Array.from(out);
+}
+// Loads assets that are in the image store but not (yet) in the cache — the boot-time bulk read may have failed,
+// or another window stored them later. Only what comes out of the store is registered. Returns how many loaded.
+async function loadMissingImageAssets(keys) {
+  const api = typeof window !== "undefined" && window.storage ? window.storage.imageAssets : null;
+  if (!api || !keys || !keys.length) return 0;
+  const r = await api.getMany(keys, { deadlineMs: 15000, graceMs: 3000 });
+  if (!r || r.outcome !== "committed" || !r.result) return 0;
+  let n = 0;
+  for (const k of keys) { const rec = r.result[k]; if (rec && typeof rec.data === "string") { registerVerifiedImageAsset(k, rec.data); n++; } }
+  return n;
+}
+// Immutable twin of hydrateImageRefs: returns `v` itself when it holds no resolvable reference, otherwise a copy
+// in which only the containers on the way to a resolved reference are new objects.
+function hydrateImageRefsCopy(v) {
+  if (typeof v === "string") { if (isImageRefString(v)) { const d = __imageAssetCache.get(v.slice(IMG_REF_PREFIX.length)); return d || v; } return v; }
+  if (Array.isArray(v)) { let out = null; for (let i = 0; i < v.length; i++) { const n = hydrateImageRefsCopy(v[i]); if (n !== v[i]) { if (!out) out = v.slice(); out[i] = n; } } return out || v; }
+  if (v && typeof v === "object") { let out = null; for (const k in v) { const n = hydrateImageRefsCopy(v[k]); if (n !== v[k]) { if (!out) out = { ...v }; out[k] = n; } } return out || v; }
+  return v;
+}
+// Every distinct inline image string anywhere in `node` (walk; strings compared by content).
+function collectInlineImages(node, out) {
+  const set = out || new Set();
+  const walk = (o) => {
+    if (Array.isArray(o)) { for (const v of o) { if (isInlineImageData(v)) set.add(v); else if (v && typeof v === "object") walk(v); } return; }
+    for (const k in o) { const v = o[k]; if (isInlineImageData(v)) set.add(v); else if (v && typeof v === "object") walk(v); }
+  };
+  if (node && typeof node === "object") walk(node);
+  return set;
+}
+// sha-256 hex of a string's UTF-8 bytes — native WebCrypto when available (never inside an IndexedDB
+// transaction: it is asynchronous), otherwise the synchronous in-file implementation.
+async function digestTextHex(str) {
   try {
-    const all = (window.storage && window.storage.image) ? await window.storage.image.getAll() : {};
-    Object.keys(all || {}).forEach((ref) => {
-      const rec = all[ref];
-      if (rec && typeof rec.data === "string") __imageAssetCache.set(ref, rec.data);
-    });
+    if (typeof crypto !== "undefined" && crypto.subtle && typeof TextEncoder !== "undefined") {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+      return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
   } catch (e) {}
+  return sha256Hex(str);
+}
+function imageMimeOf(dataUrl) { const m = /^data:([^;,]+)/.exec(dataUrl || ""); return m ? m[1] : null; }
+const IMAGE_ASSET_BATCH_CHARS = 3 * 1024 * 1024; // one image-store transaction holds at most ~3 M chars
+// Stores every given inline image as a content-addressed asset ("sha256-<hex>"), sequentially in bounded
+// transactions (never concurrent large writes), READS EACH BACK and registers only exact matches. Returns
+// { verified, failed, assets: [{ key, digest, chars }], timings, outcomes }. Never throws. `onProgress(done,total)`.
+async function storeVerifiedImageAssets(dataList, opts) {
+  const o = opts || {};
+  const res = { verified: 0, failed: 0, skippedKnown: 0, assets: [], outcomes: [], digestMs: 0, writeMs: 0, readBackMs: 0 };
+  const api = typeof window !== "undefined" && window.storage ? window.storage.imageAssets : null;
+  const todo = [];
+  const now = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+  let t = now();
+  for (const data of dataList) {
+    const known = __imageSentinelByData.get(data);
+    if (known) { res.skippedKnown++; res.assets.push({ key: known.slice(IMG_REF_PREFIX.length), digest: null, chars: data.length, known: true }); continue; }
+    const digest = await digestImageData(data);
+    todo.push({ ref: "sha256-" + digest, data, digest, mime: imageMimeOf(data) });
+    if (o.yieldEvery && todo.length % o.yieldEvery === 0) await yieldToUI();
+  }
+  res.digestMs = Math.round(now() - t);
+  if (!api || typeof api.putMany !== "function") { res.failed = todo.length; return res; }
+  // group into bounded batches
+  const batches = [];
+  let cur = [], curChars = 0;
+  for (const r of todo) { if (cur.length && curChars + r.data.length > IMAGE_ASSET_BATCH_CHARS) { batches.push(cur); cur = []; curChars = 0; } cur.push(r); curChars += r.data.length; }
+  if (cur.length) batches.push(cur);
+  let done = 0;
+  for (const batch of batches) {
+    t = now();
+    const w = await api.putMany(batch, { deadlineMs: o.deadlineMs || 20000, graceMs: o.graceMs || 4000, onSlow: o.onSlow, onUncertain: o.onUncertain });
+    res.writeMs += Math.round(now() - t);
+    res.outcomes.push({ step: "write", outcome: w.outcome, reason: w.reason || null, ms: w.ms, count: batch.length });
+    if (w.outcome !== "committed") { res.failed += batch.length; for (const r of batch) noteImageAssetFailure(r.data); done += batch.length; if (o.onProgress) o.onProgress(done, todo.length); continue; }
+    t = now();
+    const rb = await api.getMany(batch.map((r) => r.ref), { deadlineMs: o.deadlineMs || 20000, graceMs: o.graceMs || 4000 });
+    res.readBackMs += Math.round(now() - t);
+    res.outcomes.push({ step: "read-back", outcome: rb.outcome, ms: rb.ms, count: batch.length });
+    const got = rb.outcome === "committed" && rb.result ? rb.result : {};
+    for (const r of batch) {
+      const rec = got[r.ref];
+      if (rec && rec.data === r.data) { registerVerifiedImageAsset(r.ref, rec.data); __imageAssetFailures.delete(r.data); res.verified++; res.assets.push({ key: r.ref, digest: r.digest, chars: r.data.length }); }
+      else { res.failed++; noteImageAssetFailure(r.data); }
+    }
+    done += batch.length;
+    if (o.onProgress) o.onProgress(done, todo.length);
+    await yieldToUI();
+  }
+  return res;
 }
 // Registers one image (already cropped/resized/compressed by ImageCropper — see its own comment on output
 // size per image type) into the local asset store and returns its stable ref id. Fire-and-forget safe:
@@ -312,6 +492,13 @@ async function primeImageAssetCache() {
 // own comment for why that is the deliberately conservative, low-risk choice for this segment.
 async function uploadImage(dataUrl) {
   if (!dataUrl || typeof dataUrl !== "string") return null;
+  // v1.12.39: content-addressed and read-back verified (storeVerifiedImageAssets) — the returned ref is the
+  // asset key, and from now on every checkpoint stores this image once, by reference.
+  if (window.storage && window.storage.imageAssets && isInlineImageData(dataUrl)) {
+    const r = await storeVerifiedImageAssets([dataUrl], {});
+    const a = r.assets[0];
+    return r.verified || (a && a.known) ? a.key : null;
+  }
   const ref = "img_" + uid() + Date.now().toString(36);
   __imageAssetCache.set(ref, dataUrl);
   // v1.12.33 (P0 iPad Force-Close Durability Fix, "verified asset writes" requirement): this used to
@@ -1720,8 +1907,15 @@ function togglePaidTransition(players, playerId, ctx) {
 }
 // v1.12.38: End Session is refused in domain logic while any match is playing or paused.
 const END_SESSION_LIVE_MATCH_ERROR = "end-session-blocked-live-match";
-// v1.12.38: upper bound on one critical journal append before it is reported failed (see commitCriticalMutation).
-const JOURNAL_APPEND_TIMEOUT_MS = 10000;
+// v1.12.39 (Codex P0 — "timed-out journal writes remain live"): the v1.12.38 JOURNAL_APPEND_TIMEOUT_MS
+// Promise.race is gone. A journal append now has a DEADLINE OWNED BY ITS INDEXEDDB TRANSACTION (see __ownedTx
+// in index.html): past the deadline the transaction is aborted and IndexedDB itself reports "aborted" or
+// "committed"; if it reports neither within JOURNAL_APPEND_GRACE_MS the outcome is UNKNOWN and every conflicting
+// action stays fenced until a read-back probe or a reload settles it. Nothing is ever reported failed while it
+// can still commit.
+const JOURNAL_APPEND_DEADLINE_MS = 10000;
+const JOURNAL_APPEND_GRACE_MS = 4000;
+const JOURNAL_PROBE_DEADLINE_MS = 8000;
 // v1.11.41: ต้นทุนต่อลูก = ต้นทุน/กระบอก ÷ จำนวนลูก/กระบอก — guards shuttlesPerTube<=0 (would otherwise
 // divide by zero / produce Infinity) and negative/garbage input, per the required edge-case handling.
 function shuttleCostPerUnit(shuttleEco) {
@@ -3885,6 +4079,35 @@ const BOOT_LOG_MAX = 20;
 // through the exact same window.storage (IndexedDB-primary + localStorage-mirror) plumbing as every
 // other key here — see BOOT SEQUENCE below for how/when it's read and (re)written.
 const LKG_KEY = "bg-v11-lkg";
+// v1.12.39 staged-restore keys (see RESTORE CRASH-CONSISTENCY PROTOCOL in App()).
+const PRERESTORE_KEY = "bg-v11-prerestore";              // verified pre-restore safety snapshot (undo point)
+const PRERESTORE_NEXT_KEY = "bg-v11-prerestore-next";    // snapshot staged by a restore that has not promoted yet
+const PRERESTORE_JOURNAL_KEY = "bg-v11-prerestore-journal"; // journal entries archived by the promoted restore
+const RESTORE_STAGED_KEY = "bg-v11-restore-staged";      // the staged incoming state, promoted atomically
+const UNDO_JOURNAL_ARCHIVE_KEY = "bg-v11-undo-journal-archive"; // journal of a restored state that was undone
+const RESTORE_EPOCH_KEY = "bg-v11-epoch"; // highest restoreEpoch promoted on this device (the shell's write guard reads it)
+function restoreEpochOfRaw(str) { if (typeof str !== "string") return 0; const i = str.lastIndexOf('"restoreEpoch":'); if (i < 0) return 0; const m = /^"restoreEpoch":(\d+)/.exec(str.slice(i, i + 40)); return m ? Number(m[1]) : 0; }
+// v1.12.39: a manual export carries a digest manifest of every image it embeds (inline, so the file stays
+// importable by every app version). Import checks it: an image missing, altered or extra fails the import.
+async function buildBackupImageManifest(data) {
+  const imgs = Array.from(collectInlineImages(data));
+  const images = [];
+  for (const d of imgs) images.push({ sha256: await digestImageData(d), chars: d.length, mime: imageMimeOf(d) });
+  images.sort((a, b) => (a.sha256 < b.sha256 ? -1 : a.sha256 > b.sha256 ? 1 : 0));
+  return { algorithm: "sha256-utf8", count: images.length, totalChars: images.reduce((t, i) => t + i.chars, 0), images };
+}
+async function verifyBackupImageManifest(parsed, data) {
+  const man = parsed && parsed.assetManifest;
+  if (!man || !Array.isArray(man.images)) return { ok: true, checked: false };
+  const present = new Set();
+  for (const d of collectInlineImages(data)) present.add(await digestTextHex(d));
+  if (parsed.assets && typeof parsed.assets === "object") for (const k of Object.keys(parsed.assets)) { const d = parsed.assets[k]; if (isInlineImageData(d)) present.add(await digestTextHex(d)); }
+  const want = new Set(man.images.map((i) => i && i.sha256).filter(Boolean));
+  const missing = [...want].filter((h) => !present.has(h)).length;
+  const extra = [...present].filter((h) => !want.has(h)).length;
+  if (missing || extra) return { ok: false, checked: true, missing, extra, reason: "รูปภาพในไฟล์สำรองไม่ครบหรือไม่ตรงกับรายการตรวจสอบ (หาย " + missing + ", เกิน " + extra + ") — ไฟล์อาจเสียหาย" };
+  return { ok: true, checked: true, count: want.size };
+}
 
 function pad2(n) { return String(n).padStart(2, "0"); }
 function fmtBackupStamp(d) { return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`; }
@@ -4034,6 +4257,9 @@ function buildBackupPayload(state) {
       // intentional roster wipe apart from an accidental one — see isSuspiciousPlayerLoss's header comment.
       lastIntentionalPlayerWipeAt: typeof state.lastIntentionalPlayerWipeAt === "number" ? state.lastIntentionalPlayerWipeAt : null,
       journalReceipts: normJournalReceipts(state.journalReceipts), // v1.12.37: critical-journal receipts (see journalReceiptStatus)
+      // v1.12.39 (review F9): device-local restore epoch, so an auto-backup taken after a restore is not mistaken
+      // for pre-restore data by the boot guards. Absent when zero; ignored by import (a restore mints its own).
+      ...(typeof state.restoreEpoch === "number" && state.restoreEpoch > 0 ? { restoreEpoch: state.restoreEpoch } : {}),
     },
   };
 }
@@ -4241,6 +4467,13 @@ function stateIsMeaningful(s) {
 // own standalone function so it can be unit-tested directly (see test_v11141_persistence_unit.js) without
 // needing a real browser/IndexedDB round-trip. Returns { finalState, recoverySource, chosenReason } or
 // { finalState: null } if neither candidate is usable (caller falls through to LKG/Auto-Backup/new-install).
+// v1.12.39: true when `other` was written before the last restore that `chosen` reflects (lower restoreEpoch).
+// Such a candidate is the state the organizer deliberately REPLACED; boot guards must never bring it back.
+function bootCandidatePredatesRestore(chosen, other) {
+  const a = chosen && typeof chosen.restoreEpoch === "number" ? chosen.restoreEpoch : 0;
+  const b = other && typeof other.restoreEpoch === "number" ? other.restoreEpoch : 0;
+  return b < a;
+}
 function chooseBootCandidate(primaryCandidate, mirrorCandidate) {
   if (primaryCandidate && mirrorCandidate) {
     const pAt = typeof primaryCandidate.savedAt === "number" ? primaryCandidate.savedAt : null;
@@ -5577,6 +5810,7 @@ function tryRecoverFlatState(rawJsonString) {
   try {
     const parsed = JSON.parse(rawJsonString);
     if (!parsed || typeof parsed !== "object") return null;
+    hydrateImageRefs(parsed); // v1.12.39: "@img:" references back to their exact inline data (see IMAGE REFS IN PERSISTED STATE)
     const migrated = migrateBackupData({ schemaVersion: SCHEMA_VERSION, data: parsed });
     const check = validateBackupIntegrity(migrated.data);
     if (!check.ok) return null;
@@ -5590,6 +5824,7 @@ function tryRecoverFlatState(rawJsonString) {
 function tryRecoverFromAutoBackupEntry(entry) {
   if (!entry || !entry.payload || typeof entry.payload !== "object") return null;
   try {
+    hydrateImageRefs(entry.payload); // v1.12.39
     const migrated = migrateBackupData(entry.payload);
     const check = validateBackupIntegrity(migrated.data);
     if (!check.ok) return null;
@@ -6388,7 +6623,7 @@ function AppInner() {
   // v1.12.37 (Journal Proof and Legacy Safety, Codex P1 #6): durable critical-mutation receipts — see
   // buildJournalReceipt / journalReceiptStatus (module scope). Appended in the SAME state transition as the
   // effect they prove (live applyFn or boot replay), persisted in every checkpoint write, never compacted.
-  const [journalReceipts, setJournalReceipts] = useState([]);
+  const [journalReceipts, setJournalReceiptsState] = useState([]);
   const [history, setHistoryState] = useState([]);
   const [current, setCurrentState] = useState([]);
   // v1.12.38 (Lightweight Game Persistence): players/history/current are the three pieces of state the
@@ -6414,6 +6649,15 @@ function AppInner() {
   const setPlayers = makeTrackedSetter(setPlayersState, playersLatestRef, "players");
   const setHistory = makeTrackedSetter(setHistoryState, historyLatestRef, "history");
   const setCurrent = makeTrackedSetter(setCurrentState, currentLatestRef, "current");
+  // v1.12.39: receipts are read synchronously by the revalidated retry (their lifecycle tombstones are part of
+  // the replay preconditions), so they get the same latest-value tracking (not part of criticalBaselineRef).
+  const journalReceiptsLatestRef = useRef([]);
+  const setJournalReceipts = (upd) => {
+    const next = typeof upd === "function" ? upd(journalReceiptsLatestRef.current) : upd;
+    if (next === journalReceiptsLatestRef.current) return;
+    journalReceiptsLatestRef.current = next;
+    setJournalReceiptsState(next);
+  };
   // v1.12.38: draft scores of not-yet-finished matches live ONLY here, in memory — typing a score never writes
   // `current`, so it never triggers a full-state serialization/IndexedDB write. `scoreDrafts[mid]` (present =
   // edited; may be null = cleared) overrides the persisted record's `scores` for display (currentView) and is
@@ -6652,6 +6896,31 @@ function AppInner() {
   // v1.12.38: End Session's own retry slot. Lifecycle events are frequent now; they must never take over the
   // attempt that the End Session dialog's "ลองอีกครั้ง" re-sends (see retryEndSessionCommit).
   const sessionEndRetryRef = useRef(null);
+  // v1.12.39 (Codex P0 — journal timeout safety): every critical append whose IndexedDB outcome is not yet
+  // known (mutationId -> { mutationId, kind, settle, uncertainSince }). An entry is removed only when IndexedDB
+  // (or a completed read-back probe) has decided committed / aborted. While this map is non-empty the critical
+  // queue cannot advance (the op that owns the append is still pending), so no delete/edit/retry/Finish/End
+  // Session can cross it; a restore refuses to start.
+  const pendingAppendsRef = useRef(new Map());
+  // Appends whose deadline passed, abort() was requested, and IndexedDB has not reported a terminal event —
+  // drives the "outcome unknown" banner (reconcile / reload).
+  const [uncertainCritical, setUncertainCritical] = useState([]); // [{ mutationId, kind, since }]
+  const [reconcilingCritical, setReconcilingCritical] = useState(false);
+  // v1.12.39 (Codex P0 — "fence autosave, lifecycle operations and unresolved journal mutations throughout
+  // restore"): true from the moment a staged restore starts until its result is published (or it is abandoned
+  // with the old state untouched). While true: the autosave effect, the pagehide/visibility mirror flush, the
+  // cross-instance refresh, manual save retry, update handoff and every new critical operation are refused.
+  const restoreFenceRef = useRef(false);
+  const [restoreUi, setRestoreUi] = useState(null); // { phase, startedAt, status: "running"|"slow"|"blocked"|"unknown", detail }
+  // v1.12.39: epoch of the last promoted restore on this device (persisted as `restoreEpoch`, 0 = never).
+  const restoreEpochRef = useRef(0);
+  // v1.12.39: the persisted body a restore just promoted; the next autosave whose body is identical is skipped.
+  const suppressAutosaveBodyRef = useRef(null);
+  // v1.12.39: set when the fence made an autosave skip; the restore then re-arms exactly one autosave pass.
+  const autosaveSkippedByFenceRef = useRef(false);
+  // v1.12.39: bumped after background image-asset extraction so one autosave re-persists with references.
+  const [persistTick, setPersistTick] = useState(0);
+  const [storageBlocked, setStorageBlocked] = useState(() => !!(typeof window !== "undefined" && window.__badqStorageState && window.__badqStorageState.blocked));
   // v1.12.35 (Consolidated P0 Durability Remediation, Codex finding #6 — "new pending/failing mutation status
   // can be hidden"): `criticalSaveStatus` is still the single "what to show right now" pointer, but a mutation
   // that fails must never simply vanish from the organizer's awareness the moment a NEWER mutation starts and
@@ -6682,6 +6951,9 @@ function AppInner() {
   // so they apply after, and in the order of, everything already waiting.
   const criticalQueueDepthRef = useRef(0);
   const enqueueCriticalOp = (buildAndCommit) => {
+    // v1.12.39: nothing new may enter the critical queue while a restore owns storage (the restore waits for
+    // the ops already queued, then replaces the whole state; an op queued now would act on the wrong state).
+    if (restoreFenceRef.current) { const refused = Promise.reject(new Error("restore-in-progress")); refused.catch(() => {}); return refused; }
     criticalQueueDepthRef.current += 1;
     const run = () => { try { return Promise.resolve(buildAndCommit()); } catch (e) { return Promise.reject(e); } };
     const resultPromise = criticalOpQueueRef.current.then(run, run);
@@ -6749,6 +7021,58 @@ function AppInner() {
   // never shown the "data wiped after swipe-away + reopen" symptom, even on a day it was redeployed just
   // as rapidly as BadQ was.
   const [updateAvailable, setUpdateAvailable] = useState(null); // new version string, or null when none
+  // v1.12.39 (Codex P0 — blocked IndexedDB open): the shell reports a blocked upgrade open; while it lasts the
+  // app shows a recoverable full-screen notice instead of an empty, editable (and unsaveable) screen.
+  useEffect(() => {
+    const on = () => setStorageBlocked(true);
+    const off = () => setStorageBlocked(false);
+    if (window.__badqStorageState && window.__badqStorageState.blocked) setStorageBlocked(true);
+    window.addEventListener("badq:storage-blocked", on);
+    window.addEventListener("badq:storage-unblocked", off);
+    return () => { window.removeEventListener("badq:storage-blocked", on); window.removeEventListener("badq:storage-unblocked", off); };
+  }, []);
+  // v1.12.39: the loading gate appears only if boot takes longer than a moment (no flash on normal launches).
+  const [bootSlow, setBootSlow] = useState(false);
+  useEffect(() => { const t = setTimeout(() => setBootSlow(true), 900); return () => clearTimeout(t); }, []);
+  // v1.12.39: elapsed-time ticker for the restore overlay (visible progress; no silent stage).
+  const [restoreTick, setRestoreTick] = useState(0);
+  useEffect(() => {
+    if (!restoreUi) return;
+    const t = setInterval(() => setRestoreTick((x) => x + 1), 500);
+    return () => clearInterval(t);
+  }, [!!restoreUi]);
+  // v1.12.39 (Codex P1 — image payloads in full-state saves): after boot, and whenever a save still carries
+  // inline images, store those images as verified content-addressed assets in the background (sequential,
+  // bounded batches), then trigger one save so checkpoints reference them. Never runs during a restore.
+  // v1.12.39 (review F3): replaces every resolvable "@img:" reference still held in React state by its inline data
+  // (only containers that actually change get new identities; everything else is left untouched).
+  const rehydrateAllStateRefs = () => {
+    const h = hydrateImageRefsCopy;
+    setPlayers((v) => h(v)); setHistory((v) => h(v)); setCurrent((v) => h(v)); setFuture((v) => h(v));
+    setSettings((v) => h(v)); setSession((v) => h(v)); setSessionHistory((v) => h(v)); setActiveTournament((v) => h(v));
+    setTournamentHistory((v) => h(v)); setGroupDefaults((v) => h(v)); setRankingConfigs((v) => h(v)); setRewardHistory((v) => h(v));
+    setDiscountCredits((v) => h(v)); setGeneralExpenses((v) => h(v)); setOtherIncome((v) => h(v)); setCloudClub((v) => h(v));
+  };
+  const assetizeRunningRef = useRef(false);
+  const assetizeScheduledRef = useRef(null);
+  const runImageAssetization = async (reason) => {
+    if (assetizeRunningRef.current || restoreFenceRef.current) return;
+    const liveState = latestLiveStateRef.current;
+    if (!liveState) return;
+    assetizeRunningRef.current = true;
+    try {
+      const missing = Array.from(collectInlineImages(liveState)).filter((d) => !__imageSentinelByData.has(d) && imageAssetWriteAllowed(d));
+      if (!missing.length) return;
+      const r = await storeVerifiedImageAssets(missing, { yieldEvery: 4 });
+      try { window.__pushDiag && window.__pushDiag("imageAssetization", { reason, candidates: missing.length, verified: r.verified, failed: r.failed, digestMs: r.digestMs, writeMs: r.writeMs, readBackMs: r.readBackMs }); } catch (e) {}
+      if (r.verified && !restoreFenceRef.current) setPersistTick((t) => t + 1);
+    } catch (e) {
+    } finally { assetizeRunningRef.current = false; }
+  };
+  const scheduleImageAssetization = (reason, delayMs) => {
+    if (assetizeScheduledRef.current) return;
+    assetizeScheduledRef.current = setTimeout(() => { assetizeScheduledRef.current = null; runImageAssetization(reason); }, delayMs == null ? 1500 : delayMs);
+  };
   useEffect(() => {
     if (window.__badqNewVersion) setUpdateAvailable(window.__badqNewVersion);
     const onUpdate = (e) => setUpdateAvailable((e && e.detail && e.detail.version) || "ใหม่");
@@ -6763,12 +7087,16 @@ function AppInner() {
   // skipWaiting() during install), (6) wait for controllerchange, (7) reload EXACTLY ONCE, (8) the normal
   // boot sequence above (Section A) picks the newest valid state on the reload. No long blocking UI: the
   // saves below are fire-and-attempt (best-effort, never block the button past a short safety timeout).
+  const updateHandoffRef = useRef(false); // v1.12.39 (review F4): a restore refuses while the update handoff runs
   const applyUpdateNow = async () => {
+    if (restoreFenceRef.current) return; // v1.12.39: never while a restore owns storage
+    updateHandoffRef.current = true;
     try {
       const savedAt = Date.now();
       // v1.11.76: pageInstanceId tags every "bg-v11" write so refreshFromStorageIfNewer can tell "another
       // tab/session wrote this" from "this is my own earlier write" — see wouldRegressProgress.
-      const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
+      if (restoreFenceRef.current) throw new Error("restore-in-progress"); // v1.12.39
+      const json = serializePersistedState(buildPersistedStateObject({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current }), savedAt).json;
       latestStateJsonRef.current = json;
       // v1.11.76: same final pre-write conflict guard as the main save effect (see its comment) — this is
       // the exact "organizer swipes/kills the PWA to update" path implicated in the original incident, so
@@ -6797,9 +7125,10 @@ function AppInner() {
         }
       } catch (e) {}
       if (blockedByConflict) throw new Error("bg-v11 write blocked: stale snapshot would regress another instance's progress");
+      if (restoreFenceRef.current) throw new Error("restore-in-progress"); // v1.12.39 (review F4): re-checked after the await
       try { localStorage.setItem("bg:bg-v11", json); } catch (e) {} // (1) Mirror — synchronous, best-effort
-      try { await window.storage.set("bg-v11", json); } catch (e) {} // (2) Primary
-      try { await window.storage.set(LKG_KEY, json); } catch (e) {} // (3) LKG checkpoint
+      try { await window.storage.set("bg-v11", json); } catch (e) {} // (2) Primary (the shell refuses it if a newer restore epoch is on disk)
+      if (!restoreFenceRef.current) { try { await window.storage.set(LKG_KEY, json); } catch (e) {} } // (3) LKG checkpoint
       lastKnownSavedAtRef.current = savedAt;
     } catch (e) {}
 
@@ -6833,6 +7162,9 @@ function AppInner() {
   // below so the two can never silently drift apart on which fields they read/default.
   const applyPersistedState = (s) => {
     if (!s) return;
+    const hyd = hydrateImageRefs(s); // v1.12.39: idempotent — an already-hydrated state has no "@img:" strings left
+    if (hyd.unresolved) loadMissingImageAssets(missingImageRefKeys(s)).then((n) => { if (n) rehydrateAllStateRefs(); }).catch(() => {}); // review F3
+    restoreEpochRef.current = typeof s.restoreEpoch === "number" ? s.restoreEpoch : 0;
     s.players && setPlayers(s.players.map(normPlayer));
     // v1.12.13 (P0 offline persistence hotfix): restore the intentional-wipe marker alongside `players` so
     // it travels with the roster through every load path (boot, cross-instance heal, pre-write conflict
@@ -6918,11 +7250,11 @@ function AppInner() {
       // v1.11.48 (Section C/D): buildBackupSnapshot (not buildBackupPayload) — a lightweight, photo-
       // stripped copy built specifically for this checkpoint. See buildBackupSnapshot's own comment for
       // why this is safe and non-destructive to existing data.
-      const payload = buildBackupSnapshot({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts });
+      const payload = buildBackupSnapshot({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
-      const autoBackupJson = JSON.stringify(next);
+      const autoBackupJson = serializeForPersist(next); // v1.12.39: verified image references
       window.__pushDiag && window.__pushDiag("afterAutoBackupSerialize", { jsonLen: autoBackupJson.length, backupJsonLen: autoBackupJson.length, checkpointCount: next.length });
       await window.storage.set(AUTO_BACKUP_KEY, autoBackupJson);
       window.__pushDiag && window.__pushDiag("afterAutoBackupWrite");
@@ -6938,6 +7270,7 @@ function AppInner() {
   // (instead of letting this instance later write stale data over it) and, optionally, tells the user.
   // Returns true iff a newer save was found and applied.
   const refreshFromStorageIfNewer = async (announce) => {
+    if (restoreFenceRef.current) return false; // v1.12.39: a restore publishes its own state after verification
     try {
       // v1.12.19 (P0 performance regression fix): getPrimaryFirst (not the full self-healing get()) — this
       // is a pure "is storage ahead of what I know" comparison read that runs on EVERY ordinary state
@@ -6947,6 +7280,23 @@ function AppInner() {
       if (!r?.value) return false;
       const s = JSON.parse(r.value);
       const storedSavedAt = typeof s.savedAt === "number" ? s.savedAt : 0;
+      // v1.12.39 (review F2): a state carrying a HIGHER restoreEpoch was promoted by a restore (in another
+      // window/tab) after this window loaded; it is always adopted — the progress-regression heuristic below must
+      // not keep this window's pre-restore data alive (it would otherwise be written back over the restore).
+      const storedEpoch = typeof s.restoreEpoch === "number" ? s.restoreEpoch : 0;
+      if (storedEpoch > (restoreEpochRef.current || 0)) {
+        // round-2 review N3: never swap the whole state under a pending critical operation of this window —
+        // adopt once its queue is idle (the next autosave pass comes back here).
+        if (criticalQueueDepthRef.current > 0 || pendingAppendsRef.current.size > 0) return false;
+        // round-2 review N1: adopt only a state that passes the same validation boot applies
+        const validated = tryRecoverFlatState(r.value);
+        if (!validated) return false;
+        const prevKnownSavedAt = lastKnownSavedAtRef.current;
+        applyPersistedState(validated);
+        pushBootLog({ event: "heal-restore-epoch", fromSavedAt: prevKnownSavedAt, toSavedAt: storedSavedAt, playerCount: Array.isArray(s.players) ? s.players.length : 0, sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0 });
+        if (announce) { setStaleSyncNotice("มีการกู้คืนข้อมูลจากหน้าต่าง/แท็บอื่น — โหลดข้อมูลชุดที่กู้คืนแล้วให้"); setTimeout(() => setStaleSyncNotice(null), 5000); }
+        return true;
+      }
       if (storedSavedAt > lastKnownSavedAtRef.current) {
         // v1.11.76 (P0 cross-instance data-loss guard): only block when (a) this record is tagged with a
         // DIFFERENT instance's id — our own later writes are never blocked against ourselves — and (b)
@@ -6986,8 +7336,12 @@ function AppInner() {
     // part of that waterfall's own error handling: a slow/failed image-cache load must never delay or
     // affect boot of the actual app state, and every render call site already tolerates a still-empty
     // cache (falls back to a placeholder exactly like a never-uploaded image does today).
-    primeImageAssetCache();
+    // v1.12.39: the image cache is now AWAITED before any checkpoint is parsed — checkpoints carry "@img:"
+    // references that tryRecoverFlatState hydrates from it (IMAGE REFS IN PERSISTED STATE). primeImageAssetCache
+    // never throws; if storage is blocked it stays pending, and so would every read below (the blocked-storage
+    // screen covers that case — see storageBlocked).
     (async () => {
+      await primeImageAssetCache();
       const storageErrors = [];
       let primaryFound = false, primaryValid = false, mirrorFound = false, lastKnownGoodFound = false, autoBackupFound = false;
       let finalState = null, recoverySource = "new-install", recoveryAction = "none";
@@ -7000,6 +7354,7 @@ function AppInner() {
       let corrupted = false; // legacy flag — kept in sync so the existing recovery banner/tests (which key off `loadCorrupted`) keep working unchanged; true exactly when bootStatus lands on "recovery-required"
 
       let mirrorValid = false, chosenReason = null, primarySavedAtDiag = null, mirrorSavedAtDiag = null;
+      let bootMarkerEpoch = 0; // round-3 (N1): the device's promoted-restore marker, read before choosing (below)
       try {
         // Steps 1-2 (v1.11.41 rewrite — Section A): primary then mirror, read independently via
         // getBothRaw (unlike the self-healing get()), so a corrupted PRIMARY doesn't stop us from
@@ -7017,6 +7372,9 @@ function AppInner() {
         // savedAt (A1) with meaningful-state protection so a freshly-created empty/default state can never
         // beat a real one just because its savedAt happens to be newer (A2).
         let bothRaw = { primary: null, mirror: null };
+        // round-3 (N1): the restore-epoch marker is read in PARALLEL with Primary/mirror (no added boot latency)
+        let bootMarkerP;
+        try { bootMarkerP = window.storage.restore ? Promise.resolve(window.storage.restore.readKv(RESTORE_EPOCH_KEY, { deadlineMs: 5000 })).catch(() => null) : Promise.resolve(null); } catch (e) { bootMarkerP = Promise.resolve(null); }
         try { bothRaw = await window.storage.getBothRaw("bg-v11"); } catch (e) { storageErrors.push("bg-v11 read: " + (e?.message || e)); }
         primaryFound = !!bothRaw.primary;
         mirrorFound = !!bothRaw.mirror;
@@ -7029,7 +7387,27 @@ function AppInner() {
         primarySavedAtDiag = primaryCandidate && typeof primaryCandidate.savedAt === "number" ? primaryCandidate.savedAt : null;
         mirrorSavedAtDiag = mirrorCandidate && typeof mirrorCandidate.savedAt === "number" ? mirrorCandidate.savedAt : null;
 
-        const choice = chooseBootCandidate(primaryCandidate, mirrorCandidate);
+        // v1.12.39: a checkpoint written by a PROMOTED restore carries a higher restoreEpoch than anything that
+        // predates it; a lower-epoch candidate is pre-restore data and must never win over it (see
+        // bootCandidatePredatesRestore). Only applies when both are valid and their epochs differ.
+        // round-3 review (N1 remainder): the device's promoted-restore marker is read BEFORE choosing. Any
+        // candidate (Primary, mirror, LKG, auto-backup) whose epoch is below it predates the last restore and is
+        // set aside — even when the other copy failed validation — so boot falls through to the RESTORED LKG
+        // instead of picking a pre-restore mirror written by another window. Set-aside copies are used only if
+        // nothing at or above the marker validates anywhere (then the re-stamp below applies, visibly logged).
+        try {
+          const em0 = await bootMarkerP;
+          bootMarkerEpoch = em0 && em0.outcome === "committed" ? Number(em0.result) || 0 : 0;
+        } catch (e) { bootMarkerEpoch = 0; }
+        const epochOfCandidate = (c) => (c && typeof c.restoreEpoch === "number" ? c.restoreEpoch : 0);
+        const belowMarker = (c) => !!c && bootMarkerEpoch > 0 && epochOfCandidate(c) < bootMarkerEpoch;
+        const preMarkerSetAside = []; // [{ state, source }] in boot's normal preference order
+        let pC = primaryCandidate, mC = mirrorCandidate;
+        if (belowMarker(pC)) { preMarkerSetAside.push({ state: pC, source: "primary" }); pC = null; storageErrors.push("restore-epoch: primary predates the device's promoted restore marker -- set aside"); }
+        if (belowMarker(mC)) { preMarkerSetAside.push({ state: mC, source: "mirror" }); mC = null; storageErrors.push("restore-epoch: mirror predates the device's promoted restore marker -- set aside"); }
+        if (pC && mC && bootCandidatePredatesRestore(pC, mC)) { mC = null; storageErrors.push("restore-epoch: mirror predates the last promoted restore -- ignored"); }
+        else if (pC && mC && bootCandidatePredatesRestore(mC, pC)) { pC = null; storageErrors.push("restore-epoch: primary predates the last promoted restore -- ignored"); }
+        const choice = chooseBootCandidate(pC, mC);
         finalState = choice.finalState;
         if (finalState) { recoverySource = choice.recoverySource; chosenReason = choice.chosenReason; }
 
@@ -7040,7 +7418,8 @@ function AppInner() {
             if (lkgR?.value) {
               lastKnownGoodFound = true;
               const recovered = tryRecoverFlatState(lkgR.value);
-              if (recovered) { finalState = recovered; recoverySource = "last-known-good"; recoveryAction = "restored-from-last-known-good"; chosenReason = "fallback-lkg"; }
+              if (recovered && belowMarker(recovered)) { preMarkerSetAside.push({ state: recovered, source: "last-known-good" }); storageErrors.push("restore-epoch: last-known-good predates the device's promoted restore marker -- set aside"); }
+              else if (recovered) { finalState = recovered; recoverySource = "last-known-good"; recoveryAction = "restored-from-last-known-good"; chosenReason = "fallback-lkg"; }
               else storageErrors.push("last-known-good present but failed validation/parse");
             }
           } catch (e) { storageErrors.push("last-known-good read: " + (e?.message || e)); }
@@ -7053,13 +7432,28 @@ function AppInner() {
             const list = abR?.value ? JSON.parse(abR.value) : [];
             if (Array.isArray(list) && list.length) {
               autoBackupFound = true;
+              let abSetAside = false;
               for (const entry of list) {
                 const recovered = tryRecoverFromAutoBackupEntry(entry);
+                if (recovered && belowMarker(recovered)) { if (!abSetAside) { abSetAside = true; preMarkerSetAside.push({ state: recovered, source: "auto-backup" }); } continue; }
                 if (recovered) { finalState = recovered; recoverySource = "auto-backup"; recoveryAction = "restored-from-auto-backup"; chosenReason = "fallback-auto-backup"; break; }
               }
-              if (!finalState) storageErrors.push("auto-backup list present but no entry validated");
+              if (!finalState) storageErrors.push("auto-backup list present but no entry validated" + (abSetAside ? " at or above the promoted restore marker" : ""));
             }
           } catch (e) { storageErrors.push("auto-backup read: " + (e?.message || e)); }
+        }
+
+        // round-3 review (N1): nothing at or above the promoted-restore marker validated anywhere — fall back to the
+        // best set-aside copy rather than a blank install (the re-stamp further below adopts it at the current
+        // epoch, and the reason is recorded in the boot log).
+        if (!finalState && preMarkerSetAside.length) {
+          const sp = preMarkerSetAside.find((x) => x.source === "primary"), sm = preMarkerSetAside.find((x) => x.source === "mirror");
+          const c2 = (sp || sm) ? chooseBootCandidate(sp ? sp.state : null, sm ? sm.state : null) : { finalState: null };
+          const pick = c2.finalState ? { state: c2.finalState, source: c2.recoverySource } : preMarkerSetAside.find((x) => x.source !== "primary" && x.source !== "mirror");
+          if (pick && pick.state) {
+            finalState = pick.state; recoverySource = pick.source; recoveryAction = "restored-pre-restore-copy"; chosenReason = "pre-restore-fallback";
+            storageErrors.push("restore-epoch: no copy at or above the promoted restore marker validated -- fell back to a pre-restore copy (" + pick.source + ")");
+          }
         }
 
         // Step 5 (v1.12.13, P0 OFFLINE PERSISTENCE / DATA-LOSS HOTFIX — the actual fix for the reported
@@ -7102,7 +7496,7 @@ function AppInner() {
             // Pick the single best "prior evidence" candidate to compare against: prefer whichever has the
             // most players (the strongest evidence something real existed), tie-broken by the newer savedAt.
             let priorEvidence = null;
-            for (const c of otherCandidates) {
+            for (const c of otherCandidates.filter((oc) => !bootCandidatePredatesRestore(finalState, oc))) { // v1.12.39
               const cCount = Array.isArray(c.players) ? c.players.length : 0;
               const bestCount = priorEvidence ? (Array.isArray(priorEvidence.players) ? priorEvidence.players.length : 0) : -1;
               if (cCount > bestCount || (cCount === bestCount && (c.savedAt || 0) > (priorEvidence.savedAt || 0))) priorEvidence = c;
@@ -7175,7 +7569,7 @@ function AppInner() {
               { source: "mirror", state: mirrorCandidate },
               { source: "last-known-good", state: lkgCandidateForGuard },
               { source: "auto-backup", state: autoBackupCandidateForGuard },
-            ].filter((c) => c.state);
+            ].filter((c) => c.state && !bootCandidatePredatesRestore(finalState, c.state)); // v1.12.39: never "rescue" pre-restore data over a promoted restore
             let guardChosenSource = recoverySource;
             // Bounded loop (at most one pass per candidate) — settles on whichever candidate no OTHER
             // candidate demonstrably out-progresses; if genuinely conflicting divergent evidence exists
@@ -7203,6 +7597,14 @@ function AppInner() {
       // fold any critical-mutation journal entries into whatever `finalState` Steps 1-6 above chose — see
       // applyCriticalJournalToState's own header comment for why this is the one thing the waterfall above
       // structurally cannot do on its own.
+      // v1.12.39 (review F3): if the bulk image read at boot missed anything the chosen state references, load
+      // those assets now — BEFORE journal replay (End Session digests include settings.qr) and before publishing.
+      if (finalState) {
+        try {
+          const miss = missingImageRefKeys(finalState);
+          if (miss.length) { const n = await loadMissingImageAssets(miss); if (n) hydrateImageRefs(finalState); if (miss.length - n) storageErrors.push("image-refs-unresolved: " + (miss.length - n)); }
+        } catch (e) {}
+      }
       let journalReplayApplied = false, journalReplayConsumedIds = [], journalConflictIds = [], journalEntryCount = 0, journalEntries = [];
       let journalRetained = [], journalAppliedIds = [];
       let journalUnreadable = false, journalUnreadableErrorCode = null;
@@ -7248,6 +7650,19 @@ function AppInner() {
 
       let bootStatusResult, recoveredPlayerCount = 0, recoveredHistoryCount = 0, loadedSavedAt = null;
 
+      // round-2 review N1: if boot had to fall back to a copy written BEFORE the last promoted restore (e.g. the
+      // restored Primary and LKG are both unreadable), the state it chose is adopted AT the device's current
+      // restore epoch — otherwise every later save would be refused by the shell's epoch guard.
+      if (finalState) {
+        try {
+          const em = await window.storage.restore.readKv(RESTORE_EPOCH_KEY, { deadlineMs: 5000 });
+          const markerEpoch = Math.max(bootMarkerEpoch, em && em.outcome === "committed" ? Number(em.result) || 0 : 0); // round-3 review: a late timeout never undoes the first read
+          if (markerEpoch > (typeof finalState.restoreEpoch === "number" ? finalState.restoreEpoch : 0)) {
+            storageErrors.push("restore-epoch: chosen state predates the last promoted restore (" + recoverySource + ") -- re-stamped at the current epoch");
+            finalState = { ...finalState, restoreEpoch: markerEpoch };
+          }
+        } catch (e) {}
+      }
       if (finalState) {
         applyPersistedState(finalState);
         recoveredPlayerCount = Array.isArray(finalState.players) ? finalState.players.length : 0;
@@ -7262,7 +7677,7 @@ function AppInner() {
         let journalPruneFailed = false;
         try {
           const rebuiltAt = Date.now();
-          const rebuiltJson = JSON.stringify({ ...finalState, savedAt: rebuiltAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
+          const rebuiltJson = serializeForPersist({ ...finalState, savedAt: rebuiltAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null }); // v1.12.39: verified image references
           const primaryResult = await window.storage.set("bg-v11", rebuiltJson);
           const lkgResult = await window.storage.set(LKG_KEY, rebuiltJson);
           // v1.12.34 (P0 Durability Remediation, Codex review finding #2 — "journal entries are pruned after
@@ -7369,9 +7784,24 @@ function AppInner() {
 
       setBootStatus(bootStatusResult);
       setLoadCorrupted(corrupted);
+      // v1.12.39: staging keys left behind by a restore that never promoted (crash before step 4) are ignored by
+      // every read path; remove them so they cannot occupy storage. Best-effort, after the state is chosen.
+      if (bootStatusResult === "restored") {
+        try {
+          for (const k of [RESTORE_STAGED_KEY, PRERESTORE_NEXT_KEY]) {
+            const r = await window.storage.restore.readKv(k, { deadlineMs: 5000 });
+            if (r && r.outcome === "committed" && r.result != null) { await window.storage.delete(k); storageErrors.push("restore-staging-leftover-removed: " + k); }
+          }
+        } catch (e) {}
+      }
       try {
-        const pr = await window.storage.get("bg-v11-prerestore");
-        setHasPreRestoreBackup(!!pr?.value);
+        // v1.12.39 (review F1): the undo point lives in IndexedDB ONLY. storage.get() would fall back to (and
+        // self-heal from) a stale localStorage mirror written by v1.12.38 — resurrecting an undo point that was
+        // already consumed. Read IndexedDB directly and drop any legacy mirror copies.
+        const pr = await window.storage.restore.readKv(PRERESTORE_KEY, { deadlineMs: 8000 });
+        setHasPreRestoreBackup(!!(pr && pr.outcome === "committed" && pr.result));
+        window.storage.restore.mirrorSet(PRERESTORE_KEY, null);
+        window.storage.restore.mirrorSet(PRERESTORE_JOURNAL_KEY, null);
       } catch (e) {}
       try {
         const ab = await window.storage.get(AUTO_BACKUP_KEY);
@@ -7565,60 +7995,203 @@ function AppInner() {
     }
     // v1.12.35 (Codex finding "Ensure each applyFn executes at most once per mutation ID, including retry
     // races"): `inFlightPromise` makes `attempt()` single-flight FOR THIS mutationId — a retry fired while the
-    // original attempt's journal.append() is still pending returns the SAME promise instead of starting a
-    // second, redundant append and risking two overlapping `.then` chains each calling applyFn(). `appliedOnce`
-    // is a second, independent guard directly on applyFn itself (belt-and-suspenders — even if two `.then`
-    // chains somehow both resolved, only the first would ever actually invoke it).
+    // original attempt is still pending returns the SAME promise. `appliedOnce` is a second, independent guard
+    // directly on applyFn itself.
     let inFlightPromise = null;
     let appliedOnce = false;
+    let conflictErr = null; // round-3 review: set when a committed-after-unknown entry no longer fits the state
+    // v1.12.39: ONE owned journal transaction. Resolves only with a DEFINITIVE outcome — "committed", "aborted"
+    // or "not-issued" — decided by IndexedDB (or by a completed read-back probe, see reconcileUncertainCritical).
+    // While undecided it stays pending, so the critical-queue op that awaits it keeps the queue fenced.
+    const appendOnce = () => new Promise((resolve) => {
+      let settled = false;
+      const settle = (r) => {
+        if (settled) return;
+        settled = true;
+        const rec = pendingAppendsRef.current.get(mutationId);
+        if (rec && rec.uncertainSince && r && typeof r === "object") r = { ...r, uncertainBefore: true };
+        pendingAppendsRef.current.delete(mutationId);
+        setUncertainCritical((prev) => (prev.some((u) => u.mutationId === mutationId) ? prev.filter((u) => u.mutationId !== mutationId) : prev));
+        resolve(r);
+      };
+      pendingAppendsRef.current.set(mutationId, { mutationId, kind, settle, uncertainSince: null });
+      const j = typeof window !== "undefined" && window.storage ? window.storage.journal : null;
+      if (!j) { settle({ outcome: "not-issued", reason: "journal-store-unavailable" }); return; }
+      let p;
+      try {
+        if (typeof j.appendOwned === "function") {
+          p = j.appendOwned(entry, {
+            deadlineMs: JOURNAL_APPEND_DEADLINE_MS, graceMs: JOURNAL_APPEND_GRACE_MS, slowMs: 2000,
+            onSlow: (info) => {
+              setCriticalSaveStatus((prev) => (prev && prev.mutationId === mutationId && prev.status === "pending" ? { ...prev, slow: info.stage, blocked: !!info.blocked } : prev));
+              try { window.__pushDiag && window.__pushDiag("criticalJournalSlow", { kind, mutationId, stage: info.stage, ms: info.ms, blocked: !!info.blocked }); } catch (e) {}
+            },
+            onUncertain: (info) => {
+              const rec = pendingAppendsRef.current.get(mutationId);
+              if (!rec) return;
+              rec.uncertainSince = Date.now();
+              setUncertainCritical((prev) => (prev.some((u) => u.mutationId === mutationId) ? prev : [...prev, { mutationId, kind, since: rec.uncertainSince }]));
+              setCriticalSaveStatus((prev) => (prev && prev.mutationId === mutationId ? { ...prev, status: "uncertain", at: Date.now() } : prev));
+              try { window.__pushDiag && window.__pushDiag("criticalJournalOutcomeUnknown", { kind, mutationId, ms: info.ms, stageAtDeadline: info.stageAtDeadline }); } catch (e) {}
+            },
+          });
+        } else {
+          // an older shell without owned transactions: resolution = committed, rejection = not written
+          p = Promise.resolve(j.append(entry)).then(() => ({ outcome: "committed" }), (e) => ({ outcome: "aborted", reason: "append-rejected:" + String((e && e.message) || e) }));
+        }
+      } catch (e) { settle({ outcome: "not-issued", reason: "append-threw:" + String((e && e.message) || e) }); return; }
+      Promise.resolve(p).then(
+        (r) => settle(r && typeof r.outcome === "string" ? r : { outcome: "committed" }),
+        (e) => settle({ outcome: "not-issued", reason: "append-rejected:" + String((e && e.message) || e) }),
+      );
+    });
     const attempt = () => {
       if (inFlightPromise) return inFlightPromise;
-      // v1.12.35 (Codex finding #6 — "new pending/failing mutation status can be hidden while an older
-      // mutation owns criticalSaveStatus"): a NEW mutation starting always becomes the visible status,
-      // unconditionally — the old `!prev || prev.mutationId === mutationId` guard here let an older mutation's
-      // still-"pending"/"failed" status silently suppress a newer one from ever becoming visible at all. The
-      // identity guard is still applied, but ONLY on settlement (below) — never on this initial announcement.
+      // v1.12.35 (Codex finding #6): a NEW mutation starting always becomes the visible status.
       setCriticalSaveStatus(() => ({ kind, mutationId, status: "pending", at: Date.now() }));
-      inFlightPromise = (async () => {
-        if (!(window.storage && window.storage.journal)) throw new Error("journal store unavailable");
-        // v1.12.38: a hung IndexedDB transaction must not stall the critical queue (and with it every queued
-        // edit) forever — after JOURNAL_APPEND_TIMEOUT_MS the attempt is reported failed (nothing published).
-        // If the write lands later anyway, boot replay treats it like any other entry (applied if still
-        // applicable, otherwise a retained conflict) — never a double effect.
-        let timer = null;
-        try {
-          await Promise.race([
-            window.storage.journal.append(entry),
-            new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("journal-append-timeout")), JOURNAL_APPEND_TIMEOUT_MS); }),
-          ]);
-        } finally { if (timer) clearTimeout(timer); }
-      })().then(
-        () => {
-          // Only NOW -- after the durable write is genuinely confirmed -- does the caller's own state
-          // transition run, and only once (appliedOnce), regardless of how many times attempt()/retry() were
-          // invoked for this mutationId. A concurrent NEWER mutation may have already superseded this one's
-          // visible status (identity guard below); applyFn still runs, since it's the thing this specific
-          // journal entry represents actually being safe to show as complete.
+      inFlightPromise = appendOnce().then((r) => {
+        if (r.outcome === "committed") {
+          // v1.12.39 (review F6): after an UNKNOWN phase (settled by a late event or a read-back probe) other,
+          // non-critical edits may have happened meanwhile. Apply only if boot replay would apply it too;
+          // otherwise leave it on disk as a conflict for the boot-time reconciliation (never a divergent apply).
+          if (r.uncertainBefore && !appliedOnce) {
+            let pre;
+            try { pre = journalEntryPreconditions(criticalStateForPreconditions(), entry); } catch (e) { pre = { ok: false, reason: "precondition-exception" }; }
+            if (!pre.ok) {
+              setCriticalSaveStatus((prev) => (prev && prev.mutationId === mutationId ? { kind, mutationId, status: "conflict", reason: pre.reason, at: Date.now() } : prev));
+              try { window.__pushDiag && window.__pushDiag("criticalCommittedButStateChanged", { kind, mutationId, reason: pre.reason }); } catch (e) {}
+              appliedOnce = true; // never apply it live; boot replay decides (it will retain it as a conflict)
+              // round-2 review: REJECT (not resolve) — callers such as the End Session dialog must not treat
+              // this as done, and End Session's guard is released on rejection.
+              const cErr = new Error("journal-committed-state-changed:" + pre.reason);
+              cErr.outcome = "conflict";
+              // round-3 review (P1): a conflicted mutation is FINAL. Nothing may retry it: both retry refs are
+              // cleared, and a retry already wired to this mutation (e.g. the End Session dialog's
+              // "ลองอีกครั้ง") rejects with this same conflict instead of resolving as if it had been applied.
+              conflictErr = cErr;
+              if (criticalMutationRetryRef.current && criticalMutationRetryRef.current.mutationId === mutationId) criticalMutationRetryRef.current = null;
+              if (sessionEndRetryRef.current && sessionEndRetryRef.current.mutationId === mutationId) sessionEndRetryRef.current = null;
+              throw cErr;
+            }
+          }
+          // Only NOW -- after IndexedDB has confirmed the commit -- does the caller's own state transition run,
+          // and only once (appliedOnce), regardless of how many times attempt()/retry() were invoked.
           if (!appliedOnce) { appliedOnce = true; applyFn(buildJournalReceipt(entry, "live", Date.now())); }
           setCriticalSaveStatus((prev) => (prev && prev.mutationId === mutationId ? { kind, mutationId, status: "saved", at: Date.now() } : prev));
           setUnresolvedCriticalFailures((prev) => prev.filter((f) => !resolvesFailure(f)));
-          try { window.__pushDiag && window.__pushDiag("afterCriticalJournalWrite", { kind, mutationId }); } catch (e) {}
+          try { window.__pushDiag && window.__pushDiag("afterCriticalJournalWrite", { kind, mutationId, ms: r.ms, via: r.via || "transaction" }); } catch (e) {}
           if (criticalMutationRetryRef.current && criticalMutationRetryRef.current.mutationId === mutationId) criticalMutationRetryRef.current = null;
           if (sessionEndRetryRef.current && sessionEndRetryRef.current.mutationId === mutationId) sessionEndRetryRef.current = null;
-        },
-        (e) => {
-          inFlightPromise = null; // v1.12.35: allow a later genuine retry to actually re-attempt the append
-          setCriticalSaveStatus((prev) => (prev && prev.mutationId === mutationId ? { kind, mutationId, status: "failed", at: Date.now() } : prev));
-          setUnresolvedCriticalFailures((prev) => (prev.some((f) => f.mutationId === mutationId) ? prev : [...prev, { mutationId, kind, matchId: failureMatchId, at: Date.now() }]));
-          try { window.__pushDiag && window.__pushDiag("criticalJournalWriteFailed", { kind, mutationId, error: String((e && e.message) || e) }); } catch (e2) {}
-          throw e; // rethrow so the caller (e.g. endSession) can distinguish failure and show retry guidance -- applyFn is never called on this path, so no optimistic state is ever published for a mutation that didn't persist.
+          return;
         }
-      );
+        // "aborted" / "not-issued": IndexedDB has decided — the entry is NOT on disk and can never commit later.
+        inFlightPromise = null; // a later genuine retry may re-attempt (revalidated, see retryRevalidated)
+        setCriticalSaveStatus((prev) => (prev && prev.mutationId === mutationId ? { kind, mutationId, status: "failed", outcome: r.outcome, reason: r.reason || null, at: Date.now() } : prev));
+        setUnresolvedCriticalFailures((prev) => (prev.some((f) => f.mutationId === mutationId) ? prev : [...prev, { mutationId, kind, matchId: failureMatchId, at: Date.now() }]));
+        try { window.__pushDiag && window.__pushDiag("criticalJournalWriteFailed", { kind, mutationId, outcome: r.outcome, reason: r.reason || null, errorName: r.errorName || null, ms: r.ms, stageAtDeadline: r.stageAtDeadline || null }); } catch (e2) {}
+        const err = new Error("journal-append-" + r.outcome + (r.reason ? ":" + r.reason : ""));
+        err.outcome = r.outcome;
+        throw err; // applyFn never runs on this path: nothing is published for a mutation that did not persist.
+      });
       return inFlightPromise;
     };
-    criticalMutationRetryRef.current = { mutationId, retry: attempt };
-    if (kind === "sessionEnd") sessionEndRetryRef.current = { mutationId, retry: attempt };
+    // v1.12.39 (Codex P0 — "prevent ... retry-as-new from crossing that fence"): a retry never re-sends a stale
+    // entry. It runs through the critical queue (so it is ordered after everything already waiting) and first
+    // re-checks the entry's replay preconditions against the LATEST committed state — exactly the check boot
+    // replay would apply. If the state has moved on (row deleted or edited, match finished elsewhere, session
+    // ended...), the old entry is marked obsolete and never appended. A Finish additionally refuses when the
+    // match's score was changed after the failed attempt (the organizer taps จบเกม again for the new score).
+    const retryRevalidatedQueued = () => enqueueCriticalOp(() => {
+      // round-3 review (P1): a conflict is never "already applied" — it must surface as a rejection.
+      if (conflictErr) return Promise.reject(conflictErr);
+      if (appliedOnce) return undefined;
+      if (inFlightPromise) return inFlightPromise;
+      const base = criticalStateForPreconditions();
+      let pre;
+      try { pre = journalEntryPreconditions(base, entry); } catch (e) { pre = { ok: false, reason: "precondition-exception" }; }
+      // Boot replay may INSERT a never-started row that is missing from a lagging checkpoint (matchLifecycle-
+      // Preconditions' insert rule). A live retry has no such lag — the latest committed state IS the truth — so
+      // a row that is gone now was removed on purpose after the failed attempt: the retry is obsolete (this is
+      // what stops "Start failed -> row deleted -> retry" from creating a ghost match).
+      if (pre.ok && kind === "matchLifecycle" && patch && Array.isArray(patch.changes)) {
+        for (const ch of patch.changes) {
+          if (!ch || ch.before === null) continue;
+          const liveRow = (base.current || []).find((m) => m && m.id === ch.id);
+          if (!liveRow) { pre = { ok: false, reason: "row-removed-since-failed-attempt:" + ch.id }; break; }
+          // likewise an EDITED row (players/court changed since): re-sending the old entry would overwrite the edit
+          if (matchIdentity(liveRow) !== matchIdentity(ch.before)) { pre = { ok: false, reason: "row-changed-since-failed-attempt:" + ch.id }; break; }
+        }
+      }
+      if (pre.ok && kind === "matchComplete" && patch && patch.historyAppend) {
+        const mid = patch.historyAppend.id;
+        const live = (base.current || []).find((m) => m && m.id === mid);
+        const draft = Object.prototype.hasOwnProperty.call(scoreDraftsRef.current, mid) ? scoreDraftsRef.current[mid] : (live ? live.scores : null);
+        if (canonicalJson(normalizedMatchScores(draft)) !== canonicalJson(normalizedMatchScores(patch.historyAppend.scores))) pre = { ok: false, reason: "score-changed-since-failed-attempt" };
+      }
+      if (!pre.ok) {
+        setCriticalSaveStatus((prev) => (prev && prev.mutationId === mutationId ? { kind, mutationId, status: "obsolete", reason: pre.reason, at: Date.now() } : prev));
+        setUnresolvedCriticalFailures((prev) => prev.filter((f) => f.mutationId !== mutationId));
+        if (criticalMutationRetryRef.current && criticalMutationRetryRef.current.mutationId === mutationId) criticalMutationRetryRef.current = null;
+        if (sessionEndRetryRef.current && sessionEndRetryRef.current.mutationId === mutationId) sessionEndRetryRef.current = null;
+        try { window.__pushDiag && window.__pushDiag("criticalRetryObsolete", { kind, mutationId, reason: pre.reason }); } catch (e) {}
+        const err = new Error("journal-retry-obsolete:" + pre.reason);
+        err.outcome = "obsolete";
+        return Promise.reject(err);
+      }
+      return attempt();
+    });
+    // v1.12.39 (review F5): a retried Finish holds its match "in flight" from the tap until it settles, exactly
+    // like finishAndAdvance — score edits typed meanwhile are queued behind it instead of changing the draft.
+    const retryRevalidated = () => {
+      const mid = kind === "matchComplete" && patch && patch.historyAppend ? patch.historyAppend.id : null;
+      if (mid == null) return retryRevalidatedQueued();
+      if (inFlightCriticalMatchIdsRef.current.has(mid)) return Promise.resolve();
+      inFlightCriticalMatchIdsRef.current.add(mid);
+      const release = () => { inFlightCriticalMatchIdsRef.current.delete(mid); };
+      return retryRevalidatedQueued().then((v) => { release(); return v; }, (e) => { release(); throw e; });
+    };
+    criticalMutationRetryRef.current = { mutationId, kind, retry: retryRevalidated };
+    if (kind === "sessionEnd") sessionEndRetryRef.current = { mutationId, retry: retryRevalidated };
     return attempt();
+  };
+  // v1.12.39: the latest committed state in the shape the replay preconditions read (journalEntryPreconditions).
+  const criticalStateForPreconditions = () => {
+    const b = criticalBaselineRef.current || {};
+    const live = latestLiveStateRef.current || {};
+    return { ...live, ...b, players: playersLatestRef.current, history: historyLatestRef.current, current: currentLatestRef.current, journalReceipts: journalReceiptsLatestRef.current };
+  };
+  // v1.12.39: retry the most recent failed lifecycle/Finish mutation (same entry, revalidated). Returns null
+  // when there is nothing to retry.
+  const retryLastCriticalMutation = () => {
+    const pending = criticalMutationRetryRef.current;
+    if (!pending) return null;
+    return pending.retry().catch(() => {});
+  };
+  // v1.12.39 (Codex P0 — "an unknown outcome must remain fenced and require read-back/reload reconciliation"):
+  // probes each append whose outcome is unknown with a readonly transaction on the journal store. IndexedDB
+  // cannot start that readonly transaction before the earlier readwrite one has finished, so a probe that
+  // completes proves the append is no longer in flight; the entry's presence decides committed vs not. A probe
+  // that itself cannot complete changes nothing (the fence stays; reloading is then the reconciliation — boot
+  // replay decides deterministically from what is on disk).
+  const reconcileUncertainCritical = async () => {
+    if (reconcilingCritical) return;
+    setReconcilingCritical(true);
+    try {
+      const recs = Array.from(pendingAppendsRef.current.values());
+      for (const rec of recs) {
+        const j = window.storage && window.storage.journal;
+        if (!j || typeof j.probe !== "function") continue;
+        // a probe that itself becomes undecided must not leave the button stuck (review nit): stop waiting on it
+        const r = await new Promise((resolve) => {
+          j.probe(rec.mutationId, { deadlineMs: JOURNAL_PROBE_DEADLINE_MS, graceMs: 2000, onUncertain: () => resolve({ outcome: "unknown" }) }).then(resolve, () => resolve({ outcome: "not-issued" }));
+        });
+        if (r && r.outcome === "committed") {
+          const found = !!(r.result && r.result.mutationId === rec.mutationId);
+          try { window.__pushDiag && window.__pushDiag("criticalJournalProbe", { mutationId: rec.mutationId, found }); } catch (e) {}
+          rec.settle(found ? { outcome: "committed", via: "probe" } : { outcome: "aborted", reason: "probe-absent", via: "probe" });
+        }
+      }
+    } finally { setReconcilingCritical(false); }
   };
   // v1.12.34: exposed to the End Session confirm dialog (QuanPaymentPanel, via PaymentTab) as a distinct
   // entry point from endSession() itself. endSession() has its own idempotency guard (lastEndedSessionIdRef)
@@ -7683,6 +8256,7 @@ function AppInner() {
     // in-memory state is trustworthy, however it got here." (loadCorrupted is kept as a legacy alias of
     // "recovery-required" for the existing banner/tests — both are checked as belt-and-suspenders.)
     if (!loaded || loadCorrupted || (bootStatus !== "restored" && bootStatus !== "new-install")) return;
+    if (restoreFenceRef.current) { autosaveSkippedByFenceRef.current = true; return; } // v1.12.39: no autosave while a restore owns storage
     // v1.11.47 (TEMPORARY DIAGNOSTICS): this useEffect body only runs AFTER React has committed the
     // triggering state change (that's what "effect" means) — so this marker firing at all is itself proof
     // the preceding setSessionHistory/setPlayers/etc from endSession() were committed successfully
@@ -7733,7 +8307,15 @@ function AppInner() {
         // redundant middle markers are removed rather than kept "just in case." See "beforeIDBWrite"'s own
         // removal below for the third one trimmed from this same save cycle.
         // v1.11.76: pageInstanceId tags every "bg-v11" write — see the same note on applyUpdateNow's write.
-        const json = JSON.stringify({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, savedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null });
+        // v1.12.39: ONE canonical persisted shape (buildPersistedStateObject) serialized with verified image
+        // references (serializePersistedState); `body` (everything except savedAt/pageInstanceId) lets a restore
+        // suppress the one redundant autosave of exactly the content it just promoted.
+        const { body, json } = serializePersistedState(buildPersistedStateObject({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current }), savedAt);
+        if (suppressAutosaveBodyRef.current != null) {
+          const same = suppressAutosaveBodyRef.current === body;
+          suppressAutosaveBodyRef.current = null;
+          if (same) { latestStateJsonRef.current = json; try { window.__pushDiag && window.__pushDiag("autosaveSuppressedAfterRestore", { gen: mySaveGeneration }); } catch (e) {} return; }
+        }
         latestStateJsonRef.current = json; // kept fresh for the pagehide/visibility synchronous flush below
         // v1.12.32 (P1 Launch Fix Batch C): kept fresh alongside latestStateJsonRef above, regardless of
         // whether the write below succeeds — this is what lets the manual "ลองบันทึกใหม่" retry button
@@ -7768,6 +8350,12 @@ function AppInner() {
           if (saveGenerationRef.current !== mySaveGeneration) return;
           if (preWriteRead?.value) {
             const onDisk = JSON.parse(preWriteRead.value);
+            // v1.12.39 (review F2): never write this window's state over a restore promoted after it loaded.
+            if ((typeof onDisk.restoreEpoch === "number" ? onDisk.restoreEpoch : 0) > (restoreEpochRef.current || 0)) {
+              // never write over a restore promoted elsewhere; adopt it (validated) once no critical op is pending
+              if (saveGenerationRef.current === mySaveGeneration) await refreshFromStorageIfNewer(true);
+              return;
+            }
             if (
               onDisk.pageInstanceId &&
               onDisk.pageInstanceId !== window.__pageInstanceId &&
@@ -7801,6 +8389,10 @@ function AppInner() {
         // is skipped exactly as it already was before this fix — a thrown primary write was never treated
         // as "safe to build on" and still isn't now; only the VISIBILITY of that failure has changed.
         let result;
+        // v1.12.39: the restore fence is checked SYNCHRONOUSLY right before the write is invoked (no await in
+        // between), so no autosave write can start once a restore has begun; writes invoked earlier are
+        // awaited by the restore (storage.restore.whenWritesIdle) before it promotes anything.
+        if (restoreFenceRef.current) { autosaveSkippedByFenceRef.current = true; return; }
         try {
           result = await window.storage.set("bg-v11", json);
         } catch (writeErr) {
@@ -7815,11 +8407,19 @@ function AppInner() {
         // such as {primaryOk:false,error}"). Recorded/cleared through the SAME generation-gated helpers as
         // the thrown-write case above and the success path below, so exactly one warning banner can ever be
         // showing at a time regardless of which failure mode produced it.
+        if (result && result.staleRestoreEpoch) {
+          // v1.12.39 (review F2): the shell refused this write inside its transaction — a newer restore is on
+          // disk. Adopt it instead; if nothing could be adopted, this is a real (visible) save failure (N1).
+          const adopted = await refreshFromStorageIfNewer(true);
+          if (!adopted && criticalQueueDepthRef.current === 0) recordSaveFailure(mySaveGeneration, "stale-restore-epoch");
+          return;
+        }
         if (result?.primaryOk === false) {
           recordSaveFailure(mySaveGeneration, "primaryOk-false");
         } else {
           recordSaveSuccess(mySaveGeneration);
         }
+        if (result?.primaryOk !== false && json.indexOf('"data:image/') >= 0) scheduleImageAssetization("autosave-inline-images"); // v1.12.39
         // Last Known Good: only ever updated from HERE, i.e. only once bootStatus has already resolved
         // to a trustworthy state — so a failed/interrupted boot can never overwrite a good LKG with an
         // empty or corrupted one (section 9's explicit warning). A normal save landing safely on the
@@ -7827,7 +8427,7 @@ function AppInner() {
         if (result?.primaryOk !== false) {
           // v1.11.44: same generation re-check before the LKG write — LKG is a fallback layer and must
           // never be allowed to regress to stale content either.
-          if (saveGenerationRef.current === mySaveGeneration) {
+          if (saveGenerationRef.current === mySaveGeneration && !restoreFenceRef.current) {
             try { await window.storage.set(LKG_KEY, json); } catch (e) {}
           }
           // v1.11.48 (Section B/F, CRITICAL ORDERING FIX): Auto Backup's trigger now lives HERE — strictly
@@ -7856,7 +8456,7 @@ function AppInner() {
         }
       } catch (e) {}
     })();
-  }, [players, lastIntentionalPlayerWipeAt, journalReceipts, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus]);
+  }, [players, lastIntentionalPlayerWipeAt, journalReceipts, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus, persistTick]);
   // v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): manual retry for the persistent
   // save-failure warning banner below. Deliberately reuses the EXACT same `window.storage.set("bg-v11", ...)`
   // call the automatic save effect above uses (per the "do not introduce a new storage architecture"
@@ -7871,6 +8471,7 @@ function AppInner() {
     if (saveRetrying) return;
     const attempt = latestAttemptedSaveRef.current;
     if (!attempt || !attempt.json) return;
+    if (restoreFenceRef.current) return; // v1.12.39
     setSaveRetrying(true);
     try {
       const result = await window.storage.set("bg-v11", attempt.json);
@@ -7902,6 +8503,7 @@ function AppInner() {
     if (!loaded) return;
     const flush = () => {
       if (bootStatus !== "restored" && bootStatus !== "new-install") return; // never flush during/after a blocked boot
+      if (restoreFenceRef.current) return; // v1.12.39: a restore owns storage — never flush pre-restore memory over it
       // v1.12.33 (P0 iPad Force-Close Durability Fix, finding #2): build `json` HERE, fresh, from
       // latestLiveStateRef.current (kept current on EVERY commit by the cheap sync-refresh effect declared
       // above the main save effect) instead of reading a previously-stringified latestStateJsonRef.current,
@@ -7945,7 +8547,7 @@ function AppInner() {
         if (lastKnownSavedAtRef.current < existingSavedAt) return;
         const flushSavedAt = Date.now();
         let json = null;
-        try { json = JSON.stringify({ ...latestLiveStateRef.current, savedAt: flushSavedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null }); } catch (e) { return; }
+        try { json = serializePersistedState(buildPersistedStateObject({ ...latestLiveStateRef.current, restoreEpoch: restoreEpochRef.current }), flushSavedAt).json; } catch (e) { return; }
         // v1.12.24 (P0 iPad Force-Close Partial Progress Rollback — diagnostics only, no behavior change):
         // this synchronous flush was unconditionally attempting `localStorage.setItem` regardless of size —
         // for a state over the SAME MIRROR_SIZE_LIMIT_CHARS cap window.storage.set() already respects for
@@ -8115,6 +8717,7 @@ function AppInner() {
   // with zero separate bookkeeping. Only ever touches credits still "available", so an already-used credit
   // can never be double-applied even if this is called twice with the same id.
   const applyDiscountCredits = (creditIds) => {
+    flushDiscountDrafts(); // v1.12.39 (review F7): a typed-but-uncommitted discount is committed BEFORE the credit is added
     const ids = Array.isArray(creditIds) ? creditIds : [creditIds];
     const targets = discountCredits.filter((c) => ids.includes(c.id) && c.status === "available");
     if (!targets.length) return;
@@ -8657,7 +9260,7 @@ function AppInner() {
         // above (applied to the LATEST values, not to this op's `base` snapshot); only roundNo is set here.
         criticalBaselineRef.current = { ...(criticalBaselineRef.current || base), roundNo: matchCompleteNextRoundNo((criticalBaselineRef.current || base).roundNo, patch) };
       }).then(release, (e) => { release(); throw e; });
-    }).catch(() => { /* failure is already surfaced via criticalSaveStatus ("failed") -- nothing else to do here; the match correctly stays visibly unfinished since applyFn never ran. */ });
+    }).catch(() => { release(); /* v1.12.39: also covers an op refused before it ran (restore fence). Failure is already surfaced via criticalSaveStatus ("failed"); the match correctly stays visibly unfinished since applyFn never ran. */ });
   };
   // v1.11.24: genuine mid-game pause (NOT a finish) — "พักเกม" in the status dropdown. Freezes the court
   // exactly as-is (teams/scores/round/court untouched) so it keeps occupying its court and its players stay
@@ -8946,7 +9549,15 @@ function AppInner() {
   // v1.12.38 (Lightweight Game Persistence): a match still in `current` (not finished) gets its score typed into
   // the in-memory draft map only — no `current` change, so no full-state serialization or storage write per
   // keystroke. A COMPLETED match (history) is corrected in place exactly as before (durable via autosave).
+  // v1.12.39 (Codex P0 — "Finish with a changed score"): while this match's Finish is queued or its journal
+  // write is in flight/undecided, a score edit is queued BEHIND it instead of changing the draft the pending
+  // entry already captured — so the result is deterministic: if the Finish commits, the edit lands afterwards
+  // as a durable correction of the completed record; if it is aborted, the edit lands on the still-live draft.
   const editMatchScores = (mid, fn) => {
+    if (inFlightCriticalMatchIdsRef.current.has(mid)) { runAfterPendingLifecycle(() => editMatchScoresNow(mid, fn)); return; }
+    editMatchScoresNow(mid, fn);
+  };
+  const editMatchScoresNow = (mid, fn) => {
     const cur = currentLatestRef.current.find((m) => m.id === mid);
     if (cur && cur.status === "done") { // legacy completed row still in `current`: a durable correction, as before
       setCurrentSerial((prev) => prev.map((m) => (m.id === mid ? { ...m, scores: fn(m.scores || null) } : m)));
@@ -9252,6 +9863,7 @@ function AppInner() {
 
   // archive the current session into sessionHistory, then reset session-specific state (keeps player roster)
   const endSession = () => {
+    flushDiscountDrafts(); // v1.12.39 (round-2 review): a typed-but-uncommitted discount belongs to THIS session's bill
     // v1.12.38 (Codex targeted inspection): End Session is refused IN DOMAIN LOGIC while any match is playing or
     // paused — checked here against the latest `current` (before the idempotency guard, so a refused attempt
     // never blocks a later genuine one) and again inside the queued operation against the committed baseline.
@@ -9264,6 +9876,7 @@ function AppInner() {
     // unaffected. Checked synchronously here, before this call even enters the critical-operation queue.
     if (lastEndedSessionIdRef.current === session.id) return null;
     lastEndedSessionIdRef.current = session.id;
+    const endingSessionId = session.id;
     // v1.12.24 (P0 iPad Force-Close Partial Progress Rollback — END SESSION DURABILITY BOUNDARY): mark the
     // NEXT save-effect run (the one carrying every state change this function makes below, all batched into
     // one React commit) as high-priority so it skips the normal save debounce and starts writing to
@@ -9555,6 +10168,11 @@ function AppInner() {
         if (lastEndedSessionIdRef.current === base.session.id) lastEndedSessionIdRef.current = null;
         throw e;
       });
+    }).catch((e) => {
+      // round-3 review (P3): the queue itself can refuse the op before it runs (e.g. a restore owns storage) —
+      // nothing was archived, so the idempotency guard must not stay set (it would make the next "จบก๊วน" a no-op).
+      if (lastEndedSessionIdRef.current === endingSessionId) lastEndedSessionIdRef.current = null;
+      throw e;
     });
   };
   // ===== GROUP DEFAULT SETTINGS (v1.11.17, spec section 1) =====
@@ -9994,7 +10612,24 @@ function AppInner() {
   // Returns null if the user cancelled the native share sheet or every fallback failed; otherwise
   // { stats, sizeLabel } for the caller to show a success banner with.
   const exportBackup = async () => {
-    const payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts });
+    let payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts });
+    // v1.12.39 (review F3): an export must never contain an image only as an "@img:" reference. Missing assets are
+    // loaded from the image store first; if any still cannot be resolved, the export is refused (clear message)
+    // instead of producing a file that would lose those images.
+    const miss = missingImageRefKeys(payload.data);
+    if (miss.length) {
+      await loadMissingImageAssets(miss);
+      payload = { ...payload, data: hydrateImageRefsCopy(payload.data) };
+      rehydrateAllStateRefs();
+      const still = missingImageRefKeys(payload.data).length;
+      if (still) return { error: "ยังไม่ส่งออกไฟล์สำรอง — รูปภาพ " + still + " รูปยังโหลดจากที่เก็บในเครื่องไม่ได้ ไฟล์ที่ส่งออกตอนนี้จะไม่มีรูปเหล่านั้น กรุณาปิดแล้วเปิดแอปใหม่แล้วลองอีกครั้ง" };
+    }
+    // v1.12.39: every image stays INLINE (the file imports into any app version); a digest manifest lets the
+    // importer prove every image arrived intact. An "@img:" reference that could not be resolved in memory is
+    // listed as missing rather than silently exported as an unusable reference.
+    payload.assetManifest = await buildBackupImageManifest(payload.data);
+    const unresolvedRefs = (JSON.stringify(payload.data).match(/"@img:[^"]{1,190}"/g) || []).length;
+    if (unresolvedRefs) payload.assetManifest.unresolvedReferences = unresolvedRefs;
     const json = JSON.stringify(payload);
     // v1.9.19: "BadQ Back-up <date> <time>.json" per explicit naming request — colon-free time (HH-mm)
     // so the filename stays valid on every OS (Windows rejects ":" in filenames).
@@ -10030,237 +10665,306 @@ function AppInner() {
     setSettings((s) => ({ ...s, lastBackupAt: new Date().toISOString() }));
     return { stats: backupStats(payload.data), sizeLabel: fmtBytes(blob.size) };
   };
-  // parse + validate + migrate an uploaded backup file's text content; never throws, always returns
-  // either { ok:true, backup } or { ok:false, reason }.
-  const validateBackupFile = (text) => {
-    let parsed;
-    try { parsed = JSON.parse(text); } catch (e) { return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ" }; }
-    const struct = validateBackupStructure(parsed);
-    if (!struct.ok) return struct;
-    let migrated;
-    try { migrated = migrateBackupData(parsed); } catch (e) { return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ" }; }
-    const integ = validateBackupIntegrity(migrated.data);
-    if (!integ.ok) return integ;
-    return { ok: true, backup: { ...migrated, data: integ.data } };
+  // ===================== v1.12.39 — STAGED RESTORE (Codex P0: fail-open, non-atomic import) =====================
+  // RESTORE CRASH-CONSISTENCY PROTOCOL. Storage involved: IndexedDB database "badq-shadow-store" (object stores
+  // "kv", "journal", "images" — one database, so one transaction can span kv+journal), plus the localStorage
+  // mirrors "bg:bg-v11"/"bg:bg-v11-lkg" (outside any IndexedDB transaction).
+  //   0 FENCE     restoreFenceRef = true: no autosave, pagehide flush, refresh, update handoff, save retry or new
+  //               critical op. Then wait until the critical queue is empty and no journal append is undecided,
+  //               and until every earlier-invoked storage.set() for bg-v11/LKG has settled.
+  //   1 SNAPSHOT  (replace only) the pre-restore safety snapshot of the LATEST committed state is serialized
+  //               once, staged under "bg-v11-prerestore-next", and read back: it must be byte-identical (and its
+  //               sha-256 is recorded). Nothing else changes before this is proven.
+  //   2 IMAGES    every inline image of the incoming data is stored as a content-addressed asset and read back;
+  //               only exact matches are referenced (anything else stays inline). Assets are additive: the old
+  //               state's assets are never touched.
+  //   3 STAGE     the incoming data is normalized ONCE, serialized ONCE (with verified image references and a
+  //               new restoreEpoch) and staged under "bg-v11-restore-staged"; read back byte-identical.
+  //   4 PROMOTE   ONE IndexedDB transaction over kv+journal: re-reads the staged value (abort unless identical),
+  //               puts it into "bg-v11" AND LKG, moves the verified snapshot to "bg-v11-prerestore", archives
+  //               the journal to "bg-v11-prerestore-journal" and clears it (replace only), deletes the staging
+  //               keys. IndexedDB commits all of it or none of it. (The mirrors are removed just before and
+  //               rewritten just after, so a crash in between leaves no stale mirror that could out-date it.)
+  //   5 VERIFY    Primary and LKG are read back from IndexedDB and must be byte-identical to the staged JSON.
+  //   6 PUBLISH   only now does React state change (to the exact normalized values that were staged).
+  // A crash/force-close before step 4 commits leaves the exact old state (the staging keys are ignored and
+  // cleaned at the next boot); after it commits, the exact new state (the higher restoreEpoch stops every boot
+  // guard from preferring pre-restore mirrors, LKG or auto-backups). An aborted/not-issued write fails the
+  // import with the old state untouched; an UNDECIDED write keeps the fence up and asks for a reload — nothing
+  // is published, nothing else can write in between.
+  const RESTORE_STORAGE_OPTS = { deadlineMs: 20000, graceMs: 5000, slowMs: 2500 };
+  const waitCriticalQuiescence = async (maxMs) => {
+    const until = Date.now() + maxMs;
+    while (Date.now() < until) {
+      if (criticalQueueDepthRef.current === 0 && pendingAppendsRef.current.size === 0) return true;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return criticalQueueDepthRef.current === 0 && pendingAppendsRef.current.size === 0;
   };
-  // apply a validated backup. restoreMode "replace" takes a safety snapshot of the CURRENT state first
-  // (so it can be undone), then overwrites everything. "mergeHistory" only adds session-history entries
-  // that aren't already present (by stable id) — current players/session are left untouched.
-  // v1.12.17 (P0 iOS standalone PWA import performance/freeze hotfix): added an optional `onPhase(phase)`
-  // callback — existing callers (wipeAllAppData, deleteAllMembersData, other applyRestore(...) call sites)
-  // simply omit it and behave exactly as before; only confirmDoRestore's user-initiated backup-file import
-  // passes one, to drive the new phase-based "กำลังตรวจสอบไฟล์.../กำลังเตรียมข้อมูล.../..." progress label
-  // instead of a single static "กำลังนำเข้า..." for the whole operation (see spec's IMPORT PROGRESS UX
-  // section). Each phase also logs a safe, PII-free elapsed-ms diagnostic via logImportPhase so a report
-  // like "stuck on standalone PWA but fine in Safari" can be root-caused from real per-phase timings
-  // instead of guessed at.
-  const applyRestore = async (restoreMode, backup, onPhase) => {
-   // v1.12.13 (P0 IMPORT/RESTORE MODAL-STUCK HOTFIX): the entire body below used to run with no top-level
-   // guard — several of the normalization calls it makes (normTournament/normCloudClub/normRankingConfigs/
-   // syncCourtLabels/inferAdvancedFeatureFlags on a real-world backup file's not-fully-predictable shape)
-   // could throw, and an exception thrown from an async function makes its returned Promise REJECT rather
-   // than resolve. confirmDoRestore's `await applyRestore(...)` had no try/catch of its own, so a reject
-   // here became a silently-swallowed unhandled promise rejection: setBusy(false)/setPreview(null) never
-   // ran, and the "พบข้อมูลสำรอง" preview modal (gated purely on `preview` staying truthy) never closed —
-   // with no error shown at all, exactly the reported "is it stuck, did it work?" symptom. Wrapping the
-   // whole function in try/catch guarantees it ALWAYS resolves to a plain {ok, reason} object the caller
-   // can act on, never rejects. See confirmDoRestore's own v1.12.13 comment for the matching caller-side fix.
-   try {
-    const data = backup.data;
-    // v1.12.17: phase(label) both updates the caller's progress UI AND records how long the PREVIOUS
-    // phase took (safe metadata only — see logImportPhase). `now()` prefers performance.now() (monotonic,
-    // sub-ms) and falls back to Date.now() if unavailable. yieldToUI() calls are placed right after a
-    // phase() call, never before, so the just-set label actually gets a chance to paint before the next
-    // (potentially expensive) synchronous block begins.
+  // parse + validate + migrate an uploaded backup file's text content; never throws, always resolves
+  // { ok:true, backup, timings } or { ok:false, reason, timings }. v1.12.39: async with a yield between the
+  // expensive steps (visible progress; no single long main-thread block) and per-step timings.
+  const validateBackupFile = async (text, onStep) => {
     const now = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
-    let __phaseT0 = now(), __phaseName = "start";
+    const timings = {};
+    let t = now();
+    const step = async (name) => { try { onStep && onStep(name); } catch (e) {} await yieldToUI(); t = now(); };
+    let parsed;
+    await step("parsing");
+    try { parsed = JSON.parse(text); } catch (e) { return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ", timings }; }
+    timings.parseMs = Math.round(now() - t);
+    const struct = validateBackupStructure(parsed);
+    if (!struct.ok) return { ...struct, timings };
+    await step("migrating");
+    let migrated;
+    try { migrated = migrateBackupData(parsed); } catch (e) { return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ", timings }; }
+    const integ = validateBackupIntegrity(migrated.data);
+    timings.migrateValidateMs = Math.round(now() - t);
+    if (!integ.ok) return { ...integ, timings };
+    // v1.12.39: an export's digest manifest (see exportBackup) is checked against the images actually present
+    await step("checking-images");
+    const manifestCheck = await verifyBackupImageManifest(parsed, integ.data);
+    timings.imageManifestMs = Math.round(now() - t);
+    if (!manifestCheck.ok) return { ok: false, reason: manifestCheck.reason, timings };
+    return { ok: true, backup: { ...migrated, data: integ.data, assets: parsed.assets && typeof parsed.assets === "object" ? parsed.assets : null }, timings, imageCheck: manifestCheck };
+  };
+  const applyRestore = async (restoreMode, backup, onPhase, restoreOpts) => {
+    if (restoreFenceRef.current) return { ok: false, reason: "restore-already-running" };
+    if (updateHandoffRef.current) return { ok: false, reason: "update-handoff-in-progress" }; // v1.12.39 (review F4)
+    const undo = restoreOpts && restoreOpts.undo ? restoreOpts.undo : null; // { restoreEntries } — see undoRestore
+    const now = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+    const T0 = now();
+    let phaseName = "start", phaseT0 = T0;
+    let lastStatus = "ok";
+    const report = { mode: restoreMode, phases: [] };
     const phase = (label, meta) => {
       const t = now();
-      logImportPhase(__phaseName, t - __phaseT0, meta);
-      __phaseName = label; __phaseT0 = t;
+      const ms = t - phaseT0;
+      report.phases.push({ phase: phaseName, ms: Math.round(ms), status: lastStatus });
+      logImportPhase(phaseName, ms, { status: lastStatus, ...(meta || {}) });
+      phaseName = label; phaseT0 = t; lastStatus = "ok";
       try { onPhase && onPhase(label); } catch (e) {}
+      setRestoreUi((u) => ({ ...(u || {}), phase: label, status: "running", detail: null, startedAt: (u && u.startedAt) || Date.now() }));
+      try { window.__badqRestorePhase = label; } catch (e) {}
     };
-    if (restoreMode === "replace") {
-      phase("backing-up", { playerCount: (data.players || []).length, sessionHistoryCount: (data.sessionHistory || []).length, schemaVersion: backup.schemaVersion, appVersion: backup.appVersion });
-      await yieldToUI(); // let the "กำลังสำรองข้อมูลเดิม..." label paint before the (potentially large) snapshot stringify/write below
-      try {
-        const snapshot = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts });
-        const snapshotJson = JSON.stringify(snapshot);
-        await window.storage.set("bg-v11-prerestore", snapshotJson);
-        setHasPreRestoreBackup(true);
-      } catch (e) {}
-      phase("preparing");
-      await yieldToUI(); // let the "กำลังเตรียมข้อมูล..." label paint before normalization
-      // v1.11.76 (P0 fix, req 5/6): normalize into local consts ONCE — these are both what gets set into
-      // React state below AND what gets persisted+verified immediately after, so the two can never diverge.
-      const rPlayers = data.players.map(normPlayer);
-      const rHistory = data.history, rCurrent = data.current, rFuture = data.future;
-      // v1.12.1 (UX restructure — Advanced Feature migration): a restored backup goes through the SAME
-      // inferAdvancedFeatureFlags logic as normal boot (applyPersistedState) — restoring an old backup that
-      // predates the Tournament/Reward toggles must not silently disable a feature that backup's own
-      // tournamentHistory/rewardHistory shows was actually in use.
-      const rFeatureFlags = inferAdvancedFeatureFlags(data.settings, data.activeTournament, data.tournamentHistory, data.rewardHistory);
-      const rSettings = normSettings({ ...data.settings, tournamentEnabled: rFeatureFlags.tournamentEnabled, wheelEnabled: rFeatureFlags.wheelEnabled });
-      const rSession = normSession(data.session);
-      const rSessionHistory = data.sessionHistory, rTournamentHistory = data.tournamentHistory || [];
-      const rGeneralExpenses = data.generalExpenses || [], rOtherIncome = data.otherIncome || [];
-      const rDiscountCredits = (data.discountCredits || []).map(normDiscountCredit);
-      const rRewardHistory = data.rewardHistory || [];
-      const rGroupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {};
-      const rRankingConfigs = normRankingConfigs(data.rankingConfigs);
-      const rCloudClub = normCloudClub(data.cloudClub);
-      const rCourtLabels = syncCourtLabels(data.courtLabels, data.courtCount);
-      const rActiveTournament = normTournament(data.activeTournament) || null;
-      // v1.12.13 (P0 offline persistence hotfix): applyRestore("replace", ...) is ONLY ever invoked after
-      // an explicit, confirmed user action (a manual "แทนที่ทั้งหมด" backup restore, or wipeAllAppData's
-      // factory reset below) — so a replace that lands on zero players is, by definition, an intentional
-      // wipe, not an accident. Stamping it here (rather than only inside wipeAllAppData/
-      // deleteAllMembersData) covers BOTH callers uniformly. A replace that brings in a real roster clears
-      // any stale prior marker — there is no wipe to explain once real data is back.
-      const rLastIntentionalPlayerWipeAt = rPlayers.length === 0 ? Date.now() : null;
-      setLastIntentionalPlayerWipeAt(rLastIntentionalPlayerWipeAt);
-      setPlayers(rPlayers);
-      setHistory(rHistory);
-      setCurrent(rCurrent);
-      setFuture(rFuture);
-      setRoundNo(data.roundNo);
-      setCourtCount(data.courtCount);
-      setCourtLabelsRaw(rCourtLabels);
-      setMode(data.mode);
-      setSettings(rSettings);
-      setSession(rSession);
-      setLockPairs(data.lockPairs);
-      setSessionHistory(rSessionHistory);
-      setActiveTournament(rActiveTournament);
-      setTournamentHistory(rTournamentHistory);
-      setGeneralExpenses(rGeneralExpenses);
-      setOtherIncome(rOtherIncome);
-      setDiscountCredits(rDiscountCredits);
-      setRewardHistory(rRewardHistory); // v1.11.34
-      setGroupDefaults(rGroupDefaults);
-      setRankingConfigs(rRankingConfigs); // v1.11.68
-      setCloudClub(rCloudClub); // v1.11.35
-      // v1.11.76 (P0 fix, req 5): establish this restore as the current authoritative generation RIGHT NOW
-      // — bumping lastKnownSavedAtRef synchronously means no stale record already sitting in storage (or
-      // written moments from now by another instance) can ever look "newer" than what we just restored,
-      // closing the exact race the diagnostic traced. Then persist it directly (do not just wait for the
-      // ambient save effect to eventually get to it) and verify the write actually landed before reporting
-      // success (req 6) — never trust "the setters ran" as proof the data survived.
-      const restoredSavedAt = Date.now();
-      lastKnownSavedAtRef.current = restoredSavedAt;
-      const restoredJson = JSON.stringify({
-        players: rPlayers, history: rHistory, current: rCurrent, future: rFuture, roundNo: data.roundNo,
-        courtCount: data.courtCount, courtLabels: rCourtLabels, mode: data.mode, settings: rSettings, session: rSession,
-        lockPairs: data.lockPairs, sessionHistory: rSessionHistory, generalExpenses: rGeneralExpenses, otherIncome: rOtherIncome,
-        discountCredits: rDiscountCredits, rewardHistory: rRewardHistory, activeTournament: rActiveTournament,
-        tournamentHistory: rTournamentHistory, groupDefaults: rGroupDefaults, rankingConfigs: rRankingConfigs, cloudClub: rCloudClub,
-        lastIntentionalPlayerWipeAt: rLastIntentionalPlayerWipeAt,
-        journalReceipts, // v1.12.37: a restore never discards this install's journal receipts
-        savedAt: restoredSavedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null,
-      });
-      let verified = false, verifyReason = "write-failed";
-      phase("saving", { byteLength: restoredJson.length });
-      await yieldToUI(); // let the "กำลังบันทึกข้อมูล..." label paint before the primary+LKG writes below
-      try {
-        // v1.12.17: primary ("bg-v11") and LKG writes are independent keys with no ordering dependency
-        // between them, so they now fire concurrently (Promise.all) instead of strictly sequentially.
-        // window.storage.set() itself is unchanged (same IndexedDB-transaction-gated primary write +
-        // best-effort localStorage mirror write per call, same durability semantics as before) — this only
-        // lets their two idbOpen() calls share the now-cached connection (see index.html v1.12.17 comment)
-        // and their two async IndexedDB transactions queue back-to-back instead of waiting on each other's
-        // full round-trip, which is exactly where a standalone PWA's higher per-call storage latency would
-        // otherwise compound. LKG remains explicitly best-effort (its own failure must never fail the
-        // import) — a rejected LKG write is caught here as before, independent of the primary write's
-        // result, which is still awaited/checked as the actual source of truth for `verified` below.
-        const [primaryResult, lkgResult] = await Promise.allSettled([
-          window.storage.set("bg-v11", restoredJson),
-          // v1.12.13 (Import/Restore + P0 offline persistence hotfix coordination): resync Last-Known-Good
-          // to the SAME just-imported snapshot, right alongside the primary write — mirrors exactly what
-          // the boot waterfall itself does after every recovery (see Step 5's own comment). Without this,
-          // LKG would keep holding whatever PRE-import state it last saw; if primary/mirror ever later
-          // desync (the exact class of bug this hotfix targets), the player-loss-guard could fall back to
-          // that STALE pre-import LKG instead of the freshly-imported data — silently undoing a successful
-          // import after a later force-close.
-          window.storage.set(LKG_KEY, restoredJson),
-        ]);
-        if (primaryResult.status === "rejected") throw primaryResult.reason;
-        phase("verifying");
-        await yieldToUI(); // let the "กำลังตรวจสอบข้อมูล..." label paint before the read-back parse below
-        const readBack = await window.storage.get("bg-v11");
-        const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
-        const expect = { history: rHistory.length, current: rCurrent.length, future: rFuture.length, sessionHistory: rSessionHistory.length, tournamentHistory: rTournamentHistory.length, players: rPlayers.length };
-        const got = persisted ? { history: (persisted.history||[]).length, current: (persisted.current||[]).length, future: (persisted.future||[]).length, sessionHistory: (persisted.sessionHistory||[]).length, tournamentHistory: (persisted.tournamentHistory||[]).length, players: (persisted.players||[]).length } : null;
-        verified = !!got && Object.keys(expect).every((k) => expect[k] === got[k]);
-        if (!verified) verifyReason = got ? "count-mismatch" : "read-back-empty";
-        pushBootLog({ event: verified ? "restore-verified" : "restore-verify-failed", fromSavedAt: null, toSavedAt: restoredSavedAt, playerCount: expect.players, sessionHistoryCount: expect.sessionHistory });
-      } catch (e) { verifyReason = "exception: " + (e?.message || e); }
-      phase("done", { verified });
-      return { ok: verified, reason: verified ? null : verifyReason };
-    } else if (restoreMode === "mergeHistory") {
-      // v1.12.13 (Import/Restore modal-stuck hotfix + persistence coordination): this branch used to only
-      // call functional-updater setters and return `{ok:true}` immediately, with NO persisted write of its
-      // own — durability relied entirely on the ambient save effect picking the change up later. Per the
-      // explicit "the imported state must be saved during the import flow itself... do not rely on iOS
-      // pagehide" requirement, this now computes the merged arrays as plain values (so the exact same
-      // values can be both set into React state AND persisted+verified immediately, never diverging — the
-      // same discipline the "replace" branch above already used since v1.11.76) rather than functional
-      // updaters whose result isn't otherwise observable here.
-      const existingSH = new Set(sessionHistory.map((s) => s.id));
-      const mergedSessionHistory = [...sessionHistory, ...(data.sessionHistory || []).filter((s) => !existingSH.has(s.id))]; // stable-id dedup — never duplicate an existing archived session
-      const existingTH = new Set(tournamentHistory.map((t) => t.id));
-      const mergedTournamentHistory = [...tournamentHistory, ...(data.tournamentHistory || []).filter((t) => !existingTH.has(t.id))];
-      const existingDC = new Set(discountCredits.map((c) => c.id));
-      const mergedDiscountCredits = [...discountCredits, ...(data.discountCredits || []).filter((c) => !existingDC.has(c.id)).map(normDiscountCredit)]; // stable-id dedup — never duplicate an existing credit
-      // v1.11.34: same stable-id dedup merge for Reward History — a "merge history" restore should bring
-      // in past reward wins too, never duplicate ones already present.
-      const existingRH = new Set(rewardHistory.map((r) => r.id));
-      const mergedRewardHistory = [...rewardHistory, ...(data.rewardHistory || []).filter((r) => !existingRH.has(r.id))];
-
-      setSessionHistory(mergedSessionHistory);
-      setTournamentHistory(mergedTournamentHistory);
-      setDiscountCredits(mergedDiscountCredits);
-      setRewardHistory(mergedRewardHistory);
-
-      const restoredSavedAt = Date.now();
-      lastKnownSavedAtRef.current = restoredSavedAt;
-      const restoredJson = JSON.stringify({
-        players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs,
-        sessionHistory: mergedSessionHistory, generalExpenses, otherIncome, discountCredits: mergedDiscountCredits,
-        rewardHistory: mergedRewardHistory, activeTournament, tournamentHistory: mergedTournamentHistory,
-        groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts,
-        savedAt: restoredSavedAt, pageInstanceId: typeof window !== "undefined" ? window.__pageInstanceId : null,
-      });
-      let verified = false, verifyReason = "write-failed";
-      phase("saving", { byteLength: restoredJson.length });
+    // storage watchers: tell "slow" (still working), "blocked" (another connection holds the database) and
+    // "unknown" (abort requested, IndexedDB silent) apart — in the UI and in the diagnostics.
+    const watch = () => ({
+      ...RESTORE_STORAGE_OPTS,
+      onSlow: (i) => {
+        lastStatus = i.blocked ? "blocked" : "slow";
+        setRestoreUi((u) => (u ? { ...u, status: lastStatus, detail: i.stage } : u));
+        try { window.__pushDiag && window.__pushDiag("restoreStorageSlow", { phase: phaseName, stage: i.stage, ms: i.ms, blocked: !!i.blocked }); } catch (e) {}
+      },
+      onUncertain: (i) => {
+        lastStatus = "unknown";
+        setRestoreUi((u) => (u ? { ...u, status: "unknown", detail: i.stageAtDeadline } : u));
+        try { window.__pushDiag && window.__pushDiag("restoreOutcomeUnknown", { phase: phaseName, ms: i.ms, stageAtDeadline: i.stageAtDeadline }); } catch (e) {}
+      },
+    });
+    // test-only barrier (inert unless a test installs window.__badqRestoreBarrier): lets the crash-consistency
+    // suite stop the protocol at an exact phase boundary. Never present in normal use.
+    const barrier = async (name) => { try { if (typeof window.__badqRestoreBarrier === "function") await window.__badqRestoreBarrier(name); } catch (e) {} };
+    const fail = (reason, extra) => {
+      const reloadRequired = !!(extra && extra.reloadRequired);
+      const reloadDetail = extra && extra.reloadDetail;
+      phase("failed", { reason });
+      // A committed promotion can no longer be rolled back in-place. `phase()` normally resets the overlay
+      // to "running", so restore the terminal UNKNOWN state after its bookkeeping when boot must decide the
+      // actual durable outcome. The fence remains held in the caller's finally block and the existing Reload
+      // action stays visible; no React publication or autosave may run in this state.
+      if (reloadRequired) {
+        lastStatus = "unknown";
+        setRestoreUi((u) => ({ ...(u || {}), status: "unknown", detail: reloadDetail || (u && u.detail) || "reload-required" }));
+      }
+      pushBootLog({ event: "restore-failed", reason, mode: restoreMode });
+      return { ok: false, reason, report, ...(extra || {}) };
+    };
+    const S = window.storage && window.storage.restore;
+    restoreFenceRef.current = true;
+    autosaveSkippedByFenceRef.current = false;
+    setRestoreUi({ phase: "waiting-pending-saves", startedAt: Date.now(), status: "running" });
+    let keepFence = false;
+    let promoted = false; // v1.12.39 (review nit): after the promotion commits, any failure means "reload", never "old data intact"
+    try {
+      if (!S || typeof S.promote !== "function") return fail("storage-restore-api-unavailable");
+      const data = backup && backup.data;
+      if (!data || !Array.isArray(data.players)) return fail("backup-data-missing");
+      // ---- 0 FENCE ----
+      phase("waiting-pending-saves", { playerCount: data.players.length, sessionHistoryCount: (data.sessionHistory || []).length, schemaVersion: backup.schemaVersion, appVersion: backup.appVersion });
       await yieldToUI();
-      try {
-        // v1.12.17: same independent-key concurrent-write optimization as the "replace" branch above.
-        const [primaryResult] = await Promise.allSettled([
-          window.storage.set("bg-v11", restoredJson),
-          window.storage.set(LKG_KEY, restoredJson), // best-effort, see "replace" branch's own comment above
-        ]);
-        if (primaryResult.status === "rejected") throw primaryResult.reason;
-        phase("verifying");
+      if (!(await waitCriticalQuiescence(15000))) return fail("pending-critical-operation");
+      if (!(await S.whenWritesIdle(["bg-v11", LKG_KEY], 15000))) return fail("autosave-write-in-flight");
+      await barrier("fenced");
+      const live = { ...(latestLiveStateRef.current || {}), players: playersLatestRef.current, history: historyLatestRef.current, current: currentLatestRef.current, journalReceipts: journalReceiptsLatestRef.current };
+      // ---- 1 SNAPSHOT ----
+      let snapshotJson = null, snapshotDigest = null;
+      if (restoreMode === "replace" && !undo) {
+        phase("backing-up");
         await yieldToUI();
-        const readBack = await window.storage.get("bg-v11");
-        const persisted = readBack && readBack.value ? JSON.parse(readBack.value) : null;
-        const expect = { sessionHistory: mergedSessionHistory.length, tournamentHistory: mergedTournamentHistory.length, discountCredits: mergedDiscountCredits.length, rewardHistory: mergedRewardHistory.length };
-        const got = persisted ? { sessionHistory: (persisted.sessionHistory||[]).length, tournamentHistory: (persisted.tournamentHistory||[]).length, discountCredits: (persisted.discountCredits||[]).length, rewardHistory: (persisted.rewardHistory||[]).length } : null;
-        verified = !!got && Object.keys(expect).every((k) => expect[k] === got[k]);
-        if (!verified) verifyReason = got ? "count-mismatch" : "read-back-empty";
-        pushBootLog({ event: verified ? "restore-verified" : "restore-verify-failed", fromSavedAt: null, toSavedAt: restoredSavedAt, playerCount: players.length, sessionHistoryCount: mergedSessionHistory.length });
-      } catch (e) { verifyReason = "exception: " + (e?.message || e); }
-      phase("done", { verified });
-      return { ok: verified, reason: verified ? null : verifyReason };
+        snapshotJson = serializeForPersist(buildBackupPayload({ ...live, rankingConfigs: live.rankingConfigs }));
+        const st = await S.stage(PRERESTORE_NEXT_KEY, snapshotJson, watch());
+        if (st.outcome !== "committed") return fail("safety-snapshot-write-" + st.outcome + (st.reason ? ":" + st.reason : ""));
+        const rb = await S.readKv(PRERESTORE_NEXT_KEY, watch());
+        if (rb.outcome !== "committed" || rb.result !== snapshotJson) return fail("safety-snapshot-not-verified");
+        snapshotDigest = await digestTextHex(snapshotJson);
+        report.snapshot = { chars: snapshotJson.length, sha256: snapshotDigest };
+        await barrier("snapshot-verified");
+      }
+      // ---- 2 IMAGES ----
+      phase("images");
+      await yieldToUI();
+      if (backup.assets) { // compact-format assets: only content that matches its own sha256 key is accepted
+        for (const k of Object.keys(backup.assets)) { const d = backup.assets[k]; if (isInlineImageData(d) && /^sha256-[0-9a-f]{64}$/.test(k) && !__imageAssetCache.has(k) && (await digestImageData(d)) === k.slice(7)) __imageAssetCache.set(k, d); }
+      }
+      let hyd = hydrateImageRefs(data);
+      if (hyd.unresolved) { await loadMissingImageAssets(missingImageRefKeys(data)); hyd = hydrateImageRefs(data); }
+      // v1.12.39 (review F3): a backup that references images it does not contain (and this device does not have)
+      // is refused — importing it would persist references to images that exist nowhere.
+      if (hyd.unresolved) return fail("backup-references-missing-images:" + hyd.unresolved);
+      const inlineImages = Array.from(collectInlineImages(data));
+      const imgRes = inlineImages.length ? await storeVerifiedImageAssets(inlineImages, { yieldEvery: 4, deadlineMs: RESTORE_STORAGE_OPTS.deadlineMs, graceMs: RESTORE_STORAGE_OPTS.graceMs, onSlow: watch().onSlow, onUncertain: watch().onUncertain }) : { verified: 0, failed: 0, skippedKnown: 0, assets: [], digestMs: 0, writeMs: 0, readBackMs: 0 };
+      report.images = { distinct: inlineImages.length, verified: imgRes.verified, alreadyStored: imgRes.skippedKnown, keptInline: imgRes.failed, unresolvedRefs: hyd.unresolved, digestMs: imgRes.digestMs, writeMs: imgRes.writeMs, readBackMs: imgRes.readBackMs };
+      await barrier("images-stored");
+      // ---- 3 NORMALIZE + SERIALIZE ONCE + STAGE ----
+      phase("preparing");
+      await yieldToUI();
+      const newEpoch = Math.max(Date.now(), (restoreEpochRef.current || 0) + 1);
+      let next;
+      if (restoreMode === "replace") {
+        const rPlayers = data.players.map(normPlayer);
+        const rFeatureFlags = inferAdvancedFeatureFlags(data.settings, data.activeTournament, data.tournamentHistory, data.rewardHistory);
+        next = {
+          players: rPlayers, history: data.history, current: data.current, future: data.future, roundNo: data.roundNo,
+          courtCount: data.courtCount, courtLabels: syncCourtLabels(data.courtLabels, data.courtCount), mode: data.mode,
+          settings: normSettings({ ...data.settings, tournamentEnabled: rFeatureFlags.tournamentEnabled, wheelEnabled: rFeatureFlags.wheelEnabled }),
+          session: normSession(data.session), lockPairs: data.lockPairs, sessionHistory: data.sessionHistory,
+          generalExpenses: data.generalExpenses || [], otherIncome: data.otherIncome || [],
+          discountCredits: (data.discountCredits || []).map(normDiscountCredit), rewardHistory: data.rewardHistory || [],
+          activeTournament: normTournament(data.activeTournament) || null, tournamentHistory: data.tournamentHistory || [],
+          groupDefaults: data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {},
+          rankingConfigs: normRankingConfigs(data.rankingConfigs), cloudClub: normCloudClub(data.cloudClub),
+          // v1.12.13: a replace that lands on zero players is, by construction, an intentional wipe.
+          lastIntentionalPlayerWipeAt: rPlayers.length === 0 ? Date.now() : null,
+          // v1.12.37: a restore never discards this install's receipts. v1.12.39: an UNDO brings back the
+          // snapshot's own receipts, which prove the journal entries it re-inserts.
+          journalReceipts: undo ? normJournalReceipts(data.journalReceipts) : normJournalReceipts(live.journalReceipts),
+          restoreEpoch: newEpoch,
+        };
+      } else {
+        // mergeHistory: only archived history/credits/rewards/tournaments are added (stable-id dedup) to the
+        // LATEST committed state; the live session is untouched.
+        const byIds = (arr) => new Set((arr || []).map((x) => x && x.id));
+        const eSH = byIds(live.sessionHistory), eTH = byIds(live.tournamentHistory), eDC = byIds(live.discountCredits), eRH = byIds(live.rewardHistory);
+        next = {
+          ...live,
+          sessionHistory: [...(live.sessionHistory || []), ...(data.sessionHistory || []).filter((x) => !eSH.has(x.id))],
+          tournamentHistory: [...(live.tournamentHistory || []), ...(data.tournamentHistory || []).filter((x) => !eTH.has(x.id))],
+          discountCredits: [...(live.discountCredits || []), ...(data.discountCredits || []).filter((x) => !eDC.has(x.id)).map(normDiscountCredit)],
+          rewardHistory: [...(live.rewardHistory || []), ...(data.rewardHistory || []).filter((x) => !eRH.has(x.id))],
+          restoreEpoch: restoreEpochRef.current || 0, // a merge keeps the live session: not a replace epoch
+        };
+      }
+      const nextObj = buildPersistedStateObject(next);
+      const stagedSavedAt = Date.now();
+      const { body: stagedBody, json: stagedJson } = serializePersistedState(nextObj, stagedSavedAt);
+      const stagedDigest = await digestTextHex(stagedJson);
+      report.staged = { chars: stagedJson.length, sha256: stagedDigest, restoreEpoch: nextObj.restoreEpoch || 0 };
+      phase("staging", { byteLength: stagedJson.length });
+      await yieldToUI();
+      const stw = await S.stage(RESTORE_STAGED_KEY, stagedJson, watch());
+      if (stw.outcome !== "committed") return fail("staging-write-" + stw.outcome + (stw.reason ? ":" + stw.reason : ""));
+      const strb = await S.readKv(RESTORE_STAGED_KEY, watch());
+      if (strb.outcome !== "committed" || strb.result !== stagedJson || (await digestTextHex(strb.result)) !== stagedDigest) return fail("staging-not-verified");
+      await barrier("staged-verified");
+      // ---- 4 PROMOTE (one IndexedDB transaction) ----
+      phase("saving", { byteLength: stagedJson.length });
+      await yieldToUI();
+      const oldMirrors = { primary: S.mirrorGet("bg-v11"), lkg: S.mirrorGet(LKG_KEY) };
+      S.mirrorSet("bg-v11", null); S.mirrorSet(LKG_KEY, null);
+      const plan = undo ? {
+        // undo: the consumed snapshot and its journal archive go away; the journal of the state being undone is
+        // archived; the pre-restore entries come back.
+        expect: { key: RESTORE_STAGED_KEY, value: stagedJson },
+        puts: [["bg-v11", stagedJson], [LKG_KEY, stagedJson], [RESTORE_EPOCH_KEY, String(nextObj.restoreEpoch || 0)]],
+        deletes: [RESTORE_STAGED_KEY, PRERESTORE_KEY, PRERESTORE_JOURNAL_KEY, PRERESTORE_NEXT_KEY],
+        journal: { archiveToKey: UNDO_JOURNAL_ARCHIVE_KEY, clear: true, restoreEntries: undo.restoreEntries || [] },
+        seqKeys: ["bg-v11", LKG_KEY],
+      } : {
+        expect: { key: RESTORE_STAGED_KEY, value: stagedJson },
+        puts: [["bg-v11", stagedJson], [LKG_KEY, stagedJson], ...(restoreMode === "replace" ? [[PRERESTORE_KEY, snapshotJson], [RESTORE_EPOCH_KEY, String(nextObj.restoreEpoch || 0)]] : [])],
+        deletes: [RESTORE_STAGED_KEY, ...(restoreMode === "replace" ? [PRERESTORE_NEXT_KEY] : [])],
+        journal: restoreMode === "replace" ? { archiveToKey: PRERESTORE_JOURNAL_KEY, clear: true } : {},
+        seqKeys: ["bg-v11", LKG_KEY],
+      };
+      const pr = await S.promote(plan, watch());
+      report.promotion = { outcome: pr.outcome, reason: pr.reason || null, ms: pr.ms, archivedJournalCount: pr.result && pr.result.archivedJournalCount };
+      if (pr.outcome !== "committed") {
+        S.mirrorSet("bg-v11", oldMirrors.primary); S.mirrorSet(LKG_KEY, oldMirrors.lkg);
+        return fail("promotion-" + pr.outcome + (pr.reason ? ":" + pr.reason : ""));
+      }
+      promoted = true;
+      await barrier("promoted");
+      // ---- 5 VERIFY ----
+      phase("verifying");
+      await yieldToUI();
+      const [vp, vl] = [await S.readKv("bg-v11", watch()), await S.readKv(LKG_KEY, watch())];
+      const verified = vp.outcome === "committed" && vl.outcome === "committed" && vp.result === stagedJson && vl.result === stagedJson;
+      pushBootLog({ event: verified ? "restore-verified" : "restore-verify-failed", fromSavedAt: null, toSavedAt: stagedSavedAt, playerCount: (nextObj.players || []).length, sessionHistoryCount: (nextObj.sessionHistory || []).length, sha256: stagedDigest.slice(0, 16) });
+      if (!verified) {
+        // the promotion transaction committed but the read-back does not match: never publish, never write
+        // over it — the organizer reloads and boot decides from what is actually on disk.
+        keepFence = true;
+        return fail("committed-but-read-back-mismatch", { reloadRequired: true, reloadDetail: "committed-not-verified" });
+      }
+      S.mirrorSet("bg-v11", stagedJson); S.mirrorSet(LKG_KEY, stagedJson);
+      S.mirrorSet(PRERESTORE_KEY, null); S.mirrorSet(PRERESTORE_JOURNAL_KEY, null); // undo point is IndexedDB-only (review F1)
+      await barrier("verified");
+      // ---- 6 PUBLISH ----
+      phase("publishing");
+      lastKnownSavedAtRef.current = stagedSavedAt;
+      restoreEpochRef.current = nextObj.restoreEpoch || restoreEpochRef.current || 0;
+      suppressAutosaveBodyRef.current = stagedBody;
+      latestLiveStateRef.current = { ...next };
+      if (restoreMode === "replace") {
+        setLastIntentionalPlayerWipeAt(next.lastIntentionalPlayerWipeAt);
+        setPlayers(next.players); setHistory(next.history); setCurrent(next.current); setFuture(next.future);
+        setRoundNo(next.roundNo); setCourtCount(next.courtCount); setCourtLabelsRaw(next.courtLabels); setMode(next.mode);
+        setSettings(next.settings); setSession(next.session); setLockPairs(next.lockPairs); setSessionHistory(next.sessionHistory);
+        setActiveTournament(next.activeTournament); setTournamentHistory(next.tournamentHistory);
+        setGeneralExpenses(next.generalExpenses); setOtherIncome(next.otherIncome); setDiscountCredits(next.discountCredits);
+        setRewardHistory(next.rewardHistory); setGroupDefaults(next.groupDefaults); setRankingConfigs(next.rankingConfigs); setCloudClub(next.cloudClub);
+        setJournalReceipts(next.journalReceipts);
+        // the journal was archived and cleared inside the promotion: nothing of the replaced session may retry
+        setScoreDrafts({});
+        criticalMutationRetryRef.current = null; sessionEndRetryRef.current = null; lastEndedSessionIdRef.current = null;
+        setUnresolvedCriticalFailures([]); setCriticalSaveStatus(null);
+        setHasPreRestoreBackup(!undo);
+        prevHistLenRef.current = { session: (next.sessionHistory || []).length, tournament: (next.tournamentHistory || []).length };
+      } else {
+        setSessionHistory(next.sessionHistory); setTournamentHistory(next.tournamentHistory);
+        setDiscountCredits(next.discountCredits); setRewardHistory(next.rewardHistory);
+      }
+      await yieldToUI();
+      phase("done", { verified: true, totalMs: Math.round(now() - T0) });
+      report.totalMs = Math.round(now() - T0);
+      try { window.__badqLastRestoreReport = report; } catch (e) {}
+      return { ok: true, reason: null, report };
+    } catch (e) {
+      if (promoted) {
+        keepFence = true;
+        return fail("exception-after-promotion: " + ((e && e.message) || e), { reloadRequired: true, reloadDetail: "exception-after-promotion" });
+      }
+      return fail("exception: " + ((e && e.message) || e));
+    } finally {
+      if (!keepFence) {
+        restoreFenceRef.current = false;
+        setRestoreUi(null);
+        // one autosave pass for anything the fence held back — only if the fence actually made one skip, so a
+        // failed import leaves Primary byte-identical
+        if (autosaveSkippedByFenceRef.current) { autosaveSkippedByFenceRef.current = false; setPersistTick((t) => t + 1); }
+      }
     }
-    return { ok: true, reason: null };
-   } catch (e) {
-    // v1.12.13 (P0 import/restore modal-stuck hotfix): see this function's own opening comment — ANY
-    // unexpected exception anywhere above resolves here instead of rejecting, so the caller (confirmDoRestore)
-    // always gets a normal {ok:false, reason} it can show to the user and recover from, never an unhandled
-    // promise rejection that leaves the preview modal stuck open with no explanation.
-    return { ok: false, reason: "exception: " + ((e && e.message) || e) };
-   }
   };
   // v1.11.5: "ล้างข้อมูลทั้งหมด" (Settings → ความเป็นส่วนตัวและข้อมูล) — full factory reset. Reuses the
   // EXISTING applyRestore("replace", ...) path instead of a new deletion code path, so this destructive
@@ -10274,38 +10978,27 @@ function AppInner() {
     tournamentHistory: [], discountCredits: [], rewardHistory: [], rankingConfigs: {}, cloudClub: null, // v1.11.35
   } });
   // revert the most recent "replace all" restore using the safety snapshot taken right before it.
+  // v1.12.39: the same staged, verified, single-transaction promotion as a restore. The journal entries archived
+  // by that restore go back into the journal store (boot replay recognises the ones whose receipts the snapshot
+  // already carries); entries written since the restore are archived to "bg-v11-undo-journal-archive".
   const undoRestore = async () => {
+    const S = window.storage && window.storage.restore;
+    if (!S || restoreFenceRef.current) return false;
     try {
-      const r = await window.storage.get("bg-v11-prerestore");
-      if (!r?.value) { setHasPreRestoreBackup(false); return false; }
-      const snap = JSON.parse(r.value);
-      const data = snap.data || snap;
-      setPlayers((data.players || []).map(normPlayer));
-      setHistory(data.history || []);
-      setCurrent(data.current || []);
-      setFuture(data.future || []);
-      setRoundNo(data.roundNo || 0);
-      setCourtCount(data.courtCount || 2);
-      setCourtLabelsRaw(syncCourtLabels(data.courtLabels, data.courtCount || 2));
-      setMode(data.mode || "doubles");
-      setSettings(normSettings(data.settings));
-      setSession(normSession(data.session));
-      setLockPairs(migrateLockPairs(data.lockPairs));
-      setSessionHistory(data.sessionHistory || []);
-      setActiveTournament(normTournament(data.activeTournament) || null);
-      setTournamentHistory((data.tournamentHistory || []).map(normTournament));
-      setGeneralExpenses(data.generalExpenses || []);
-      setOtherIncome(data.otherIncome || []);
-      setDiscountCredits((data.discountCredits || []).map(normDiscountCredit));
-      setRewardHistory(data.rewardHistory || []); // v1.11.34
-      setRankingConfigs(normRankingConfigs(data.rankingConfigs)); // v1.11.68
-      setCloudClub(normCloudClub(data.cloudClub)); // v1.11.35
-      await window.storage.delete("bg-v11-prerestore");
-      setHasPreRestoreBackup(false);
-      return true;
+      const snapR = await S.readKv(PRERESTORE_KEY, RESTORE_STORAGE_OPTS);
+      if (snapR.outcome !== "committed" || !snapR.result) { setHasPreRestoreBackup(false); return false; }
+      const snap = JSON.parse(snapR.result);
+      hydrateImageRefs(snap);
+      const archived = await S.readKv(PRERESTORE_JOURNAL_KEY, RESTORE_STORAGE_OPTS);
+      const restoreEntries = archived.outcome === "committed" && Array.isArray(archived.result) ? archived.result : [];
+      const migrated = migrateBackupData(snap.data ? snap : { schemaVersion: SCHEMA_VERSION, data: snap });
+      const integ = validateBackupIntegrity(migrated.data);
+      if (!integ.ok) return false;
+      const res = await applyRestoreForUndo({ ...migrated, data: integ.data }, restoreEntries);
+      return !!(res && res.ok);
     } catch (e) { return false; }
   };
-
+  const applyRestoreForUndo = (backup, restoreEntries) => applyRestore("replace", backup, null, { undo: { restoreEntries } });
   // Financial Report Export PDF path (Requirement #16): replace the ENTIRE app render with just the print
   // view while open — guarantees bottom nav / tabs / edit buttons / every other interactive control is
   // completely absent from both the on-screen preview and the printed/saved PDF, with zero extra CSS-hiding
@@ -10328,6 +11021,36 @@ function AppInner() {
        viewport as browser chrome shows/hides — same effect everywhere else in the app that fills the
        screen. This only affects the background/min-height of the shell, never any business logic. */
     <div style={{ background: T.bg, color: T.text, minHeight: "100dvh", fontFamily: "ui-sans-serif, system-ui, sans-serif", paddingTop: "env(safe-area-inset-top)" }}>
+      {/* v1.12.39 (Codex P0 — blocked IndexedDB open / import that can wait indefinitely): full-screen, blocking,
+          recoverable states. (1) storage blocked by another BadQ window, or boot still loading after a moment:
+          nothing is editable because nothing could be saved. (2) a staged restore in progress: phase, elapsed
+          time and whether storage is slow, blocked or its outcome unknown (then: reload). */}
+      {(storageBlocked || (bootSlow && !loaded && bootStatus === "loading")) && !restoreUi && (
+        <div data-testid="storage-gate" style={{ position: "fixed", inset: 0, zIndex: 10050, background: "rgba(255,255,255,0.96)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div style={{ maxWidth: 360, textAlign: "center" }}>
+            <div style={{ fontSize: 30, marginBottom: 8 }}>{storageBlocked ? "🔒" : "⏳"}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 6 }}>{storageBlocked ? "เปิดที่เก็บข้อมูลไม่ได้ (ถูกบล็อก)" : "กำลังโหลดข้อมูล…"}</div>
+            {storageBlocked && <div style={{ fontSize: 12.5, color: T.muted, lineHeight: 1.6 }}>มี BadQ อีกหน้าต่าง/แท็บ (มักเป็นเวอร์ชันเก่า) เปิดค้างอยู่และยังถือที่เก็บข้อมูลไว้ — ปิดหน้าต่าง/แท็บ BadQ อื่นทั้งหมด แล้วรอสักครู่ หรือปิดแล้วเปิดแอปใหม่ ข้อมูลเดิมในเครื่องยังอยู่ ไม่มีการลบ</div>}
+            {storageBlocked && <button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ marginTop: 12, padding: "9px 16px", borderRadius: 10, background: T.accent, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>เปิดแอปใหม่</button>}
+          </div>
+        </div>
+      )}
+      {restoreUi && (
+        <div data-testid="restore-gate" data-phase={restoreUi.phase} data-status={restoreUi.status} style={{ position: "fixed", inset: 0, zIndex: 10060, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div style={{ background: T.bg, borderRadius: 16, padding: 18, maxWidth: 360, width: "100%", textAlign: "center" }}>
+            <div style={{ fontSize: 14.5, fontWeight: 800, marginBottom: 6 }}>{IMPORT_PHASE_LABELS[restoreUi.phase] || "กำลังนำเข้าข้อมูล..."}</div>
+            <div style={{ fontSize: 12, color: T.muted }}>{Math.max(0, Math.round((Date.now() - (restoreUi.startedAt || Date.now())) / 1000))} วินาที</div>
+            {restoreUi.status === "slow" && <div style={{ fontSize: 12, color: "#b26a00", marginTop: 8 }}>ที่เก็บข้อมูลตอบสนองช้ากว่าปกติ — กำลังรอ อย่าปิดแอป</div>}
+            {restoreUi.status === "blocked" && <div style={{ fontSize: 12, color: "#b26a00", marginTop: 8 }}>ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง/แท็บ BadQ อื่น — ปิดหน้าต่างอื่น ระบบจะยกเลิกอย่างปลอดภัยถ้ายังไม่ได้ภายในเวลาที่กำหนด</div>}
+            {restoreUi.status === "unknown" && (
+              <div style={{ fontSize: 12, color: T.accent, marginTop: 8, lineHeight: 1.6 }}>
+                ยืนยันผลการบันทึกไม่ได้ — ระบบหยุดการบันทึกทั้งหมดไว้เพื่อป้องกันข้อมูลปนกัน ปิดแล้วเปิดแอปใหม่ ระบบจะเลือกข้อมูลชุดเดิมหรือชุดที่นำเข้าให้ครบทั้งชุด (ไม่ปนกัน) จากที่บันทึกจริงในเครื่อง
+                <div><button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ marginTop: 10, padding: "9px 16px", borderRadius: 10, background: T.accent, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>เปิดแอปใหม่</button></div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
       {staleSyncNotice && (
         <div style={{ position: "fixed", top: "calc(env(safe-area-inset-top) + 8px)", left: "50%", transform: "translateX(-50%)", zIndex: 9999, background: T.green, color: "#fff", padding: "8px 14px", borderRadius: 10, fontSize: 13, fontWeight: 600, boxShadow: "0 4px 14px rgba(0,0,0,.18)", maxWidth: "90vw", textAlign: "center" }}>
           {staleSyncNotice}
@@ -10404,20 +11127,55 @@ function AppInner() {
             "pending" only becomes visible if it's still pending by the time this renders (normally it never
             is), and "failed" stays visible/persistent until the next successful critical mutation, exactly
             like saveWarning's own "never auto-dismiss a real risk" convention. */}
-        {criticalSaveStatus && criticalSaveStatus.status !== "saved" && (
-          <div style={{ background: criticalSaveStatus.status === "failed" ? "#fdecea" : "#eef4ff", border: `1px solid ${criticalSaveStatus.status === "failed" ? "#f0a8a0" : "#a9cdf0"}`, borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
-            <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>{criticalSaveStatus.status === "failed" ? "⚠️" : "⏳"}</span>
+        {/* v1.12.39 (Codex P0 — journal timeout safety): an append whose outcome IndexedDB has not decided is
+            shown as its own, persistent state. Every game/session action stays queued behind it (the fence);
+            "ตรวจสอบอีกครั้ง" runs the read-back probe, "เปิดแอปใหม่" reloads (boot replay then decides from
+            what is actually on disk). Never auto-dismissed. */}
+        {uncertainCritical.length > 0 && (
+          <div data-testid="critical-uncertain" style={{ background: "#fff4e5", border: "1px solid #f0c96b", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
+            <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>⚠️</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800 }}>ยังยืนยันผลการบันทึกไม่ได้ ({uncertainCritical.length} รายการ)</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ที่เก็บข้อมูลของเครื่องไม่ตอบกลับว่าบันทึกสำเร็จหรือไม่ ระบบจึงหยุดรับคำสั่งแก้ไขเกม/จบก๊วนไว้ชั่วคราว เพื่อไม่ให้เกิดเกมซ้ำหรือข้อมูลทับกัน — แตะ "ตรวจสอบอีกครั้ง" หรือปิดแล้วเปิดแอปใหม่ ข้อมูลที่บันทึกสำเร็จแล้วจะไม่หาย</div>
+              <div style={{ display: "flex", gap: 8, marginTop: 7, flexWrap: "wrap" }}>
+                <button onClick={reconcileUncertainCritical} disabled={reconcilingCritical} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800, opacity: reconcilingCritical ? 0.6 : 1 }}>{reconcilingCritical ? "กำลังตรวจสอบ…" : "ตรวจสอบอีกครั้ง"}</button>
+                <button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 800 }}>เปิดแอปใหม่</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {criticalSaveStatus && criticalSaveStatus.status !== "saved" && criticalSaveStatus.status !== "uncertain" && (
+          <div data-testid="critical-save-status" data-status={criticalSaveStatus.status} style={{ background: criticalSaveStatus.status === "failed" ? "#fdecea" : criticalSaveStatus.status === "obsolete" ? "#f4f4f4" : "#eef4ff", border: `1px solid ${criticalSaveStatus.status === "failed" ? "#f0a8a0" : criticalSaveStatus.status === "obsolete" ? T.border : "#a9cdf0"}`, borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
+            <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>{criticalSaveStatus.status === "failed" ? "⚠️" : criticalSaveStatus.status === "obsolete" ? "ℹ️" : "⏳"}</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12.5, fontWeight: 800 }}>
                 {criticalSaveStatus.status === "failed"
                   ? (criticalSaveStatus.kind === "sessionEnd" ? "บันทึกผลจบก๊วนยังไม่สำเร็จ" : criticalSaveStatus.kind === "matchLifecycle" ? "บันทึกสถานะเกมยังไม่สำเร็จ" : "บันทึกผลการแข่งขันยังไม่สำเร็จ")
-                  : (criticalSaveStatus.kind === "sessionEnd" ? "กำลังบันทึกผลจบก๊วน…" : criticalSaveStatus.kind === "matchLifecycle" ? "กำลังบันทึกสถานะเกม…" : "กำลังบันทึกผลการแข่งขัน…")}
+                  : criticalSaveStatus.status === "obsolete"
+                    ? "ไม่ได้บันทึกคำสั่งเดิมซ้ำ"
+                    : criticalSaveStatus.status === "conflict"
+                    ? "บันทึกแล้ว แต่ข้อมูลเปลี่ยนไประหว่างรอยืนยัน"
+                    : (criticalSaveStatus.kind === "sessionEnd" ? "กำลังบันทึกผลจบก๊วน…" : criticalSaveStatus.kind === "matchLifecycle" ? "กำลังบันทึกสถานะเกม…" : "กำลังบันทึกผลการแข่งขัน…")}
               </div>
+              {criticalSaveStatus.status === "pending" && criticalSaveStatus.slow && (
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{criticalSaveStatus.blocked ? "ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง BadQ อื่น — ปิดแท็บ/หน้าต่าง BadQ อื่นแล้วรอสักครู่" : criticalSaveStatus.slow === "queued" ? "ที่เก็บข้อมูลกำลังทำงานอื่นอยู่ — คำสั่งถัดไปจะรอคิวจนกว่าการบันทึกนี้จะยืนยันผล" : "ที่เก็บข้อมูลตอบสนองช้ากว่าปกติ — คำสั่งถัดไปจะรอคิวจนกว่าการบันทึกนี้จะยืนยันผล"}</div>
+              )}
               {criticalSaveStatus.status === "failed" && criticalSaveStatus.kind === "matchLifecycle" && (
-                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>สถานะเกมยังไม่เปลี่ยน เพราะบันทึกลงเครื่องไม่สำเร็จ — แตะคำสั่งเดิมอีกครั้ง (เช่น เริ่มเกม/พักเกม) เพื่อบันทึกใหม่</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>สถานะเกมยังไม่เปลี่ยน เพราะบันทึกลงเครื่องไม่สำเร็จ (ระบบยืนยันแล้วว่าไม่ได้บันทึก) — แตะคำสั่งเดิมอีกครั้ง (เช่น เริ่มเกม/พักเกม) หรือแตะ "ลองบันทึกซ้ำ"</div>
               )}
               {criticalSaveStatus.status === "failed" && criticalSaveStatus.kind !== "matchLifecycle" && (
-                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ข้อมูลยังอยู่ในหน้าจอนี้ แต่ยังบันทึกลงเครื่องไม่สำเร็จ — อย่าเพิ่งปิดแอปตอนนี้ ลองแตะเมนูอื่นแล้วกลับมา หรือรอสักครู่ ระบบจะลองบันทึกใหม่โดยอัตโนมัติเมื่อมีการเปลี่ยนแปลงครั้งถัดไป</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ข้อมูลยังอยู่ในหน้าจอนี้ แต่ยังบันทึกลงเครื่องไม่สำเร็จ (ระบบยืนยันแล้วว่าไม่ได้บันทึก) — อย่าเพิ่งปิดแอปตอนนี้ แตะ "ลองบันทึกซ้ำ" หรือแตะคำสั่งเดิมอีกครั้ง</div>
+              )}
+              {criticalSaveStatus.status === "failed" && criticalSaveStatus.kind !== "sessionEnd" && criticalMutationRetryRef.current && criticalMutationRetryRef.current.mutationId === criticalSaveStatus.mutationId && (
+                <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
+                  <button onClick={retryLastCriticalMutation} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>ลองบันทึกซ้ำ</button>
+                </div>
+              )}
+              {criticalSaveStatus.status === "conflict" && (
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>คำสั่งนี้บันทึกลงเครื่องแล้ว แต่ข้อมูลที่เกี่ยวข้องถูกแก้ไขระหว่างรอยืนยันผล ระบบจึงยังไม่นำไปใช้ และจะแสดงเป็นรายการที่ต้องตรวจสอบเมื่อเปิดแอปครั้งถัดไป (ข้อมูลไม่หาย ส่งออกเพื่อตรวจสอบได้)</div>
+              )}
+              {criticalSaveStatus.status === "obsolete" && (
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>เกม/ก๊วนนี้ถูกแก้ไขไปแล้วหลังจากบันทึกครั้งก่อนไม่สำเร็จ คำสั่งเดิมจึงไม่ถูกบันทึกซ้ำ (ป้องกันเกมผี/ผลซ้ำ) — ถ้ายังต้องการ ให้แตะคำสั่งนั้นใหม่จากสถานะปัจจุบัน</div>
               )}
             </div>
           </div>
@@ -10481,7 +11239,7 @@ function AppInner() {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12.5, fontWeight: 800 }}>{daysSinceBackup == null ? "ยังไม่เคยสำรองข้อมูลเลย" : `ยังไม่ได้สำรองข้อมูลมา ${daysSinceBackup} วันแล้ว`}</div>
               <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>มือถือ (โดยเฉพาะ iPhone) อาจล้างข้อมูลแอปเองได้ถ้าปิด/ไม่ได้เปิดนาน ๆ — สำรองเก็บไว้กันพลาด</div>
-              <button onClick={() => { exportBackup(); setBackupNoticeDismissed(true); }} style={{ marginTop: 7, padding: "7px 13px", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>สำรองเลย</button>
+              <button onClick={() => { exportBackup().then((res) => { if (res && res.error) { setBackupNoticeDismissed(false); try { alert(res.error); } catch (e) {} } }); setBackupNoticeDismissed(true); }} style={{ marginTop: 7, padding: "7px 13px", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>สำรองเลย</button>
             </div>
             <button onClick={() => setBackupNoticeDismissed(true)} style={{ flexShrink: 0, background: "none", border: "none", color: T.muted, padding: 4 }}><X size={16} /></button>
           </div>
@@ -12878,7 +13636,9 @@ function ArchivedPlayersSheet({ archivedPlayers, restorePlayer, onClose }) {
 
 function Avatar({ p, size }) {
   if (!p) return null;
-  if (p.photo) return <img src={p.photo} alt="" style={{ width: size, height: size, flexShrink: 0, borderRadius: size / 2, objectFit: "cover" }} />;
+  // v1.12.39: an "@img:" reference whose asset could not be loaded stays in state (never nulled — see IMAGE REFS
+  // IN PERSISTED STATE) but is drawn as the initial-letter placeholder, not as a broken image.
+  if (p.photo && !isImageRefString(p.photo)) return <img src={p.photo} alt="" style={{ width: size, height: size, flexShrink: 0, borderRadius: size / 2, objectFit: "cover" }} />;
   return <div style={{ width: size, height: size, flexShrink: 0, borderRadius: size / 2, background: levelColor(p.skillIndex), color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: size * 0.4 }}>{p.name.trim().charAt(0).toUpperCase()}</div>;
 }
 
@@ -18516,21 +19276,66 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
 // every persistence/payment-calc path — only on blur or Enter, never per keystroke. Re-syncs the draft from
 // the real value whenever the player being edited changes, or their discount changes from elsewhere (e.g. a
 // discount credit applied, a wheel prize, or the "ล้างข้อมูล" reset) while this popover happens to be open.
+// v1.12.39 (review F7): every mounted DiscountAmountInput registers a "commit my pending draft now" function.
+// Code that CHANGES a player's discount itself (applying a discount credit) flushes these first, so the typed
+// value is committed before the credit is added on top of it — the credit is never overwritten by a later
+// commit of a draft typed before it (on iPad, tapping the credit button does not blur the field).
+const __discountDraftFlushers = new Set();
+function flushDiscountDrafts() { for (const f of Array.from(__discountDraftFlushers)) { try { f(); } catch (e) {} } }
 function DiscountAmountInput({ id, discount, setPDiscount }) {
+  // v1.12.39 (Codex P2 — discount races; behaviour now DEFINED):
+  //  * a draft always belongs to the player it was typed for (draftIdRef) and is committed to THAT player —
+  //    never to whichever player the (reused) input shows next;
+  //  * an edited, uncommitted draft is committed on blur/Enter AND when the input goes away without a blur
+  //    (overlay closed or switched while the field still has focus — iPad/Safari buttons do not take focus,
+  //    so tapping ✕ does not blur the field) or when the input is re-pointed at another player;
+  //  * an EXTERNAL change of this player's discount while the organizer is typing does not overwrite what is
+  //    being typed: the local draft wins at commit (it is the organizer's latest explicit entry), and a note
+  //    shows the value that arrived meanwhile. With no local edit pending, an external change shows at once.
   const [draft, setDraft] = useState(String(discount || 0));
-  useEffect(() => { setDraft(String(discount || 0)); }, [id, discount]);
-  const commit = () => setPDiscount(id, draft === "" ? 0 : draft);
+  const [externalWhileEditing, setExternalWhileEditing] = useState(null);
+  const draftRef = useRef(draft);
+  const dirtyRef = useRef(false);
+  const draftIdRef = useRef(id);
+  const setPDiscountRef = useRef(setPDiscount);
+  setPDiscountRef.current = setPDiscount;
+  const commitPending = () => {
+    if (!dirtyRef.current) return;
+    dirtyRef.current = false;
+    const v = draftRef.current;
+    setPDiscountRef.current(draftIdRef.current, v === "" ? 0 : v);
+  };
+  useEffect(() => {
+    if (draftIdRef.current !== id) {
+      commitPending(); // the previous player's unsaved draft goes to the previous player
+      draftIdRef.current = id;
+      draftRef.current = String(discount || 0);
+      setDraft(draftRef.current);
+      setExternalWhileEditing(null);
+      return;
+    }
+    if (dirtyRef.current) { setExternalWhileEditing(discount || 0); return; } // local draft wins; show what arrived
+    draftRef.current = String(discount || 0);
+    setDraft(draftRef.current);
+    setExternalWhileEditing(null);
+  }, [id, discount]);
+  useEffect(() => () => { commitPending(); }, []); // unmounted with an uncommitted draft (no blur): commit it
+  useEffect(() => { __discountDraftFlushers.add(commitPending); return () => { __discountDraftFlushers.delete(commitPending); }; });
   return (
-    <input
-      type="number"
-      min={0}
-      value={draft}
-      onChange={(e) => setDraft(e.target.value)}
-      onFocus={(e) => e.target.select()}
-      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      onBlur={commit}
-      style={{ width: 64, padding: "4px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 700, color: T.green, outline: "none" }}
-    />
+    <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end" }}>
+      <input
+        type="number"
+        min={0}
+        value={draft}
+        data-testid="discount-input"
+        onChange={(e) => { dirtyRef.current = true; draftRef.current = e.target.value; setDraft(e.target.value); }}
+        onFocus={(e) => e.target.select()}
+        onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+        onBlur={() => { commitPending(); setExternalWhileEditing(null); }}
+        style={{ width: 64, padding: "4px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 700, color: T.green, outline: "none" }}
+      />
+      {externalWhileEditing != null && <span data-testid="discount-external-note" style={{ fontSize: 10, color: T.muted, marginTop: 2 }}>ระหว่างพิมพ์ ส่วนลดถูกเปลี่ยนเป็น ฿{externalWhileEditing} — จะใช้ค่าที่พิมพ์</span>}
+    </span>
   );
 }
 function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory }) {
@@ -18549,8 +19354,17 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   // vanishing over an archival that never actually persisted.
   const [endSessionPending, setEndSessionPending] = useState(false);
   const [endSessionError, setEndSessionError] = useState(null);
-  const runEndSessionCommit = (promise) => {
-    if (!promise || typeof promise.then !== "function") { setEndSessionPending(false); setConfirmEnd(false); return; }
+  const runEndSessionCommit = (promise, fromRetry) => {
+    if (!promise || typeof promise.then !== "function") {
+      setEndSessionPending(false);
+      // round-3 review (P1): a retry with nothing left to retry is NEVER a success — the session was not ended
+      // by this tap. Keep the dialog open and offer the normal "จบก๊วน" (a fresh, revalidated attempt).
+      if (fromRetry) { setEndSessionError({ text: "ยังไม่ได้จบก๊วน — ไม่มีรายการให้ลองซ้ำแล้ว กรุณากด “จบก๊วน” อีกครั้ง", retry: false }); return; }
+      // endSession() returns null only when an End Session for this session is already under way (its own
+      // idempotency guard) — this tap did not end anything: keep the dialog open, never report success.
+      setEndSessionError({ text: "กำลังบันทึกการจบก๊วนนี้อยู่ — รอสักครู่ แล้วตรวจสอบอีกครั้ง", retry: false });
+      return;
+    }
     promise.then(
       () => { setEndSessionPending(false); setEndSessionError(null); setConfirmEnd(false); },
       (e) => {
@@ -18558,6 +19372,9 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         // v1.12.38: a refusal because a match is still live is not a storage failure — say so, and offer the
         // normal "จบก๊วน" button again (not "retry", which re-sends an already-built entry).
         if (e && e.message === END_SESSION_LIVE_MATCH_ERROR) setEndSessionError({ text: "ยังมีเกมที่กำลังเล่นหรือพักอยู่ — กดจบเกมให้ครบก่อน แล้วค่อยจบก๊วน", retry: false });
+        // round-3 review (P1): the old entry no longer fits the current data (conflict) or was superseded
+        // (obsolete). Re-sending it is never right; the organizer checks the data and ends the session afresh.
+        else if (e && (e.outcome === "conflict" || e.outcome === "obsolete")) setEndSessionError({ text: "ยังไม่ได้จบก๊วน — ข้อมูลเปลี่ยนไประหว่างรอบันทึก กรุณาตรวจสอบรายการ แล้วกด “จบก๊วน” อีกครั้ง", retry: false, outcome: e.outcome });
         else setEndSessionError({ text: "บันทึกไม่สำเร็จ กรุณาลองอีกครั้ง", retry: true });
       }
     );
@@ -18920,7 +19737,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               <button onClick={() => setConfirmEnd(false)} disabled={endSessionPending} style={{ ...btnSecondary, opacity: endSessionPending ? 0.6 : 1 }}>ยกเลิก</button>
               {endSessionError && endSessionError.retry ? (
                 <button
-                  onClick={() => { setEndSessionError(null); setEndSessionPending(true); runEndSessionCommit(retryEndSessionCommit && retryEndSessionCommit()); }}
+                  onClick={() => { setEndSessionError(null); setEndSessionPending(true); runEndSessionCommit(retryEndSessionCommit && retryEndSessionCommit(), true); }}
                   disabled={endSessionPending}
                   style={{ ...btnPrimary, background: T.accent, opacity: endSessionPending ? 0.6 : 1 }}
                 >{endSessionPending ? "กำลังลองอีกครั้ง…" : "ลองอีกครั้ง"}</button>
@@ -19931,13 +20748,38 @@ function CustomLevelEditor({ customLevels, setCustomLevels }) {
 // import operation — see applyRestore's onPhase callback, which drives which key is active here. Falls
 // back to the old generic label for any phase not in this map (defensive — never blocks progress on an
 // unrecognized key) and while busy with no phase set yet (e.g. undo/export, which don't pass onPhase).
+// v1.12.39: what a failed staged restore means for the organizer. Every failure before the promotion
+// transaction commits leaves the previous data exactly as it was.
+function restoreFailureMessage(reason) {
+  const r = String(reason || "unknown");
+  const tail = " (" + r + ")";
+  if (/^committed-but-read-back-mismatch|^exception-after-promotion/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — บันทึกแล้วแต่ตรวจสอบย้อนกลับไม่ตรง กรุณาปิดแล้วเปิดแอปใหม่ (ระบบจะเลือกข้อมูลจากที่บันทึกจริงในเครื่อง)" + tail;
+  const intact = " ข้อมูลเดิมยังอยู่ครบ ไม่มีการเปลี่ยนแปลง";
+  if (/^pending-critical-operation/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — ยังมีการบันทึกผลเกม/จบก๊วนที่รอยืนยันอยู่ กรุณารอให้เสร็จก่อนแล้วลองอีกครั้ง." + intact + tail;
+  if (/^autosave-write-in-flight/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — การบันทึกอัตโนมัติยังไม่เสร็จ กรุณารอสักครู่แล้วลองอีกครั้ง." + intact + tail;
+  if (/open-blocked/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง/แท็บ BadQ อื่น ปิดหน้าต่างอื่นแล้วลองอีกครั้ง." + intact + tail;
+  if (/QuotaExceeded/i.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — พื้นที่เก็บข้อมูลของเครื่องไม่พอ." + intact + tail;
+  if (/^backup-references-missing-images/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — ไฟล์นี้อ้างถึงรูปภาพที่ไม่มีอยู่ในไฟล์และไม่มีในเครื่องนี้ จึงไม่นำเข้า (ป้องกันรูปหาย)." + intact + tail;
+  if (/^update-handoff-in-progress/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — แอปกำลังอัปเดตเวอร์ชัน กรุณาลองอีกครั้งหลังเปิดแอปใหม่." + intact + tail;
+  if (/safety-snapshot/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — สำรองข้อมูลเดิมก่อนนำเข้าไม่สำเร็จ จึงยังไม่นำเข้า." + intact + tail;
+  return "นำเข้าข้อมูลไม่สำเร็จ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง." + intact + tail;
+}
 const IMPORT_PHASE_LABELS = {
+  "reading-file": "กำลังอ่านไฟล์...",
+  parsing: "กำลังอ่านข้อมูลในไฟล์...",
+  migrating: "กำลังตรวจสอบและแปลงข้อมูล...",
+  "checking-images": "กำลังตรวจสอบรูปภาพในไฟล์...",
   validating: "กำลังตรวจสอบไฟล์...",
-  preparing: "กำลังเตรียมข้อมูล...",
+  "waiting-pending-saves": "กำลังรอการบันทึกที่ค้างอยู่ให้เสร็จ...",
   "backing-up": "กำลังสำรองข้อมูลเดิม...",
+  images: "กำลังจัดเก็บรูปภาพ...",
+  preparing: "กำลังเตรียมข้อมูล...",
+  staging: "กำลังบันทึกข้อมูลใหม่ (ขั้นเตรียม)...",
   saving: "กำลังบันทึกข้อมูล...",
   verifying: "กำลังตรวจสอบข้อมูล...",
+  publishing: "กำลังแสดงข้อมูล...",
   done: "นำเข้าข้อมูลสำเร็จ",
+  failed: "นำเข้าข้อมูลไม่สำเร็จ",
 };
 function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog }) {
   const [busy, setBusy] = useState(false);
@@ -19985,6 +20827,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
     setBusy(true); setSuccessMsg(null); setImportError(null);
     const res = await exportBackup();
     setBusy(false);
+    if (res && res.error) { setImportError("__verify_failed__:" + res.error); return; } // v1.12.39
     if (res) setSuccessMsg({ kind: "export", stats: res.stats, sizeLabel: res.sizeLabel });
   };
 
@@ -19997,14 +20840,19 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
     // ไฟล์..." phase — it runs BEFORE the preview modal even opens, so the "นำเข้าข้อมูล" button (already
     // `disabled={busy}` below) now visibly shows that state too instead of appearing to do nothing while a
     // large file is read and its (synchronous) validateBackupFile migration/integrity work runs.
-    setBusy(true); setImportPhase("validating");
-    const __t0 = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
+    setBusy(true); setImportPhase("reading-file");
+    const __now = () => (typeof performance !== "undefined" && performance.now ? performance.now() : Date.now());
+    const __t0 = __now();
     try {
       let text;
+      await yieldToUI(); // v1.12.39: the "reading" label paints before the (possibly large) file read
       try { text = await f.text(); } catch (err) { setImportError("ไม่สามารถอ่านไฟล์นี้ได้"); return; }
-      const res = validateBackupFile(text);
-      const __t1 = typeof performance !== "undefined" && performance.now ? performance.now() : Date.now();
-      logImportPhase("validating", __t1 - __t0, { byteLength: text.length, ok: res.ok });
+      const __tRead = __now();
+      logImportPhase("reading-file", __tRead - __t0, { byteLength: text.length });
+      const res = await validateBackupFile(text, (step) => setImportPhase(step));
+      text = null; // v1.12.39: drop the raw file text as soon as it is parsed (memory)
+      const __t1 = __now();
+      logImportPhase("validating", __t1 - __tRead, { ok: res.ok, ...(res.timings || {}), imagesChecked: !!(res.imageCheck && res.imageCheck.checked) });
       if (!res.ok) { setImportError(res.reason || "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"); return; }
       setRestoreMode("replace");
       setPreview(res.backup);
@@ -20037,7 +20885,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       // committed and a retry is always safe.
       if (!result || result.ok === false) {
         setSuccessMsg(null);
-        setImportError("__verify_failed__:นำเข้าข้อมูลไม่สำเร็จ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง (" + ((result && result.reason) || "unknown") + ")");
+        setImportError("__verify_failed__:" + restoreFailureMessage(result && result.reason));
         return;
       }
       // v1.12.13: ON SUCCESS — clear ALL temporary import state (preview/mode/pending), close the modal,
@@ -20094,7 +20942,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       )}
       {importError && !importError.startsWith("__verify_failed__:") && (
         <div style={{ background: "#fdecea", border: `1px solid ${T.accent}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.accent, marginBottom: 8, lineHeight: 1.7 }}>
-          ไม่สามารถนำเข้าข้อมูลได้<br />ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ
+          ไม่สามารถนำเข้าข้อมูลได้<br />{importError || "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"}{/* v1.12.39: the specific reason (e.g. image manifest mismatch) instead of one fixed sentence */}
         </div>
       )}
       <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.5 }}>
