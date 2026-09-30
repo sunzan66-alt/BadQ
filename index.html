@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.45";
+      var CURRENT_VERSION = "1.12.46";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -2653,6 +2653,80 @@ const th = defineMessages("th", [
   ["settings.levelNamePlaceholder", "ชื่อระดับ เช่น มือใหม่"],
   ["settings.levelDescriptionPlaceholder", "คำอธิบาย (ไม่บังคับ)"],
   ["settings.levelMinimum", "ต้องมีอย่างน้อย 2 ระดับ"],
+  ["settings.levelSettingsTitle", "ตั้งค่าระดับฝีมือ"],
+  ["settings.levelSettingsIntro", "เลือกรูปแบบชื่อที่แสดงสำหรับ Skill Index 1–11 ระบบจัดเกมยังใช้ค่าฝีมือตัวเลขเดิม"],
+  ["settings.presetBadwebCentral", "Bad Web / กลาง"],
+  ["settings.presetNorth", "เหนือ / เชียงใหม่"],
+  ["settings.presetCustom", "กำหนดเอง"],
+  ["settings.presetOrder", "ใช้ลำดับ: {levels}"],
+  ["settings.presetCustomDescription", "Organizer กำหนดระดับฝีมือเองได้ โดย map เข้ากับ Skill Index 1–11"],
+  ["settings.presetInUse", "ใช้อยู่"],
+  ["settings.viewLevelDescriptions", "ดูคำอธิบายระดับ"],
+  ["settings.hideLevelDescriptions", "ซ่อนคำอธิบายระดับ"],
+  ["settings.changeSkillSystemTitle", "เปลี่ยนระบบระดับฝีมือ?"],
+  ["settings.changeSkillSystemBody", "เปลี่ยนเฉพาะชื่อระดับที่แสดง ค่าฝีมือที่บันทึกและระบบจัดเกมยังเหมือนเดิม"],
+  ["settings.changeSkillSystemButton", "เปลี่ยนระบบ"],
+  ["settings.levelNameRequired", "กรุณากรอกชื่อระดับ"],
+  ["settings.customLevelsCount", "ระดับที่กำหนดเอง ({count})"],
+  ["settings.memberManagement", "การจัดการสมาชิก"],
+  ["settings.inactiveThreshold", "ไม่ได้มานานเกิน"],
+  ["settings.monthUnit", "เดือน"],
+  ["settings.skillDescription.1", "เริ่มต้น — เพิ่งเริ่มจับไม้ ยังไม่คุ้นการตีโต้"],
+  ["settings.skillDescription.2", "เริ่มตี — เริ่มตีโต้ได้บ้าง ยังไม่นิ่ง"],
+  ["settings.skillDescription.3", "พื้นฐาน — ตีโต้ได้พอสมควร เริ่มคุมลูก และเล่นเกมได้ในระดับพื้นฐาน"],
+  ["settings.skillDescription.4", "เล่นเป็นเกม — เริ่มเข้าใจแทคติก เล่นเป็นเกมได้"],
+  ["settings.skillDescription.5", "กลางล่าง — ตีได้หลากหลายลูก คุมเกมได้ระดับหนึ่ง"],
+  ["settings.skillDescription.6", "กลาง — เล่นได้คล่อง มีจังหวะ คุมเกมได้ดี"],
+  ["settings.skillDescription.7", "กลางสูง — ตีแม่นขึ้น มีกลยุทธ์ชัดเจน"],
+  ["settings.skillDescription.8", "มือดี — ควบคุมเกมได้ดี ตีได้หลากหลายจังหวะ"],
+  ["settings.skillDescription.9", "มือแข็ง — ฝีมือสูง แข่งขันได้ในระดับก๊วน"],
+  ["settings.skillDescription.10", "แข่งขัน — ระดับแข่งขันจริงจัง"],
+  ["settings.skillDescription.11", "ระดับสูง — ฝีมือสูงสุด เล่นแข่งขันระดับสูง"],
+  ["session.dateLabel", "วันที่ก๊วน"],
+  ["finance.category.courtVenue", "ค่าสนาม/สถานที่"],
+  ["finance.category.shuttlecock", "ค่าลูกแบด"],
+  ["finance.category.foodDrinks", "ค่าอาหาร/น้ำ"],
+  ["finance.category.prizes", "ค่ารางวัล"],
+  ["finance.category.tournamentPrizes", "ค่ารางวัลการแข่งขัน"],
+  ["finance.category.travel", "ค่าเดินทาง"],
+  ["finance.category.other", "ค่าใช้จ่ายอื่น ๆ"],
+  ["summary.empty", "ยังไม่มีเกมที่จบแล้ว"],
+  ["summary.totalMatches", "แมตช์"],
+  ["summary.totalGames", "เกม"],
+  ["summary.minimumGames", "เกมน้อยสุด"],
+  ["summary.maximumGames", "เกมมากสุด"],
+  ["summary.averageWaitMinutes", "เวลารอเฉลี่ย (นาที)"],
+  ["summary.maximumWaitMinutes", "เวลารอนานสุด (นาที)"],
+  ["summary.shareSession", "แชร์สรุปก๊วน"],
+  ["summary.gamesPerPlayer", "จำนวนเกมต่อคน"],
+  ["summary.recordHint", "แตะชื่อผู้เล่นเพื่อดูผลงาน"],
+  ["summary.noPlayers", "ยังไม่มีข้อมูลผู้เล่น"],
+  ["summary.matchHistory", "ประวัติแมตช์"],
+  ["summary.noCompletedMatches", "ยังไม่มีแมตช์ที่จบแล้ว"],
+  ["summary.gamesLabel", "เกม"],
+  ["summary.matchesLabel", "แมตช์"],
+  ["summary.winsLabel", "ชนะ"],
+  ["summary.lossesLabel", "แพ้"],
+  ["summary.drawsLabel", "เสมอ"],
+  ["summary.noScoreGames", "เกมที่ไม่มีคะแนน: {count}"],
+  ["summary.partnersPlayedWith", "คู่ที่เคยเล่นด้วย"],
+  ["summary.opponentsFaced", "คู่แข่งที่เคยเจอ"],
+  ["summary.tournamentStats", "ผลงานทัวร์นาเมนต์"],
+  ["summary.tournamentStatsHint", "นับเฉพาะแมตช์ทัวร์นาเมนต์อย่างเป็นทางการ"],
+  ["summary.champion", "แชมป์"],
+  ["summary.runnerUp", "รองแชมป์"],
+  ["summary.winRate", "อัตราชนะ"],
+  ["summary.tournamentsLabel", "ทัวร์นาเมนต์"],
+  ["reward.noHistory", "ยังไม่มีใครได้รางวัลจากวงล้อ"],
+  ["reward.unknownPlayer", "ผู้เล่น"],
+  ["reward.winCount.one", "ได้รางวัล {count} ครั้ง"],
+  ["reward.winCount.other", "ได้รางวัล {count} ครั้ง"],
+  ["reward.totalWinCount.one", "ได้รางวัลทั้งหมด {count} ครั้ง"],
+  ["reward.totalWinCount.other", "ได้รางวัลทั้งหมด {count} ครั้ง"],
+  ["reward.latest", "ล่าสุด"],
+  ["reward.defaultDiscountNow", "ส่วนลด {amount}฿ (ใช้ทันที)"],
+  ["reward.defaultDiscountNext", "ส่วนลด {amount}฿ (ครั้งหน้า)"],
+  ["reward.defaultFreeCourt", "ฟรีค่าสนาม! ส่วนลด {amount}฿ (ทันที)"],
   ["settings.privacy", "ความเป็นส่วนตัวและข้อมูล"],
   ["settings.privacyPolicy", "นโยบายความเป็นส่วนตัว"],
   ["settings.dataStored", "ข้อมูลที่ BadQ จัดเก็บ"],
@@ -3994,6 +4068,80 @@ const en = defineMessages("en", [
   ["settings.levelNamePlaceholder", "Level name, for example Beginner"],
   ["settings.levelDescriptionPlaceholder", "Description (optional)"],
   ["settings.levelMinimum", "At least two levels are required"],
+  ["settings.levelSettingsTitle", "Skill Level Settings"],
+  ["settings.levelSettingsIntro", "Choose the display labels for Skill Index 1–11. Matchmaking still uses the same numeric skill values."],
+  ["settings.presetBadwebCentral", "Bad Web / Central"],
+  ["settings.presetNorth", "North / Chiang Mai"],
+  ["settings.presetCustom", "Custom"],
+  ["settings.presetOrder", "Order: {levels}"],
+  ["settings.presetCustomDescription", "Define your own level names and map them to Skill Index 1–11"],
+  ["settings.presetInUse", "In use"],
+  ["settings.viewLevelDescriptions", "View level descriptions"],
+  ["settings.hideLevelDescriptions", "Hide level descriptions"],
+  ["settings.changeSkillSystemTitle", "Change skill level system?"],
+  ["settings.changeSkillSystemBody", "Only the displayed level names will change. Stored skill values and matchmaking stay the same."],
+  ["settings.changeSkillSystemButton", "Change system"],
+  ["settings.levelNameRequired", "Enter a level name"],
+  ["settings.customLevelsCount", "Custom levels ({count})"],
+  ["settings.memberManagement", "Member management"],
+  ["settings.inactiveThreshold", "Inactive for more than"],
+  ["settings.monthUnit", "months"],
+  ["settings.skillDescription.1", "Beginner — Just starting and not yet comfortable rallying"],
+  ["settings.skillDescription.2", "Developing — Can rally sometimes, but not consistently"],
+  ["settings.skillDescription.3", "Foundation — Can rally, control the shuttle, and play a basic game"],
+  ["settings.skillDescription.4", "Match play — Understands basic tactics and can play a full game"],
+  ["settings.skillDescription.5", "Lower intermediate — Uses a range of shots and controls play to some degree"],
+  ["settings.skillDescription.6", "Intermediate — Plays fluently with good timing and control"],
+  ["settings.skillDescription.7", "Upper intermediate — More accurate with a clear tactical approach"],
+  ["settings.skillDescription.8", "Advanced — Controls play well and uses a wide range of shots"],
+  ["settings.skillDescription.9", "Strong — High skill level and competitive in club play"],
+  ["settings.skillDescription.10", "Competitive — Plays serious competitive badminton"],
+  ["settings.skillDescription.11", "Elite — Highest skill level and competes at an advanced level"],
+  ["session.dateLabel", "Session date"],
+  ["finance.category.courtVenue", "Court/Venue cost"],
+  ["finance.category.shuttlecock", "Shuttlecock cost"],
+  ["finance.category.foodDrinks", "Food/Drinks"],
+  ["finance.category.prizes", "Prizes"],
+  ["finance.category.tournamentPrizes", "Tournament prizes"],
+  ["finance.category.travel", "Travel"],
+  ["finance.category.other", "Other expenses"],
+  ["summary.empty", "No completed games yet"],
+  ["summary.totalMatches", "Matches"],
+  ["summary.totalGames", "Games"],
+  ["summary.minimumGames", "Fewest games"],
+  ["summary.maximumGames", "Most games"],
+  ["summary.averageWaitMinutes", "Average wait (minutes)"],
+  ["summary.maximumWaitMinutes", "Longest wait (minutes)"],
+  ["summary.shareSession", "Share session summary"],
+  ["summary.gamesPerPlayer", "Games per player"],
+  ["summary.recordHint", "Tap a player to view their game record"],
+  ["summary.noPlayers", "No player data"],
+  ["summary.matchHistory", "Match history"],
+  ["summary.noCompletedMatches", "No completed matches"],
+  ["summary.gamesLabel", "Games"],
+  ["summary.matchesLabel", "Matches"],
+  ["summary.winsLabel", "Wins"],
+  ["summary.lossesLabel", "Losses"],
+  ["summary.drawsLabel", "Draws"],
+  ["summary.noScoreGames", "Games without scores: {count}"],
+  ["summary.partnersPlayedWith", "Partners"],
+  ["summary.opponentsFaced", "Opponents"],
+  ["summary.tournamentStats", "Tournament record"],
+  ["summary.tournamentStatsHint", "Official tournament matches only"],
+  ["summary.champion", "Champion"],
+  ["summary.runnerUp", "Runner-up"],
+  ["summary.winRate", "Win rate"],
+  ["summary.tournamentsLabel", "Tournaments"],
+  ["reward.noHistory", "No prize-wheel winners yet"],
+  ["reward.unknownPlayer", "Player"],
+  ["reward.winCount.one", "Won {count} prize"],
+  ["reward.winCount.other", "Won {count} prizes"],
+  ["reward.totalWinCount.one", "Won {count} prize in total"],
+  ["reward.totalWinCount.other", "Won {count} prizes in total"],
+  ["reward.latest", "Latest"],
+  ["reward.defaultDiscountNow", "฿{amount} discount (use now)"],
+  ["reward.defaultDiscountNext", "฿{amount} discount (next session)"],
+  ["reward.defaultFreeCourt", "Free court fee! ฿{amount} discount (use now)"],
   ["settings.privacy", "Privacy and data"],
   ["settings.privacyPolicy", "Privacy policy"],
   ["settings.dataStored", "Data stored by BadQ"],
@@ -4321,7 +4469,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
   });
 })();
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.45";
+const APP_VERSION = "1.12.46";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -4400,10 +4548,28 @@ function getPresetMeta(id) {
   };
   return LEVEL_PRESETS.find(p => p.id === id) || LEVEL_PRESETS[0];
 }
-// Display-only localization for preset names. The persisted preset id remains exactly `isan`.
+// Display-only localization for system preset names/descriptions. Persisted preset ids, level arrays and
+// skill-index mappings remain unchanged.
 function presetDisplayName(id, t) {
-  if (id === "isan" && t) return t("quanSettings.presetIsanName");
+  const key = {
+    "badweb-central": "settings.presetBadwebCentral",
+    isan: "quanSettings.presetIsanName",
+    north: "settings.presetNorth",
+    custom: "settings.presetCustom"
+  }[id];
+  if (key && t) return t(key);
   return getPresetMeta(id).name;
+}
+function presetDisplayDescription(id, t) {
+  const preset = getPresetMeta(id);
+  if (!t) return preset.description;
+  if (id === "custom") return t("settings.presetCustomDescription");
+  return t("settings.presetOrder", {
+    levels: (preset.levels || []).join(" → ")
+  });
+}
+function skillDescription(skillIndex, t) {
+  return t ? t(`settings.skillDescription.${skillIndex}`) : SKILL_DESC[skillIndex];
 }
 // display label for a given skillIndex, resolved against whichever preset is currently active (incl. custom)
 function displayLevelFor(skillIndex, settings) {
@@ -7808,6 +7974,27 @@ const LEGACY_EXPENSE_CATEGORY_LABEL = {
 };
 function normExpenseCategoryLabel(cat) {
   return LEGACY_EXPENSE_CATEGORY_LABEL[cat] || cat;
+}
+// Display-only translation for known system categories. The category value and any suffix after " - "
+// stay byte-for-byte unchanged in storage; unknown/user-entered labels pass through untouched.
+const FINANCE_CATEGORY_I18N_KEY = {
+  "ค่าสนาม/สถานที่": "finance.category.courtVenue",
+  "ค่าลูกแบต": "finance.category.shuttlecock",
+  "ค่าลูกแบด": "finance.category.shuttlecock",
+  "ค่ารางวัล": "finance.category.prizes",
+  "ค่ารางวัลการแข่งขัน": "finance.category.tournamentPrizes",
+  "ค่าอาหาร/น้ำ": "finance.category.foodDrinks",
+  "ค่าเดินทาง": "finance.category.travel",
+  "ค่าใช้จ่ายอื่น": "finance.category.other",
+  "อื่น ๆ": "finance.category.other"
+};
+function financeCategoryDisplayLabel(label, t) {
+  if (!t || label == null) return label;
+  const parts = String(label).split(" - ");
+  const key = FINANCE_CATEGORY_I18N_KEY[parts[0]];
+  if (!key) return label;
+  parts[0] = t(key);
+  return parts.join(" - ");
 }
 // v1.11.20: fixed display order for the P&L expense breakdown (computeFinanceForRange) — ก๊วนแบต
 // categories first, then Tournament, per the organizer's requested statement layout. A category not
@@ -21766,7 +21953,9 @@ function AppInner() {
         getP,
         settings,
         session,
-        tournamentHistory
+        tournamentHistory,
+        t,
+        tc
       }
     }), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
       settings,
@@ -21857,6 +22046,7 @@ function AppInner() {
       playersById,
       tTogglePlayerPaid,
       tToggleHistoricalPlayerPaid,
+      uiLocale,
       t,
       tc,
       fmtDate,
@@ -25131,13 +25321,13 @@ function LevelSettingsSheet({
       fontWeight: 800,
       marginBottom: 4
     }
-  }, "\u2699\uFE0F \u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D"), /*#__PURE__*/React.createElement("div", {
+  }, "\u2699\uFE0F ", t("settings.levelSettingsTitle")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: T.muted,
       marginBottom: 14
     }
-  }, "\u0E40\u0E25\u0E37\u0E2D\u0E01\u0E23\u0E30\u0E1A\u0E1A\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E17\u0E35\u0E48\u0E43\u0E0A\u0E49\u0E43\u0E19\u0E1E\u0E37\u0E49\u0E19\u0E17\u0E35\u0E48/\u0E01\u0E4A\u0E27\u0E19\u0E02\u0E2D\u0E07\u0E04\u0E38\u0E13 \u0E41\u0E25\u0E30\u0E14\u0E39\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E41\u0E15\u0E48\u0E25\u0E30\u0E23\u0E30\u0E14\u0E31\u0E1A"), /*#__PURE__*/React.createElement(LevelPresetEditor, {
+  }, t("settings.levelSettingsIntro")), /*#__PURE__*/React.createElement(LevelPresetEditor, {
     settings: settings,
     changeLevelPreset: changeLevelPreset,
     setCustomLevels: setCustomLevels,
@@ -25190,7 +25380,7 @@ function GeneralSettingsSheet({
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
   const [wipedNotice, setWipedNotice] = useState(false);
-  const currentPreset = getPresetMeta(settings.levelPresetId || "badweb-central");
+  const currentPresetId = settings.levelPresetId || "badweb-central";
   const NavRow = ({
     children,
     onClick
@@ -25298,7 +25488,7 @@ function GeneralSettingsSheet({
       fontSize: 13,
       color: T.text
     }
-  }, currentPreset.name), /*#__PURE__*/React.createElement(ChevronRight, {
+  }, presetDisplayName(currentPresetId, t)), /*#__PURE__*/React.createElement(ChevronRight, {
     size: 15,
     color: T.muted
   })), levelSheetOpen && /*#__PURE__*/React.createElement(LevelSettingsSheet, {
@@ -25323,13 +25513,13 @@ function GeneralSettingsSheet({
       fontWeight: 700,
       color: T.text
     }
-  }, "\u0E15\u0E31\u0E49\u0E07\u0E04\u0E48\u0E32 Rank"), /*#__PURE__*/React.createElement("div", {
+  }, t("ranking.settings")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 10.5,
       color: T.muted,
       marginTop: 1
     }
-  }, "\u0E01\u0E33\u0E2B\u0E19\u0E14\u0E23\u0E30\u0E1A\u0E1A Ranking \u0E41\u0E22\u0E01\u0E15\u0E32\u0E21\u0E01\u0E4A\u0E27\u0E19")), /*#__PURE__*/React.createElement(ChevronRight, {
+  }, t("ranking.advancedRowSub"))), /*#__PURE__*/React.createElement(ChevronRight, {
     size: 15,
     color: T.muted
   })), rankingClubPickerOpen && /*#__PURE__*/React.createElement(RankingClubPickerSheet, {
@@ -25352,7 +25542,7 @@ function GeneralSettingsSheet({
     style: {
       marginTop: 14
     }
-  }, /*#__PURE__*/React.createElement(Label, null, "\uD83D\uDC65 \u0E01\u0E32\u0E23\u0E08\u0E31\u0E14\u0E01\u0E32\u0E23\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01")), /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement(Label, null, "\uD83D\uDC65 ", t("settings.memberManagement"))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -25369,7 +25559,7 @@ function GeneralSettingsSheet({
       color: T.text,
       fontWeight: 700
     }
-  }, "\u0E44\u0E21\u0E48\u0E44\u0E14\u0E49\u0E21\u0E32\u0E19\u0E32\u0E19\u0E40\u0E01\u0E34\u0E19"), /*#__PURE__*/React.createElement("input", {
+  }, t("settings.inactiveThreshold")), /*#__PURE__*/React.createElement("input", {
     type: "number",
     min: 1,
     value: settings.inactiveMonths ?? 6,
@@ -25395,7 +25585,7 @@ function GeneralSettingsSheet({
       color: T.text,
       fontWeight: 700
     }
-  }, "\u0E40\u0E14\u0E37\u0E2D\u0E19")), /*#__PURE__*/React.createElement("div", {
+  }, t("settings.monthUnit"))), /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 6
     }
@@ -27999,6 +28189,7 @@ function GroupSessionHeader({
   current,
   t,
   tc,
+  fmtDate,
   fmtDateTime
 }) {
   const [showNameDropdown, setShowNameDropdown] = useState(false);
@@ -28232,7 +28423,20 @@ function GroupSessionHeader({
     }
   }, /*#__PURE__*/React.createElement(Calendar, {
     size: 15
-  }), /*#__PURE__*/React.createElement("input", {
+  }), /*#__PURE__*/React.createElement("label", {
+    style: {
+      position: "relative",
+      display: "inline-flex",
+      alignItems: "center",
+      minHeight: 28,
+      fontSize: 13,
+      color: T.muted,
+      cursor: "pointer"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    "aria-hidden": "true"
+  }, fmtDate ? fmtDate(session.date) : fmtThaiDate(session.date)), /*#__PURE__*/React.createElement("input", {
+    "aria-label": t("session.dateLabel"),
     type: "date",
     value: session.date,
     onChange: e => setSession(s => ({
@@ -28240,13 +28444,14 @@ function GroupSessionHeader({
       date: e.target.value
     })),
     style: {
-      border: "none",
-      background: "transparent",
-      color: T.muted,
-      fontSize: 13,
-      outline: "none"
+      position: "absolute",
+      inset: 0,
+      width: "100%",
+      height: "100%",
+      opacity: 0,
+      cursor: "pointer"
     }
-  }), session.photo && /*#__PURE__*/React.createElement("button", {
+  })), session.photo && /*#__PURE__*/React.createElement("button", {
     onClick: clearSessionPhoto,
     style: {
       marginLeft: "auto",
@@ -33378,7 +33583,8 @@ function FinanceEntryList({
       padding: "4px 2px"
     }
   }, tr("finance.noEntriesYet")), entries.map(e => {
-    const catLabel = (categories.find(c => c[0] === e.category) || [, e.category])[1];
+    const rawCatLabel = (categories.find(c => c[0] === e.category) || [, e.category])[1];
+    const catLabel = financeCategoryDisplayLabel(rawCatLabel, tr);
     return /*#__PURE__*/React.createElement("div", {
       key: e.id,
       style: {
@@ -33454,7 +33660,7 @@ function FinanceEntryList({
       background: category === v ? "#e2f5ec" : T.surface,
       color: category === v ? T.green : T.muted
     }
-  }, l))), /*#__PURE__*/React.createElement("input", {
+  }, financeCategoryDisplayLabel(l, tr)))), /*#__PURE__*/React.createElement("input", {
     value: label,
     onChange: e => setLabel(e.target.value),
     placeholder: tr("finance.descriptionPlaceholder"),
@@ -33985,7 +34191,7 @@ function QuanSettingsSheet({
   }, /*#__PURE__*/React.createElement(ClipboardList, {
     size: 15,
     color: T.muted
-  }), " \uD83C\uDFF8 ", t("quanSettings.levelSection"), " (", presetDisplayName(settings.levelPresetId || "badweb-central", t), ")", /*#__PURE__*/React.createElement(ChevronDown, {
+  }), " \uD83C\uDFF8 ", t("quanSettings.levelSection"), " \xB7 ", presetDisplayName(settings.levelPresetId || "badweb-central", t), /*#__PURE__*/React.createElement(ChevronDown, {
     size: 17,
     color: T.muted,
     style: {
@@ -37029,7 +37235,7 @@ function ExpenseListEditor({
       color: T.muted,
       fontWeight: 700
     }
-  }, it.category, it.auto ? t ? t("finance.autoEstimatedSuffix") : " · ประมาณการ" : ""), /*#__PURE__*/React.createElement("span", {
+  }, financeCategoryDisplayLabel(it.category, t), it.auto ? t ? t("finance.autoEstimatedSuffix") : " · ประมาณการ" : ""), /*#__PURE__*/React.createElement("span", {
     style: {
       display: "block",
       fontSize: 13,
@@ -37098,7 +37304,7 @@ function ExpenseListEditor({
   }, categories.map(c => /*#__PURE__*/React.createElement("option", {
     key: c,
     value: c
-  }, c))), /*#__PURE__*/React.createElement("input", {
+  }, financeCategoryDisplayLabel(c, t)))), /*#__PURE__*/React.createElement("input", {
     type: "text",
     placeholder: t ? t("finance.descriptionPlaceholder") : "รายละเอียด (ไม่บังคับ)",
     value: draft.description,
@@ -37229,9 +37435,27 @@ function fmtThaiMonthLabel(ym) {
 // their own detail sheet sorted newest-first. Deliberately reads straight off the flat `rewardHistory` ledger
 // (never per-session `s.wheelPrizes`/bill state) so it survives sessions being deleted from sessionHistory —
 // exactly like discountCredits' own ledger already does elsewhere in this app.
+function rewardHistoryDisplayName(rawName, t) {
+  const raw = String(rawName || "");
+  let m = raw.match(/^ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ใช้ทันที\)$/);
+  if (m) return t("reward.defaultDiscountNow", {
+    amount: m[1]
+  });
+  m = raw.match(/^ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ครั้งหน้า\)$/);
+  if (m) return t("reward.defaultDiscountNext", {
+    amount: m[1]
+  });
+  m = raw.match(/^ฟรีค่าสนาม!\s*ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ทันที\)$/);
+  if (m) return t("reward.defaultFreeCourt", {
+    amount: m[1]
+  });
+  return raw;
+}
 function GlobalRewardHistory({
   rewardHistory,
-  fmtDate
+  fmtDate,
+  t,
+  tc
 }) {
   const [openPlayerId, setOpenPlayerId] = useState(null);
   const grouped = useMemo(() => {
@@ -37239,7 +37463,7 @@ function GlobalRewardHistory({
     (rewardHistory || []).forEach(r => {
       if (!byPlayer[r.playerId]) byPlayer[r.playerId] = {
         playerId: r.playerId,
-        name: r.playerNameSnapshot || "ผู้เล่น",
+        name: r.playerNameSnapshot || t("reward.unknownPlayer"),
         entries: [],
         latestTs: 0
       };
@@ -37250,13 +37474,14 @@ function GlobalRewardHistory({
       }
     });
     return Object.values(byPlayer).sort((a, b) => b.latestTs - a.latestTs);
-  }, [rewardHistory]);
+  }, [rewardHistory, t]);
   const openPlayer = grouped.find(g => g.playerId === openPlayerId);
   const rewardIcon = rt => rt === "cash" ? "💵" : rt === "discount" ? "🎟️" : "🎁";
   const summarize = entries => {
     const byName = {};
     entries.forEach(e => {
-      byName[e.rewardNameSnapshot] = (byName[e.rewardNameSnapshot] || 0) + 1;
+      const name = rewardHistoryDisplayName(e.rewardNameSnapshot, t);
+      byName[name] = (byName[name] || 0) + 1;
     });
     return Object.entries(byName).map(([n, c]) => `${n} ×${c}`).join(", ");
   };
@@ -37267,7 +37492,7 @@ function GlobalRewardHistory({
       textAlign: "center",
       padding: "10px 0"
     }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E43\u0E04\u0E23\u0E44\u0E14\u0E49\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E08\u0E32\u0E01\u0E27\u0E07\u0E25\u0E49\u0E2D");
+  }, t("reward.noHistory"));
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -37308,7 +37533,7 @@ function GlobalRewardHistory({
         fontWeight: 700,
         flexShrink: 0
       }
-    }, "\u0E44\u0E14\u0E49\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25 ", g.entries.length, " \u0E04\u0E23\u0E31\u0E49\u0E07")), /*#__PURE__*/React.createElement("div", {
+    }, tc("reward.winCount", g.entries.length))), /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11.5,
         color: T.muted,
@@ -37321,7 +37546,7 @@ function GlobalRewardHistory({
         fontSize: 10.5,
         color: T.muted
       }
-    }, "\u0E25\u0E48\u0E32\u0E2A\u0E38\u0E14: ", fmtDate ? fmtDate(latest.date) : fmtThaiDate(latest.date), " \xB7 ", latest.groupNameSnapshot));
+    }, t("reward.latest"), ": ", fmtDate ? fmtDate(latest.date) : fmtThaiDate(latest.date), " \xB7 ", latest.groupNameSnapshot));
   })), openPlayer && /*#__PURE__*/React.createElement(Overlay, {
     onClose: () => setOpenPlayerId(null)
   }, /*#__PURE__*/React.createElement("div", {
@@ -37336,7 +37561,7 @@ function GlobalRewardHistory({
       color: T.muted,
       marginBottom: 14
     }
-  }, "\u0E44\u0E14\u0E49\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14 ", openPlayer.entries.length, " \u0E04\u0E23\u0E31\u0E49\u0E07"), /*#__PURE__*/React.createElement("div", {
+  }, tc("reward.totalWinCount", openPlayer.entries.length)), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -37371,7 +37596,7 @@ function GlobalRewardHistory({
       textOverflow: "ellipsis",
       whiteSpace: "nowrap"
     }
-  }, r.rewardNameSnapshot), /*#__PURE__*/React.createElement("div", {
+  }, rewardHistoryDisplayName(r.rewardNameSnapshot, t)), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11,
       color: T.muted
@@ -37479,7 +37704,9 @@ function HistoryTab({
     }
   }, /*#__PURE__*/React.createElement(GlobalRewardHistory, {
     rewardHistory: rewardHistory,
-    fmtDate: fmtDate
+    fmtDate: fmtDate,
+    t: tr,
+    tc: trc
   })), rankingEnabledSomewhere && /*#__PURE__*/React.createElement("button", {
     onClick: () => setRankingPickerOpen(true),
     style: {
@@ -38831,6 +39058,7 @@ function FinanceTab({
   playersById,
   tTogglePlayerPaid,
   tToggleHistoricalPlayerPaid,
+  uiLocale,
   t,
   tc,
   fmtDate,
@@ -39183,7 +39411,7 @@ function FinanceTab({
       fontWeight: 800,
       color: T.text
     }
-  }, year === "all" ? t("common.all") : Number(year) + 543, " ", /*#__PURE__*/React.createElement(ChevronDown, {
+  }, year === "all" ? t("common.all") : uiLocale === "en" ? Number(year) : Number(year) + 543, " ", /*#__PURE__*/React.createElement(ChevronDown, {
     size: 16,
     color: T.muted
   }))), (() => {
@@ -39286,7 +39514,8 @@ function FinanceTab({
     years: allYears,
     onPick: setYear,
     onClose: () => setPickerOpen(null),
-    t: t
+    t: t,
+    uiLocale: uiLocale
   }), exportSheetOpen && /*#__PURE__*/React.createElement(FinanceExportSheet, {
     defaultPeriod: exportDefaultPeriod,
     sessionHistory: sessionHistory,
@@ -40955,7 +41184,7 @@ function FinancePL({
   }, t("finance.noExpensesThisPeriod")) : Object.entries(catTotals).map(([cat, amt]) => /*#__PURE__*/React.createElement(BillRow, {
     key: cat,
     label: t("finance.deductCategoryLine", {
-      category: cat
+      category: financeCategoryDisplayLabel(cat, t)
     }),
     v: -amt,
     kind: "expense"
@@ -41208,7 +41437,7 @@ function TournamentFinanceGroupsList({
     }))), (t.finance?.expense || []).map(e => /*#__PURE__*/React.createElement("div", {
       key: e.id
     }, tt("finance.expenseLine", {
-      label: e.label || TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category,
+      label: e.label || financeCategoryDisplayLabel(TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category, tt),
       amount: formatCurrency(e.amount)
     }))), ft.entryFee === 0 && !(t.finance?.income || []).length && !(t.finance?.expense || []).length && /*#__PURE__*/React.createElement("div", null, tt("finance.noEntries"))));
   })));
@@ -41332,7 +41561,8 @@ function YearPickerSheet({
   years,
   onPick,
   onClose,
-  t
+  t,
+  uiLocale
 }) {
   return /*#__PURE__*/React.createElement(Overlay, {
     onClose: onClose
@@ -41382,7 +41612,7 @@ function YearPickerSheet({
       color: T.text
     }
   }, t("finance.yearOption", {
-    year: Number(y) + 543
+    year: uiLocale === "en" ? Number(y) : Number(y) + 543
   })))));
 }
 
@@ -42362,7 +42592,9 @@ function SummaryTab({
   getP,
   settings,
   session,
-  tournamentHistory
+  tournamentHistory,
+  t,
+  tc
 }) {
   const [detail, setDetail] = useState(null); // player id for detail
   const doneCurrent = current.filter(m => m.status === "done");
@@ -42415,7 +42647,7 @@ function SummaryTab({
       textAlign: "center",
       padding: "40px 0"
     }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E01\u0E4A\u0E27\u0E19 \u2014 \u0E40\u0E23\u0E34\u0E48\u0E21\u0E08\u0E31\u0E14\u0E01\u0E4A\u0E27\u0E19\u0E43\u0E19\u0E41\u0E17\u0E47\u0E1A \"\u0E40\u0E01\u0E21\" \u0E01\u0E48\u0E2D\u0E19");
+  }, t("summary.empty"));
   const Stat = ({
     label,
     value
@@ -42448,10 +42680,10 @@ function SummaryTab({
       marginBottom: 10
     }
   }, /*#__PURE__*/React.createElement(Stat, {
-    label: "\u0E41\u0E21\u0E15\u0E0A\u0E4C\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14",
+    label: t("summary.totalMatches"),
     value: totalMatches
   }), /*#__PURE__*/React.createElement(Stat, {
-    label: "\u0E40\u0E01\u0E21\u0E23\u0E27\u0E21",
+    label: t("summary.totalGames"),
     value: totalGames
   })), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -42460,10 +42692,10 @@ function SummaryTab({
       marginBottom: 10
     }
   }, /*#__PURE__*/React.createElement(Stat, {
-    label: "\u0E40\u0E01\u0E21\u0E19\u0E49\u0E2D\u0E22\u0E2A\u0E38\u0E14",
+    label: t("summary.minimumGames"),
     value: minGames
   }), /*#__PURE__*/React.createElement(Stat, {
-    label: "\u0E40\u0E01\u0E21\u0E21\u0E32\u0E01\u0E2A\u0E38\u0E14",
+    label: t("summary.maximumGames"),
     value: maxGames
   })), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -42472,10 +42704,10 @@ function SummaryTab({
       marginBottom: 16
     }
   }, /*#__PURE__*/React.createElement(Stat, {
-    label: "\u0E23\u0E2D\u0E40\u0E09\u0E25\u0E35\u0E48\u0E22 (\u0E19\u0E32\u0E17\u0E35)",
+    label: t("summary.averageWaitMinutes"),
     value: avgWaitMin ?? "-"
   }), /*#__PURE__*/React.createElement(Stat, {
-    label: "\u0E23\u0E2D\u0E19\u0E32\u0E19\u0E2A\u0E38\u0E14 (\u0E19\u0E32\u0E17\u0E35)",
+    label: t("summary.maximumWaitMinutes"),
     value: maxWaitMin ?? "-"
   })), /*#__PURE__*/React.createElement("button", {
     onClick: () => shareSummary(buildShareText({
@@ -42503,13 +42735,13 @@ function SummaryTab({
     }
   }, /*#__PURE__*/React.createElement(Share2, {
     size: 15
-  }), " \u0E41\u0E0A\u0E23\u0E4C\u0E2A\u0E23\u0E38\u0E1B\u0E01\u0E4A\u0E27\u0E19"), /*#__PURE__*/React.createElement(SectionHead, {
+  }), " ", t("summary.shareSession")), /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(User, {
       size: 16,
       color: T.green
     }),
-    title: "\u0E08\u0E33\u0E19\u0E27\u0E19\u0E40\u0E01\u0E21\u0E02\u0E2D\u0E07\u0E41\u0E15\u0E48\u0E25\u0E30\u0E04\u0E19",
-    sub: "\u0E0A\u0E19\u0E30-\u0E41\u0E1E\u0E49-\u0E40\u0E2A\u0E21\u0E2D \xB7 \u0E41\u0E15\u0E30\u0E14\u0E39\u0E23\u0E32\u0E22\u0E25\u0E30\u0E40\u0E2D\u0E35\u0E22\u0E14"
+    title: t("summary.gamesPerPlayer"),
+    sub: t("summary.recordHint")
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -42524,7 +42756,7 @@ function SummaryTab({
       textAlign: "center",
       padding: "8px 0"
     }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19") : ranking.map(p => {
+  }, t("player.notFound")) : ranking.map(p => {
     const st = playerStats(p.id, allHist);
     return /*#__PURE__*/React.createElement("button", {
       key: p.id,
@@ -42568,7 +42800,7 @@ function SummaryTab({
         fontWeight: 800,
         color: T.text
       }
-    }, p.games || 0, " \u0E40\u0E01\u0E21"), /*#__PURE__*/React.createElement(ChevronRight, {
+    }, tc("common.gameCount", p.games || 0)), /*#__PURE__*/React.createElement(ChevronRight, {
       size: 15,
       color: T.muted
     }));
@@ -42577,8 +42809,8 @@ function SummaryTab({
       size: 16,
       color: T.muted
     }),
-    title: "\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E41\u0E21\u0E15\u0E0A\u0E4C",
-    sub: `${allHist.length} เกม`
+    title: t("history.matchHistory"),
+    sub: tc("common.matchCount", allHist.length)
   }), allHist.length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       color: T.muted,
@@ -42586,7 +42818,7 @@ function SummaryTab({
       textAlign: "center",
       padding: "8px 0"
     }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E40\u0E01\u0E21\u0E17\u0E35\u0E48\u0E08\u0E1A") : /*#__PURE__*/React.createElement("div", {
+  }, t("summary.noCompletedMatches")) : /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -42624,29 +42856,29 @@ function SummaryTab({
       fontSize: 12,
       color: T.muted
     }
-  }, PSTATUS[detailP.status || "absent"].label))), /*#__PURE__*/React.createElement("div", {
+  }, t(PSTATUS_I18N_KEY[detailP.status || "absent"])))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
       marginBottom: 12
     }
   }, /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\u0E40\u0E01\u0E21",
+    label: t("summary.gamesLabel"),
     value: detailP.games || 0
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\u0E0A\u0E19\u0E30",
+    label: t("score.win"),
     value: detailStats.win,
     color: T.green
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\u0E41\u0E1E\u0E49",
+    label: t("score.lose"),
     value: detailStats.loss,
     color: T.accent
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\u0E40\u0E2A\u0E21\u0E2D",
+    label: t("score.draw"),
     value: detailStats.draw,
     color: T.blue
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "Win%",
+    label: t("summary.winRate"),
     value: detailStats.winRate != null ? detailStats.winRate + "%" : "-"
   })), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -42654,12 +42886,14 @@ function SummaryTab({
       color: T.muted,
       marginBottom: 12
     }
-  }, "\u0E44\u0E21\u0E48\u0E21\u0E35\u0E04\u0E30\u0E41\u0E19\u0E19 ", detailStats.noScore, " \u0E40\u0E01\u0E21 (\u0E19\u0E31\u0E1A\u0E40\u0E01\u0E21\u0E41\u0E15\u0E48\u0E44\u0E21\u0E48\u0E19\u0E31\u0E1A\u0E41\u0E1E\u0E49\u0E0A\u0E19\u0E30)"), /*#__PURE__*/React.createElement(DetailList, {
-    title: "\u0E04\u0E39\u0E48\u0E17\u0E35\u0E48\u0E40\u0E25\u0E48\u0E19\u0E14\u0E49\u0E27\u0E22",
+  }, t("summary.noScoreGames", {
+    count: detailStats.noScore
+  })), /*#__PURE__*/React.createElement(DetailList, {
+    title: t("summary.partnersPlayedWith"),
     map: detailStats.partners,
     getP: getP
   }), /*#__PURE__*/React.createElement(DetailList, {
-    title: "\u0E04\u0E39\u0E48\u0E15\u0E48\u0E2D\u0E2A\u0E39\u0E49\u0E17\u0E35\u0E48\u0E1E\u0E1A",
+    title: t("summary.opponentsFaced"),
     map: detailStats.opps,
     getP: getP
   }), detailTStats && detailTStats.tournaments > 0 && /*#__PURE__*/React.createElement("div", {
@@ -42668,8 +42902,8 @@ function SummaryTab({
     }
   }, /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement("span", null, "\uD83C\uDFC6"),
-    title: "\u0E2A\u0E16\u0E34\u0E15\u0E34 Tournament",
-    sub: "\u0E41\u0E22\u0E01\u0E08\u0E32\u0E01\u0E2A\u0E16\u0E34\u0E15\u0E34\u0E08\u0E31\u0E14\u0E01\u0E4A\u0E27\u0E19"
+    title: t("summary.tournamentStats"),
+    sub: t("summary.tournamentStatsHint")
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -42678,17 +42912,17 @@ function SummaryTab({
       flexWrap: "wrap"
     }
   }, /*#__PURE__*/React.createElement(MiniStat, {
-    label: "Tournament",
+    label: t("summary.tournamentsLabel"),
     value: detailTStats.tournaments
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\u0E41\u0E21\u0E15\u0E0A\u0E4C",
+    label: t("summary.matchesLabel"),
     value: detailTStats.matches
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\u0E0A\u0E19\u0E30",
+    label: t("score.win"),
     value: detailTStats.wins,
     color: T.green
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\u0E41\u0E1E\u0E49",
+    label: t("score.lose"),
     value: detailTStats.losses,
     color: T.accent
   })), /*#__PURE__*/React.createElement("div", {
@@ -42697,11 +42931,11 @@ function SummaryTab({
       gap: 8
     }
   }, /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\uD83C\uDFC6 \u0E41\u0E0A\u0E21\u0E1B\u0E4C",
+    label: `🏆 ${t("summary.champion")}`,
     value: detailTStats.championships,
     color: T.green
   }), /*#__PURE__*/React.createElement(MiniStat, {
-    label: "\uD83E\uDD48 \u0E23\u0E2D\u0E07\u0E41\u0E0A\u0E21\u0E1B\u0E4C",
+    label: `🥈 ${t("summary.runnerUp")}`,
     value: detailTStats.runnerUps
   })))));
 }
@@ -46297,19 +46531,20 @@ function LevelPresetEditor({
         padding: "2px 7px",
         borderRadius: 10
       }
-    }, "\u0E43\u0E0A\u0E49\u0E2D\u0E22\u0E39\u0E48")), /*#__PURE__*/React.createElement("div", {
+    }, t("settings.presetInUse"))), /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11,
         color: T.muted
       }
-    }, preset.description));
+    }, presetDisplayDescription(preset.id, t)));
   })), currentId === "custom" && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10
     }
   }, /*#__PURE__*/React.createElement(CustomLevelEditor, {
     customLevels: settings.customLevels || [],
-    setCustomLevels: setCustomLevels
+    setCustomLevels: setCustomLevels,
+    t: t
   })), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowSkillInfo(v => !v),
     style: {
@@ -46328,7 +46563,7 @@ function LevelPresetEditor({
     }
   }, /*#__PURE__*/React.createElement(Info, {
     size: 14
-  }), " ", showSkillInfo ? "ซ่อน" : "ดู", "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22\u0E41\u0E15\u0E48\u0E25\u0E30\u0E23\u0E30\u0E14\u0E31\u0E1A"), showSkillInfo && /*#__PURE__*/React.createElement("div", {
+  }), " ", showSkillInfo ? t("settings.hideLevelDescriptions") : t("settings.viewLevelDescriptions")), showSkillInfo && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11.5,
       color: T.muted,
@@ -46347,7 +46582,7 @@ function LevelPresetEditor({
       fontWeight: 800,
       color: levelColor(si)
     }
-  }, levelOptions.find(o => o.skillIndex === si)?.label || `Skill ${si}`), " \u2014 ", SKILL_DESC[si]))), pendingPreset && /*#__PURE__*/React.createElement("div", {
+  }, levelOptions.find(o => o.skillIndex === si)?.label || `Skill ${si}`), " \u2014 ", skillDescription(si, t)))), pendingPreset && /*#__PURE__*/React.createElement("div", {
     onClick: () => setPendingPreset(null),
     style: {
       position: "fixed",
@@ -46374,13 +46609,13 @@ function LevelPresetEditor({
       fontWeight: 800,
       marginBottom: 8
     }
-  }, "\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E23\u0E30\u0E1A\u0E1A\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D?"), /*#__PURE__*/React.createElement("div", {
+  }, t("settings.changeSkillSystemTitle")), /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12.5,
       color: T.muted,
       marginBottom: 16
     }
-  }, "\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19\u0E08\u0E30\u0E16\u0E39\u0E01\u0E41\u0E1B\u0E25\u0E07\u0E2D\u0E31\u0E15\u0E42\u0E19\u0E21\u0E31\u0E15\u0E34\u0E15\u0E32\u0E21\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E1D\u0E35\u0E21\u0E37\u0E2D\u0E40\u0E14\u0E34\u0E21 \u0E2A\u0E16\u0E34\u0E15\u0E34 \u0E01\u0E32\u0E23\u0E08\u0E31\u0E1A\u0E04\u0E39\u0E48 \u0E41\u0E25\u0E30\u0E1B\u0E23\u0E30\u0E27\u0E31\u0E15\u0E34\u0E01\u0E4A\u0E27\u0E19\u0E08\u0E30\u0E44\u0E21\u0E48\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19"), /*#__PURE__*/React.createElement("div", {
+  }, t("settings.changeSkillSystemBody")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -46388,14 +46623,15 @@ function LevelPresetEditor({
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setPendingPreset(null),
     style: btnSecondary
-  }, "\u0E22\u0E01\u0E40\u0E25\u0E34\u0E01"), /*#__PURE__*/React.createElement("button", {
+  }, t("common.cancel")), /*#__PURE__*/React.createElement("button", {
     onClick: confirm,
     style: btnPrimary
-  }, "\u0E40\u0E1B\u0E25\u0E35\u0E48\u0E22\u0E19\u0E23\u0E30\u0E1A\u0E1A")))));
+  }, t("settings.changeSkillSystemButton"))))));
 }
 function CustomLevelEditor({
   customLevels,
-  setCustomLevels
+  setCustomLevels,
+  t
 }) {
   const [name, setName] = useState("");
   const [skillIndex, setSkillIndex] = useState(6);
@@ -46413,7 +46649,7 @@ function CustomLevelEditor({
   const add = () => {
     const n = name.trim();
     if (!n) {
-      setError("ชื่อห้ามว่าง");
+      setError(t("settings.levelNameRequired"));
       return;
     }
     setError("");
@@ -46428,7 +46664,7 @@ function CustomLevelEditor({
   };
   const remove = id => {
     if (customLevels.length <= 2) {
-      setError("ต้องมีอย่างน้อย 2 ระดับ");
+      setError(t("settings.levelMinimum"));
       return;
     }
     setError("");
@@ -46450,7 +46686,9 @@ function CustomLevelEditor({
       fontWeight: 800,
       marginBottom: 8
     }
-  }, "\u0E01\u0E33\u0E2B\u0E19\u0E14\u0E23\u0E30\u0E14\u0E31\u0E1A\u0E40\u0E2D\u0E07 (", customLevels.length, " \u0E23\u0E30\u0E14\u0E31\u0E1A)"), sorted.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, t("settings.customLevelsCount", {
+    count: customLevels.length
+  })), sorted.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -46504,7 +46742,7 @@ function CustomLevelEditor({
   }))))), /*#__PURE__*/React.createElement("input", {
     value: name,
     onChange: e => setName(e.target.value),
-    placeholder: "\u0E0A\u0E37\u0E48\u0E2D\u0E23\u0E30\u0E14\u0E31\u0E1A \u0E40\u0E0A\u0E48\u0E19 \u0E21\u0E37\u0E2D\u0E43\u0E2B\u0E21\u0E48",
+    placeholder: t("settings.levelNamePlaceholder"),
     style: {
       ...sty,
       width: "100%",
@@ -46531,7 +46769,7 @@ function CustomLevelEditor({
   }, "Skill ", si))), /*#__PURE__*/React.createElement("input", {
     value: description,
     onChange: e => setDescription(e.target.value),
-    placeholder: "\u0E04\u0E33\u0E2D\u0E18\u0E34\u0E1A\u0E32\u0E22 (\u0E44\u0E21\u0E48\u0E1A\u0E31\u0E07\u0E04\u0E31\u0E1A)",
+    placeholder: t("settings.levelDescriptionPlaceholder"),
     style: {
       ...sty,
       flex: 1,

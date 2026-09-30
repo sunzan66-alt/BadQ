@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.45";
+const APP_VERSION = "1.12.46";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -43,10 +43,26 @@ function getPresetMeta(id) {
   if (id === "custom") return { id: "custom", name: "กำหนดเอง", description: "Organizer กำหนดระดับฝีมือเองได้ โดย map เข้ากับ Skill Index 1–11" };
   return LEVEL_PRESETS.find((p) => p.id === id) || LEVEL_PRESETS[0];
 }
-// Display-only localization for preset names. The persisted preset id remains exactly `isan`.
+// Display-only localization for system preset names/descriptions. Persisted preset ids, level arrays and
+// skill-index mappings remain unchanged.
 function presetDisplayName(id, t) {
-  if (id === "isan" && t) return t("quanSettings.presetIsanName");
+  const key = {
+    "badweb-central": "settings.presetBadwebCentral",
+    isan: "quanSettings.presetIsanName",
+    north: "settings.presetNorth",
+    custom: "settings.presetCustom",
+  }[id];
+  if (key && t) return t(key);
   return getPresetMeta(id).name;
+}
+function presetDisplayDescription(id, t) {
+  const preset = getPresetMeta(id);
+  if (!t) return preset.description;
+  if (id === "custom") return t("settings.presetCustomDescription");
+  return t("settings.presetOrder", { levels: (preset.levels || []).join(" → ") });
+}
+function skillDescription(skillIndex, t) {
+  return t ? t(`settings.skillDescription.${skillIndex}`) : SKILL_DESC[skillIndex];
 }
 // display label for a given skillIndex, resolved against whichever preset is currently active (incl. custom)
 function displayLevelFor(skillIndex, settings) {
@@ -2530,6 +2546,27 @@ const LEGACY_EXPENSE_CATEGORY_LABEL = {
   "อื่น ๆ": "ค่าใช้จ่ายอื่น",
 };
 function normExpenseCategoryLabel(cat) { return LEGACY_EXPENSE_CATEGORY_LABEL[cat] || cat; }
+// Display-only translation for known system categories. The category value and any suffix after " - "
+// stay byte-for-byte unchanged in storage; unknown/user-entered labels pass through untouched.
+const FINANCE_CATEGORY_I18N_KEY = {
+  "ค่าสนาม/สถานที่": "finance.category.courtVenue",
+  "ค่าลูกแบต": "finance.category.shuttlecock",
+  "ค่าลูกแบด": "finance.category.shuttlecock",
+  "ค่ารางวัล": "finance.category.prizes",
+  "ค่ารางวัลการแข่งขัน": "finance.category.tournamentPrizes",
+  "ค่าอาหาร/น้ำ": "finance.category.foodDrinks",
+  "ค่าเดินทาง": "finance.category.travel",
+  "ค่าใช้จ่ายอื่น": "finance.category.other",
+  "อื่น ๆ": "finance.category.other",
+};
+function financeCategoryDisplayLabel(label, t) {
+  if (!t || label == null) return label;
+  const parts = String(label).split(" - ");
+  const key = FINANCE_CATEGORY_I18N_KEY[parts[0]];
+  if (!key) return label;
+  parts[0] = t(key);
+  return parts.join(" - ");
+}
 // v1.11.20: fixed display order for the P&L expense breakdown (computeFinanceForRange) — ก๊วนแบต
 // categories first, then Tournament, per the organizer's requested statement layout. A category not
 // listed here (an organizer's own custom label, or ค่ารางวัล/ค่าเดินทาง when actually used) is appended
@@ -11418,10 +11455,10 @@ function AppInner() {
         {tab === "session" && <GameTab
           t={t}
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
-          summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory }}
+          summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory, t, tc }}
         />}
         {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, t, tc, fmtDate, fmtDateFull, fmtDateTime }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -12730,8 +12767,8 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, t, o
   // is the single source for it now.
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>⚙️ ตั้งค่าระดับฝีมือ</div>
-      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>เลือกระบบระดับที่ใช้ในพื้นที่/ก๊วนของคุณ และดูคำอธิบายแต่ละระดับ</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>⚙️ {t("settings.levelSettingsTitle")}</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>{t("settings.levelSettingsIntro")}</div>
       <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} t={t} />
     </Overlay>
   );
@@ -12756,7 +12793,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
   const [wipedNotice, setWipedNotice] = useState(false);
-  const currentPreset = getPresetMeta(settings.levelPresetId || "badweb-central");
+  const currentPresetId = settings.levelPresetId || "badweb-central";
 
   const NavRow = ({ children, onClick }) => (
     <button onClick={onClick} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer" }}>{children}</button>
@@ -12800,7 +12837,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
       <Label>🏸 {t("settings.skillLevels")}</Label>
       <NavRow onClick={() => setLevelSheetOpen(true)}>
         <span style={{ fontSize: 12.5, color: T.muted }}>{t("settings.skillSystem")}</span>
-        <span style={{ marginLeft: "auto", fontWeight: 800, fontSize: 13, color: T.text }}>{currentPreset.name}</span>
+        <span style={{ marginLeft: "auto", fontWeight: 800, fontSize: 13, color: T.text }}>{presetDisplayName(currentPresetId, t)}</span>
         <ChevronRight size={15} color={T.muted} />
       </NavRow>
       {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} t={t} onClose={() => setLevelSheetOpen(false)} />}
@@ -12811,8 +12848,8 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
       <NavRow onClick={() => setRankingClubPickerOpen(true)}>
         <span style={{ fontSize: 17 }}>🏆</span>
         <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>ตั้งค่า Rank</div>
-          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 1 }}>กำหนดระบบ Ranking แยกตามก๊วน</div>
+          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t("ranking.settings")}</div>
+          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 1 }}>{t("ranking.advancedRowSub")}</div>
         </div>
         <ChevronRight size={15} color={T.muted} />
       </NavRow>
@@ -12838,9 +12875,9 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
 
       {/* v1.11.34: "ไม่ได้มานานเกิน [N] เดือน" (spec section 2) — used ONLY by the ผู้เล่น tab's
           "ไม่ได้มานาน" filter, never auto-deletes/auto-archives anyone. Default 6 (see getDefaultSettings). */}
-      <div style={{ marginTop: 14 }}><Label>👥 การจัดการสมาชิก</Label></div>
+      <div style={{ marginTop: 14 }}><Label>👥 {t("settings.memberManagement")}</Label></div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8 }}>
-        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>ไม่ได้มานานเกิน</span>
+        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>{t("settings.inactiveThreshold")}</span>
         <input
           type="number"
           min={1}
@@ -12849,7 +12886,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           onFocus={(e) => e.target.select()}
           style={{ width: 56, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }}
         />
-        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>เดือน</span>
+        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>{t("settings.monthUnit")}</span>
       </div>
 
       {/* v1.12.12 (P2.2 IA reorg): "☁️ BadQ Online" moved OUT of ตั้งค่าทั่วไป into its own top-level Settings
@@ -13947,7 +13984,7 @@ function Fairness({ sA, sB }) {
 // openSessionPhoto, applyGroupDefaultsFor, QuanSettingsSheet and all its props, fmtMode,
 // quanSettingsSummary) — nothing duplicated, just relocated, plus one small addition (the "🔒 ล็อคคู่ N คู่"
 // line the new mockup calls for, computed directly off the existing lockPairs array).
-function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessionPhoto, sessionHistory, applyGroupDefaultsFor, settings, setSettings, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current, t, tc, fmtDateTime }) {
+function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessionPhoto, sessionHistory, applyGroupDefaultsFor, settings, setSettings, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current, t, tc, fmtDate, fmtDateTime }) {
   const [showNameDropdown, setShowNameDropdown] = useState(false);
   const [openQuanSettings, setOpenQuanSettings] = useState(false);
   // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
@@ -14011,7 +14048,10 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: T.muted }}>
           <Calendar size={15} />
-          <input type="date" value={session.date} onChange={(e) => setSession((s) => ({ ...s, date: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
+          <label style={{ position: "relative", display: "inline-flex", alignItems: "center", minHeight: 28, fontSize: 13, color: T.muted, cursor: "pointer" }}>
+            <span aria-hidden="true">{fmtDate ? fmtDate(session.date) : fmtThaiDate(session.date)}</span>
+            <input aria-label={t("session.dateLabel")} type="date" value={session.date} onChange={(e) => setSession((s) => ({ ...s, date: e.target.value }))} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }} />
+          </label>
           {session.photo && <button onClick={clearSessionPhoto} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700 }}>{t("session.photoRemove")}</button>}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, color: T.muted }}>
@@ -16019,7 +16059,8 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
       </div>
       {entries.length === 0 && !adding && <div style={{ fontSize: 11.5, color: T.muted, padding: "4px 2px" }}>{tr("finance.noEntriesYet")}</div>}
       {entries.map((e) => {
-        const catLabel = (categories.find((c) => c[0] === e.category) || [, e.category])[1];
+        const rawCatLabel = (categories.find((c) => c[0] === e.category) || [, e.category])[1];
+        const catLabel = financeCategoryDisplayLabel(rawCatLabel, tr);
         return (
           <div key={e.id} style={{ display: "flex", alignItems: "center", padding: "7px 10px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, marginBottom: 6 }}>
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -16035,7 +16076,7 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
         <div style={{ padding: 10, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 10, marginTop: 4 }}>
           <div style={{ display: "flex", gap: 6, marginBottom: 8, overflowX: "auto" }}>
             {categories.map(([v, l]) => (
-              <button key={v} onClick={() => setCategory(v)} style={{ flex: "none", padding: "6px 10px", borderRadius: 8, fontSize: 11.5, fontWeight: 800, border: `1.5px solid ${category === v ? T.green : T.border}`, background: category === v ? "#e2f5ec" : T.surface, color: category === v ? T.green : T.muted }}>{l}</button>
+              <button key={v} onClick={() => setCategory(v)} style={{ flex: "none", padding: "6px 10px", borderRadius: 8, fontSize: 11.5, fontWeight: 800, border: `1.5px solid ${category === v ? T.green : T.border}`, background: category === v ? "#e2f5ec" : T.surface, color: category === v ? T.green : T.muted }}>{financeCategoryDisplayLabel(l, tr)}</button>
             ))}
           </div>
           <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={tr("finance.descriptionPlaceholder")} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, boxSizing: "border-box", marginBottom: 8 }} />
@@ -16223,7 +16264,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
 
       {/* 🏸 ระดับฝีมือ */}
       <button onClick={() => toggle("level")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "level" ? 0 : 4 }}>
-        <ClipboardList size={15} color={T.muted} /> 🏸 {t("quanSettings.levelSection")} ({presetDisplayName(settings.levelPresetId || "badweb-central", t)})
+        <ClipboardList size={15} color={T.muted} /> 🏸 {t("quanSettings.levelSection")} · {presetDisplayName(settings.levelPresetId || "badweb-central", t)}
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "level" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "level" && (
@@ -17430,7 +17471,7 @@ function ExpenseListEditor({ items, onAdd, onUpdate, onRemove, categories, t }) 
           {items.map((it) => (
             <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
               <span style={{ flex: 1, minWidth: 0 }}>
-                {categories && <span style={{ display: "block", fontSize: 11, color: T.muted, fontWeight: 700 }}>{it.category}{it.auto ? (t ? t("finance.autoEstimatedSuffix") : " · ประมาณการ") : ""}</span>}
+                {categories && <span style={{ display: "block", fontSize: 11, color: T.muted, fontWeight: 700 }}>{financeCategoryDisplayLabel(it.category, t)}{it.auto ? (t ? t("finance.autoEstimatedSuffix") : " · ประมาณการ") : ""}</span>}
                 <span style={{ display: "block", fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.description || (categories ? "-" : (t ? t("finance.noDescriptionFallback") : "ไม่มีรายละเอียด"))}</span>
               </span>
               <span style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 13, fontWeight: 800 }}>
@@ -17445,7 +17486,7 @@ function ExpenseListEditor({ items, onAdd, onUpdate, onRemove, categories, t }) 
         <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 10 }}>
           {categories && (
             <select value={draft.category} onChange={(e) => setDraft((d) => ({ ...d, category: e.target.value }))} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, background: "#fff" }}>
-              {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+              {categories.map((c) => <option key={c} value={c}>{financeCategoryDisplayLabel(c, t)}</option>)}
             </select>
           )}
           <input type="text" placeholder={t ? t("finance.descriptionPlaceholder") : "รายละเอียด (ไม่บังคับ)"} value={draft.description} onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
@@ -17486,25 +17527,38 @@ function fmtThaiMonthLabel(ym) {
 // their own detail sheet sorted newest-first. Deliberately reads straight off the flat `rewardHistory` ledger
 // (never per-session `s.wheelPrizes`/bill state) so it survives sessions being deleted from sessionHistory —
 // exactly like discountCredits' own ledger already does elsewhere in this app.
-function GlobalRewardHistory({ rewardHistory, fmtDate }) {
+function rewardHistoryDisplayName(rawName, t) {
+  const raw = String(rawName || "");
+  let m = raw.match(/^ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ใช้ทันที\)$/);
+  if (m) return t("reward.defaultDiscountNow", { amount: m[1] });
+  m = raw.match(/^ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ครั้งหน้า\)$/);
+  if (m) return t("reward.defaultDiscountNext", { amount: m[1] });
+  m = raw.match(/^ฟรีค่าสนาม!\s*ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ทันที\)$/);
+  if (m) return t("reward.defaultFreeCourt", { amount: m[1] });
+  return raw;
+}
+function GlobalRewardHistory({ rewardHistory, fmtDate, t, tc }) {
   const [openPlayerId, setOpenPlayerId] = useState(null);
   const grouped = useMemo(() => {
     const byPlayer = {};
     (rewardHistory || []).forEach((r) => {
-      if (!byPlayer[r.playerId]) byPlayer[r.playerId] = { playerId: r.playerId, name: r.playerNameSnapshot || "ผู้เล่น", entries: [], latestTs: 0 };
+      if (!byPlayer[r.playerId]) byPlayer[r.playerId] = { playerId: r.playerId, name: r.playerNameSnapshot || t("reward.unknownPlayer"), entries: [], latestTs: 0 };
       byPlayer[r.playerId].entries.push(r);
       if ((r.timestamp || 0) >= byPlayer[r.playerId].latestTs) { byPlayer[r.playerId].latestTs = r.timestamp || 0; byPlayer[r.playerId].name = r.playerNameSnapshot || byPlayer[r.playerId].name; }
     });
     return Object.values(byPlayer).sort((a, b) => b.latestTs - a.latestTs);
-  }, [rewardHistory]);
+  }, [rewardHistory, t]);
   const openPlayer = grouped.find((g) => g.playerId === openPlayerId);
   const rewardIcon = (rt) => (rt === "cash" ? "💵" : rt === "discount" ? "🎟️" : "🎁");
   const summarize = (entries) => {
     const byName = {};
-    entries.forEach((e) => { byName[e.rewardNameSnapshot] = (byName[e.rewardNameSnapshot] || 0) + 1; });
+    entries.forEach((e) => {
+      const name = rewardHistoryDisplayName(e.rewardNameSnapshot, t);
+      byName[name] = (byName[name] || 0) + 1;
+    });
     return Object.entries(byName).map(([n, c]) => `${n} ×${c}`).join(", ");
   };
-  if (grouped.length === 0) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "10px 0" }}>ยังไม่มีใครได้รางวัลจากวงล้อ</div>;
+  if (grouped.length === 0) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "10px 0" }}>{t("reward.noHistory")}</div>;
   return (
     <>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -17514,10 +17568,10 @@ function GlobalRewardHistory({ rewardHistory, fmtDate }) {
             <button key={g.playerId} onClick={() => setOpenPlayerId(g.playerId)} style={{ textAlign: "left", display: "flex", flexDirection: "column", gap: 3, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ fontWeight: 800, fontSize: 13.5 }}>{g.name}</span>
-                <span style={{ marginLeft: "auto", fontSize: 11.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>ได้รางวัล {g.entries.length} ครั้ง</span>
+                <span style={{ marginLeft: "auto", fontSize: 11.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>{tc("reward.winCount", g.entries.length)}</span>
               </div>
               <div style={{ fontSize: 11.5, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summarize(g.entries)}</div>
-              <div style={{ fontSize: 10.5, color: T.muted }}>ล่าสุด: {fmtDate ? fmtDate(latest.date) : fmtThaiDate(latest.date)} · {latest.groupNameSnapshot}</div>
+              <div style={{ fontSize: 10.5, color: T.muted }}>{t("reward.latest")}: {fmtDate ? fmtDate(latest.date) : fmtThaiDate(latest.date)} · {latest.groupNameSnapshot}</div>
             </button>
           );
         })}
@@ -17525,13 +17579,13 @@ function GlobalRewardHistory({ rewardHistory, fmtDate }) {
       {openPlayer && (
         <Overlay onClose={() => setOpenPlayerId(null)}>
           <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 2 }}>🎁 {openPlayer.name}</div>
-          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>ได้รางวัลทั้งหมด {openPlayer.entries.length} ครั้ง</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>{tc("reward.totalWinCount", openPlayer.entries.length)}</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {[...openPlayer.entries].sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0)).map((r) => (
               <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
                 <span style={{ fontSize: 16, flexShrink: 0 }}>{rewardIcon(r.rewardType)}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.rewardNameSnapshot}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rewardHistoryDisplayName(r.rewardNameSnapshot, t)}</div>
                   <div style={{ fontSize: 11, color: T.muted }}>{fmtDate ? fmtDate(r.date) : fmtThaiDate(r.date)} · {r.groupNameSnapshot}</div>
                 </div>
               </div>
@@ -17592,7 +17646,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
       )}
       {rewardFeatureOn && openRewardHistory && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
-          <GlobalRewardHistory rewardHistory={rewardHistory} fmtDate={fmtDate} />
+          <GlobalRewardHistory rewardHistory={rewardHistory} fmtDate={fmtDate} t={tr} tc={trc} />
         </div>
       )}
 
@@ -18074,7 +18128,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }) {
+function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }) {
   // v1.11.53: this component's OWN local `mode` state (below) is the finance period view toggle
   // (day/month/overview) — unrelated to and pre-dating the doubles/singles game format, hence the `gameMode`
   // prop name here specifically (every other component in this file still just calls it `mode`, matching
@@ -18206,7 +18260,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
         <>
           <div style={{ textAlign: "center" }}>
             <button onClick={() => setPickerOpen("year")} style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: "0 auto 16px", padding: "8px 16px", borderRadius: 20, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 15, fontWeight: 800, color: T.text }}>
-              {year === "all" ? t("common.all") : Number(year) + 543} <ChevronDown size={16} color={T.muted} />
+              {year === "all" ? t("common.all") : (uiLocale === "en" ? Number(year) : Number(year) + 543)} <ChevronDown size={16} color={T.muted} />
             </button>
           </div>
           {(() => {
@@ -18246,7 +18300,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
       )}
       {pickerOpen === "day-month" && <MonthPickerSheet months={allMonths} onPick={(ym) => { setDayYm(ym); setSelectedDate(null); }} onClose={() => setPickerOpen(null)} t={t} fmtMonthFull={fmtMonthFull} />}
       {pickerOpen === "month-month" && <MonthPickerSheet months={allMonths} onPick={setMonthYm} onClose={() => setPickerOpen(null)} t={t} fmtMonthFull={fmtMonthFull} />}
-      {pickerOpen === "year" && <YearPickerSheet years={allYears} onPick={setYear} onClose={() => setPickerOpen(null)} t={t} />}
+      {pickerOpen === "year" && <YearPickerSheet years={allYears} onPick={setYear} onClose={() => setPickerOpen(null)} t={t} uiLocale={uiLocale} />}
       {exportSheetOpen && (
         <FinanceExportSheet
           defaultPeriod={exportDefaultPeriod}
@@ -18959,7 +19013,7 @@ function FinancePL({ sessionRevenueTotal, otherIncomeTotal, membershipIncomeTota
         <div style={{ height: 4 }} />
         {Object.keys(catTotals).length === 0
           ? <div style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>{t("finance.noExpensesThisPeriod")}</div>
-          : Object.entries(catTotals).map(([cat, amt]) => <BillRow key={cat} label={t("finance.deductCategoryLine", { category: cat })} v={-amt} kind="expense" />)}
+          : Object.entries(catTotals).map(([cat, amt]) => <BillRow key={cat} label={t("finance.deductCategoryLine", { category: financeCategoryDisplayLabel(cat, t) })} v={-amt} kind="expense" />)}
         {shuttleRevOrExp && (
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, fontWeight: 700, padding: "3px 0" }}>
             <span>{shuttleProfit >= 0 ? t("finance.shuttlecockProfit") : t("finance.shuttlecockLoss")}</span>
@@ -19033,7 +19087,7 @@ function TournamentFinanceGroupsList({ title, tournaments, t: tt, tc }) {
                   <div style={{ padding: "0 12px 12px", fontSize: 12, color: T.muted, lineHeight: 1.8 }}>
                     {ft.entryFee > 0 && <div>{tt("finance.registrationFeeLine", { amount: formatCurrency(ft.entryFee) })}</div>}
                     {(t.finance?.income || []).map((e) => <div key={e.id}>{tt("finance.incomeLine", { label: e.label || TOURNAMENT_INCOME_CAT_LABEL[e.category] || e.category, amount: formatCurrency(e.amount) })}</div>)}
-                    {(t.finance?.expense || []).map((e) => <div key={e.id}>{tt("finance.expenseLine", { label: e.label || TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category, amount: formatCurrency(e.amount) })}</div>)}
+                    {(t.finance?.expense || []).map((e) => <div key={e.id}>{tt("finance.expenseLine", { label: e.label || financeCategoryDisplayLabel(TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category, tt), amount: formatCurrency(e.amount) })}</div>)}
                     {ft.entryFee === 0 && !(t.finance?.income || []).length && !(t.finance?.expense || []).length && <div>{tt("finance.noEntries")}</div>}
                   </div>
                 )}
@@ -19081,14 +19135,14 @@ function MonthPickerSheet({ months, onPick, onClose, t, fmtMonthFull }) {
     </Overlay>
   );
 }
-function YearPickerSheet({ years, onPick, onClose, t }) {
+function YearPickerSheet({ years, onPick, onClose, t, uiLocale }) {
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>{t("finance.selectPeriod")}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <button onClick={() => { onPick("all"); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>{t("finance.allTimeOption")}</button>
         {years.map((y) => (
-          <button key={y} onClick={() => { onPick(y); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>{t("finance.yearOption", { year: Number(y) + 543 })}</button>
+          <button key={y} onClick={() => { onPick(y); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>{t("finance.yearOption", { year: uiLocale === "en" ? Number(y) : Number(y) + 543 })}</button>
         ))}
       </div>
     </Overlay>
@@ -19435,7 +19489,7 @@ function PlayerPerformanceList({ playerStats, peopleById, tr }) {
 }
 
 /* ============ SUMMARY ============ */
-function SummaryTab({ players: rosterPlayers, history, current, getP, settings, session, tournamentHistory }) {
+function SummaryTab({ players: rosterPlayers, history, current, getP, settings, session, tournamentHistory, t, tc }) {
   const [detail, setDetail] = useState(null); // player id for detail
   const doneCurrent = current.filter((m) => m.status === "done");
   // v1.12.38: every "games played" figure on this live summary comes from the completed-match ledger (same as
@@ -19478,7 +19532,7 @@ function SummaryTab({ players: rosterPlayers, history, current, getP, settings, 
   const detailTStats = detailP ? tournamentStatsForPlayer(detailP.id, tournamentHistory) : null;
 
   const started = totalMatches > 0 || current.length > 0 || played.length > 0;
-  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "เกม" ก่อน</div>;
+  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>{t("summary.empty")}</div>;
 
   const Stat = ({ label, value }) => (
     <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 10px", textAlign: "center" }}>
@@ -19490,26 +19544,26 @@ function SummaryTab({ players: rosterPlayers, history, current, getP, settings, 
   return (
     <div>
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        <Stat label="แมตช์ทั้งหมด" value={totalMatches} />
-        <Stat label="เกมรวม" value={totalGames} />
+        <Stat label={t("summary.totalMatches")} value={totalMatches} />
+        <Stat label={t("summary.totalGames")} value={totalGames} />
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        <Stat label="เกมน้อยสุด" value={minGames} />
-        <Stat label="เกมมากสุด" value={maxGames} />
+        <Stat label={t("summary.minimumGames")} value={minGames} />
+        <Stat label={t("summary.maximumGames")} value={maxGames} />
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
-        <Stat label="รอเฉลี่ย (นาที)" value={avgWaitMin ?? "-"} />
-        <Stat label="รอนานสุด (นาที)" value={maxWaitMin ?? "-"} />
+        <Stat label={t("summary.averageWaitMinutes")} value={avgWaitMin ?? "-"} />
+        <Stat label={t("summary.maximumWaitMinutes")} value={maxWaitMin ?? "-"} />
       </div>
 
       <button
         onClick={() => shareSummary(buildShareText({ name: session?.name, date: session?.date, playerCount: ranking.length, totalMatches, maxGames, totalExpense: grandTotal }))}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px 0", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 18 }}
-      ><Share2 size={15} /> แชร์สรุปก๊วน</button>
+      ><Share2 size={15} /> {t("summary.shareSession")}</button>
 
-      <SectionHead icon={<User size={16} color={T.green} />} title="จำนวนเกมของแต่ละคน" sub="ชนะ-แพ้-เสมอ · แตะดูรายละเอียด" />
+      <SectionHead icon={<User size={16} color={T.green} />} title={t("summary.gamesPerPlayer")} sub={t("summary.recordHint")} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
-        {ranking.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ยังไม่มีผู้เล่น</div> :
+        {ranking.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{t("player.notFound")}</div> :
           ranking.map((p) => {
             const st = playerStats(p.id, allHist);
             return (
@@ -19517,15 +19571,15 @@ function SummaryTab({ players: rosterPlayers, history, current, getP, settings, 
                 <Avatar p={p} size={30} />
                 <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: levelColor(p.skillIndex), fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
                 {(st.win + st.loss + st.draw) > 0 && <span style={{ fontSize: 11.5, color: T.muted }}>{st.win}-{st.loss}-{st.draw}</span>}
-                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{p.games || 0} เกม</span>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{tc("common.gameCount", p.games || 0)}</span>
                 <ChevronRight size={15} color={T.muted} />
               </button>
             );
           })}
       </div>
 
-      <SectionHead icon={<History size={16} color={T.muted} />} title="ประวัติแมตช์" sub={`${allHist.length} เกม`} />
-      {allHist.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ยังไม่มีเกมที่จบ</div> : (
+      <SectionHead icon={<History size={16} color={T.muted} />} title={t("history.matchHistory")} sub={tc("common.matchCount", allHist.length)} />
+      {allHist.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{t("summary.noCompletedMatches")}</div> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {allHist.map((m) => <CompactMatch key={m.id} m={m} getP={getP} onClick={() => {}} />)}
         </div>
@@ -19536,31 +19590,31 @@ function SummaryTab({ players: rosterPlayers, history, current, getP, settings, 
         <Overlay onClose={() => setDetail(null)}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
             <Avatar p={detailP} size={44} />
-            <div><div style={{ fontSize: 16, fontWeight: 800 }}>{detailP.name} <span style={{ color: levelColor(detailP.skillIndex), fontSize: 13 }}>({detailP.level})</span></div><div style={{ fontSize: 12, color: T.muted }}>{PSTATUS[detailP.status || "absent"].label}</div></div>
+            <div><div style={{ fontSize: 16, fontWeight: 800 }}>{detailP.name} <span style={{ color: levelColor(detailP.skillIndex), fontSize: 13 }}>({detailP.level})</span></div><div style={{ fontSize: 12, color: T.muted }}>{t(PSTATUS_I18N_KEY[detailP.status || "absent"])}</div></div>
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <MiniStat label="เกม" value={detailP.games || 0} />
-            <MiniStat label="ชนะ" value={detailStats.win} color={T.green} />
-            <MiniStat label="แพ้" value={detailStats.loss} color={T.accent} />
-            <MiniStat label="เสมอ" value={detailStats.draw} color={T.blue} />
-            <MiniStat label="Win%" value={detailStats.winRate != null ? detailStats.winRate + "%" : "-"} />
+            <MiniStat label={t("summary.gamesLabel")} value={detailP.games || 0} />
+            <MiniStat label={t("score.win")} value={detailStats.win} color={T.green} />
+            <MiniStat label={t("score.lose")} value={detailStats.loss} color={T.accent} />
+            <MiniStat label={t("score.draw")} value={detailStats.draw} color={T.blue} />
+            <MiniStat label={t("summary.winRate")} value={detailStats.winRate != null ? detailStats.winRate + "%" : "-"} />
           </div>
-          <div style={{ fontSize: 12, color: T.muted, marginBottom: 12 }}>ไม่มีคะแนน {detailStats.noScore} เกม (นับเกมแต่ไม่นับแพ้ชนะ)</div>
-          <DetailList title="คู่ที่เล่นด้วย" map={detailStats.partners} getP={getP} />
-          <DetailList title="คู่ต่อสู้ที่พบ" map={detailStats.opps} getP={getP} />
+          <div style={{ fontSize: 12, color: T.muted, marginBottom: 12 }}>{t("summary.noScoreGames", { count: detailStats.noScore })}</div>
+          <DetailList title={t("summary.partnersPlayedWith")} map={detailStats.partners} getP={getP} />
+          <DetailList title={t("summary.opponentsFaced")} map={detailStats.opps} getP={getP} />
 
           {detailTStats && detailTStats.tournaments > 0 && (
             <div style={{ marginTop: 16 }}>
-              <SectionHead icon={<span>🏆</span>} title="สถิติ Tournament" sub="แยกจากสถิติจัดก๊วน" />
+              <SectionHead icon={<span>🏆</span>} title={t("summary.tournamentStats")} sub={t("summary.tournamentStatsHint")} />
               <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-                <MiniStat label="Tournament" value={detailTStats.tournaments} />
-                <MiniStat label="แมตช์" value={detailTStats.matches} />
-                <MiniStat label="ชนะ" value={detailTStats.wins} color={T.green} />
-                <MiniStat label="แพ้" value={detailTStats.losses} color={T.accent} />
+                <MiniStat label={t("summary.tournamentsLabel")} value={detailTStats.tournaments} />
+                <MiniStat label={t("summary.matchesLabel")} value={detailTStats.matches} />
+                <MiniStat label={t("score.win")} value={detailTStats.wins} color={T.green} />
+                <MiniStat label={t("score.lose")} value={detailTStats.losses} color={T.accent} />
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <MiniStat label="🏆 แชมป์" value={detailTStats.championships} color={T.green} />
-                <MiniStat label="🥈 รองแชมป์" value={detailTStats.runnerUps} />
+                <MiniStat label={`🏆 ${t("summary.champion")}`} value={detailTStats.championships} color={T.green} />
+                <MiniStat label={`🥈 ${t("summary.runnerUp")}`} value={detailTStats.runnerUps} />
               </div>
             </div>
           )}
@@ -21013,9 +21067,9 @@ function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels, t }) 
             <button key={preset.id} onClick={() => pick(preset.id)} style={{ textAlign: "left", padding: "10px 12px", borderRadius: 11, border: `1.5px solid ${active ? T.green : T.border}`, background: active ? "#e2f5ec" : T.surface2, display: "flex", flexDirection: "column", gap: 2 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <span style={{ fontWeight: 800, fontSize: 13.5, color: active ? T.green : T.text }}>{presetDisplayName(preset.id, t)}</span>
-                {active && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.green, background: "#fff", padding: "2px 7px", borderRadius: 10 }}>ใช้อยู่</span>}
+                {active && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.green, background: "#fff", padding: "2px 7px", borderRadius: 10 }}>{t("settings.presetInUse")}</span>}
               </div>
-              <div style={{ fontSize: 11, color: T.muted }}>{preset.description}</div>
+              <div style={{ fontSize: 11, color: T.muted }}>{presetDisplayDescription(preset.id, t)}</div>
             </button>
           );
         })}
@@ -21023,17 +21077,17 @@ function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels, t }) 
 
       {currentId === "custom" && (
         <div style={{ marginBottom: 10 }}>
-          <CustomLevelEditor customLevels={settings.customLevels || []} setCustomLevels={setCustomLevels} />
+          <CustomLevelEditor customLevels={settings.customLevels || []} setCustomLevels={setCustomLevels} t={t} />
         </div>
       )}
 
       <button onClick={() => setShowSkillInfo((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>
-        <Info size={14} /> {showSkillInfo ? "ซ่อน" : "ดู"}คำอธิบายแต่ละระดับ
+        <Info size={14} /> {showSkillInfo ? t("settings.hideLevelDescriptions") : t("settings.viewLevelDescriptions")}
       </button>
       {showSkillInfo && (
         <div style={{ fontSize: 11.5, color: T.muted, lineHeight: 1.6, marginTop: 8 }}>
           {Array.from({ length: 11 }, (_, i) => i + 1).map((si) => (
-            <div key={si} style={{ marginBottom: 2 }}><span style={{ fontWeight: 800, color: levelColor(si) }}>{levelOptions.find((o) => o.skillIndex === si)?.label || `Skill ${si}`}</span> — {SKILL_DESC[si]}</div>
+            <div key={si} style={{ marginBottom: 2 }}><span style={{ fontWeight: 800, color: levelColor(si) }}>{levelOptions.find((o) => o.skillIndex === si)?.label || `Skill ${si}`}</span> — {skillDescription(si, t)}</div>
           ))}
         </div>
       )}
@@ -21041,11 +21095,11 @@ function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels, t }) 
       {pendingPreset && (
         <div onClick={() => setPendingPreset(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>เปลี่ยนระบบระดับฝีมือ?</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ระดับผู้เล่นจะถูกแปลงอัตโนมัติตามระดับฝีมือเดิม สถิติ การจับคู่ และประวัติก๊วนจะไม่เปลี่ยน</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{t("settings.changeSkillSystemTitle")}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{t("settings.changeSkillSystemBody")}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setPendingPreset(null)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={confirm} style={btnPrimary}>เปลี่ยนระบบ</button>
+              <button onClick={() => setPendingPreset(null)} style={btnSecondary}>{t("common.cancel")}</button>
+              <button onClick={confirm} style={btnPrimary}>{t("settings.changeSkillSystemButton")}</button>
             </div>
           </div>
         </div>
@@ -21054,7 +21108,7 @@ function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels, t }) 
   );
 }
 
-function CustomLevelEditor({ customLevels, setCustomLevels }) {
+function CustomLevelEditor({ customLevels, setCustomLevels, t }) {
   const [name, setName] = useState("");
   const [skillIndex, setSkillIndex] = useState(6);
   const [description, setDescription] = useState("");
@@ -21063,20 +21117,20 @@ function CustomLevelEditor({ customLevels, setCustomLevels }) {
   const sorted = [...customLevels].sort((a, b) => a.skillIndex - b.skillIndex);
   const add = () => {
     const n = name.trim();
-    if (!n) { setError("ชื่อห้ามว่าง"); return; }
+    if (!n) { setError(t("settings.levelNameRequired")); return; }
     setError("");
     setCustomLevels((prev) => [...(prev || []), { id: uid(), name: n, skillIndex: Math.max(1, Math.min(11, Number(skillIndex) || 1)), description: description.trim() }]);
     setName(""); setDescription("");
   };
   const remove = (id) => {
-    if (customLevels.length <= 2) { setError("ต้องมีอย่างน้อย 2 ระดับ"); return; }
+    if (customLevels.length <= 2) { setError(t("settings.levelMinimum")); return; }
     setError("");
     setCustomLevels((prev) => (prev || []).filter((l) => l.id !== id));
   };
   const editField = (id, field, value) => setCustomLevels((prev) => (prev || []).map((l) => (l.id === id ? { ...l, [field]: value } : l)));
   return (
     <div style={{ background: T.surface2, borderRadius: 11, padding: 10 }}>
-      <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>กำหนดระดับเอง ({customLevels.length} ระดับ)</div>
+      <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 8 }}>{t("settings.customLevelsCount", { count: customLevels.length })}</div>
       {sorted.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
           {sorted.map((l) => (
@@ -21090,12 +21144,12 @@ function CustomLevelEditor({ customLevels, setCustomLevels }) {
           ))}
         </div>
       )}
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="ชื่อระดับ เช่น มือใหม่" style={{ ...sty, width: "100%", marginBottom: 6, boxSizing: "border-box" }} />
+      <input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("settings.levelNamePlaceholder")} style={{ ...sty, width: "100%", marginBottom: 6, boxSizing: "border-box" }} />
       <div style={{ display: "flex", gap: 6 }}>
         <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ ...sty, flexShrink: 0 }}>
           {Array.from({ length: 11 }, (_, i) => i + 1).map((si) => <option key={si} value={si}>Skill {si}</option>)}
         </select>
-        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="คำอธิบาย (ไม่บังคับ)" style={{ ...sty, flex: 1, minWidth: 0 }} />
+        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("settings.levelDescriptionPlaceholder")} style={{ ...sty, flex: 1, minWidth: 0 }} />
         <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center", flexShrink: 0 }}><Plus size={17} /></button>
       </div>
       {error && <div style={{ fontSize: 11, color: T.accent, marginTop: 6, fontWeight: 700 }}>{error}</div>}
