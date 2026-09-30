@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.40";
+const APP_VERSION = "1.12.45";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -42,6 +42,11 @@ const LEVEL_PRESETS = [
 function getPresetMeta(id) {
   if (id === "custom") return { id: "custom", name: "กำหนดเอง", description: "Organizer กำหนดระดับฝีมือเองได้ โดย map เข้ากับ Skill Index 1–11" };
   return LEVEL_PRESETS.find((p) => p.id === id) || LEVEL_PRESETS[0];
+}
+// Display-only localization for preset names. The persisted preset id remains exactly `isan`.
+function presetDisplayName(id, t) {
+  if (id === "isan" && t) return t("quanSettings.presetIsanName");
+  return getPresetMeta(id).name;
 }
 // display label for a given skillIndex, resolved against whichever preset is currently active (incl. custom)
 function displayLevelFor(skillIndex, settings) {
@@ -106,6 +111,12 @@ const STATUS_OPTIONS = [
   { key: "paused", label: "พักเกม" },
   { key: "done", label: "จบเกม" },
 ];
+// v1.12.44 (Localization Closure): translation-key lookups for STATUS[st].label / STATUS_OPTIONS[].label
+// above, kept SEPARATE from those (which stay byte-for-byte unchanged) — see MatchRow's own render for the
+// only reader wired to these so far; every other STATUS/STATUS_OPTIONS reader elsewhere in the app is
+// untouched and keeps showing the plain Thai literal above.
+const STATUS_LABEL_I18N_KEY = { next: "match.nextGameBadge", playing: "match.status.playing", paused: "match.pausedGameBadge", done: "match.status.done" };
+const STATUS_OPTION_I18N_KEY = { playing: "match.startGameLabel", paused: "match.pauseGameActionLabel", done: "match.finishGameActionLabel" };
 function allowedNextStatuses(status) {
   // v1.11.29: "next" can no longer reach "playing" via this dropdown at all — starting a queued match is
   // now a dedicated "▶ เริ่มเกม" button (see MatchRow) so it can be a clearer, deliberate, single tap
@@ -180,6 +191,26 @@ const MEMBER_TYPE_META = {
   guest: { label: "Guest", color: "#5b6672", bg: "#eceff2", border: "#c7cdd4" },
   owner: { label: "Owner", color: "#7c3aed", bg: "#efe7fc", border: "#c4a9f7" },
 };
+// v1.12.42 (Localization Phase 2): pure key-lookup maps, deliberately kept SEPARATE from PSTATUS/HAND_LABEL/
+// MEMBER_TYPE_META above rather than translating those shared constants in place. Those objects are also read
+// by out-of-scope surfaces this phase does not touch (e.g. ArchivedPlayersSheet, court-detail popovers on
+// other tabs, per the "do not modify player archive/delete confirmation flows" and "no unrelated UI" phase
+// boundaries) — changing them directly would have translated those surfaces too, as a side effect, with no
+// way to opt them out. Instead, each translated call site below (MembersTab, EditPlayerModal,
+// PlayerProfileSheet) looks up the matching catalog key here and calls t(...) itself; every untouched call
+// site keeps reading PSTATUS[...].label / HAND_LABEL[...] / MEMBER_TYPE_META[...].label directly, completely
+// unaffected. Colors/backgrounds are never looked up through these maps — only display text.
+const PSTATUS_I18N_KEY = {
+  absent: "attendance.status.absent",
+  registered: "attendance.status.registered",
+  waiting: "attendance.status.waiting",
+  ready: "attendance.status.ready",
+  playing: "attendance.status.playing",
+  resting: "attendance.status.resting",
+  left: "attendance.status.left",
+};
+const HAND_I18N_KEY = { left: "player.hand.left", right: "player.hand.right" };
+const MEMBER_TYPE_I18N_KEY = { member: "memberType.member", guest: "memberType.guest", owner: "memberType.owner" };
 const LEVEL_HELP = "เรียงจากเริ่มต้น → เก่งสุด: R (มือใหม่) · BG1-3 (มือบ้าน) · S-/S · N-/N · P-/P · C (เก่งสุด)";
 // backward-compatible: old data used `present` boolean; old data also has no skillIndex yet — derive it
 // from the (isan-based) label so matchmaking strength is 100% preserved across the upgrade.
@@ -263,6 +294,40 @@ function useIsExtraWide() {
     return () => { if (mq.removeEventListener) mq.removeEventListener("change", onChange); else mq.removeListener(onChange); };
   }, []);
   return isExtraWide;
+}
+// v1.12.41 (Localization Phase 1): the app's single UI-language access point. `uiLocale` is a pure display
+// preference — "th" | "en" — read/written ONLY through the plain localStorage key below, deliberately
+// outside `settings` (which is journaled and included in every backup/restore payload). This is intentional
+// per the approved integration plan: switching language must never alter, migrate, or touch business data,
+// the Journal, Restore, or the IndexedDB schema, and a backup restored on a device with a different language
+// preference must keep that device's own preference. See src/i18n/index.mjs for the engine this wraps
+// (window.BadQI18n, generated into the build by tools/gen_i18n_bundle.js — see its header comment for why a
+// browser-global rather than an ESM import).
+const BADQ_UI_LOCALE_KEY = "badq_uiLocale";
+function useBadQI18n() {
+  const [locale, setLocaleState] = useState(() => {
+    try {
+      const saved = localStorage.getItem(BADQ_UI_LOCALE_KEY);
+      return window.BadQI18n ? window.BadQI18n.normalizeLocale(saved) : (saved === "en" ? "en" : "th");
+    } catch (e) { return "th"; }
+  });
+  useEffect(() => {
+    try { document.documentElement.lang = locale; } catch (e) {}
+  }, [locale]);
+  const setLocale = useCallback((next) => {
+    const normalized = window.BadQI18n ? window.BadQI18n.normalizeLocale(next) : (next === "en" ? "en" : "th");
+    setLocaleState(normalized);
+    try { localStorage.setItem(BADQ_UI_LOCALE_KEY, normalized); } catch (e) { /* private mode / storage unavailable -> in-memory only for this session */ }
+  }, []);
+  // Defensive fallback (should never trigger in a real build — gen_i18n_bundle.js fails the build itself if
+  // window.BadQI18n's expected exports are missing): if the localization bundle somehow didn't load, every
+  // UI surface that already calls t()/tc() below still renders its literal key instead of throwing, so a
+  // broken bundle degrades to visible-but-functional rather than a blank screen.
+  const i18n = useMemo(() => {
+    if (window.BadQI18n) return window.BadQI18n.createI18n(locale);
+    return { locale, t: (key) => key, tc: (key) => key, currency: (v) => String(v), number: (v) => String(v) };
+  }, [locale]);
+  return { locale, setLocale, i18n };
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -1091,8 +1156,23 @@ function rankManualSlotCandidates(bench, teammateIds, opponentIds, players, lock
 // is only used for spec 2 Case C: when a locked partner can't legitimately be auto-filled in (playing,
 // absent, or otherwise ineligible), the empty-teammate-slot case below still surfaces a warning instead of
 // silently doing nothing.
-function computeManualConstraintWarnings(teamA, teamB, lockPairs, players, availableIds) {
+// v1.12.44 (Localization Closure): `tr` (the i18n.t function, threaded down from AppInner via MatchRow — see
+// MatchRow's own comment on this call site) is OPTIONAL and always passed a real function by every current
+// caller; the `|| ((key, vals) => ...)` fallback below exists only so this pure, testable module function
+// never throws if some future/test caller omits it, and reproduces the exact pre-v1.12.44 Thai wording in
+// that case (never a behavior change for anyone already passing `tr`).
+function computeManualConstraintWarnings(teamA, teamB, lockPairs, players, availableIds, tr) {
   const warnings = [];
+  const T_ = tr || ((key, vals) => {
+    const FALLBACK = {
+      "warn.lockSplitOpponents": `${vals.playerA} ถูกล็อคคู่กับ ${vals.playerB} แต่กำลังเป็นคู่แข่งกัน`,
+      "warn.lockTakenByOther": `${vals.presentName} ถูกล็อคคู่กับ ${vals.partnerName} แต่กำลังจับคู่กับ ${vals.teammateName}`,
+      "warn.lockPartnerUnavailable": `${vals.presentName} ถูกล็อคคู่กับ ${vals.partnerName} แต่ ${vals.partnerName} ไม่ว่างในขณะนี้`,
+      "warn.avoidPartnerViolated": `${vals.playerA} ไม่อยากคู่กับ ${vals.playerB} แต่กำลังจับคู่กัน`,
+      "warn.avoidOpponentViolated": `${vals.playerA} ไม่อยากเจอกับ ${vals.playerB} แต่กำลังเป็นคู่แข่งกัน`,
+    };
+    return FALLBACK[key];
+  });
   const nameOf = (id) => (players.find((p) => p.id === id) || {}).name || "";
   const teamOf = (id) => (teamA.includes(id) ? "A" : teamB.includes(id) ? "B" : null);
   const allIds = [...(teamA || []), ...(teamB || [])].filter(Boolean);
@@ -1105,7 +1185,7 @@ function computeManualConstraintWarnings(teamA, teamB, lockPairs, players, avail
         const ta = teamOf(r.a), tb = teamOf(r.b);
         if (ta && tb && ta !== tb) {
           // locked pair ended up split across opposing teams (organizer manually overrode it)
-          warnings.push({ id: r.id + "-lock", kind: "lock", a: r.a, b: r.b, text: `${nameOf(r.a)} ถูกล็อคคู่กับ ${nameOf(r.b)} แต่กำลังเป็นคู่แข่งกัน` });
+          warnings.push({ id: r.id + "-lock", kind: "lock", a: r.a, b: r.b, text: T_("warn.lockSplitOpponents", { playerA: nameOf(r.a), playerB: nameOf(r.b) }) });
         }
         // both present, same team -> lock satisfied, no warning
       } else {
@@ -1117,12 +1197,12 @@ function computeManualConstraintWarnings(teamA, teamB, lockPairs, players, avail
         const teammateId = (t === "A" ? teamA : t === "B" ? teamB : []).find((pid) => pid && pid !== presentId);
         if (teammateId) {
           // spec Case B: someone ELSE already occupies the remaining slot -> manual intent wins, warn only
-          warnings.push({ id: r.id + "-lock", kind: "lock", a: presentId, b: teammateId, text: `${nameOf(presentId)} ถูกล็อคคู่กับ ${partnerName} แต่กำลังจับคู่กับ ${nameOf(teammateId)}` });
+          warnings.push({ id: r.id + "-lock", kind: "lock", a: presentId, b: teammateId, text: T_("warn.lockTakenByOther", { presentName: nameOf(presentId), partnerName, teammateName: nameOf(teammateId) }) });
         } else if (!isAvailable(partnerId)) {
           // spec Case C: teammate slot is still empty, but the locked partner can't legitimately be
           // auto-filled in right now (playing/absent/otherwise ineligible) — replaceSlot's own v1.11.77
           // auto-fill assist already tried and skipped them for the exact same reason, so surface why.
-          warnings.push({ id: r.id + "-lock", kind: "lock", a: presentId, b: partnerId, text: `${nameOf(presentId)} ถูกล็อคคู่กับ ${partnerName} แต่ ${partnerName} ไม่ว่างในขณะนี้` });
+          warnings.push({ id: r.id + "-lock", kind: "lock", a: presentId, b: partnerId, text: T_("warn.lockPartnerUnavailable", { presentName: nameOf(presentId), partnerName }) });
         }
         // else: teammate slot empty AND partner is available -> replaceSlot's auto-fill assist already
         // seats them in the same update (spec Case A), so there's nothing left to warn about here.
@@ -1134,9 +1214,9 @@ function computeManualConstraintWarnings(teamA, teamB, lockPairs, players, avail
         const ta = teamOf(r.a), tb = teamOf(r.b);
         if (ta && tb) {
           if (ta === tb && sameTeamViolation) {
-            warnings.push({ id: r.id + "-avoidP", kind: "avoid", a: r.a, b: r.b, text: `${nameOf(r.a)} ไม่อยากคู่กับ ${nameOf(r.b)} แต่กำลังจับคู่กัน` });
+            warnings.push({ id: r.id + "-avoidP", kind: "avoid", a: r.a, b: r.b, text: T_("warn.avoidPartnerViolated", { playerA: nameOf(r.a), playerB: nameOf(r.b) }) });
           } else if (ta !== tb && crossTeamViolation) {
-            warnings.push({ id: r.id + "-avoidO", kind: "avoid", a: r.a, b: r.b, text: `${nameOf(r.a)} ไม่อยากเจอกับ ${nameOf(r.b)} แต่กำลังเป็นคู่แข่งกัน` });
+            warnings.push({ id: r.id + "-avoidO", kind: "avoid", a: r.a, b: r.b, text: T_("warn.avoidOpponentViolated", { playerA: nameOf(r.a), playerB: nameOf(r.b) }) });
           }
         }
       }
@@ -1203,26 +1283,36 @@ function buildSessionEncounterIndex(history, current, sessionId) {
   for (const m of current || []) if (isLiveMatch(m)) consider(m); // on court now = most recent
   return { teammates, opponents, latestOf };
 }
-function computeSessionRepeatWarnings(teamA, teamB, index, lockPairs, players, excludeMatchId) {
+// v1.12.44 (Localization Closure): `tr`/`trc` (i18n.t/i18n.tc, threaded down from AppInner via MatchRow) are
+// OPTIONAL — see computeManualConstraintWarnings' own comment just above for why (never a behavior change
+// for the real caller, which always passes both; only a safety net for a future/test caller that doesn't).
+function computeSessionRepeatWarnings(teamA, teamB, index, lockPairs, players, excludeMatchId, tr, trc) {
   const warnings = [];
   if (!index) return warnings;
+  const T_ = tr || ((key, vals) => {
+    if (key === "repeat.teammateLatest") return `${vals.playerA} และ ${vals.playerB} เคยคู่กันในเกมล่าสุด`;
+    if (key === "repeat.teammatePast") return `${vals.playerA} และ ${vals.playerB} เคยคู่กันแล้ว`;
+    if (key === "repeat.opponentLatest") return `${vals.playerA} และ ${vals.playerB} เพิ่งเจอกันในเกมล่าสุด`;
+    if (key === "repeat.opponentPast") return `${vals.playerA} และ ${vals.playerB} เคยเจอกันแล้ว`;
+    return key;
+  });
   const nameOf = (id) => ((players || []).find((p) => p.id === id) || {}).name || "";
   const isLockedPair = (a, b) => (lockPairs || []).some((r) => r.type === "lock" && ((r.a === a && r.b === b) || (r.a === b && r.b === a)));
   const prior = (map, a, b) => { const set = map.get(sessionPairKey(a, b)); return set ? [...set].filter((id) => id !== excludeMatchId) : []; };
-  const latestNote = (ids, a, b) => (ids.includes(index.latestOf.get(a)) || ids.includes(index.latestOf.get(b)) ? " (รวมถึงเกมล่าสุด)" : "");
+  const isLatest = (ids, a, b) => ids.includes(index.latestOf.get(a)) || ids.includes(index.latestOf.get(b));
   for (const team of [teamA || [], teamB || []]) {
     const filled = [...new Set(team.filter(Boolean))];
     if (filled.length !== 2) continue; // singles / incomplete team: never a teammate warning
     const [a, b] = filled;
     if (isLockedPair(a, b)) continue; // intentional Lock Pair: teammate repeat is expected
     const ids = prior(index.teammates, a, b);
-    if (ids.length) warnings.push({ id: `tm-${a}-${b}`, kind: "teammate", a, b, count: ids.length, matchIds: ids, text: `${nameOf(a)} ↔ ${nameOf(b)} เคยเป็นคู่กันแล้ว ${ids.length} เกมในก๊วนนี้${latestNote(ids, a, b)}` });
+    if (ids.length) warnings.push({ id: `tm-${a}-${b}`, kind: "teammate", a, b, count: ids.length, matchIds: ids, text: T_(isLatest(ids, a, b) ? "repeat.teammateLatest" : "repeat.teammatePast", { playerA: nameOf(a), playerB: nameOf(b) }) });
   }
   for (const a of [...new Set((teamA || []).filter(Boolean))]) {
     for (const b of [...new Set((teamB || []).filter(Boolean))]) {
       if (a === b) continue;
       const ids = prior(index.opponents, a, b);
-      if (ids.length) warnings.push({ id: `op-${a}-${b}`, kind: "opponent", a, b, count: ids.length, matchIds: ids, text: `${nameOf(a)} ↔ ${nameOf(b)} เคยเจอกันเป็นคู่แข่งแล้ว ${ids.length} เกมในก๊วนนี้${latestNote(ids, a, b)}` });
+      if (ids.length) warnings.push({ id: `op-${a}-${b}`, kind: "opponent", a, b, count: ids.length, matchIds: ids, text: T_(isLatest(ids, a, b) ? "repeat.opponentLatest" : "repeat.opponentPast", { playerA: nameOf(a), playerB: nameOf(b) }) });
     }
   }
   return warnings;
@@ -1396,10 +1486,14 @@ function visibleSetCount(m, neededWins) {
   }
   return visible;
 }
-function roundsLabel(rounds) {
-  if (rounds === "2fixed") return "2 เซต";
+// v1.12.44 (Localization Closure): `t` is OPTIONAL — see fmtMode's own comment just above for why (this is
+// the same reused-everywhere pure formatting function it calls; not every caller has been updated to pass
+// `t` yet — see the v1.12.44 coverage report for the exact remaining call sites).
+function roundsLabel(rounds, t) {
+  if (rounds === "2fixed") return t ? t("score.twoSetsFixedFormat") : "2 เซต";
   const r = rounds || 1;
-  return r <= 1 ? "1 เซต" : `${r} ใน ${maxSetsFor(r)} เซต`;
+  if (r <= 1) return t ? t("score.oneSetFormat") : "1 เซต";
+  return t ? t("score.bestOfNSetsFormat", { r, max: maxSetsFor(r) }) : `${r} ใน ${maxSetsFor(r)} เซต`;
 }
 // v1.11.12: expected NUMBER OF SETS a match actually takes, given the existing settings.rounds format —
 // used ONLY by the Court Recommendation engine to turn "เวลาเฉลี่ยต่อ 1 เซต" into a per-match time estimate,
@@ -1470,6 +1564,10 @@ function tournamentStatsForPlayer(pid, tournamentHistory) {
 // v1.11.8: per-match casual history for "ดูประวัติการเล่น" — mirrors playerStats()'s aggregate logic
 // but returns one row per match instead of totals. `taggedMatches` must already carry a `__date` field
 // (raw match records have no date of their own) — see PlayerProfileSheet's casualMatchesWithDate.
+// v1.12.43 (Localization Phase 3): returns a semantic `resultKey` ("win"/"loss"/"draw"/"noScore"/
+// "undetermined") instead of a Thai-literal `resultLabel` -- these are pure data-shaping helpers with no
+// access to `t`, so localizing the label is deferred to PlayerMatchHistorySheet's render (see
+// MATCH_RESULT_I18N_KEY below). No scoring/winner logic changes here, only what field name carries the result.
 function casualMatchHistoryForPlayer(pid, taggedMatches, getP) {
   const nameOf = (id) => getP(id)?.name || "?";
   const rows = [];
@@ -1480,19 +1578,22 @@ function casualMatchHistoryForPlayer(pid, taggedMatches, getP) {
     const mine = inA ? A : B, theirs = inA ? B : A;
     const partnerNames = mine.filter((id) => id !== pid).map(nameOf).join(" + ") || "-";
     const oppNames = theirs.map(nameOf).join(" + ") || "-";
-    let resultLabel = "ไม่มีคะแนน";
+    let resultKey = "noScore";
     if (hasScore(m)) {
       const w = matchWinner(m);
-      if (w) resultLabel = w === (inA ? "A" : "B") ? "ชนะ" : "แพ้";
-      else if (m.scores && m.scores.length === 2) resultLabel = "เสมอ";
-      else resultLabel = "ไม่ระบุผล";
+      if (w) resultKey = w === (inA ? "A" : "B") ? "win" : "loss";
+      else if (m.scores && m.scores.length === 2) resultKey = "draw";
+      else resultKey = "undetermined";
     }
-    rows.push({ id: m.id, date: m.__date || null, partnerNames, oppNames, resultLabel, scoreStr: matchScoreText(m) || "-" });
+    rows.push({ id: m.id, date: m.__date || null, partnerNames, oppNames, resultKey, scoreStr: matchScoreText(m) || "-" });
   }
   return rows.sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 }
 // v1.11.8: per-match Tournament history for "ดูประวัติการเล่น" — mirrors tournamentStatsForPlayer()'s
 // aggregate logic but returns one completed match per row (event name, round, opponent, result, score).
+// v1.12.43 (Localization Phase 3): `event` is now `t.name || null` (was `t.name || "Tournament ไม่มีชื่อ"`)
+// -- the Thai/English fallback name for an unnamed tournament is applied at render time instead (see
+// PlayerMatchHistorySheet), same reasoning as resultKey above.
 function tournamentMatchesForPlayer(pid, tournamentHistory, getP) {
   const rows = [];
   (tournamentHistory || []).forEach((t) => {
@@ -1509,8 +1610,8 @@ function tournamentMatchesForPlayer(pid, tournamentHistory, getP) {
       const partnerNames = (myTeam?.playerIds || []).filter((id) => id !== pid).map(nameOf).join(" + ") || "-";
       const oppNames = (oppTeam?.playerIds || []).map(nameOf).join(" + ") || "?";
       rows.push({
-        id: m.id, event: t.name || "Tournament ไม่มีชื่อ", date: t.date || null, roundLabel: m.roundLabel || "-",
-        partnerNames, oppNames, resultLabel: m.winnerTeamId === myTeam?.id ? "ชนะ" : "แพ้", scoreStr: matchScoreText(m) || "-",
+        id: m.id, event: t.name || null, date: t.date || null, roundLabel: m.roundLabel || "-",
+        partnerNames, oppNames, resultKey: m.winnerTeamId === myTeam?.id ? "win" : "loss", scoreStr: matchScoreText(m) || "-",
       });
     });
   });
@@ -3040,11 +3141,11 @@ function normDiscountCredit(c) {
 // resolves a credit's sourceSessionId/usedSessionId to a display label ("ก๊วน AAA · 19 ส.ค. 2569") —
 // checks archived sessionHistory first, falls back to the live (not-yet-archived) session if it matches,
 // else a generic placeholder (e.g. the session it came from was later deleted from history).
-function resolveSessionLabel(sessId, session, sessionHistory) {
+function resolveSessionLabel(sessId, session, sessionHistory, formatDate = fmtThaiDate) {
   if (!sessId) return null;
   const hist = (sessionHistory || []).find((s) => s.id === sessId);
-  if (hist) return `${hist.name || "ก๊วนไม่มีชื่อ"} · ${fmtThaiDate(hist.date)}`;
-  if (session && session.id === sessId) return `${session.name || "ก๊วนไม่มีชื่อ"} · ${fmtThaiDate(session.date)}`;
+  if (hist) return `${hist.name || "ก๊วนไม่มีชื่อ"} · ${formatDate(hist.date)}`;
+  if (session && session.id === sessId) return `${session.name || "ก๊วนไม่มีชื่อ"} · ${formatDate(session.date)}`;
   return "ก๊วนที่ผ่านมา";
 }
 
@@ -3062,19 +3163,21 @@ function fmtGeneratedAt(ts) {
 // describes which period is currently selected on the Finance page (or a custom override chosen inside the
 // export sheet itself) — one shared shape consumed by buildFinancialReport() AND the filename builder, so
 // the exported data and the exported filename can never disagree about what range they cover.
-function financePeriodMeta(mode, effectiveDate, monthYm, year, custom) {
+function financePeriodMeta(mode, effectiveDate, monthYm, year, custom, formats = {}) {
+  const formatDateFull = formats.fmtDateFull || fmtThaiDateFull;
+  const formatMonthFull = formats.fmtMonthFull || fmtThaiMonthFull;
   if (custom && custom.from && custom.to) {
     const from = custom.from <= custom.to ? custom.from : custom.to;
     const to = custom.from <= custom.to ? custom.to : custom.from;
-    return { kind: "custom", range: { from, to }, label: `${fmtThaiDateFull(from)} – ${fmtThaiDateFull(to)}`, filenameStub: `${from}_to_${to}` };
+    return { kind: "custom", range: { from, to }, label: `${formatDateFull(from)} – ${formatDateFull(to)}`, filenameStub: `${from}_to_${to}` };
   }
   if (mode === "day") {
     if (!effectiveDate) return null;
-    return { kind: "day", range: { from: effectiveDate, to: effectiveDate }, label: fmtThaiDateFull(effectiveDate), filenameStub: effectiveDate };
+    return { kind: "day", range: { from: effectiveDate, to: effectiveDate }, label: formatDateFull(effectiveDate), filenameStub: effectiveDate };
   }
   if (mode === "month") {
     if (!monthYm) return null;
-    return { kind: "month", range: { from: `${monthYm}-01`, to: `${monthYm}-${String(lastDayOfMonth(monthYm)).padStart(2, "0")}` }, label: fmtThaiMonthFull(monthYm), filenameStub: monthYm };
+    return { kind: "month", range: { from: `${monthYm}-01`, to: `${monthYm}-${String(lastDayOfMonth(monthYm)).padStart(2, "0")}` }, label: formatMonthFull(monthYm), filenameStub: monthYm };
   }
   // mode === "overview" -> follows the ภาพรวม tab's year selector ("YYYY" | "all")
   if (year === "all") return { kind: "all", range: { from: "0000-01-01", to: "9999-12-31" }, label: "ทั้งหมด", filenameStub: "All" };
@@ -3124,7 +3227,7 @@ function buildTransactionDetail(f) {
   return rows;
 }
 // THE single normalized report object — TXT/PDF/XLSX all render straight from this, never recompute totals themselves.
-function buildFinancialReport(period, ctx) {
+function buildFinancialReport(period, ctx, formatDate = fmtThaiDate) {
   const { sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory = [] } = ctx;
   const f = computeFinanceForRange(period.range, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
   const sessions = f.sessionsInRange.map((s) => ({
@@ -3144,7 +3247,7 @@ function buildFinancialReport(period, ctx) {
   const discountCreditRows = (discountCredits || []).filter((c) => c.status === "available").map((c) => ({
     playerName: c.playerNameSnapshot || "ผู้เล่น",
     amount: Number(c.amount) || 0,
-    sourceSession: resolveSessionLabel(c.sourceSessionId, null, sessionHistory) || "-",
+    sourceSession: resolveSessionLabel(c.sourceSessionId, null, sessionHistory, formatDate) || "-",
     createdAt: c.createdAt || null,
     status: c.status,
   }));
@@ -3210,12 +3313,14 @@ function padTxtRow(label, value) {
   const gap = Math.max(1, width - label.length);
   return label + " ".repeat(gap) + value;
 }
-function buildFinancialReportTxt(report) {
+function buildFinancialReportTxt(report, formats = {}) {
+  const formatDateFull = formats.fmtDateFull || fmtThaiDateFull;
+  const formatDateTime = formats.fmtDateTime || fmtGeneratedAt;
   const L = [];
   const sep = "==============================";
   L.push("BadQ — รายงานการเงิน");
   L.push(report.period.label);
-  L.push(`สร้างเมื่อ ${fmtGeneratedAt(report.generatedAt)}`);
+  L.push(`สร้างเมื่อ ${formatDateTime(report.generatedAt)}`);
   L.push(""); L.push(sep); L.push("");
   L.push("สรุป"); L.push("");
   L.push(padTxtRow("รายได้", formatCurrency(report.summary.revenue)));
@@ -3240,7 +3345,7 @@ function buildFinancialReportTxt(report) {
     L.push("ไม่มีก๊วนในช่วงเวลานี้");
   } else {
     report.sessions.forEach((s) => {
-      L.push(`${fmtThaiDateFull(s.date)} | ${s.name}`);
+      L.push(`${formatDateFull(s.date)} | ${s.name}`);
       L.push(`ผู้เล่น ${s.playerCount} คน · ${s.matchCount} แมตช์ · ${s.courtCount} สนาม`);
       L.push(`รายได้ ${formatCurrency(s.revenue)}`);
       L.push(`ค่าใช้จ่าย ${formatCurrency(s.expense)}`);
@@ -3254,7 +3359,7 @@ function buildFinancialReportTxt(report) {
     L.push("ไม่มีรายการ");
   } else {
     report.transactions.forEach((t) => {
-      L.push(`${fmtThaiDateFull(t.date)} | ${t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย"} | ${t.category} | ${t.description} | ${t.session} | ${formatCurrency(t.amount)}`);
+      L.push(`${formatDateFull(t.date)} | ${t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย"} | ${t.category} | ${t.description} | ${t.session} | ${formatCurrency(t.amount)}`);
     });
   }
   L.push(""); L.push(sep); L.push("");
@@ -3263,7 +3368,7 @@ function buildFinancialReportTxt(report) {
     L.push("ไม่มีรายการค้างชำระ");
   } else {
     report.outstandingPayments.forEach((o) => {
-      L.push(`${fmtThaiDateFull(o.date)} | ${o.sessionName} | ${o.playerName} | ต้องชำระ ${formatCurrency(o.due)} | รับแล้ว ${formatCurrency(o.collected)} | ค้าง ${formatCurrency(o.outstanding)}`);
+      L.push(`${formatDateFull(o.date)} | ${o.sessionName} | ${o.playerName} | ต้องชำระ ${formatCurrency(o.due)} | รับแล้ว ${formatCurrency(o.collected)} | ค้าง ${formatCurrency(o.outstanding)}`);
     });
   }
   L.push(""); L.push(sep); L.push("");
@@ -3277,8 +3382,8 @@ function buildFinancialReportTxt(report) {
   L.push("สร้างจาก BadQ");
   return L.join("\n");
 }
-function downloadFinancialReportTxt(report) {
-  const text = buildFinancialReportTxt(report);
+function downloadFinancialReportTxt(report, formats) {
+  const text = buildFinancialReportTxt(report, formats);
   const blob = new Blob(["﻿" + text], { type: "text/plain;charset=utf-8" });
   return shareOrDownloadBlob(blob, financeExportFilename(report.period, "txt"), "text/plain");
 }
@@ -3447,7 +3552,7 @@ function buildFinancialXlsxTableSheet(headers, colTypes, rows, opts) {
 }
 // สรุป sheet — a key/value summary + P&L breakdown (not a filterable table, so it's built by hand rather than
 // through buildFinancialXlsxTableSheet).
-function buildFinancialXlsxSummarySheet(report) {
+function buildFinancialXlsxSummarySheet(report, formatDateTime = fmtGeneratedAt) {
   const rows = [];
   let r = 1;
   const pushRow = (a, b, styleA, styleB) => {
@@ -3460,7 +3565,7 @@ function buildFinancialXlsxSummarySheet(report) {
   };
   pushRow("BadQ — รายงานการเงิน", null, XLSX_STYLE.boldText);
   pushRow("ช่วงเวลา", report.period.label);
-  pushRow("วันที่สร้างรายงาน", fmtGeneratedAt(report.generatedAt));
+  pushRow("วันที่สร้างรายงาน", formatDateTime(report.generatedAt));
   r++;
   pushRow("สรุป", null, XLSX_STYLE.boldText);
   pushRow("รายได้", report.summary.revenue);
@@ -3486,9 +3591,9 @@ function buildFinancialXlsxSummarySheet(report) {
 function buildFinancialXlsxStylesXml() {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="2"><numFmt numFmtId="164" formatCode="&quot;฿&quot;#,##0"/><numFmt numFmtId="165" formatCode="yyyy-mm-dd"/></numFmts><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font></fonts><fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="solid"><fgColor rgb="FFEEF2F0"/><bgColor indexed="64"/></patternFill></fill></fills><borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="0" fontId="1" fillId="1" borderId="0" xfId="0" applyFont="1" applyFill="1"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/><xf numFmtId="164" fontId="1" fillId="0" borderId="0" xfId="0" applyNumberFormat="1" applyFont="1"/><xf numFmtId="165" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>`;
 }
-function buildFinancialReportXlsxBytes(report) {
+function buildFinancialReportXlsxBytes(report, formats = {}) {
   const sheets = [
-    { name: "สรุป", xml: buildFinancialXlsxSummarySheet(report) },
+    { name: "สรุป", xml: buildFinancialXlsxSummarySheet(report, formats.fmtDateTime || fmtGeneratedAt) },
     { name: "รายก๊วน", xml: buildFinancialXlsxTableSheet(["วันที่", "ชื่อก๊วน", "จำนวนผู้เล่น", "จำนวนแมตช์", "จำนวนสนาม", "รายได้", "รับแล้ว", "ค้างรับ", "ค่าใช้จ่าย", "กำไร/ขาดทุน"], ["date", "text", "int", "int", "int", "money", "money", "money", "money", "money"], report.sessions.map((s) => [s.date, s.name, s.playerCount, s.matchCount, s.courtCount, s.revenue, s.collected, s.receivable, s.expense, s.profit]), { widths: [12, 20, 10, 8, 8, 12, 12, 12, 12, 12], emptyMessage: "ไม่มีก๊วนในช่วงเวลานี้" }) },
     { name: "รายรับรายจ่าย", xml: buildFinancialXlsxTableSheet(["วันที่", "ประเภท", "หมวด", "รายละเอียด", "ก๊วน", "จำนวนเงิน"], ["date", "text", "text", "text", "text", "money"], report.transactions.map((t) => [t.date, t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย", t.category, t.description, t.session, t.amount]), { widths: [12, 10, 14, 28, 18, 12], emptyMessage: "ไม่มีรายการ" }) },
     { name: "ค้างชำระ", xml: buildFinancialXlsxTableSheet(["วันที่", "ก๊วน", "ผู้เล่น", "ยอดที่ต้องชำระ", "รับแล้ว", "ค้างชำระ"], ["date", "text", "text", "money", "money", "money"], report.outstandingPayments.map((o) => [o.date, o.sessionName, o.playerName, o.due, o.collected, o.outstanding]), { widths: [12, 18, 16, 14, 12, 12], emptyMessage: "ไม่มีรายการค้างชำระ" }) },
@@ -3508,8 +3613,8 @@ function buildFinancialReportXlsxBytes(report) {
   ];
   return buildZipArchive(files);
 }
-function downloadFinancialReportXlsx(report) {
-  const bytes = buildFinancialReportXlsxBytes(report);
+function downloadFinancialReportXlsx(report, formats) {
+  const bytes = buildFinancialReportXlsxBytes(report, formats);
   const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
   return shareOrDownloadBlob(blob, financeExportFilename(report.period, "xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
 }
@@ -3521,9 +3626,9 @@ function buildShareText({ name, date, playerCount, totalMatches, maxGames, total
 // v1.11.4: single Tournament share-text generator — built from the SAME buildTournamentResultReport
 // object that feeds the Podium/Bracket/PDF, so the shared text can never separately calculate or drift
 // from what's actually on screen. Includes medals + the final score line; ends with a small BadQ credit.
-function buildTournamentShareText(report, teamsById, peopleById) {
+function buildTournamentShareText(report, teamsById, peopleById, formatDate = fmtThaiDate) {
   const { t, totals, podium, finalMatch, isCompleted } = report;
-  const lines = [`🏆 BadQ Tournament — ${t.name || "Tournament ไม่มีชื่อ"}`, `${fmtThaiDate(t.date)} · ${totals.teamCount} ทีม · ${totals.completedMatches} แมตช์`];
+  const lines = [`🏆 BadQ Tournament — ${t.name || "Tournament ไม่มีชื่อ"}`, `${formatDate(t.date)} · ${totals.teamCount} ทีม · ${totals.completedMatches} แมตช์`];
   if (podium && podium.champion) {
     lines.push("");
     lines.push(`🥇 แชมป์: ${tTeamName(teamsById[podium.champion], peopleById)}`);
@@ -3568,24 +3673,38 @@ async function readImageFull(file) {
     return cv.toDataURL("image/jpeg", 0.92);
   } catch (e) { return dataUrl; }
 }
-function fmtMode(settings, mode) {
-  return `🏸 ${mode === "doubles" ? "ตีคู่" : "ตีเดี่ยว"} · ${settings.winScore || 21} แต้ม · ${settings.deuce ? "มีดิว" : "ไม่มีดิว"} · ${roundsLabel(settings.rounds)}`;
+// v1.12.44 (Localization Closure): `t` is OPTIONAL — pass it from a caller that already has i18n threaded
+// (GroupSessionHeader, SessionTab's compact context line) and the exact pre-v1.12.44 Thai renders unchanged;
+// omit it (existing callers this phase doesn't touch, e.g. HistoricalDetail) and it also renders unchanged.
+function fmtMode(settings, mode, t) {
+  const modeWord = t ? t(mode === "doubles" ? "quanSettings.doublesShort" : "quanSettings.singlesShort") : (mode === "doubles" ? "ตีคู่" : "ตีเดี่ยว");
+  const points = t ? t("score.pointsSuffix", { score: settings.winScore || 21 }) : `${settings.winScore || 21} แต้ม`;
+  const deuceWord = t ? t(settings.deuce ? "score.deuceOn" : "score.deuceOff") : (settings.deuce ? "มีดิว" : "ไม่มีดิว");
+  return `🏸 ${modeWord} · ${points} · ${deuceWord} · ${roundsLabel(settings.rounds, t)}`;
 }
 // one-line summary shown on the Today tab's "⚙️ ตั้งค่าก๊วน" entry point — reflects the real current
 // session config so organizers don't have to open the sheet just to check it.
-function quanSettingsSummary(settings, mode, courtCount) {
+// v1.12.44 (Localization Closure): `t`/`tc` optional, same convention as fmtMode/roundsLabel above. levelLabel
+// (from getPresetMeta) is untouched here — level preset names belong to LevelPresetEditor/CustomLevelEditor,
+// out of this phase's scope (see the coverage report).
+function quanSettingsSummary(settings, mode, courtCount, t, tc) {
   const modeLabel = mode === "singles" ? "1v1" : "2v2";
-  const levelLabel = getPresetMeta(settings.levelPresetId || "badweb-central").name;
-  return `${modeLabel} · ${courtCount} สนาม · ${settings.winScore || 21} แต้ม · ${levelLabel}`;
+  const levelLabel = presetDisplayName(settings.levelPresetId || "badweb-central", t);
+  const courtWord = tc ? tc("common.courtCount", courtCount) : `${courtCount} สนาม`;
+  const points = t ? t("score.pointsSuffix", { score: settings.winScore || 21 }) : `${settings.winScore || 21} แต้ม`;
+  return `${modeLabel} · ${courtWord} · ${points} · ${levelLabel}`;
 }
 // dynamic subtitle for the "💵 การชำระเงินและต้นทุน" compact entry point on the ชำระเงิน tab
 const COST_MODEL_LABEL = { splitExpenses: "หารค่าใช้จ่าย", simple: "แบบง่าย", perCourt: "แยกรายสนาม", hourly: "รายชั่วโมง", perPerson: "รายคน", custom: "กำหนดเอง" };
-function financeSettingsSummary(settings) {
+function financeSettingsSummary(settings, t) {
   const model = settings.costModel || "simple";
   const parts = model === "simple"
-    ? [`ค่าสนาม ${formatCurrency(settings.court || 0)}/คน`, `ค่าลูก ${formatCurrency(settings.shuttle || 0)}/เกม`]
-    : [`รูปแบบ: ${COST_MODEL_LABEL[model] || model}`];
-  if (settings.other) parts.push(`อื่นๆ ${formatCurrency(settings.other)}`);
+    ? [
+        t ? t("finance.simpleCourtFeeSummary", { amount: formatCurrency(settings.court || 0) }) : `ค่าสนาม ${formatCurrency(settings.court || 0)}/คน`,
+        t ? t("finance.simpleShuttleFeeSummary", { amount: formatCurrency(settings.shuttle || 0) }) : `ค่าลูก ${formatCurrency(settings.shuttle || 0)}/เกม`,
+      ]
+    : [t ? `${t("finance.costModelLabel")}: ${t(`finance.chargeMode.${model === "splitExpenses" ? "split" : model}`)}` : `รูปแบบ: ${COST_MODEL_LABEL[model] || model}`];
+  if (settings.other) parts.push(`${t ? t("common.miscellaneous") : "อื่นๆ"} ${formatCurrency(settings.other)}`);
   // v1.12.1 (UX restructure, spec 7): Reward moved out of this card entirely (now in Advanced Settings),
   // so its "รางวัลเปิด/ไม่มีรางวัล" segment no longer belongs in this summary — do not re-add it here.
   return parts.join(" · ");
@@ -6597,6 +6716,56 @@ function AppInner() {
   }, []);
   const isWide = useIsWide(); // landscape phone / tablet — widen the shell so it doesn't look squeezed into a narrow column
   const [tab, setTab] = useState("members");
+  // v1.12.41 (Localization Phase 1): one shared i18n instance for the whole tree, threaded down as plain
+  // props exactly like every other cross-cutting value here (settings/setSettings, etc.) — this codebase
+  // has no React Context anywhere, so that's the existing convention, not a new one. Only the surfaces this
+  // phase covers (main nav here, General Settings and its own shared buttons) actually call t()/tc() below;
+  // everywhere else keeps its Thai literals untouched (see the phase report for the exact scope).
+  const { locale: uiLocale, setLocale: setUiLocale, i18n } = useBadQI18n();
+  const t = i18n.t;
+  // v1.12.44 (Localization Closure): count-aware translation (.one/.other catalog variants — see
+  // src/i18n/index.mjs's translateCount), threaded the same way as `t` above, only into the surfaces this
+  // phase actually wires up (Game tab's session-repeat warnings so far).
+  const tc = i18n.tc;
+  // v1.12.44 (Localization Closure, task item 3 — locale-aware DISPLAY formatting for dates): REUSE FIRST —
+  // i18n.calendarDate already exists (src/i18n/format.mjs's formatCalendarDate, exposed via createI18n and
+  // window.BadQI18n) and was verified this phase to produce BYTE-IDENTICAL Thai output to the legacy
+  // fmtThaiDate for every real calendar date ("1 ม.ค. 2569" either way), plus a standard English rendering
+  // ("Jan 1, 2026") for English — so this is a thin wrapper, not a new formatting engine. Preserves
+  // fmtThaiDate's own "-" contract for missing input and falls back to fmtThaiDate itself if a date string
+  // is ever unparseable (never throws, never regresses a screen that already worked). Stored calendar-date
+  // strings themselves are never touched — this only changes what's rendered on screen. Threaded the same
+  // way as t/tc, only into screens whose surrounding text is already fully translated (Player match
+  // history, the Game tab's session context line); screens not yet translated keep calling fmtThaiDate
+  // directly until their own translation pass wires this in too — see the coverage report for exact scope.
+  const fmtDate = (iso) => {
+    if (!iso) return "-";
+    try { return i18n.calendarDate(iso); } catch (e) { return fmtThaiDate(iso); }
+  };
+  const fmtDateFull = (iso) => {
+    if (!iso) return "-";
+    try { return i18n.calendarDate(iso, { month: "long" }); } catch (e) { return fmtThaiDateFull(iso); }
+  };
+  const fmtMonthFull = (ym) => {
+    if (!ym) return "-";
+    try { return i18n.calendarDate(`${ym}-01`, { year: "numeric", month: "long", day: undefined }); } catch (e) { return fmtThaiMonthFull(ym); }
+  };
+  const fmtMonthLabel = (ym) => {
+    if (!ym) return "-";
+    try { return i18n.calendarDate(`${ym}-01`, { year: "numeric", month: "short", day: undefined }); } catch (e) { return fmtThaiMonthLabel(ym); }
+  };
+  const fmtMonthDay = (iso) => {
+    if (!iso) return "-";
+    try { return i18n.calendarDate(iso, { year: undefined, month: "short", day: "numeric" }); } catch (e) { return fmtThaiMonthDay(iso); }
+  };
+  // Same idea for a full date+time value (epoch ms) — e.g. GroupSessionHeader's "saved defaults at" stamp,
+  // previously hardcoded to toLocaleString("th-TH", ...) regardless of uiLocale (a gap explicitly flagged
+  // in that component's own code comment when it was translated earlier this phase). Same options object
+  // as before (dateStyle/timeStyle "medium"/"short"), only the locale tag now follows uiLocale.
+  const fmtDateTime = (ms) => {
+    if (!ms) return "-";
+    try { return new Date(ms).toLocaleString(i18n.locale === "en" ? "en-US" : "th-TH", { dateStyle: "medium", timeStyle: "short" }); } catch (e) { return String(ms); }
+  };
   // v1.12.1 (UX restructure): ข้อมูลและการสำรอง moved from ประวัติ to ตั้งค่า (spec 12) — the corrupted-data
   // recovery banner below used to jump straight to ประวัติ where Backup lived inline; it now needs to jump
   // two levels (tab -> Settings card) so this one-shot flag tells SettingsTab which card to auto-open on
@@ -7294,7 +7463,7 @@ function AppInner() {
         const prevKnownSavedAt = lastKnownSavedAtRef.current;
         applyPersistedState(validated);
         pushBootLog({ event: "heal-restore-epoch", fromSavedAt: prevKnownSavedAt, toSavedAt: storedSavedAt, playerCount: Array.isArray(s.players) ? s.players.length : 0, sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0 });
-        if (announce) { setStaleSyncNotice("มีการกู้คืนข้อมูลจากหน้าต่าง/แท็บอื่น — โหลดข้อมูลชุดที่กู้คืนแล้วให้"); setTimeout(() => setStaleSyncNotice(null), 5000); }
+        if (announce) { setStaleSyncNotice(t ? t("recovery.restoredFromOtherTab") : "มีการกู้คืนข้อมูลจากหน้าต่าง/แท็บอื่น — โหลดข้อมูลชุดที่กู้คืนแล้วให้"); setTimeout(() => setStaleSyncNotice(null), 5000); }
         return true;
       }
       if (storedSavedAt > lastKnownSavedAtRef.current) {
@@ -7314,7 +7483,7 @@ function AppInner() {
         applyPersistedState(s);
         pushBootLog({ event: "heal", fromSavedAt: prevKnownSavedAt, toSavedAt: storedSavedAt, playerCount: Array.isArray(s.players) ? s.players.length : 0, sessionHistoryCount: Array.isArray(s.sessionHistory) ? s.sessionHistory.length : 0 });
         if (announce) {
-          setStaleSyncNotice("มีข้อมูลใหม่กว่าจากอุปกรณ์/แท็บอื่น — รีเฟรชให้แล้ว");
+          setStaleSyncNotice(t ? t("recovery.newerDataRefreshed") : "มีข้อมูลใหม่กว่าจากอุปกรณ์/แท็บอื่น — รีเฟรชให้แล้ว");
           setTimeout(() => setStaleSyncNotice(null), 4000);
         }
         return true;
@@ -7759,7 +7928,7 @@ function AppInner() {
         if (recoverySource === "last-known-good" || recoverySource === "auto-backup" || recoverySource === "player-loss-guard") {
           // A genuine "this would have been gone" automatic recovery — a small non-blocking heads-up,
           // never a forced trip to the manual restore screen (spec: automatic recovery, no modal spam).
-          setAutoRecoveryToast("♻️ กู้คืนข้อมูลล่าสุดให้อัตโนมัติแล้ว");
+          setAutoRecoveryToast("♻️ " + (t ? t("recovery.autoRestored") : "กู้คืนข้อมูลล่าสุดให้อัตโนมัติแล้ว"));
           setTimeout(() => setAutoRecoveryToast(null), 5000);
         }
       } else {
@@ -8880,7 +9049,7 @@ function AppInner() {
     // asset-store registration (uploadImage) is ADDITIVE — it runs alongside the existing inline `photo`
     // write, never replacing/blocking it, so this stays exactly as safe/instant as before if the async
     // IndexedDB write is ever slow or fails; only `photoRef` gets backfilled once it succeeds.
-    setCropJob({ src: raw, circleGuide: true, title: "จัดตำแหน่งรูปโปรไฟล์", maxSize: 256, onDone: (data) => {
+    setCropJob({ src: raw, circleGuide: true, title: t("player.cropProfilePhoto"), maxSize: 256, onDone: (data) => {
       setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photo: data } : p)));
       uploadImage(data).then((ref) => { if (ref) setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, photoRef: ref } : p))); });
     } });
@@ -11004,10 +11173,10 @@ function AppInner() {
   // completely absent from both the on-screen preview and the printed/saved PDF, with zero extra CSS-hiding
   // logic that could accidentally leak through print's default UA stylesheet handling.
   if (financePrintReport) {
-    return <FinancePrintView report={financePrintReport} onClose={() => setFinancePrintReport(null)} />;
+    return <FinancePrintView report={financePrintReport} fmtDateFull={fmtDateFull} fmtDateTime={fmtDateTime} onClose={() => setFinancePrintReport(null)} />;
   }
   if (tournamentPrintReport) {
-    return <TournamentPrintView report={tournamentPrintReport} onClose={() => setTournamentPrintReport(null)} />;
+    return <TournamentPrintView report={tournamentPrintReport} fmtDateFull={fmtDateFull} fmtDateTime={fmtDateTime} onClose={() => setTournamentPrintReport(null)} tr={t} />;
   }
 
   const BACKUP_REMINDER_DAYS = 7;
@@ -11029,23 +11198,23 @@ function AppInner() {
         <div data-testid="storage-gate" style={{ position: "fixed", inset: 0, zIndex: 10050, background: "rgba(255,255,255,0.96)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div style={{ maxWidth: 360, textAlign: "center" }}>
             <div style={{ fontSize: 30, marginBottom: 8 }}>{storageBlocked ? "🔒" : "⏳"}</div>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 6 }}>{storageBlocked ? "เปิดที่เก็บข้อมูลไม่ได้ (ถูกบล็อก)" : "กำลังโหลดข้อมูล…"}</div>
-            {storageBlocked && <div style={{ fontSize: 12.5, color: T.muted, lineHeight: 1.6 }}>มี BadQ อีกหน้าต่าง/แท็บ (มักเป็นเวอร์ชันเก่า) เปิดค้างอยู่และยังถือที่เก็บข้อมูลไว้ — ปิดหน้าต่าง/แท็บ BadQ อื่นทั้งหมด แล้วรอสักครู่ หรือปิดแล้วเปิดแอปใหม่ ข้อมูลเดิมในเครื่องยังอยู่ ไม่มีการลบ</div>}
-            {storageBlocked && <button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ marginTop: 12, padding: "9px 16px", borderRadius: 10, background: T.accent, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>เปิดแอปใหม่</button>}
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 6 }}>{storageBlocked ? (t ? t("recovery.storageBlockedTitle") : "เปิดที่เก็บข้อมูลไม่ได้ (ถูกบล็อก)") : (t ? t("recovery.loadingEllipsis") : "กำลังโหลดข้อมูล…")}</div>
+            {storageBlocked && <div style={{ fontSize: 12.5, color: T.muted, lineHeight: 1.6 }}>{t ? t("recovery.storageBlockedBody") : "มี BadQ อีกหน้าต่าง/แท็บ (มักเป็นเวอร์ชันเก่า) เปิดค้างอยู่และยังถือที่เก็บข้อมูลไว้ — ปิดหน้าต่าง/แท็บ BadQ อื่นทั้งหมด แล้วรอสักครู่ หรือปิดแล้วเปิดแอปใหม่ ข้อมูลเดิมในเครื่องยังอยู่ ไม่มีการลบ"}</div>}
+            {storageBlocked && <button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ marginTop: 12, padding: "9px 16px", borderRadius: 10, background: T.accent, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>{t ? t("recovery.reopenAppButton") : "เปิดแอปใหม่"}</button>}
           </div>
         </div>
       )}
       {restoreUi && (
         <div data-testid="restore-gate" data-phase={restoreUi.phase} data-status={restoreUi.status} style={{ position: "fixed", inset: 0, zIndex: 10060, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div style={{ background: T.bg, borderRadius: 16, padding: 18, maxWidth: 360, width: "100%", textAlign: "center" }}>
-            <div style={{ fontSize: 14.5, fontWeight: 800, marginBottom: 6 }}>{IMPORT_PHASE_LABELS[restoreUi.phase] || "กำลังนำเข้าข้อมูล..."}</div>
-            <div style={{ fontSize: 12, color: T.muted }}>{Math.max(0, Math.round((Date.now() - (restoreUi.startedAt || Date.now())) / 1000))} วินาที</div>
-            {restoreUi.status === "slow" && <div style={{ fontSize: 12, color: "#b26a00", marginTop: 8 }}>ที่เก็บข้อมูลตอบสนองช้ากว่าปกติ — กำลังรอ อย่าปิดแอป</div>}
-            {restoreUi.status === "blocked" && <div style={{ fontSize: 12, color: "#b26a00", marginTop: 8 }}>ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง/แท็บ BadQ อื่น — ปิดหน้าต่างอื่น ระบบจะยกเลิกอย่างปลอดภัยถ้ายังไม่ได้ภายในเวลาที่กำหนด</div>}
+            <div style={{ fontSize: 14.5, fontWeight: 800, marginBottom: 6 }}>{importPhaseLabel(restoreUi.phase, t) || (t ? t("recovery.importingGenericEllipsis") : "กำลังนำเข้าข้อมูล...")}</div>
+            <div style={{ fontSize: 12, color: T.muted }}>{Math.max(0, Math.round((Date.now() - (restoreUi.startedAt || Date.now())) / 1000))} {t ? t("recovery.secondsUnit") : "วินาที"}</div>
+            {restoreUi.status === "slow" && <div style={{ fontSize: 12, color: "#b26a00", marginTop: 8 }}>{t ? t("recovery.storageSlowWarning") : "ที่เก็บข้อมูลตอบสนองช้ากว่าปกติ — กำลังรอ อย่าปิดแอป"}</div>}
+            {restoreUi.status === "blocked" && <div style={{ fontSize: 12, color: "#b26a00", marginTop: 8 }}>{t ? t("recovery.storageBlockedDuringImport") : "ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง/แท็บ BadQ อื่น — ปิดหน้าต่างอื่น ระบบจะยกเลิกอย่างปลอดภัยถ้ายังไม่ได้ภายในเวลาที่กำหนด"}</div>}
             {restoreUi.status === "unknown" && (
               <div style={{ fontSize: 12, color: T.accent, marginTop: 8, lineHeight: 1.6 }}>
-                ยืนยันผลการบันทึกไม่ได้ — ระบบหยุดการบันทึกทั้งหมดไว้เพื่อป้องกันข้อมูลปนกัน ปิดแล้วเปิดแอปใหม่ ระบบจะเลือกข้อมูลชุดเดิมหรือชุดที่นำเข้าให้ครบทั้งชุด (ไม่ปนกัน) จากที่บันทึกจริงในเครื่อง
-                <div><button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ marginTop: 10, padding: "9px 16px", borderRadius: 10, background: T.accent, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>เปิดแอปใหม่</button></div>
+                {t ? t("recovery.unknownOutcomeWarning") : "ยืนยันผลการบันทึกไม่ได้ — ระบบหยุดการบันทึกทั้งหมดไว้เพื่อป้องกันข้อมูลปนกัน ปิดแล้วเปิดแอปใหม่ ระบบจะเลือกข้อมูลชุดเดิมหรือชุดที่นำเข้าให้ครบทั้งชุด (ไม่ปนกัน) จากที่บันทึกจริงในเครื่อง"}
+                <div><button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ marginTop: 10, padding: "9px 16px", borderRadius: 10, background: T.accent, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>{t ? t("recovery.reopenAppButton") : "เปิดแอปใหม่"}</button></div>
               </div>
             )}
           </div>
@@ -11085,11 +11254,11 @@ function AppInner() {
           <div style={{ background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>⚠️</span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 800 }}>ข้อมูลเดิมเสียหาย ระบบไม่บันทึกทับให้เพื่อกันข้อมูลหายซ้ำ</div>
-              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>น่าจะเกิดจากแอปถูกปิดกลางคันตอนกำลังบันทึก — ไปที่ "ตั้งค่า" แล้วเปิด "ข้อมูลและการสำรอง" เพื่อกู้คืนจากจุดสำรองอัตโนมัติ หรือไฟล์สำรองที่เคยเก็บไว้</div>
+              <div style={{ fontSize: 12.5, fontWeight: 800 }}>{t ? t("recovery.primaryCorruptBanner") : "ข้อมูลเดิมเสียหาย ระบบไม่บันทึกทับให้เพื่อกันข้อมูลหายซ้ำ"}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("recovery.primaryCorruptHint") : "น่าจะเกิดจากแอปถูกปิดกลางคันตอนกำลังบันทึก — ไปที่ \"ตั้งค่า\" แล้วเปิด \"ข้อมูลและการสำรอง\" เพื่อกู้คืนจากจุดสำรองอัตโนมัติ หรือไฟล์สำรองที่เคยเก็บไว้"}</div>
               <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
-                <button onClick={() => { setTab("settings"); setSettingsAutoOpen("backup"); }} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>ไปกู้คืนข้อมูล</button>
-                <button onClick={() => { setLoadCorrupted(false); setBootStatus("new-install"); }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>เริ่มต้นใหม่ (ไม่กู้คืน)</button>
+                <button onClick={() => { setTab("settings"); setSettingsAutoOpen("backup"); }} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>{t ? t("recovery.goToRestore") : "ไปกู้คืนข้อมูล"}</button>
+                <button onClick={() => { setLoadCorrupted(false); setBootStatus("new-install"); }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>{t ? t("recovery.startFreshParen") : "เริ่มต้นใหม่ (ไม่กู้คืน)"}</button>
               </div>
             </div>
           </div>
@@ -11108,10 +11277,10 @@ function AppInner() {
           <div style={{ background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>⚠️</span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 800 }}>บันทึกข้อมูลล่าสุดยังไม่สำเร็จ</div>
-              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ข้อมูลที่เห็นอยู่ตอนนี้ยังอยู่ครบในหน้าจอนี้ แต่ระบบยังบันทึกลงเครื่องไม่สำเร็จ — ถ้าปิดแอปหรือปิดหน้านี้ตอนนี้ การเปลี่ยนแปลงล่าสุดอาจไม่ถูกบันทึกไว้ อย่าเพิ่งปิดแอป แล้วลองกดปุ่มด้านล่าง หรือรอสักครู่แล้วลองอีกครั้ง</div>
+              <div style={{ fontSize: 12.5, fontWeight: 800 }}>{t ? t("recovery.saveFailedTitle") : "บันทึกข้อมูลล่าสุดยังไม่สำเร็จ"}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("recovery.saveWarningBody") : "ข้อมูลที่เห็นอยู่ตอนนี้ยังอยู่ครบในหน้าจอนี้ แต่ระบบยังบันทึกลงเครื่องไม่สำเร็จ — ถ้าปิดแอปหรือปิดหน้านี้ตอนนี้ การเปลี่ยนแปลงล่าสุดอาจไม่ถูกบันทึกไว้ อย่าเพิ่งปิดแอป แล้วลองกดปุ่มด้านล่าง หรือรอสักครู่แล้วลองอีกครั้ง"}</div>
               <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
-                <button onClick={retrySaveNow} disabled={saveRetrying} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800, opacity: saveRetrying ? 0.6 : 1 }}>{saveRetrying ? "กำลังลองบันทึก…" : "ลองบันทึกใหม่"}</button>
+                <button onClick={retrySaveNow} disabled={saveRetrying} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800, opacity: saveRetrying ? 0.6 : 1 }}>{saveRetrying ? (t ? t("recovery.retryingSaveEllipsis") : "กำลังลองบันทึก…") : (t ? t("recovery.retrySave") : "ลองบันทึกใหม่")}</button>
               </div>
             </div>
           </div>
@@ -11135,11 +11304,11 @@ function AppInner() {
           <div data-testid="critical-uncertain" style={{ background: "#fff4e5", border: "1px solid #f0c96b", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>⚠️</span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 800 }}>ยังยืนยันผลการบันทึกไม่ได้ ({uncertainCritical.length} รายการ)</div>
-              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ที่เก็บข้อมูลของเครื่องไม่ตอบกลับว่าบันทึกสำเร็จหรือไม่ ระบบจึงหยุดรับคำสั่งแก้ไขเกม/จบก๊วนไว้ชั่วคราว เพื่อไม่ให้เกิดเกมซ้ำหรือข้อมูลทับกัน — แตะ "ตรวจสอบอีกครั้ง" หรือปิดแล้วเปิดแอปใหม่ ข้อมูลที่บันทึกสำเร็จแล้วจะไม่หาย</div>
+              <div style={{ fontSize: 12.5, fontWeight: 800 }}>{t ? t("recovery.uncertainTitle", { count: uncertainCritical.length }) : `ยังยืนยันผลการบันทึกไม่ได้ (${uncertainCritical.length} รายการ)`}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("recovery.uncertainBody") : "ที่เก็บข้อมูลของเครื่องไม่ตอบกลับว่าบันทึกสำเร็จหรือไม่ ระบบจึงหยุดรับคำสั่งแก้ไขเกม/จบก๊วนไว้ชั่วคราว เพื่อไม่ให้เกิดเกมซ้ำหรือข้อมูลทับกัน — แตะ \"ตรวจสอบอีกครั้ง\" หรือปิดแล้วเปิดแอปใหม่ ข้อมูลที่บันทึกสำเร็จแล้วจะไม่หาย"}</div>
               <div style={{ display: "flex", gap: 8, marginTop: 7, flexWrap: "wrap" }}>
-                <button onClick={reconcileUncertainCritical} disabled={reconcilingCritical} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800, opacity: reconcilingCritical ? 0.6 : 1 }}>{reconcilingCritical ? "กำลังตรวจสอบ…" : "ตรวจสอบอีกครั้ง"}</button>
-                <button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 800 }}>เปิดแอปใหม่</button>
+                <button onClick={reconcileUncertainCritical} disabled={reconcilingCritical} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800, opacity: reconcilingCritical ? 0.6 : 1 }}>{reconcilingCritical ? (t ? t("recovery.reconcilingEllipsis") : "กำลังตรวจสอบ…") : (t ? t("recovery.reconcileButton") : "ตรวจสอบอีกครั้ง")}</button>
+                <button onClick={() => { try { location.reload(); } catch (e) {} }} style={{ padding: "7px 13px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 800 }}>{t ? t("recovery.reopenAppButton") : "เปิดแอปใหม่"}</button>
               </div>
             </div>
           </div>
@@ -11150,32 +11319,32 @@ function AppInner() {
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12.5, fontWeight: 800 }}>
                 {criticalSaveStatus.status === "failed"
-                  ? (criticalSaveStatus.kind === "sessionEnd" ? "บันทึกผลจบก๊วนยังไม่สำเร็จ" : criticalSaveStatus.kind === "matchLifecycle" ? "บันทึกสถานะเกมยังไม่สำเร็จ" : "บันทึกผลการแข่งขันยังไม่สำเร็จ")
+                  ? (criticalSaveStatus.kind === "sessionEnd" ? (t ? t("recovery.sessionEndSaveFailed") : "บันทึกผลจบก๊วนยังไม่สำเร็จ") : criticalSaveStatus.kind === "matchLifecycle" ? (t ? t("recovery.matchLifecycleSaveFailed") : "บันทึกสถานะเกมยังไม่สำเร็จ") : (t ? t("recovery.matchSaveFailed") : "บันทึกผลการแข่งขันยังไม่สำเร็จ"))
                   : criticalSaveStatus.status === "obsolete"
-                    ? "ไม่ได้บันทึกคำสั่งเดิมซ้ำ"
+                    ? (t ? t("recovery.obsoleteTitle") : "ไม่ได้บันทึกคำสั่งเดิมซ้ำ")
                     : criticalSaveStatus.status === "conflict"
-                    ? "บันทึกแล้ว แต่ข้อมูลเปลี่ยนไประหว่างรอยืนยัน"
-                    : (criticalSaveStatus.kind === "sessionEnd" ? "กำลังบันทึกผลจบก๊วน…" : criticalSaveStatus.kind === "matchLifecycle" ? "กำลังบันทึกสถานะเกม…" : "กำลังบันทึกผลการแข่งขัน…")}
+                    ? (t ? t("recovery.conflictTitle") : "บันทึกแล้ว แต่ข้อมูลเปลี่ยนไประหว่างรอยืนยัน")
+                    : (criticalSaveStatus.kind === "sessionEnd" ? (t ? t("recovery.savingSessionEnd") : "กำลังบันทึกผลจบก๊วน…") : criticalSaveStatus.kind === "matchLifecycle" ? (t ? t("recovery.savingMatchLifecycle") : "กำลังบันทึกสถานะเกม…") : (t ? t("recovery.savingMatch") : "กำลังบันทึกผลการแข่งขัน…"))}
               </div>
               {criticalSaveStatus.status === "pending" && criticalSaveStatus.slow && (
-                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{criticalSaveStatus.blocked ? "ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง BadQ อื่น — ปิดแท็บ/หน้าต่าง BadQ อื่นแล้วรอสักครู่" : criticalSaveStatus.slow === "queued" ? "ที่เก็บข้อมูลกำลังทำงานอื่นอยู่ — คำสั่งถัดไปจะรอคิวจนกว่าการบันทึกนี้จะยืนยันผล" : "ที่เก็บข้อมูลตอบสนองช้ากว่าปกติ — คำสั่งถัดไปจะรอคิวจนกว่าการบันทึกนี้จะยืนยันผล"}</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{criticalSaveStatus.blocked ? (t ? t("recovery.slowBlocked") : "ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง BadQ อื่น — ปิดแท็บ/หน้าต่าง BadQ อื่นแล้วรอสักครู่") : criticalSaveStatus.slow === "queued" ? (t ? t("recovery.slowQueued") : "ที่เก็บข้อมูลกำลังทำงานอื่นอยู่ — คำสั่งถัดไปจะรอคิวจนกว่าการบันทึกนี้จะยืนยันผล") : (t ? t("recovery.slowDefault") : "ที่เก็บข้อมูลตอบสนองช้ากว่าปกติ — คำสั่งถัดไปจะรอคิวจนกว่าการบันทึกนี้จะยืนยันผล")}</div>
               )}
               {criticalSaveStatus.status === "failed" && criticalSaveStatus.kind === "matchLifecycle" && (
-                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>สถานะเกมยังไม่เปลี่ยน เพราะบันทึกลงเครื่องไม่สำเร็จ (ระบบยืนยันแล้วว่าไม่ได้บันทึก) — แตะคำสั่งเดิมอีกครั้ง (เช่น เริ่มเกม/พักเกม) หรือแตะ "ลองบันทึกซ้ำ"</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("recovery.matchLifecycleFailedBody") : "สถานะเกมยังไม่เปลี่ยน เพราะบันทึกลงเครื่องไม่สำเร็จ (ระบบยืนยันแล้วว่าไม่ได้บันทึก) — แตะคำสั่งเดิมอีกครั้ง (เช่น เริ่มเกม/พักเกม) หรือแตะ \"ลองบันทึกซ้ำ\""}</div>
               )}
               {criticalSaveStatus.status === "failed" && criticalSaveStatus.kind !== "matchLifecycle" && (
-                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ข้อมูลยังอยู่ในหน้าจอนี้ แต่ยังบันทึกลงเครื่องไม่สำเร็จ (ระบบยืนยันแล้วว่าไม่ได้บันทึก) — อย่าเพิ่งปิดแอปตอนนี้ แตะ "ลองบันทึกซ้ำ" หรือแตะคำสั่งเดิมอีกครั้ง</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("recovery.failedGenericBody") : "ข้อมูลยังอยู่ในหน้าจอนี้ แต่ยังบันทึกลงเครื่องไม่สำเร็จ (ระบบยืนยันแล้วว่าไม่ได้บันทึก) — อย่าเพิ่งปิดแอปตอนนี้ แตะ \"ลองบันทึกซ้ำ\" หรือแตะคำสั่งเดิมอีกครั้ง"}</div>
               )}
               {criticalSaveStatus.status === "failed" && criticalSaveStatus.kind !== "sessionEnd" && criticalMutationRetryRef.current && criticalMutationRetryRef.current.mutationId === criticalSaveStatus.mutationId && (
                 <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
-                  <button onClick={retryLastCriticalMutation} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>ลองบันทึกซ้ำ</button>
+                  <button onClick={retryLastCriticalMutation} style={{ padding: "7px 13px", borderRadius: 9, background: T.accent, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>{t ? t("recovery.retryButton") : "ลองบันทึกซ้ำ"}</button>
                 </div>
               )}
               {criticalSaveStatus.status === "conflict" && (
-                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>คำสั่งนี้บันทึกลงเครื่องแล้ว แต่ข้อมูลที่เกี่ยวข้องถูกแก้ไขระหว่างรอยืนยันผล ระบบจึงยังไม่นำไปใช้ และจะแสดงเป็นรายการที่ต้องตรวจสอบเมื่อเปิดแอปครั้งถัดไป (ข้อมูลไม่หาย ส่งออกเพื่อตรวจสอบได้)</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("recovery.conflictBody") : "คำสั่งนี้บันทึกลงเครื่องแล้ว แต่ข้อมูลที่เกี่ยวข้องถูกแก้ไขระหว่างรอยืนยันผล ระบบจึงยังไม่นำไปใช้ และจะแสดงเป็นรายการที่ต้องตรวจสอบเมื่อเปิดแอปครั้งถัดไป (ข้อมูลไม่หาย ส่งออกเพื่อตรวจสอบได้)"}</div>
               )}
               {criticalSaveStatus.status === "obsolete" && (
-                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>เกม/ก๊วนนี้ถูกแก้ไขไปแล้วหลังจากบันทึกครั้งก่อนไม่สำเร็จ คำสั่งเดิมจึงไม่ถูกบันทึกซ้ำ (ป้องกันเกมผี/ผลซ้ำ) — ถ้ายังต้องการ ให้แตะคำสั่งนั้นใหม่จากสถานะปัจจุบัน</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("recovery.obsoleteBody") : "เกม/ก๊วนนี้ถูกแก้ไขไปแล้วหลังจากบันทึกครั้งก่อนไม่สำเร็จ คำสั่งเดิมจึงไม่ถูกบันทึกซ้ำ (ป้องกันเกมผี/ผลซ้ำ) — ถ้ายังต้องการ ให้แตะคำสั่งนั้นใหม่จากสถานะปัจจุบัน"}</div>
               )}
             </div>
           </div>
@@ -11189,7 +11358,7 @@ function AppInner() {
             silently dropped from the organizer's awareness. */}
         {unresolvedCriticalFailures.filter((f) => !criticalSaveStatus || f.mutationId !== criticalSaveStatus.mutationId).length > 0 && (
           <div style={{ background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 12, padding: "8px 11px", marginBottom: 14, fontSize: 10.5, color: T.muted }}>
-            ⚠️ มีการบันทึกที่ยังไม่สำเร็จอีก {unresolvedCriticalFailures.filter((f) => !criticalSaveStatus || f.mutationId !== criticalSaveStatus.mutationId).length} รายการ — ข้อมูลยังปลอดภัย ระบบจะลองใหม่โดยอัตโนมัติ
+            {t ? t("recovery.unresolvedFailuresCount", { count: unresolvedCriticalFailures.filter((f) => !criticalSaveStatus || f.mutationId !== criticalSaveStatus.mutationId).length }) : `⚠️ มีการบันทึกที่ยังไม่สำเร็จอีก ${unresolvedCriticalFailures.filter((f) => !criticalSaveStatus || f.mutationId !== criticalSaveStatus.mutationId).length} รายการ — ข้อมูลยังปลอดภัย ระบบจะลองใหม่โดยอัตโนมัติ`}
           </div>
         )}
 
@@ -11205,20 +11374,20 @@ function AppInner() {
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>⚠️</span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 12.5, fontWeight: 800 }}>
-                {journalRecoveryWarning.type === "unreadable" && "ไม่สามารถอ่านข้อมูลการบันทึกล่าสุดบางส่วนได้"}
-                {journalRecoveryWarning.type === "conflicts" && "พบข้อมูลเกมที่ยังไม่ได้ยืนยันสถานะ"}
-                {journalRecoveryWarning.type === "prune-failed" && "ระบบยังยืนยันการบันทึกล่าสุดไม่สำเร็จ"}
+                {journalRecoveryWarning.type === "unreadable" && (t ? t("recovery.journalUnreadable") : "ไม่สามารถอ่านข้อมูลการบันทึกล่าสุดบางส่วนได้")}
+                {journalRecoveryWarning.type === "conflicts" && (t ? t("recovery.unconfirmedGameTitle") : "พบข้อมูลเกมที่ยังไม่ได้ยืนยันสถานะ")}
+                {journalRecoveryWarning.type === "prune-failed" && (t ? t("recovery.verifyFailed") : "ระบบยังยืนยันการบันทึกล่าสุดไม่สำเร็จ")}
               </div>
               <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>
-                {journalRecoveryWarning.type === "unreadable" && "ข้อมูลหลักของคุณยังปลอดภัย แต่ระบบตรวจสอบบันทึกช่วยความปลอดภัยล่าสุดไม่ได้ในตอนนี้ — แนะนำให้ตรวจสอบผลการแข่งขัน/ประวัติก๊วนล่าสุดว่าครบถ้วน แล้วสำรองข้อมูลไว้"}
-                {journalRecoveryWarning.type === "conflicts" && `พบรายการ ${journalRecoveryWarning.count} รายการที่ระบบไม่แน่ใจว่าปลอดภัยที่จะรวมเข้าข้อมูลปัจจุบัน จึงเก็บไว้รอตรวจสอบแทนการเดา — กรุณาตรวจสอบผลการแข่งขันล่าสุด`}
-                {journalRecoveryWarning.type === "conflicts" && (journalRecoveryWarning.legacyCount > 0 || journalRecoveryWarning.malformedCount > 0) && ` (จากเวอร์ชันก่อน ${journalRecoveryWarning.legacyCount || 0} · รูปแบบไม่ถูกต้อง ${journalRecoveryWarning.malformedCount || 0} · ขัดแย้งกับข้อมูลปัจจุบัน ${journalRecoveryWarning.conflictCount || 0}) — รายการเหล่านี้ถูกเก็บไว้ครบถ้วน ไม่ถูกลบ และส่งออกไปตรวจสอบได้`}
-                {journalRecoveryWarning.type === "prune-failed" && "ข้อมูลยังปลอดภัยและระบบจะลองยืนยันใหม่ในครั้งถัดไป — ไม่มีข้อมูลสูญหาย"}
+                {journalRecoveryWarning.type === "unreadable" && (t ? t("recovery.unreadableBody") : "ข้อมูลหลักของคุณยังปลอดภัย แต่ระบบตรวจสอบบันทึกช่วยความปลอดภัยล่าสุดไม่ได้ในตอนนี้ — แนะนำให้ตรวจสอบผลการแข่งขัน/ประวัติก๊วนล่าสุดว่าครบถ้วน แล้วสำรองข้อมูลไว้")}
+                {journalRecoveryWarning.type === "conflicts" && (t ? t("recovery.conflictsBody", { count: journalRecoveryWarning.count }) : `พบรายการ ${journalRecoveryWarning.count} รายการที่ระบบไม่แน่ใจว่าปลอดภัยที่จะรวมเข้าข้อมูลปัจจุบัน จึงเก็บไว้รอตรวจสอบแทนการเดา — กรุณาตรวจสอบผลการแข่งขันล่าสุด`)}
+                {journalRecoveryWarning.type === "conflicts" && (journalRecoveryWarning.legacyCount > 0 || journalRecoveryWarning.malformedCount > 0) && (t ? t("recovery.conflictsBreakdown", { legacyCount: journalRecoveryWarning.legacyCount || 0, malformedCount: journalRecoveryWarning.malformedCount || 0, conflictCount: journalRecoveryWarning.conflictCount || 0 }) : ` (จากเวอร์ชันก่อน ${journalRecoveryWarning.legacyCount || 0} · รูปแบบไม่ถูกต้อง ${journalRecoveryWarning.malformedCount || 0} · ขัดแย้งกับข้อมูลปัจจุบัน ${journalRecoveryWarning.conflictCount || 0}) — รายการเหล่านี้ถูกเก็บไว้ครบถ้วน ไม่ถูกลบ และส่งออกไปตรวจสอบได้`)}
+                {journalRecoveryWarning.type === "prune-failed" && (t ? t("recovery.pruneFailedBody") : "ข้อมูลยังปลอดภัยและระบบจะลองยืนยันใหม่ในครั้งถัดไป — ไม่มีข้อมูลสูญหาย")}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 7 }}>
-                <button onClick={() => setJournalRecoveryWarning(null)} style={{ padding: "7px 13px", borderRadius: 9, background: "#fff", border: `1px solid ${T.border || "#ddd"}`, color: "#111", fontSize: 12, fontWeight: 800 }}>รับทราบ</button>
+                <button onClick={() => setJournalRecoveryWarning(null)} style={{ padding: "7px 13px", borderRadius: 9, background: "#fff", border: `1px solid ${T.border || "#ddd"}`, color: "#111", fontSize: 12, fontWeight: 800 }}>{t ? t("recovery.acknowledge") : "รับทราบ"}</button>
                 {journalRecoveryWarning.type !== "prune-failed" && (
-                  <button data-testid="journal-export" onClick={() => { exportJournalForReconciliation(); }} style={{ padding: "7px 13px", borderRadius: 9, background: "#fff", border: `1px solid ${T.border || "#ddd"}`, color: "#111", fontSize: 12, fontWeight: 800 }}>ส่งออกข้อมูลเพื่อตรวจสอบ</button>
+                  <button data-testid="journal-export" onClick={() => { exportJournalForReconciliation(); }} style={{ padding: "7px 13px", borderRadius: 9, background: "#fff", border: `1px solid ${T.border || "#ddd"}`, color: "#111", fontSize: 12, fontWeight: 800 }}>{t ? t("recovery.exportDiagnostic") : "ส่งออกข้อมูลเพื่อตรวจสอบ"}</button>
                 )}
               </div>
             </div>
@@ -11237,37 +11406,46 @@ function AppInner() {
           <div style={{ background: "#fff7e6", border: "1px solid #f0c96b", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "flex-start", gap: 9 }}>
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>💾</span>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 800 }}>{daysSinceBackup == null ? "ยังไม่เคยสำรองข้อมูลเลย" : `ยังไม่ได้สำรองข้อมูลมา ${daysSinceBackup} วันแล้ว`}</div>
-              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>มือถือ (โดยเฉพาะ iPhone) อาจล้างข้อมูลแอปเองได้ถ้าปิด/ไม่ได้เปิดนาน ๆ — สำรองเก็บไว้กันพลาด</div>
-              <button onClick={() => { exportBackup().then((res) => { if (res && res.error) { setBackupNoticeDismissed(false); try { alert(res.error); } catch (e) {} } }); setBackupNoticeDismissed(true); }} style={{ marginTop: 7, padding: "7px 13px", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>สำรองเลย</button>
+              <div style={{ fontSize: 12.5, fontWeight: 800 }}>{daysSinceBackup == null ? (t ? t("backup.never") : "ยังไม่เคยสำรองข้อมูลเลย") : (t ? t("backup.daysSinceBackup", { days: daysSinceBackup }) : `ยังไม่ได้สำรองข้อมูลมา ${daysSinceBackup} วันแล้ว`)}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t ? t("backup.deviceRiskHint") : "มือถือ (โดยเฉพาะ iPhone) อาจล้างข้อมูลแอปเองได้ถ้าปิด/ไม่ได้เปิดนาน ๆ — สำรองเก็บไว้กันพลาด"}</div>
+              <button onClick={() => { exportBackup().then((res) => { if (res && res.error) { setBackupNoticeDismissed(false); try { alert(res.error); } catch (e) {} } }); setBackupNoticeDismissed(true); }} style={{ marginTop: 7, padding: "7px 13px", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>{t ? t("backup.backupNow") : "สำรองเลย"}</button>
             </div>
             <button onClick={() => setBackupNoticeDismissed(true)} style={{ flexShrink: 0, background: "none", border: "none", color: T.muted, padding: 4 }}><X size={16} /></button>
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, t, tc, fmtDate, fmtDateTime }} />}
         {tab === "session" && <GameTab
-          sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members") }}
+          t={t}
+          sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
           summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory }}
         />}
-        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null) }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} gameMode={mode} />}
+        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, t, tc, fmtDate, fmtDateFull, fmtDateTime }} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
         <div style={{ maxWidth: gameShellMaxWidth, margin: "0 auto", display: "flex" }}>
           {/* v1.12.1 (UX restructure, spec 1): icon switched from the lucide User glyph to the 👥 emoji to
               match the new nav's exact spec (👥 ผู้เล่น | 🏸 เกม | 💰 การเงิน | ⚙️ ตั้งค่า) — label/behavior unchanged. */}
-          <TabBtn active={tab === "members"} onClick={() => setTab("members")} label="ผู้เล่น"><span style={{ fontSize: 19, lineHeight: "20px" }}>👥</span></TabBtn>
+          <TabBtn active={tab === "members"} onClick={() => setTab("members")} label={t("nav.players")}><span style={{ fontSize: 19, lineHeight: "20px" }}>👥</span></TabBtn>
           {/* v1.11.61: bottom nav simplified from 5 items to 4 — "วันนี้" renamed to "เกม" (same 🏸 icon,
               already badminton-appropriate, no change needed there) and the old standalone "สรุป" item is
               retired; Summary now lives INSIDE this "เกม" page as a compact เกม/สรุป sub-tab (see GameTab
               below) rather than being deleted. */}
-          <TabBtn active={tab === "session"} onClick={() => setTab("session")} label="เกม"><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
-          <TabBtn active={tab === "finance"} onClick={() => setTab("finance")} label="การเงิน"><span style={{ fontSize: 19, lineHeight: "20px" }}>💰</span></TabBtn>
+          {/* v1.12.41 (Localization Phase 1) flagged this tab as a deliberate gap: the prepared catalog's
+              nav.games key is authored as "Matches" for a future matches-list nav item, but this tab's Thai
+              label is "เกม" (Game/session hub, per the v1.11.61 comment above) — using nav.games here would
+              have rendered "Matches" for a tab that isn't about a match list, contradicting the approved
+              game/เกม vs match/แมตช์ terminology.
+              v1.12.42 (Localization Phase 2): resolved per Owner instruction — a new, dedicated key
+              (nav.gameHub, TH "เกม" / EN "Game") was added specifically for this tab, leaving nav.games
+              untouched for its own future Matches-list context. No terminology conflict remains. */}
+          <TabBtn active={tab === "session"} onClick={() => setTab("session")} label={t("nav.gameHub")}><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
+          <TabBtn active={tab === "finance"} onClick={() => setTab("finance")} label={t("nav.finance")}><span style={{ fontSize: 19, lineHeight: "20px" }}>💰</span></TabBtn>
           {/* v1.12.1 (UX restructure, spec 1): "ประวัติ" removed from the bottom nav — History itself is NOT
               deleted, it moves under ⚙️ ตั้งค่า → ประวัติ (see SettingsTab) along with Backup/Advanced/General. */}
-          <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} label="ตั้งค่า"><span style={{ fontSize: 19, lineHeight: "20px" }}>⚙️</span></TabBtn>
+          <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} label={t("nav.settings")}><span style={{ fontSize: 19, lineHeight: "20px" }}>⚙️</span></TabBtn>
         </div>
       </div>
     </div>
@@ -11283,7 +11461,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, t, tc, fmtDate, fmtDateTime }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
@@ -11485,45 +11663,45 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} setCourtLabel={setCourtLabel}
         players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
         resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
-        groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
+        groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault} t={t} tc={tc} fmtDate={fmtDate} fmtDateTime={fmtDateTime}
         /* v1.12.7 (fix 1): threaded through purely so QuanSettingsSheet can embed the EXISTING
            FinanceSettingsBody (การชำระเงินและต้นทุน) as a new accordion — same props FinanceSettingsSheet
            already receives from App() at the ชำระเงิน tab, nothing new is created. */
         qrRef={qrRef} history={history} current={current}
       />
-      {cropJob && <ImageCropper src={cropJob} circleGuide title="จัดตำแหน่งรูปโปรไฟล์" maxSize={256} onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
+      {cropJob && <ImageCropper src={cropJob} circleGuide title={t("player.cropProfilePhoto")} maxSize={256} onCancel={() => setCropJob(null)} onConfirm={(data) => { setDraftPhoto(data); setCropJob(null); }} />}
 
       {/* v1.12.1 (UX restructure, spec 3/5): simplified controls — "+ เพิ่มผู้เล่น" opens a compact modal
           (same addPlayer/draftPhoto/cropJob logic as before, just relocated behind a button instead of an
           always-visible inline row), then search, then the new ทั้งหมด/มา/กำลังมา/ไม่มา quick filter with
           live counts, then ตัวกรอง ▾ (secondary filters/sorting) and จัดการ ▾ (bulk/membership actions). */}
       <button onClick={() => setAddPlayerOpen(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 0", borderRadius: 12, background: T.accent, border: "none", color: "#fff", fontSize: 14, fontWeight: 800, marginBottom: 10 }}>
-        <Plus size={18} /> เพิ่มผู้เล่น
+        <Plus size={18} /> {t("player.add")}
       </button>
       {addPlayerOpen && (
         <Overlay onClose={() => setAddPlayerOpen(false)}>
-          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>+ เพิ่มผู้เล่น</div>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>+ {t("player.add")}</div>
           {/* v1.9.11/v1.9.13 logic unchanged — only the surrounding chrome (always-visible row -> modal)
               changed, per spec 5: "at minimum surface photo/avatar, name, skill" — handedness/Member-Guest-
               Owner/phone/LINE/archive/delete all still live in EditPlayerModal, opened after creation via
               the player's profile, exactly as before this patch. */}
           <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
             <input ref={newPlayerFileRef} type="file" accept="image/*" onChange={onDraftPhotoFile} style={{ display: "none" }} />
-            <button onClick={() => newPlayerFileRef.current.click()} title="เพิ่ม/ถ่ายรูปสมาชิกใหม่" style={{ position: "relative", border: `1px solid ${T.border}`, background: T.surface, borderRadius: 11, padding: 0, width: 46, height: 46, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+            <button onClick={() => newPlayerFileRef.current.click()} title={t("player.addPhoto")} style={{ position: "relative", border: `1px solid ${T.border}`, background: T.surface, borderRadius: 11, padding: 0, width: 46, height: 46, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
               {draftPhoto ? <img src={draftPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={18} color={T.muted} />}
             </button>
-            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (submit(), setAddPlayerOpen(false))} placeholder="ชื่อผู้เล่น" style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (submit(), setAddPlayerOpen(false))} placeholder={t("player.name")} style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
           </div>
           <div style={{ marginBottom: 14 }}>
             <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ width: "100%", padding: "10px 8px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700 }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}</select>
           </div>
-          <button onClick={() => { submit(); setAddPlayerOpen(false); }} disabled={!name.trim()} style={{ ...btnPrimary, width: "100%", opacity: name.trim() ? 1 : 0.5 }}><Plus size={16} /> เพิ่มผู้เล่น</button>
+          <button onClick={() => { submit(); setAddPlayerOpen(false); }} disabled={!name.trim()} style={{ ...btnPrimary, width: "100%", opacity: name.trim() ? 1 : 0.5 }}><Plus size={16} /> {t("player.add")}</button>
         </Overlay>
       )}
 
       <div style={{ position: "relative", marginBottom: 10 }}>
         <Search size={17} style={{ position: "absolute", left: 12, top: 12, color: T.muted }} />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อผู้เล่น" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("player.searchPlaceholder")} style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
       </div>
 
       {/* v1.12.5 (Simplify Player Status UI): ทั้งหมด/ลงทะเบียน/สำรอง/พร้อมเล่น/กลับแล้ว — one-tap filter on
@@ -11533,7 +11711,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           pulled straight from PSTATUS so the "รอคิว" -> "สำรอง" rename (see PSTATUS.waiting above) stays the
           single source of truth. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 8, overflowX: "auto" }}>
-        {[["all", "ทั้งหมด", statusCounts.all], ["registered", PSTATUS.registered.label, statusCounts.registered], ["waiting", PSTATUS.waiting.label, statusCounts.waiting], ["ready", PSTATUS.ready.label, statusCounts.ready], ["left", PSTATUS.left.label, statusCounts.left]].map(([key, label, count]) => (
+        {[["all", t("common.all"), statusCounts.all], ["registered", t(PSTATUS_I18N_KEY.registered), statusCounts.registered], ["waiting", t(PSTATUS_I18N_KEY.waiting), statusCounts.waiting], ["ready", t(PSTATUS_I18N_KEY.ready), statusCounts.ready], ["left", t(PSTATUS_I18N_KEY.left), statusCounts.left]].map(([key, label, count]) => (
           <button key={key} onClick={() => setStatusQuick(key)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700, border: `1px solid ${statusQuick === key ? T.green : T.border}`, background: statusQuick === key ? "#e2f5ec" : T.surface, color: statusQuick === key ? T.green : T.muted, whiteSpace: "nowrap" }}>{label} {count}</button>
         ))}
       </div>
@@ -11542,65 +11720,65 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           everything that used to be its own always-visible chip on this row now lives behind these two. */}
       <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
         <button onClick={() => setFilterSheetOpen(true)} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "9px 10px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${activeFilterCount > 0 ? T.green : T.border}`, background: activeFilterCount > 0 ? "#e2f5ec" : T.surface, color: activeFilterCount > 0 ? T.green : T.text }}>
-          ตัวกรอง{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""} <ChevronDown size={14} />
+          {t("player.filter")}{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ""} <ChevronDown size={14} />
         </button>
         <button onClick={() => setManageSheetOpen(true)} style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "9px 10px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${T.border}`, background: T.surface, color: T.text }}>
-          จัดการ <ChevronDown size={14} />
+          {t("player.manage")} <ChevronDown size={14} />
         </button>
       </div>
 
       {filterSheetOpen && (
         <Overlay onClose={() => setFilterSheetOpen(false)}>
-          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>ตัวกรอง</div>
-          <Label>เรียงตาม</Label>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t("player.filter")}</div>
+          <Label>{t("player.sort")}</Label>
           <div style={{ position: "relative", marginBottom: 16 }}>
             <select value={sort} onChange={(e) => setSort(e.target.value)} style={{ width: "100%", appearance: "none", padding: "10px 26px 10px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 600, boxSizing: "border-box" }}>
-              <option value="name">ค่าเริ่มต้น</option>
-              <option value="levelDesc">เก่ง → เริ่มต้น</option>
-              <option value="levelAsc">เริ่มต้น → เก่ง</option>
-              <option value="frequent">มาบ่อย</option>
-              <option value="recent">มาล่าสุด</option>
+              <option value="name">{t("player.sort.default")}</option>
+              <option value="levelDesc">{t("player.sort.strongest")}</option>
+              <option value="levelAsc">{t("player.sort.beginner")}</option>
+              <option value="frequent">{t("player.sort.frequent")}</option>
+              <option value="recent">{t("player.sort.recent")}</option>
             </select>
             <ChevronDown size={15} style={{ position: "absolute", right: 8, top: 12, color: T.muted, pointerEvents: "none" }} />
           </div>
-          <Label>ตัวกรองเพิ่มเติม</Label>
+          <Label>{t("player.additionalFilters")}</Label>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
-            <button onClick={() => setOnlyInactive((v) => !v)} title={`ไม่มีประวัติมาร่วมก๊วนเกิน ${settings.inactiveMonths || 6} เดือน (ตั้งค่าได้ที่ ⚙️ ตั้งค่า → ตั้งค่าทั่วไป)`} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${onlyInactive ? T.accent : T.border}`, background: onlyInactive ? "#fdecea" : T.surface, color: onlyInactive ? T.accent : T.muted }}>ไม่ได้มานาน</button>
+            <button onClick={() => setOnlyInactive((v) => !v)} title={t("player.inactiveFilterHelp", { months: settings.inactiveMonths || 6 })} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${onlyInactive ? T.accent : T.border}`, background: onlyInactive ? "#fdecea" : T.surface, color: onlyInactive ? T.accent : T.muted }}>{t("player.inactiveFilter")}</button>
             {memberTypesPresent.has("member") && (
-              <button onClick={() => toggleInSet(setMemberTypeFilters, "member")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("member") ? T.green : T.border}`, background: memberTypeFilters.has("member") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("member") ? T.green : T.muted }}>Member</button>
+              <button onClick={() => toggleInSet(setMemberTypeFilters, "member")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("member") ? T.green : T.border}`, background: memberTypeFilters.has("member") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("member") ? T.green : T.muted }}>{t(MEMBER_TYPE_I18N_KEY.member)}</button>
             )}
             {memberTypesPresent.has("guest") && (
-              <button onClick={() => toggleInSet(setMemberTypeFilters, "guest")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("guest") ? T.green : T.border}`, background: memberTypeFilters.has("guest") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("guest") ? T.green : T.muted }}>Guest</button>
+              <button onClick={() => toggleInSet(setMemberTypeFilters, "guest")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("guest") ? T.green : T.border}`, background: memberTypeFilters.has("guest") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("guest") ? T.green : T.muted }}>{t(MEMBER_TYPE_I18N_KEY.guest)}</button>
             )}
             {memberTypesPresent.has("owner") && (
-              <button onClick={() => toggleInSet(setMemberTypeFilters, "owner")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("owner") ? T.green : T.border}`, background: memberTypeFilters.has("owner") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("owner") ? T.green : T.muted }}>Owner</button>
+              <button onClick={() => toggleInSet(setMemberTypeFilters, "owner")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${memberTypeFilters.has("owner") ? T.green : T.border}`, background: memberTypeFilters.has("owner") ? "#e2f5ec" : T.surface, color: memberTypeFilters.has("owner") ? T.green : T.muted }}>{t(MEMBER_TYPE_I18N_KEY.owner)}</button>
             )}
             {handsPresent.has("left") && (
-              <button onClick={() => toggleInSet(setHandFilters, "left")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${handFilters.has("left") ? T.green : T.border}`, background: handFilters.has("left") ? "#e2f5ec" : T.surface, color: handFilters.has("left") ? T.green : T.muted }}>มือซ้าย</button>
+              <button onClick={() => toggleInSet(setHandFilters, "left")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${handFilters.has("left") ? T.green : T.border}`, background: handFilters.has("left") ? "#e2f5ec" : T.surface, color: handFilters.has("left") ? T.green : T.muted }}>{t("player.filterHandLeft")}</button>
             )}
             {handsPresent.has("right") && (
-              <button onClick={() => toggleInSet(setHandFilters, "right")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${handFilters.has("right") ? T.green : T.border}`, background: handFilters.has("right") ? "#e2f5ec" : T.surface, color: handFilters.has("right") ? T.green : T.muted }}>มือขวา</button>
+              <button onClick={() => toggleInSet(setHandFilters, "right")} style={{ padding: "8px 12px", borderRadius: 10, fontSize: 12.5, fontWeight: 700, border: `1px solid ${handFilters.has("right") ? T.green : T.border}`, background: handFilters.has("right") ? "#e2f5ec" : T.surface, color: handFilters.has("right") ? T.green : T.muted }}>{t("player.filterHandRight")}</button>
             )}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={clearAllFilters} style={btnSecondary}>ล้างตัวกรอง</button>
-            <button onClick={() => setFilterSheetOpen(false)} style={btnPrimary}>แสดงผล</button>
+            <button onClick={clearAllFilters} style={btnSecondary}>{t("player.clearFilters")}</button>
+            <button onClick={() => setFilterSheetOpen(false)} style={btnPrimary}>{t("common.apply")}</button>
           </div>
         </Overlay>
       )}
 
       {manageSheetOpen && (
         <Overlay onClose={() => setManageSheetOpen(false)}>
-          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>จัดการ</div>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t("player.manage")}</div>
           <button onClick={() => { setBulkMode((v) => !v); setSelectedIds(new Set()); setBulkArchiveResult(null); setManageSheetOpen(false); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, textAlign: "left" }}>
             <span style={{ fontSize: 17 }}>👥</span>
-            <span style={{ flex: 1, fontSize: 14, fontWeight: 800, color: T.text }}>{bulkMode ? "จบการจัดการหลายคน" : "จัดการหลายคน"}</span>
+            <span style={{ flex: 1, fontSize: 14, fontWeight: 800, color: T.text }}>{bulkMode ? t("player.bulkDone") : t("player.bulkManage")}</span>
           </button>
           <button onClick={() => { setMembershipSettingsOpen(true); setManageSheetOpen(false); }} style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, textAlign: "left" }}>
             <span style={{ fontSize: 17 }}>💳</span>
-            <span style={{ flex: 1, fontSize: 14, fontWeight: 800, color: T.text }}>ค่าสมาชิก</span>
+            <span style={{ flex: 1, fontSize: 14, fontWeight: 800, color: T.text }}>{t("membership.title")}</span>
           </button>
-          <button onClick={() => setManageSheetOpen(false)} style={{ ...btnSecondary, marginTop: 14 }}>ปิด</button>
+          <button onClick={() => setManageSheetOpen(false)} style={{ ...btnSecondary, marginTop: 14 }}>{t("common.close")}</button>
         </Overlay>
       )}
 
@@ -11610,22 +11788,24 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           players={players} otherIncome={otherIncome}
           payEntranceFee={payEntranceFee} payMembership={payMembership}
           onOpenProfile={(id) => { setMembershipSettingsOpen(false); setProfilePlayerId(id); }}
+          t={t}
+          tc={tc}
           onClose={() => setMembershipSettingsOpen(false)}
         />
       )}
       {bulkMode && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 11px" }}>
-          <span style={{ flex: 1, fontSize: 12, fontWeight: 700, color: T.muted }}>เลือกแล้ว {selectedIds.size} คน</span>
+          <span style={{ flex: 1, fontSize: 12, fontWeight: 700, color: T.muted }}>{t("player.selectedCount", { count: selectedIds.size })}</span>
           <button
             onClick={runBulkArchive}
             disabled={selectedIds.size === 0}
             style={{ padding: "7px 12px", borderRadius: 20, border: "none", fontSize: 12, fontWeight: 800, background: selectedIds.size === 0 ? T.surface : T.green, color: selectedIds.size === 0 ? T.muted : "#fff", opacity: selectedIds.size === 0 ? 0.6 : 1 }}
-          >📦 Archive ที่เลือก</button>
+          >📦 {t("player.archiveSelected")}</button>
         </div>
       )}
       {bulkArchiveResult && (
         <div style={{ fontSize: 11.5, color: T.muted, marginTop: -6, marginBottom: 12, textAlign: "center" }}>
-          เก็บสมาชิกแล้ว {bulkArchiveResult.archived} คน{bulkArchiveResult.skipped > 0 ? ` · ข้าม ${bulkArchiveResult.skipped} คนเพราะถูกล็อกไว้` : ""}
+          {t(bulkArchiveResult.archived === 1 ? "player.archivedCount.one" : "player.archivedCount.other", { count: bulkArchiveResult.archived })}{bulkArchiveResult.skipped > 0 ? ` · ${t("player.archiveSkippedLocked", { count: bulkArchiveResult.skipped })}` : ""}
         </div>
       )}
 
@@ -11638,8 +11818,8 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           left over from before the feature was disabled can never render the Tournament view either. */}
       {settings.tournamentEnabled && (
       <div style={{ display: "flex", gap: 6, background: T.surface2, borderRadius: 12, padding: 4, marginBottom: 12 }}>
-        <button onClick={() => setRegTab("group")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "group" ? T.surface : "none", color: regTab === "group" ? T.text : T.muted, boxShadow: regTab === "group" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏸 ก๊วน</button>
-        <button onClick={() => setRegTab("tournament")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "tournament" ? T.surface : "none", color: regTab === "tournament" ? T.text : T.muted, boxShadow: regTab === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 Tournament</button>
+        <button onClick={() => setRegTab("group")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "group" ? T.surface : "none", color: regTab === "group" ? T.text : T.muted, boxShadow: regTab === "group" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏸 {t("session.title")}</button>
+        <button onClick={() => setRegTab("tournament")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "tournament" ? T.surface : "none", color: regTab === "tournament" ? T.text : T.muted, boxShadow: regTab === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 {t("tournament.title")}</button>
       </div>
       )}
 
@@ -11649,22 +11829,22 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           text summary is removed here — the filter chip row right above already shows every one of those
           counts live, per status. "สมาชิก N คน" and "ไม่มาทั้งหมด" are unchanged/kept. */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.muted, marginBottom: 8 }}>
-        <span>สมาชิก {players.length} คน</span>
-        {players.length > 0 && <button onClick={() => setConfirmResetAll(true)} title="รีเซ็ตทุกคนเป็นไม่ได้มา (เริ่มวันใหม่)" style={{ padding: "5px 9px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><RotateCcw size={12} /> ไม่มาทั้งหมด</button>}
+        <span>{t(players.length === 1 ? "player.memberCount.one" : "player.memberCount.other", { count: players.length })}</span>
+        {players.length > 0 && <button onClick={() => setConfirmResetAll(true)} title={t("attendance.resetAll")} style={{ padding: "5px 9px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><RotateCcw size={12} /> {t("attendance.markAllAbsent")}</button>}
       </div>
       {confirmResetAll && (
         <div onClick={() => setConfirmResetAll(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>รีเซ็ตสถานะทุกคนเป็น "ไม่ได้มา"?</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>เหมือนเริ่มก๊วนใหม่วันใหม่ — สถิติ/ประวัติของแต่ละคนจะไม่หาย แค่สถานะการมาจะถูกล้าง</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{t("attendance.resetAllConfirm")}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{t("attendance.resetAllHelp")}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmResetAll(false)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={() => { setConfirmResetAll(false); resetAllToAbsent(); }} style={btnPrimary}>ไม่มาทั้งหมด</button>
+              <button onClick={() => setConfirmResetAll(false)} style={btnSecondary}>{t("common.cancel")}</button>
+              <button onClick={() => { setConfirmResetAll(false); resetAllToAbsent(); }} style={btnPrimary}>{t("attendance.markAllAbsent")}</button>
             </div>
           </div>
         </div>
       )}
-      {list.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>{players.length === 0 ? "ยังไม่มีสมาชิก" : "ไม่พบสมาชิก"}</div>}
+      {list.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>{players.length === 0 ? t("player.empty") : t("player.notFound")}</div>}
       {/* v1.12.1 (spec 4): pagination shown above AND below the list once it exceeds one page (30/page) */}
       <PageNav />
       <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -11701,20 +11881,20 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
                 <select value={p.skillIndex} onChange={(e) => setPLevel(p.id, Number(e.target.value))} style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, border: "none", borderRadius: 7, padding: "3px 6px" }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex} style={{ background: "#fff", color: "#000" }}>{o.label}</option>)}</select>
-                <span style={{ background: HAND_BADGE[p.handedness === "left" ? "left" : "right"].bg, color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span>
+                <span style={{ background: HAND_BADGE[p.handedness === "left" ? "left" : "right"].bg, color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{t(HAND_I18N_KEY[p.handedness === "left" ? "left" : "right"])}</span>
                 {/* v1.11.5: Member/Guest badge — order is Skill → Hand → Type per spec, informational
                     only (never read by matchmaking/skill/attendance/tournament logic). */}
-                <span style={{ background: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].bg, color: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].label}</span>
+                <span style={{ background: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].bg, color: MEMBER_TYPE_META[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{t(MEMBER_TYPE_I18N_KEY[p.memberType === "guest" ? "guest" : p.memberType === "owner" ? "owner" : "member"])}</span>
                 {/* v1.11.67 (sections G/H): membership alert — shown ONLY for a real exception, and NEVER
                     more than one at once (getMembershipStatus already enforces the entrance>expired>
                     expiring_soon priority via early return, so this is a single non-branching lookup, not
                     re-implemented priority logic). memberType/badge above is completely untouched either
                     way (section I) — this is purely an ADDITIONAL small chip, never a row-height change
                     beyond an occasional wrap, same treatment as the existing customWindow chip nearby. */}
-                <MembershipAlertBadge player={p} membershipSettings={settings.membership} todayISO={todayISO} />
+                <MembershipAlertBadge player={p} membershipSettings={settings.membership} todayISO={todayISO} t={t} />
                 {/* v1.11.34: small lock indicator — purely visual, so a locked player is recognizable
                     without opening แก้ไขสมาชิก; the actual guard lives in delPlayer/archivePlayer/bulkArchivePlayers. */}
-                {p.isLocked && <span title="ล็อกสมาชิกอยู่" style={{ display: "flex", alignItems: "center", color: "#7c3aed" }}><Lock size={12} /></span>}
+                {p.isLocked && <span title={t("player.locked")} style={{ display: "flex", alignItems: "center", color: "#7c3aed" }}><Lock size={12} /></span>}
                 {/* v1.11.7 (Part D): compact secondary attendance-time label — only rendered when it
                     differs from the full session window, tappable to open the (also compact) time editor. */}
                 {customWindow && (
@@ -11723,20 +11903,20 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
               </div>
             </div>
             {playingIds && playingIds.has(p.id)
-              ? <span style={{ padding: "7px 12px", borderRadius: 20, fontSize: 12, fontWeight: 800, minWidth: 76, textAlign: "center", background: PSTATUS.playing.bg, color: PSTATUS.playing.color }}>กำลังเล่น</span>
+              ? <span style={{ padding: "7px 12px", borderRadius: 20, fontSize: 12, fontWeight: 800, minWidth: 76, textAlign: "center", background: PSTATUS.playing.bg, color: PSTATUS.playing.color }}>{t(PSTATUS_I18N_KEY.playing)}</span>
               : (
                 <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
                   {/* v1.11.17 (spec section 3): waiting-list queue position + one-tap promote — promoting
                       always goes through setStatus like every other status change, so the same cap-aware
                       logic applies uniformly (an explicit promote is honored even right at/over the cap). */}
                   {p.status === "waiting" && waitingOrder[p.id] && (
-                    <span title="ลำดับคิว" style={{ fontSize: 11, fontWeight: 800, color: PSTATUS.waiting.color }}>#{waitingOrder[p.id]}</span>
+                    <span title={t("player.queuePosition")} style={{ fontSize: 11, fontWeight: 800, color: PSTATUS.waiting.color }}>#{waitingOrder[p.id]}</span>
                   )}
                   {p.status === "waiting" && (
-                    <button onClick={() => setStatus(p.id, "ready")} title="เลื่อนเข้าเล่น" style={{ flexShrink: 0, width: 26, height: 26, borderRadius: 13, background: T.surface2, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>⬆️</button>
+                    <button onClick={() => setStatus(p.id, "ready")} title={t("player.promoteToPlay")} style={{ flexShrink: 0, width: 26, height: 26, borderRadius: 13, background: T.surface2, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>⬆️</button>
                   )}
                   <select value={p.status || "absent"} onChange={(e) => setStatus(p.id, e.target.value)} style={{ appearance: "none", textAlign: "center", padding: "7px 10px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", minWidth: 76, background: PSTATUS[p.status || "absent"].bg, color: PSTATUS[p.status || "absent"].color }}>
-                    {PSTATUS_OPTS.map((s) => <option key={s} value={s} style={{ background: "#fff", color: "#000" }}>{PSTATUS[s].label}</option>)}
+                    {PSTATUS_OPTS.map((s) => <option key={s} value={s} style={{ background: "#fff", color: "#000" }}>{t(PSTATUS_I18N_KEY[s])}</option>)}
                   </select>
                 </div>
               )}
@@ -11745,7 +11925,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
                 กลับก่อน/กำหนดเอง). Absent from "กำลังเล่น" cards on purpose: mid-game is too late to edit
                 when you're arriving/leaving, and the label above already covers a custom window. */}
             {isComing && !(playingIds && playingIds.has(p.id)) && (
-              <button onClick={() => setAttendanceTimeFor(p.id)} title="เวลาที่คาดว่าจะอยู่เล่น" style={{ flexShrink: 0, width: 30, height: 30, borderRadius: 15, background: T.surface2, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>🕐</button>
+              <button onClick={() => setAttendanceTimeFor(p.id)} title={t("player.expectedPlayTime")} style={{ flexShrink: 0, width: 30, height: 30, borderRadius: 15, background: T.surface2, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>🕐</button>
             )}
             {/* v1.11.6: the per-card trash icon is removed per spec — deleting/archiving a member is a
                 destructive/management action and must not sit on the main frequently-tapped screen where
@@ -11759,6 +11939,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
         <AttendanceTimeSheet
           player={players.find((p) => p.id === attendanceTimeFor)}
           session={session}
+          t={t}
           onSave={(arrivalTime, departureTime) => { setAttendanceTime(attendanceTimeFor, arrivalTime, departureTime); setAttendanceTimeFor(null); }}
           onClose={() => setAttendanceTimeFor(null)}
         />
@@ -11773,6 +11954,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           tournamentRegister={tournamentRegister}
           tournamentUnregister={tournamentUnregister}
           onOpenProfile={setProfilePlayerId}
+          t={t}
         />
       )}
 
@@ -11781,6 +11963,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           player={players.find((p) => p.id === editPlayerId)}
           levelOptions={levelOptions}
           onOpenPhoto={openPhoto}
+          t={t}
           onSave={(patch) => updatePlayer(editPlayerId, patch)}
           onArchive={() => { archivePlayer(editPlayerId); setEditPlayerId(null); }}
           onDelete={() => { delPlayer(editPlayerId); setEditPlayerId(null); }}
@@ -11802,6 +11985,8 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           payEntranceFee={payEntranceFee}
           payMembership={payMembership}
           rankingConfigs={rankingConfigs}
+          t={t}
+          fmtDate={fmtDate}
           onEdit={() => { setEditPlayerId(profilePlayerId); setProfilePlayerId(null); }}
           onClose={() => setProfilePlayerId(null)}
         />
@@ -11813,7 +11998,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
 // v1.11.7 (Part D): compact attendance-time editor — opened from either the small 🕐 icon or the
 // secondary time label on a player's card. มาตลอด/มาสาย/กลับก่อน/กำหนดเอง per spec; มาตลอด always
 // resolves to the exact full session window so it never drifts from sessionStartTime/sessionEndTime.
-function AttendanceTimeSheet({ player, session, onSave, onClose }) {
+function AttendanceTimeSheet({ player, session, t, onSave, onClose }) {
   const fullStart = session?.sessionStartTime || "19:00", fullEnd = session?.sessionEndTime || "23:00";
   const curStart = player.arrivalTime || fullStart, curEnd = player.departureTime || fullEnd;
   const initialMode = curStart === fullStart && curEnd === fullEnd ? "full" : curStart !== fullStart && curEnd === fullEnd ? "late" : curStart === fullStart && curEnd !== fullEnd ? "early" : "custom";
@@ -11835,28 +12020,28 @@ function AttendanceTimeSheet({ player, session, onSave, onClose }) {
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>เวลาที่คาดว่าจะอยู่เล่น</div>
-      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>{player.name} · ก๊วนวันนี้ {fullStart}–{fullEnd}</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>{t("attendance.expectedTime")}</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>{player.name} · {t("session.today")} {fullStart}–{fullEnd}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
-        {[["full", "มาตลอด (เต็มก๊วน)"], ["late", "มาสาย"], ["early", "กลับก่อน"], ["custom", "กำหนดเอง"]].map(([v, lb]) => (
+        {[["full", t("attendance.fullSession")], ["late", t("attendance.late")], ["early", t("attendance.leaveEarly")], ["custom", t("attendance.custom")]].map(([v, lb]) => (
           <button key={v} onClick={() => apply(v)} style={{ textAlign: "left", padding: "11px 12px", borderRadius: 11, border: `1.5px solid ${modeSel === v ? T.green : T.border}`, background: modeSel === v ? "#e2f5ec" : T.surface, color: modeSel === v ? T.green : T.text, fontSize: 13.5, fontWeight: 700 }}>{lb}</button>
         ))}
       </div>
       {modeSel !== "full" && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เวลามา</div>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t("attendance.arrival")}</div>
             <input type="time" value={arrival} disabled={modeSel === "early"} onChange={(e) => setArrival(e.target.value)} style={{ width: "100%", padding: "9px 10px", borderRadius: 10, background: modeSel === "early" ? T.surface2 : T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700, boxSizing: "border-box" }} />
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เวลากลับ</div>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t("attendance.departure")}</div>
             <input type="time" value={departure} disabled={modeSel === "late"} onChange={(e) => setDeparture(e.target.value)} style={{ width: "100%", padding: "9px 10px", borderRadius: 10, background: modeSel === "late" ? T.surface2 : T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700, boxSizing: "border-box" }} />
           </div>
         </div>
       )}
       <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
-        <button onClick={save} style={btnPrimary}>บันทึก</button>
+        <button onClick={onClose} style={btnSecondary}>{t("common.cancel")}</button>
+        <button onClick={save} style={btnPrimary}>{t("common.save")}</button>
       </div>
     </Overlay>
   );
@@ -11867,22 +12052,22 @@ function AttendanceTimeSheet({ player, session, onSave, onClose }) {
 // tournaments exist, show a selector" case never actually triggers yet — written so it would if the app
 // ever supported concurrent tournaments, without inventing multi-tournament infrastructure that doesn't
 // otherwise exist (out of scope here).
-function TournamentRegistrationList({ players, activeTournament, tournamentRegister, tournamentUnregister, onOpenProfile }) {
+function TournamentRegistrationList({ players, activeTournament, tournamentRegister, tournamentUnregister, onOpenProfile, t }) {
   if (!activeTournament || activeTournament.status === "completed" || activeTournament.status === "archived") {
     return <div style={{ textAlign: "center", padding: "40px 20px", color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14 }}>
       <div style={{ fontSize: 32, marginBottom: 8 }}>🏆</div>
-      <div style={{ fontSize: 13.5 }}>ยังไม่มี Tournament ที่เปิดรับสมัคร</div>
-      <div style={{ fontSize: 11.5, marginTop: 4 }}>สร้าง Tournament ได้ที่แท็บ "เกม"</div>
+      <div style={{ fontSize: 13.5 }}>{t("tournament.noneOpenForRegistration")}</div>
+      <div style={{ fontSize: 11.5, marginTop: 4 }}>{t("tournament.createHint")}</div>
     </div>;
   }
-  const REG_LABEL = { none: "ยังไม่สมัคร", registered: "สมัครแล้ว", paid: "ชำระแล้ว" };
+  const REG_LABEL = { none: t("tournament.regStatus.none"), registered: t("tournament.regStatus.registered"), paid: t("membership.paid") };
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, marginBottom: 10, fontSize: 12.5 }}>
-        <span style={{ color: T.muted }}>Tournament:</span>
-        <span style={{ fontWeight: 800 }}>{activeTournament.name || "(ยังไม่ตั้งชื่อ)"}</span>
+        <span style={{ color: T.muted }}>{t("tournament.title")}:</span>
+        <span style={{ fontWeight: 800 }}>{activeTournament.name || t("tournament.unnamed")}</span>
       </div>
-      {players.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>ไม่พบสมาชิก</div>}
+      {players.length === 0 && <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>{t("player.notFound")}</div>}
       <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
         {players.map((p) => {
           const status = tournamentRegStatusFor(activeTournament, p.id);
@@ -11913,7 +12098,7 @@ function TournamentRegistrationList({ players, activeTournament, tournamentRegis
 // photo crop flow used everywhere else (onOpenPhoto = the existing openPhoto(id)). Pairing preference
 // ("อยากคู่/ไม่อยากคู่กับมือซ้าย") deliberately has NO control here — per spec it stays exclusively on
 // the existing ล็อคคู่/ข้อจำกัดคู่ editor (ตั้งค่าก๊วน sheet) rather than a new/duplicate one.
-function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive, onDelete, onClose }) {
+function EditPlayerModal({ player, levelOptions, onOpenPhoto, t, onSave, onArchive, onDelete, onClose }) {
   const [name, setName] = useState(player.name);
   const [skillIndex, setSkillIndex] = useState(player.skillIndex);
   const [handedness, setHandedness] = useState(player.handedness === "left" ? "left" : "right");
@@ -11942,82 +12127,89 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
   );
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>แก้ไขสมาชิก</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t("player.edit")}</div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 18 }}>
         <button onClick={() => onOpenPhoto(player.id)} style={{ position: "relative", border: "none", background: "none", padding: 0, flexShrink: 0 }}>
           <Avatar p={{ ...player, name: name || player.name }} size={60} />
           <span style={{ position: "absolute", right: -2, bottom: -2, width: 20, height: 20, borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={11} color={T.muted} /></span>
         </button>
-        <div style={{ fontSize: 12, color: T.muted }}>แตะรูปเพื่อเปลี่ยน</div>
+        <div style={{ fontSize: 12, color: T.muted }}>{t("player.photoChange")}</div>
       </div>
-      <Label>ชื่อ</Label>
+      <Label>{t("common.name")}</Label>
       <input value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 14 }} />
-      <Label>ระดับฝีมือ</Label>
+      <Label>{t("player.skillLevel")}</Label>
       <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, fontWeight: 700, marginBottom: 14, boxSizing: "border-box" }}>
         {levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}
       </select>
-      <Label>มือถนัด</Label>
+      <Label>{t("player.dominantHand")}</Label>
       <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
-        {handBtn("left", "ซ้าย")}
-        {handBtn("right", "ขวา")}
+        {handBtn("left", t("player.hand.left"))}
+        {handBtn("right", t("player.hand.right"))}
       </div>
       <div style={{ fontSize: 11, color: T.muted, marginBottom: 16, lineHeight: 1.5 }}>
-        ความต้องการจับคู่กับมือซ้าย (อยาก/ไม่อยาก) ตั้งค่าได้ที่ ตั้งค่าก๊วน → ล็อคคู่/ข้อจำกัดคู่
+        {t("player.leftHandPairingHint")}
       </div>
 
-      <Label>ประเภทสมาชิก</Label>
+      <Label>{t("player.memberType")}</Label>
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-        <button onClick={() => setMemberType("member")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "member" ? MEMBER_TYPE_META.member.border : T.border}`, background: memberType === "member" ? MEMBER_TYPE_META.member.bg : T.surface, color: memberType === "member" ? MEMBER_TYPE_META.member.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Member</button>
-        <button onClick={() => setMemberType("guest")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "guest" ? MEMBER_TYPE_META.guest.border : T.border}`, background: memberType === "guest" ? MEMBER_TYPE_META.guest.bg : T.surface, color: memberType === "guest" ? MEMBER_TYPE_META.guest.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Guest</button>
+        <button onClick={() => setMemberType("member")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "member" ? MEMBER_TYPE_META.member.border : T.border}`, background: memberType === "member" ? MEMBER_TYPE_META.member.bg : T.surface, color: memberType === "member" ? MEMBER_TYPE_META.member.color : T.text, fontWeight: 800, fontSize: 13.5 }}>{t(MEMBER_TYPE_I18N_KEY.member)}</button>
+        <button onClick={() => setMemberType("guest")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "guest" ? MEMBER_TYPE_META.guest.border : T.border}`, background: memberType === "guest" ? MEMBER_TYPE_META.guest.bg : T.surface, color: memberType === "guest" ? MEMBER_TYPE_META.guest.color : T.text, fontWeight: 800, fontSize: 13.5 }}>{t(MEMBER_TYPE_I18N_KEY.guest)}</button>
         {/* v1.11.34: Owner — a real 3rd memberType value (see spec section 4). Informational badge here,
             like Member/Guest; its one real effect (lowest auto-pairing priority) lives entirely in
             SORT/buildMatch and never touches this form. */}
-        <button onClick={() => setMemberType("owner")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "owner" ? MEMBER_TYPE_META.owner.border : T.border}`, background: memberType === "owner" ? MEMBER_TYPE_META.owner.bg : T.surface, color: memberType === "owner" ? MEMBER_TYPE_META.owner.color : T.text, fontWeight: 800, fontSize: 13.5 }}>Owner</button>
+        <button onClick={() => setMemberType("owner")} style={{ flex: 1, padding: "10px 0", borderRadius: 11, border: `1.5px solid ${memberType === "owner" ? MEMBER_TYPE_META.owner.border : T.border}`, background: memberType === "owner" ? MEMBER_TYPE_META.owner.bg : T.surface, color: memberType === "owner" ? MEMBER_TYPE_META.owner.color : T.text, fontWeight: 800, fontSize: 13.5 }}>{t(MEMBER_TYPE_I18N_KEY.owner)}</button>
       </div>
 
       {/* v1.11.5: optional contact info — display/storage only, explicitly never read by any
           matchmaking/skill/attendance/tournament logic (see spec: informational-only). */}
-      <Label>ข้อมูลติดต่อ (ไม่บังคับ)</Label>
-      <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 8, marginTop: -6 }}>ใช้สำหรับติดต่อสมาชิกเท่านั้น</div>
-      <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="เบอร์โทรศัพท์" type="tel" inputMode="tel" style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 10 }} />
-      <input value={lineId} onChange={(e) => setLineId(e.target.value)} placeholder="LINE ID" style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 18 }} />
+      <Label>{t("player.contact")} ({t("common.optional")})</Label>
+      <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 8, marginTop: -6 }}>{t("player.contactHelp")}</div>
+      <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder={t("player.phone")} type="tel" inputMode="tel" style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 10 }} />
+      <input value={lineId} onChange={(e) => setLineId(e.target.value)} placeholder={t("player.lineId")} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box", marginBottom: 18 }} />
 
       <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
-        <button onClick={save} style={btnPrimary}>บันทึก</button>
+        <button onClick={onClose} style={btnSecondary}>{t("common.cancel")}</button>
+        <button onClick={save} style={btnPrimary}>{t("common.save")}</button>
       </div>
 
+      {/* v1.12.43 (Localization Phase 3): everything from here down (lock toggle, Archive, permanent Delete,
+          and its confirm dialog) was DELIBERATELY left as exact Thai literals in v1.12.42 (Phase 2) -- that
+          phase's boundary said "Do not modify player archive/delete confirmation flows in this phase." This
+          phase's own SCOPE item 2 explicitly asks for exactly this block ("Lock/Unlock player and
+          explanatory text; Archive player; Permanent Delete and confirmation dialogs"), so it is now wired
+          up. LOCALIZATION ONLY: onArchive/onDelete/setConfirmDelete/isLocked and every guard/condition below
+          are byte-for-byte unchanged -- only the visible text changed. */}
       {/* v1.11.6: "การจัดการสมาชิก" — deliberately separated (spacing + divider) and visually quiet so it
           never competes with the green บันทึก button above, per spec sections 2/8. Archive is a normal
           secondary action (no confirmation — it's fully reversible from ⚙️ ตั้งค่า → สมาชิกที่เก็บไว้);
           permanent delete is styled destructive/red and always requires an explicit confirm (section 5). */}
       <div style={{ marginTop: 24, paddingTop: 16, borderTop: `1px solid ${T.border}` }}>
-        <Label>การจัดการสมาชิก</Label>
+        <Label>{t("player.management")}</Label>
         {/* v1.11.34: "🔒 ล็อกสมาชิก" — protects against accidental Archive/Delete only (spec section 2);
             name/photo/skill/hand/phone/LINE ID/ประเภทสมาชิก above are all still freely editable regardless.
             Uses the live local toggle (not just the saved player.isLocked) so Archive/Delete below react
             immediately, same as every other field on this form before บันทึก is tapped. */}
         <button onClick={() => setIsLocked((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: isLocked ? "#efe7fc" : T.surface, border: `1.5px solid ${isLocked ? "#7c3aed" : T.border}`, color: isLocked ? "#7c3aed" : T.text, fontSize: 13, fontWeight: 800, marginBottom: 10 }}>
-          {isLocked ? "🔒 ล็อกสมาชิกอยู่ (แตะเพื่อปลดล็อก)" : "🔓 ล็อกสมาชิก"}
+          {isLocked ? `🔒 ${t("player.lockedTapToUnlock")}` : `🔓 ${t("player.lock")}`}
         </button>
         {isLocked && (
           <div style={{ fontSize: 11.5, color: "#7c3aed", background: "#efe7fc", borderRadius: 10, padding: "8px 10px", marginBottom: 10, lineHeight: 1.5 }}>
-            ผู้เล่นนี้ถูกล็อกไว้ — ป้องกันการเก็บ/ลบสมาชิกโดยไม่ตั้งใจ ต้องปลดล็อกก่อนจึงจะเก็บหรือลบได้ (แก้ไขข้อมูลอื่นได้ตามปกติ)
+            {t("player.lockExplanation")}
           </div>
         )}
-        <button onClick={onArchive} disabled={isLocked} title={isLocked ? "ผู้เล่นถูกล็อกไว้ — ปลดล็อกก่อนจึงจะเก็บสมาชิกได้" : undefined} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: isLocked ? T.muted : T.text, fontSize: 13, fontWeight: 700, marginBottom: 8, opacity: isLocked ? 0.55 : 1 }}>📦 เก็บสมาชิก</button>
-        <button onClick={() => setConfirmDelete(true)} disabled={isLocked} title={isLocked ? "ผู้เล่นถูกล็อกไว้ — ปลดล็อกก่อนจึงจะลบสมาชิกได้" : undefined} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: "none", border: `1px solid ${isLocked ? T.border : T.accent}`, color: isLocked ? T.muted : T.accent, fontSize: 13, fontWeight: 700, opacity: isLocked ? 0.55 : 1 }}>🗑️ ลบสมาชิกถาวร</button>
+        <button onClick={onArchive} disabled={isLocked} title={isLocked ? t("player.lockRequiredForArchive") : undefined} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: isLocked ? T.muted : T.text, fontSize: 13, fontWeight: 700, marginBottom: 8, opacity: isLocked ? 0.55 : 1 }}>📦 {t("player.archive")}</button>
+        <button onClick={() => setConfirmDelete(true)} disabled={isLocked} title={isLocked ? t("player.lockRequiredForDelete") : undefined} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: "none", border: `1px solid ${isLocked ? T.border : T.accent}`, color: isLocked ? T.muted : T.accent, fontSize: 13, fontWeight: 700, opacity: isLocked ? 0.55 : 1 }}>🗑️ {t("player.deletePermanent")}</button>
       </div>
 
       {confirmDelete && (
         <Overlay onClose={() => setConfirmDelete(false)}>
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ลบสมาชิกถาวร?</div>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{t("player.deleteConfirmTitle")}</div>
           <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
-            ข้อมูลสมาชิกนี้จะถูกลบและไม่สามารถกู้คืนได้
+            {t("player.deleteConfirmBody")}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setConfirmDelete(false)} style={btnSecondary}>ยกเลิก</button>
-            <button onClick={() => { setConfirmDelete(false); onDelete(); }} style={{ ...btnPrimary, background: T.accent }}>ลบถาวร</button>
+            <button onClick={() => setConfirmDelete(false)} style={btnSecondary}>{t("common.cancel")}</button>
+            <button onClick={() => { setConfirmDelete(false); onDelete(); }} style={{ ...btnPrimary, background: T.accent }}>{t("player.deletePermanentConfirm")}</button>
           </div>
         </Overlay>
       )}
@@ -12029,18 +12221,21 @@ function EditPlayerModal({ player, levelOptions, onOpenPhoto, onSave, onArchive,
 // the ONE authoritative getMembershipStatus/membershipAlertInfo helper — never re-implements priority
 // logic in JSX, and returns null (no chip at all) for active/not_applicable so healthy or paid-up
 // members, or players in a group with membership tracking off entirely, never get a badge.
-function MembershipAlertBadge({ player, membershipSettings, todayISO }) {
+function MembershipAlertBadge({ player, membershipSettings, todayISO, t }) {
   const { status, remainingDays } = membershipAlertInfo(player, membershipSettings, todayISO);
-  if (status === "entrance_fee_due") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#c0392b", whiteSpace: "nowrap" }}>🔴 ยังไม่ชำระค่าแรกเข้า</span>;
-  if (status === "expired") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#c0392b", whiteSpace: "nowrap" }}>🔴 สมาชิกหมดอายุ</span>;
-  if (status === "expiring_soon") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#b8720a", whiteSpace: "nowrap" }}>🟠 สมาชิกใกล้หมดอายุ{remainingDays != null ? ` · เหลือ ${remainingDays} วัน` : ""}</span>;
+  // v1.12.43 (Localization Phase 3): this badge shows the exact same membership status as the Player
+  // Profile membership card (below) -- localizing them together keeps the two displays consistent. No
+  // status/priority logic changes; membershipAlertInfo remains the single source of truth.
+  if (status === "entrance_fee_due") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#c0392b", whiteSpace: "nowrap" }}>🔴 {t("membership.unpaidEntrance")}</span>;
+  if (status === "expired") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#c0392b", whiteSpace: "nowrap" }}>🔴 {t("membership.expired")}</span>;
+  if (status === "expiring_soon") return <span style={{ fontSize: 10.5, fontWeight: 800, color: "#b8720a", whiteSpace: "nowrap" }}>🟠 {t("membership.expiringSoon")}{remainingDays != null ? ` · ${t("membership.daysRemaining", { days: remainingDays })}` : ""}</span>;
   return null;
 }
 // v1.11.67 — records ONE real transaction (section J/T: never a bare flag flip, guarded against
 // duplicate submission by disabling every action the instant one is tapped). Reused from both
 // MembershipSettingsSheet's exception list and PlayerProfileSheet's membership block (section K: the
 // EXISTING detail/action flow), so there is exactly one payment UI in the whole app, not two.
-function MembershipPaymentSheet({ player, membershipSettings, payEntranceFee, payMembership, onClose }) {
+function MembershipPaymentSheet({ player, membershipSettings, payEntranceFee, payMembership, t, onClose }) {
   const ms = membershipSettings || DEFAULT_MEMBERSHIP_SETTINGS;
   const [submitting, setSubmitting] = useState(false);
   // v1.11.67 (section T): a plain useState flag is NOT enough to guard against a genuine rapid
@@ -12054,39 +12249,43 @@ function MembershipPaymentSheet({ player, membershipSettings, payEntranceFee, pa
   const recurringOn = !!ms.recurring.enabled;
   const guard = (fn) => { if (submittingRef.current) return; submittingRef.current = true; setSubmitting(true); fn(); onClose(); };
   const chipBtn = { padding: "10px 8px", borderRadius: 11, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 12.5, fontWeight: 800, flex: "1 1 76px" };
+  // v1.12.43 (Localization Phase 3): month-count chips (1/3/6/12) reuse the plural-aware common.monthCount
+  // key -- "1 month" vs "3 months" in English -- without needing a separate tc()/plural prop threaded
+  // through this component; Thai has no plural distinction so both variants read identically there.
+  const monthLabel = (n) => t(n === 1 ? "common.monthCount.one" : "common.monthCount.other", { count: n });
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 4 }}>บันทึกชำระเงิน</div>
+      <div style={{ fontWeight: 800, fontSize: 16, marginBottom: 4 }}>{t("membership.recordPayment")}</div>
       <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>{player.name}</div>
       {owesEntrance && (
         <>
-          <Label>ค่าแรกเข้า</Label>
+          <Label>{t("membership.entranceFee")}</Label>
           <button disabled={submitting} onClick={() => guard(() => payEntranceFee(player.id))} style={{ ...btnPrimary, width: "100%", marginBottom: 18, opacity: submitting ? 0.6 : 1 }}>
-            ชำระค่าแรกเข้า ({formatCurrency(ms.entranceFee.amount)})
+            {t("membership.payEntranceFeeAmount", { amount: formatCurrency(ms.entranceFee.amount) })}
           </button>
         </>
       )}
       {recurringOn && (
         <>
-          <Label>ค่าสมาชิก (ต่ออายุจากวันหมดอายุปัจจุบัน ถ้ายังไม่หมดอายุ)</Label>
+          <Label>{t("membership.recurringPaymentLabel")}</Label>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
             {[1, 3, 6, 12].map((n) => (
               <button key={n} disabled={submitting} onClick={() => guard(() => payMembership(player.id, { months: n }))} style={{ ...chipBtn, opacity: submitting ? 0.6 : 1 }}>
-                {n} เดือน<br /><span style={{ fontWeight: 700, color: T.muted, fontSize: 11 }}>{formatCurrency((Number(ms.recurring.monthlyFee) || 0) * n)}</span>
+                {monthLabel(n)}<br /><span style={{ fontWeight: 700, color: T.muted, fontSize: 11 }}>{formatCurrency((Number(ms.recurring.monthlyFee) || 0) * n)}</span>
               </button>
             ))}
           </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <input type="number" min="1" value={customMonths} onChange={(e) => setCustomMonths(e.target.value)} placeholder="กำหนดเอง (จำนวนเดือน)" style={{ flex: 1, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, boxSizing: "border-box" }} />
-            <button disabled={submitting || !(Math.round(Number(customMonths)) > 0)} onClick={() => guard(() => payMembership(player.id, { months: Math.round(Number(customMonths)) }))} style={{ padding: "0 16px", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontWeight: 800, fontSize: 13, opacity: submitting || !(Math.round(Number(customMonths)) > 0) ? 0.5 : 1 }}>ชำระ</button>
+            <input type="number" min="1" value={customMonths} onChange={(e) => setCustomMonths(e.target.value)} placeholder={t("membership.customMonths")} style={{ flex: 1, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, boxSizing: "border-box" }} />
+            <button disabled={submitting || !(Math.round(Number(customMonths)) > 0)} onClick={() => guard(() => payMembership(player.id, { months: Math.round(Number(customMonths)) }))} style={{ padding: "0 16px", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontWeight: 800, fontSize: 13, opacity: submitting || !(Math.round(Number(customMonths)) > 0) ? 0.5 : 1 }}>{t("membership.pay")}</button>
           </div>
           <button disabled={submitting} onClick={() => guard(() => payMembership(player.id, { annual: true }))} style={{ width: "100%", padding: "11px 0", borderRadius: 11, border: `1.5px solid ${T.green}`, background: "#e2f5ec", color: T.green, fontWeight: 800, fontSize: 13.5, marginBottom: 18, opacity: submitting ? 0.6 : 1 }}>
-            เหมารายปี ({formatCurrency(ms.recurring.annualFee)})
+            {t("membership.annualLumpSum")} ({formatCurrency(ms.recurring.annualFee)})
           </button>
         </>
       )}
-      {!owesEntrance && !recurringOn && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "14px 0" }}>ไม่มีรายการที่ต้องชำระ</div>}
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      {!owesEntrance && !recurringOn && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "14px 0" }}>{t("membership.noPaymentDue")}</div>}
+      <button onClick={onClose} style={btnSecondary}>{t("common.close")}</button>
     </Overlay>
   );
 }
@@ -12095,7 +12294,14 @@ function MembershipPaymentSheet({ player, membershipSettings, payEntranceFee, pa
 // list (same priority/definition as the main list's chip — never re-implemented here) with a one-tap
 // route into MembershipPaymentSheet. Config lives inside `settings.membership`, so it is automatically
 // per-group (saveGroupDefault/applyGroupDefaultsFor already bundle the whole `settings` object — section N).
-function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFee, payMembership, onOpenProfile, onClose }) {
+// v1.12.43 (Localization Phase 3): `t` is accepted here PURELY to pass through to the two shared child
+// components below (MembershipAlertBadge, MembershipPaymentSheet) so they render correctly no matter which
+// parent opens them -- this sheet's OWN literals (ค่าสมาชิก settings/toggles/labels below) are a separate,
+// broader club-wide settings destination reached via "จัดการ" and are NOT in this phase's scope ("Player
+// Profile membership card"); they are left exactly as-is, same as GeneralSettingsSheet's other untouched
+// sections. This is the same surgical, minimal-footprint technique Phase 2 used for shared constants
+// (PSTATUS/HAND_LABEL/MEMBER_TYPE_META lookup maps), applied here to prop threading instead.
+function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFee, payMembership, onOpenProfile, t, tc, onClose }) {
   const ms = settings.membership || DEFAULT_MEMBERSHIP_SETTINGS;
   const todayISO = todayLocalISO();
   const [payFor, setPayFor] = useState(null);
@@ -12109,39 +12315,39 @@ function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFe
   const payTarget = payFor && (players || []).find((p) => p.id === payFor);
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>💳 ค่าสมาชิก</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>💳 {t("membership.title")}</div>
 
-      <Label>ค่าแรกเข้า (Entrance Fee)</Label>
-      <button onClick={() => patchEntrance({ enabled: !ms.entranceFee.enabled })} style={toggleBtn(ms.entranceFee.enabled)}>{ms.entranceFee.enabled ? "✓ เปิดใช้งาน" : "ปิดใช้งาน (แตะเพื่อเปิด)"}</button>
+      <Label>{t("membershipSettings.entranceFeeSectionLabel")}</Label>
+      <button onClick={() => patchEntrance({ enabled: !ms.entranceFee.enabled })} style={toggleBtn(ms.entranceFee.enabled)}>{ms.entranceFee.enabled ? t("membershipSettings.enabledToggle") : t("membershipSettings.disabledToggle")}</button>
       {ms.entranceFee.enabled && (
-        <input type="number" min="0" value={ms.entranceFee.amount} onChange={(e) => patchEntrance({ amount: Math.max(0, Number(e.target.value) || 0) })} placeholder="จำนวนเงิน (฿/คน)" style={numInput} />
+        <input type="number" min="0" value={ms.entranceFee.amount} onChange={(e) => patchEntrance({ amount: Math.max(0, Number(e.target.value) || 0) })} placeholder={t("membershipSettings.entranceAmountPlaceholder")} style={numInput} />
       )}
 
-      <Label>ค่าสมาชิกรายเดือน/รายปี (Recurring Membership)</Label>
-      <button onClick={() => patchRecurring({ enabled: !ms.recurring.enabled })} style={toggleBtn(ms.recurring.enabled)}>{ms.recurring.enabled ? "✓ เปิดใช้งาน" : "ปิดใช้งาน (แตะเพื่อเปิด)"}</button>
+      <Label>{t("membershipSettings.recurringSectionLabel")}</Label>
+      <button onClick={() => patchRecurring({ enabled: !ms.recurring.enabled })} style={toggleBtn(ms.recurring.enabled)}>{ms.recurring.enabled ? t("membershipSettings.enabledToggle") : t("membershipSettings.disabledToggle")}</button>
       {ms.recurring.enabled && (
         <>
           <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 11, color: T.muted, marginBottom: 5 }}>รายเดือน (฿/เดือน)</div>
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 5 }}>{t("membershipSettings.monthlyFeeLabel")}</div>
               <input type="number" min="0" value={ms.recurring.monthlyFee} onChange={(e) => patchRecurring({ monthlyFee: Math.max(0, Number(e.target.value) || 0) })} style={{ ...numInput, marginBottom: 0 }} />
             </div>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 11, color: T.muted, marginBottom: 5 }}>รายปี (฿/ปี, ราคาเหมา)</div>
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 5 }}>{t("membershipSettings.annualFeeLabel")}</div>
               <input type="number" min="0" value={ms.recurring.annualFee} onChange={(e) => patchRecurring({ annualFee: Math.max(0, Number(e.target.value) || 0) })} style={{ ...numInput, marginBottom: 0 }} />
             </div>
           </div>
         </>
       )}
 
-      <Label>เตือนล่วงหน้าก่อนหมดอายุ (วัน)</Label>
+      <Label>{t("membershipSettings.expiryWarningLabel")}</Label>
       <input type="number" min="1" value={ms.expiryWarningDays} onChange={(e) => patchMembership({ expiryWarningDays: Math.max(1, Number(e.target.value) || 7) })} style={numInput} />
 
       {(ms.entranceFee.enabled || ms.recurring.enabled) && (
         <>
-          <SectionHead title="สมาชิกที่ต้องดำเนินการ" sub={`${exceptions.length} คน`} />
+          <SectionHead title={t("membership.actionRequired")} sub={tc("common.personCount", exceptions.length)} />
           {exceptions.length === 0 ? (
-            <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "16px 0", marginBottom: 8 }}>ไม่มีสมาชิกที่ต้องดำเนินการ</div>
+            <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "16px 0", marginBottom: 8 }}>{t("membership.noActionRequired")}</div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
               {exceptions.map(({ p, status, remainingDays }) => (
@@ -12149,9 +12355,9 @@ function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFe
                   <Avatar p={p} size={36} />
                   <button onClick={() => onOpenProfile(p.id)} style={{ flex: 1, minWidth: 0, textAlign: "left", border: "none", background: "none", padding: 0, cursor: "pointer" }}>
                     <div style={{ fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.text }}>{p.name}</div>
-                    <MembershipAlertBadge player={p} membershipSettings={ms} todayISO={todayISO} />
+                    <MembershipAlertBadge player={p} membershipSettings={ms} todayISO={todayISO} t={t} />
                   </button>
-                  <button onClick={() => setPayFor(p.id)} style={{ flexShrink: 0, padding: "7px 11px", borderRadius: 10, background: T.green, border: "none", color: "#fff", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" }}>บันทึกชำระเงิน</button>
+                  <button onClick={() => setPayFor(p.id)} style={{ flexShrink: 0, padding: "7px 11px", borderRadius: 10, background: T.green, border: "none", color: "#fff", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" }}>{t("membership.recordPayment")}</button>
                 </div>
               ))}
             </div>
@@ -12159,10 +12365,10 @@ function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFe
         </>
       )}
 
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{t("common.close")}</button>
 
       {payTarget && (
-        <MembershipPaymentSheet player={payTarget} membershipSettings={ms} payEntranceFee={payEntranceFee} payMembership={payMembership} onClose={() => setPayFor(null)} />
+        <MembershipPaymentSheet player={payTarget} membershipSettings={ms} payEntranceFee={payEntranceFee} payMembership={payMembership} t={t} onClose={() => setPayFor(null)} />
       )}
     </Overlay>
   );
@@ -12174,7 +12380,7 @@ function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFe
 // reuses the existing playerStats/tournamentStatsForPlayer functions rather than reinventing counting
 // logic, so the "no-result matches never distort Win Rate" rule already built into playerStats (decided
 // = win+loss, noScore/draw excluded) is inherited for free.
-function PlayerProfileSheet({ player: p, getP, players, history, current, sessionHistory, tournamentHistory, session, settings, otherIncome, payEntranceFee, payMembership, rankingConfigs, onEdit, onClose }) {
+function PlayerProfileSheet({ player: p, getP, players, history, current, sessionHistory, tournamentHistory, session, settings, otherIncome, payEntranceFee, payMembership, rankingConfigs, t, fmtDate, onEdit, onClose }) {
   const [showPhoto, setShowPhoto] = useState(false);
   const [showHistory, setShowHistory] = useState(false); // v1.11.8: "ดูประวัติการเล่น" drill-down sheet
   // all-time casual matches this player could appear in: today's completed matches (history + any
@@ -12262,39 +12468,39 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
           <div style={{ fontSize: 17, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 6, flexWrap: "wrap" }}>
             <span style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{p.level}</span>
-            <span style={{ background: HAND_BADGE[hand].bg, color: HAND_BADGE[hand].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{HAND_LABEL[hand]}</span>
-            <span style={{ background: MEMBER_TYPE_META[mtype].bg, color: MEMBER_TYPE_META[mtype].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{MEMBER_TYPE_META[mtype].label}</span>
+            <span style={{ background: HAND_BADGE[hand].bg, color: HAND_BADGE[hand].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{t(HAND_I18N_KEY[hand])}</span>
+            <span style={{ background: MEMBER_TYPE_META[mtype].bg, color: MEMBER_TYPE_META[mtype].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 7px" }}>{t(MEMBER_TYPE_I18N_KEY[mtype])}</span>
           </div>
         </div>
-        <button onClick={onEdit} title="แก้ไขสมาชิก" style={{ flexShrink: 0, padding: "7px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>✎ แก้ไข</button>
+        <button onClick={onEdit} title={t("player.edit")} style={{ flexShrink: 0, padding: "7px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>✎ {t("common.edit")}</button>
       </div>
 
       {membershipTrackingOn && (
         <>
-          <SectionHead icon={<span style={{ fontSize: 15 }}>💳</span>} title="ค่าสมาชิก" />
+          <SectionHead icon={<span style={{ fontSize: 15 }}>💳</span>} title={t("membership.title")} />
           <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, marginBottom: 6 }}>
-              <span style={{ color: T.muted }}>ค่าแรกเข้า</span>
+              <span style={{ color: T.muted }}>{t("membership.entranceFee")}</span>
               <span style={{ fontWeight: 800, color: ms.entranceFee.enabled && p.entranceFeePaid === false ? "#c0392b" : T.green }}>
-                {!ms.entranceFee.enabled ? "ไม่ใช้งาน" : p.entranceFeePaid === false ? "ยังไม่ชำระ" : `ชำระแล้ว${p.entranceFeePaidAt ? ` (${p.entranceFeePaidAt})` : ""}`}
+                {!ms.entranceFee.enabled ? t("common.notEnabled") : p.entranceFeePaid === false ? t("common.unpaid") : `${t("membership.paid")}${p.entranceFeePaidAt ? ` (${p.entranceFeePaidAt})` : ""}`}
               </span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5 }}>
-              <span style={{ color: T.muted }}>สถานะสมาชิก</span>
+              <span style={{ color: T.muted }}>{t("membership.status")}</span>
               <span style={{ fontWeight: 800, color: mStatus === "expired" || mStatus === "entrance_fee_due" ? "#c0392b" : mStatus === "expiring_soon" ? "#b8720a" : T.green }}>
-                {!ms.recurring.enabled ? "ไม่ใช้งาน"
-                  : !p.membershipExpiry ? "ยังไม่ได้สมัครสมาชิก"
-                  : mStatus === "expired" ? `หมดอายุแล้ว (${p.membershipExpiry})`
-                  : mStatus === "expiring_soon" ? `ใกล้หมดอายุ · เหลือ ${mRemainingDays} วัน (${p.membershipExpiry})`
-                  : `ใช้งานถึง ${p.membershipExpiry}`}
+                {!ms.recurring.enabled ? t("common.notEnabled")
+                  : !p.membershipExpiry ? t("membership.notEnrolled")
+                  : mStatus === "expired" ? t("membership.expiredOn", { date: p.membershipExpiry })
+                  : mStatus === "expiring_soon" ? `${t("membership.expiringSoon")} · ${t("membership.daysRemaining", { days: mRemainingDays })} (${p.membershipExpiry})`
+                  : t("membership.activeUntil", { date: p.membershipExpiry })}
               </span>
             </div>
             {(mStatus === "entrance_fee_due" || mStatus === "expired" || mStatus === "expiring_soon" || ms.recurring.enabled) && (
-              <button onClick={() => setShowMembershipPay(true)} style={{ width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 10, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>บันทึกชำระเงิน</button>
+              <button onClick={() => setShowMembershipPay(true)} style={{ width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 10, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>{t("membership.recordPayment")}</button>
             )}
             {paymentHistory.length > 0 && (
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
-                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 6 }}>ประวัติการชำระ</div>
+                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 6 }}>{t("membership.paymentHistory")}</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                   {paymentHistory.map((e) => (
                     <div key={e.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5 }}>
@@ -12309,22 +12515,22 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
         </>
       )}
 
-      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title="สถิติผู้เล่น" />
+      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title={t("player.stats")} />
       <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
-        <MiniStat label="แมตช์ทั้งหมด" value={totalMatches} />
-        <MiniStat label="ชนะ" value={wins} color={T.green} />
-        <MiniStat label="แพ้" value={losses} color={T.accent} />
-        {cs.fixedDraw > 0 && <MiniStat label="เสมอ" value={cs.fixedDraw} />}
+        <MiniStat label={t("player.gamesPlayed")} value={totalMatches} />
+        <MiniStat label={t("player.wins")} value={wins} color={T.green} />
+        <MiniStat label={t("player.losses")} value={losses} color={T.accent} />
+        {cs.fixedDraw > 0 && <MiniStat label={t("player.draws")} value={cs.fixedDraw} />}
         <MiniStat label="Win Rate" value={winRate != null ? winRate + "%" : "—"} />
       </div>
       {/* v1.11.7: compact, single-language achievement labels (was a Thai/English mix: "เข้าร่วมก๊วน" /
           "Champion" / "Runner-up" / "Third") — same 5 cards, no new stats added per spec. */}
       <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        <MiniStat label="มาเล่น" value={sessionsAttended} />
-        <MiniStat label="Tournament" value={ts.tournaments} />
-        <MiniStat label="🥇 แชมป์" value={ts.championships} color={T.green} />
-        <MiniStat label="🥈 รองแชมป์" value={ts.runnerUps} />
-        <MiniStat label="🥉 อันดับ 3" value={ts.thirds} />
+        <MiniStat label={t("player.attendanceCount")} value={sessionsAttended} />
+        <MiniStat label={t("tournament.title")} value={ts.tournaments} />
+        <MiniStat label={`🥇 ${t("tournament.champion")}`} value={ts.championships} color={T.green} />
+        <MiniStat label={`🥈 ${t("tournament.runnerUp")}`} value={ts.runnerUps} />
+        <MiniStat label={`🥉 ${t("tournament.third")}`} value={ts.thirds} />
       </div>
 
       {/* v1.11.68 (Ranking System, section 11): per-club Ranking — separate stats/Rank/history per club,
@@ -12333,7 +12539,7 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
         <>
           <SectionHead icon={<span style={{ fontSize: 15 }}>🏆</span>} title="Ranking" />
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
-            {rankingCards.map((c) => <PlayerRankingClubCard key={c.name} clubName={c.name} playerId={p.id} skillIndex={p.skillIndex} result={c.result} />)}
+            {rankingCards.map((c) => <PlayerRankingClubCard key={c.name} clubName={c.name} playerId={p.id} skillIndex={p.skillIndex} result={c.result} t={t} />)}
           </div>
         </>
       )}
@@ -12341,10 +12547,10 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
       {/* v1.11.8: entry point into the new full match-history drill-down (casual log / Tournament log /
           most-frequent-partner win rates) — placed right below the achievement stats per spec mockup. */}
       <button onClick={() => setShowHistory(true)} style={{ width: "100%", textAlign: "left", background: "none", border: "none", padding: "2px 0 16px", color: T.green, fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", gap: 4 }}>
-        ดูประวัติการเล่น <ChevronRight size={15} />
+        {t("player.viewMatchHistory")} <ChevronRight size={15} />
       </button>
 
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{t("common.close")}</button>
 
       {showPhoto && p.photo && (
         <div onClick={() => setShowPhoto(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", zIndex: 90, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
@@ -12359,6 +12565,8 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
           tournamentRows={tournamentMatchesForPlayer(p.id, tournamentHistory, getP)}
           partnerRecord={cs.partnerRecord}
           getP={getP}
+          t={t}
+          fmtDate={fmtDate}
           onClose={() => setShowHistory(false)}
         />
       )}
@@ -12368,6 +12576,7 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
           membershipSettings={ms}
           payEntranceFee={payEntranceFee}
           payMembership={payMembership}
+          t={t}
           onClose={() => setShowMembershipPay(false)}
         />
       )}
@@ -12378,7 +12587,7 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
 // Rank/RP/games/win-rate + (if any) a short recent Rank-change history, e.g. "16 Sep: Gold → Platinum, RP
 // 248 → 253". Never fabricates a transition — rankHistoryByPlayer only ever contains transitions actually
 // derived by replaying real match history (see computeClubRanking).
-function PlayerRankingClubCard({ clubName, playerId, skillIndex, result }) {
+function PlayerRankingClubCard({ clubName, playerId, skillIndex, result, t }) {
   const [showHistory, setShowHistory] = useState(false);
   const st = result.stats[playerId];
   const tier = result.rankByPlayer[playerId];
@@ -12387,7 +12596,7 @@ function PlayerRankingClubCard({ clubName, playerId, skillIndex, result }) {
     return (
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12 }}>
         <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 2 }}>{clubName}</div>
-        <div style={{ fontSize: 11.5, color: T.muted }}>ยังไม่มีข้อมูล Ranking ในก๊วนนี้</div>
+        <div style={{ fontSize: 11.5, color: T.muted }}>{t ? t("ranking.cardNoData") : "ยังไม่มีข้อมูล Ranking ในก๊วนนี้"}</div>
       </div>
     );
   }
@@ -12401,25 +12610,25 @@ function PlayerRankingClubCard({ clubName, playerId, skillIndex, result }) {
             <span style={{ fontSize: 11.5, fontWeight: 800, color: T.text }}>{tier.name}</span>
           </div>
         ) : (
-          <span style={{ fontSize: 11, fontWeight: 700, color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "3px 9px" }}>🔒 {st.gamesPlayed}/{result.minGames} เกม</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 20, padding: "3px 9px" }}>🔒 {t ? t("ranking.showcaseGamesRatio", { played: st.gamesPlayed, min: result.minGames }) : `${st.gamesPlayed}/${result.minGames} เกม`}</span>
         )}
       </div>
       <div style={{ display: "flex", gap: 14, fontSize: 11.5, color: T.muted, flexWrap: "wrap" }}>
         <span>RP <b style={{ color: T.text }}>{st.rp}</b></span>
-        <span>เกม <b style={{ color: T.text }}>{st.gamesPlayed}</b></span>
+        <span>{t ? t("ranking.cardGamesLabel") : "เกม"} <b style={{ color: T.text }}>{st.gamesPlayed}</b></span>
         <span>Win Rate <b style={{ color: T.text }}>{st.winRatePct}%</b></span>
-        <span title="Skill 40% + RP 60% — ค่าข้อมูลเท่านั้น ไม่ใช้ตัดสิน Rank">รวม <b style={{ color: T.text }}>{finalRankingStrength(skillIndex, st.rp)}</b></span>
+        <span title={t ? t("ranking.cardTotalTooltip") : "Skill 40% + RP 60% — ค่าข้อมูลเท่านั้น ไม่ใช้ตัดสิน Rank"}>{t ? t("ranking.cardTotalLabel") : "รวม"} <b style={{ color: T.text }}>{finalRankingStrength(skillIndex, st.rp)}</b></span>
       </div>
       {rankHistory.length > 0 && (
         <>
           <button onClick={() => setShowHistory((v) => !v)} style={{ marginTop: 8, background: "none", border: "none", padding: 0, color: T.green, fontSize: 11, fontWeight: 800, cursor: "pointer" }}>
-            {showHistory ? "ซ่อนประวัติ Rank" : `ดูประวัติ Rank (${rankHistory.length})`}
+            {showHistory ? (t ? t("ranking.cardHideHistory") : "ซ่อนประวัติ Rank") : (t ? t("ranking.cardViewHistory", { count: rankHistory.length }) : `ดูประวัติ Rank (${rankHistory.length})`)}
           </button>
           {showHistory && (
             <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 3 }}>
               {rankHistory.slice(0, 10).map((h, i) => (
                 <div key={i} style={{ fontSize: 10.5, color: T.muted }}>
-                  {h.date}: {h.fromTier || "ยังไม่มี Rank"} → {h.toTier || "ยังไม่มี Rank"}, RP {h.rpBefore} → {h.rpAfter}
+                  {h.date}: {h.fromTier || (t ? t("ranking.showcaseNoRankLabel") : "ยังไม่มี Rank")} → {h.toTier || (t ? t("ranking.showcaseNoRankLabel") : "ยังไม่มี Rank")}, RP {h.rpBefore} → {h.rpAfter}
                 </div>
               ))}
             </div>
@@ -12432,31 +12641,35 @@ function PlayerRankingClubCard({ clubName, playerId, skillIndex, result }) {
 // v1.11.8: "ดูประวัติการเล่น" — full match-history drill-down opened from PlayerProfileSheet. Three
 // sections: casual match log, Tournament match log, and most-frequent-partner win rates (reuses
 // playerStats()'s partnerRecord map rather than recomputing partner win/loss here).
-function PlayerMatchHistorySheet({ player: p, casualRows, tournamentRows, partnerRecord, getP, onClose }) {
+// v1.12.43 (Localization Phase 3): maps casualMatchHistoryForPlayer/tournamentMatchesForPlayer's semantic
+// `resultKey` to its catalog key -- kept next to the sheet that's the ONLY reader of resultKey, same pattern
+// as PSTATUS_I18N_KEY/HAND_I18N_KEY/MEMBER_TYPE_I18N_KEY above.
+const MATCH_RESULT_I18N_KEY = { win: "player.matchWin", loss: "player.matchLoss", draw: "player.matchDraw", noScore: "player.matchNoScore", undetermined: "player.matchUndetermined" };
+function PlayerMatchHistorySheet({ player: p, casualRows, tournamentRows, partnerRecord, getP, t, fmtDate, onClose }) {
   const [tab, setTab] = useState("casual"); // "casual" | "tournament" | "partners"
   const partnerRows = useMemo(() => Object.entries(partnerRecord || {})
     .map(([id, rec]) => ({ id, name: getP(id)?.name || "?", ...rec, winRate: rec.games ? Math.round((rec.wins / rec.games) * 100) : null }))
     .sort((a, b) => b.games - a.games), [partnerRecord, getP]);
   const rowStyle = { background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: "9px 11px" };
-  const resultColor = (label) => (label === "ชนะ" ? T.green : label === "แพ้" ? T.accent : T.muted);
+  const resultColor = (key) => (key === "win" ? T.green : key === "loss" ? T.accent : T.muted);
   return (
     <Overlay onClose={onClose}>
-      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title={`ประวัติการเล่น — ${p.name}`} />
+      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title={t("player.matchHistoryTitle", { name: p.name })} />
       <div style={{ marginBottom: 14 }}>
-        <Seg options={[["casual", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"], ["partners", "📈 คู่หู"]]} value={tab} onChange={setTab} />
+        <Seg options={[["casual", `🏸 ${t("session.title")}`], ["tournament", `🏆 ${t("tournament.title")}`], ["partners", `📈 ${t("player.partners")}`]]} value={tab} onChange={setTab} />
       </div>
 
       {tab === "casual" && (
         casualRows.length === 0 ? (
-          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีประวัติการเล่นก๊วน</div>
+          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>{t("player.noCasualMatchHistory")}</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
             {casualRows.map((r) => (
               <div key={r.id} style={rowStyle}>
-                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 3 }}>{r.date ? fmtThaiDate(r.date) : "ไม่ระบุวันที่"}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>คู่: {r.partnerNames} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {r.oppNames}</div>
+                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 3 }}>{r.date ? (fmtDate ? fmtDate(r.date) : fmtThaiDate(r.date)) : t("player.matchDateUnspecified")}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{t("player.matchupPartnerLabel")}: {r.partnerNames} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {r.oppNames}</div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 12, fontWeight: 800, color: resultColor(r.resultLabel) }}>{r.resultLabel}</span>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: resultColor(r.resultKey) }}>{t(MATCH_RESULT_I18N_KEY[r.resultKey])}</span>
                   <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>{r.scoreStr}</span>
                 </div>
               </div>
@@ -12467,15 +12680,15 @@ function PlayerMatchHistorySheet({ player: p, casualRows, tournamentRows, partne
 
       {tab === "tournament" && (
         tournamentRows.length === 0 ? (
-          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีประวัติการแข่งขัน</div>
+          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>{t("player.noMatchHistory")}</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
             {tournamentRows.map((r) => (
               <div key={r.id} style={rowStyle}>
-                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 3 }}>{r.event}{r.date ? ` · ${fmtThaiDate(r.date)}` : ""} · {r.roundLabel}</div>
-                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>คู่: {r.partnerNames} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {r.oppNames}</div>
+                <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 3 }}>{r.event || t("tournament.unnamed")}{r.date ? ` · ${fmtDate ? fmtDate(r.date) : fmtThaiDate(r.date)}` : ""} · {r.roundLabel}</div>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{t("player.matchupPartnerLabel")}: {r.partnerNames} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {r.oppNames}</div>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 12, fontWeight: 800, color: resultColor(r.resultLabel) }}>{r.resultLabel}</span>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: resultColor(r.resultKey) }}>{t(MATCH_RESULT_I18N_KEY[r.resultKey])}</span>
                   <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>{r.scoreStr}</span>
                 </div>
               </div>
@@ -12486,14 +12699,14 @@ function PlayerMatchHistorySheet({ player: p, casualRows, tournamentRows, partne
 
       {tab === "partners" && (
         partnerRows.length === 0 ? (
-          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีข้อมูลคู่หู</div>
+          <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "20px 0" }}>{t("player.noPartnerData")}</div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
             {partnerRows.map((r) => (
               <div key={r.id} style={{ ...rowStyle, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div>
                   <div style={{ fontSize: 13, fontWeight: 700 }}>{r.name}</div>
-                  <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{r.games} เกม · ชนะ {r.wins} แพ้ {r.losses}</div>
+                  <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{t(r.games === 1 ? "common.gameCount.one" : "common.gameCount.other", { count: r.games })} · {t("player.wins")} {r.wins} {t("player.losses")} {r.losses}</div>
                 </div>
                 <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{r.winRate != null ? r.winRate + "%" : "—"}</div>
               </div>
@@ -12502,7 +12715,7 @@ function PlayerMatchHistorySheet({ player: p, casualRows, tournamentRows, partne
         )
       )}
 
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{t("common.close")}</button>
     </Overlay>
   );
 }
@@ -12510,7 +12723,7 @@ function PlayerMatchHistorySheet({ player: p, casualRows, tournamentRows, partne
 // v1.9.9 IA cleanup (Phase 2): consolidates the level-preset switch (LevelPresetEditor, unchanged) and the
 // per-skill-index (1-11) description text — previously always-visible / a separate inline toggle in
 // MembersTab — into one collapsed sheet, opened from the compact "ตั้งค่าระดับฝีมือ" button.
-function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onClose }) {
+function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, t, onClose }) {
   // v1.9.12 fix: LevelPresetEditor already renders its own "ดู/ซ่อนคำอธิบายแต่ละระดับ" toggle + the same
   // per-skill-index (1-11) list — the sheet used to ALSO render that list again unconditionally below it,
   // showing the exact same descriptions twice. Removed the duplicate block; LevelPresetEditor's own toggle
@@ -12519,7 +12732,7 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>⚙️ ตั้งค่าระดับฝีมือ</div>
       <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>เลือกระบบระดับที่ใช้ในพื้นที่/ก๊วนของคุณ และดูคำอธิบายแต่ละระดับ</div>
-      <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} />
+      <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} t={t} />
     </Overlay>
   );
 }
@@ -12533,7 +12746,7 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, onCl
 // longer accepted here — they existed ONLY to feed the removed BadQ Online row (moved to SettingsTab, see
 // its own comment) and the removed legacy Member Portal (Beta) sheet. Nothing else in this component ever
 // read them; dropping them here is pure dead-prop cleanup, not a behavior change.
-function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, onClose }) {
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, uiLocale, setUiLocale, t, fmtDateTime, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false); // v1.11.68: section 9 club-picker-first flow
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
@@ -12560,15 +12773,37 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>⚙️ ตั้งค่า</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>⚙️ {t("settings.title")}</div>
 
-      <Label>🏸 ระดับฝีมือ</Label>
+      {/* v1.12.41 (Localization Phase 1): the language preference lives here, not in `settings` (see
+          useBadQI18n's header comment) — switching it writes only to its own localStorage key and never
+          touches this settings object, so it can never reach the Journal, a backup export, or Restore. */}
+      <Label>🌐 {t("settings.language")}</Label>
+      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+        {["th", "en"].map((code) => (
+          <button
+            key={code}
+            onClick={() => setUiLocale(code)}
+            style={{
+              flex: 1, padding: "10px 0", borderRadius: 11, cursor: "pointer",
+              border: `1px solid ${uiLocale === code ? T.green : T.border}`,
+              background: uiLocale === code ? T.green : T.surface,
+              color: uiLocale === code ? "#fff" : T.text,
+              fontSize: 13, fontWeight: 800,
+            }}
+          >
+            {t(`settings.language.${code}`)}
+          </button>
+        ))}
+      </div>
+
+      <Label>🏸 {t("settings.skillLevels")}</Label>
       <NavRow onClick={() => setLevelSheetOpen(true)}>
-        <span style={{ fontSize: 12.5, color: T.muted }}>ระบบที่ใช้อยู่</span>
+        <span style={{ fontSize: 12.5, color: T.muted }}>{t("settings.skillSystem")}</span>
         <span style={{ marginLeft: "auto", fontWeight: 800, fontSize: 13, color: T.text }}>{currentPreset.name}</span>
         <ChevronRight size={15} color={T.muted} />
       </NavRow>
-      {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} onClose={() => setLevelSheetOpen(false)} />}
+      {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} t={t} onClose={() => setLevelSheetOpen(false)} />}
 
       {/* v1.11.68 (Ranking System, section 9): placed directly under ระดับฝีมือ per spec. Tapping FIRST
           shows a club-selection list (any club, independent of the currently-active session) — only after
@@ -12586,6 +12821,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           sessionHistory={sessionHistory}
           onPick={(name) => { setRankingClubPickerOpen(false); setRankingSettingsClub(name); }}
           onClose={() => setRankingClubPickerOpen(false)}
+          t={t}
         />
       )}
       {rankingSettingsClub && (
@@ -12596,6 +12832,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           players={players}
           sessionHistory={sessionHistory}
           onClose={() => setRankingSettingsClub(null)}
+          t={t}
         />
       )}
 
@@ -12621,74 +12858,81 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           the comment above MemberPortalSheet's old location, right before ArchivedPlayersSheet, for what was
           and wasn't touched). */}
 
-      <div style={{ marginTop: 6 }}><Label>🔒 ความเป็นส่วนตัวและข้อมูล</Label></div>
+      <div style={{ marginTop: 6 }}><Label>🔒 {t("settings.privacy")}</Label></div>
 
-      <ExpandRow title="นโยบายความเป็นส่วนตัว" id="policy">
+      {/* v1.12.41 (Localization Phase 1): only the ExpandRow TITLES have an approved catalog key — the long
+          body paragraphs are policy text with no prepared translation yet, so they stay Thai literals
+          (fallback), matching "Do not claim the full app is translated at this stage." */}
+      <ExpandRow title={t("settings.privacyPolicy")} id="policy">
         BadQ เก็บข้อมูลสมาชิกและประวัติการเล่นไว้ในเครื่องของคุณเท่านั้น (ไม่มีการส่งข้อมูลขึ้นเซิร์ฟเวอร์ภายนอก) ใช้เพื่อจัดก๊วน จับคู่ และสรุปผลภายในแอปนี้เท่านั้น
       </ExpandRow>
-      <ExpandRow title="ข้อมูลที่ BadQ จัดเก็บ" id="data">
+      <ExpandRow title={t("settings.dataStored")} id="data">
         ขึ้นอยู่กับการใช้งาน แอปอาจเก็บ: ชื่อสมาชิก, รูปโปรไฟล์, ระดับฝีมือ, มือถนัด, ประเภทสมาชิก, เบอร์โทรศัพท์ (ถ้ากรอก), LINE ID (ถ้ากรอก), ประวัติการเข้าร่วมก๊วน, ประวัติการแข่งขัน/ผลการแข่งขัน, สถิติผู้เล่น, ข้อมูลการชำระเงินที่เกี่ยวข้อง และ Tournament data
         <div style={{ marginTop: 6 }}>เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น</div>
       </ExpandRow>
-      <ExpandRow title="การจัดการข้อมูลส่วนบุคคล" id="manage">
+      <ExpandRow title={t("settings.dataManagement")} id="manage">
         แก้ไขหรือลบข้อมูลติดต่อ (เบอร์โทร/LINE ID) ของสมาชิกแต่ละคนได้ที่โปรไฟล์ผู้เล่น → แก้ไขสมาชิก ส่วนการลบข้อมูลสมาชิกทั้งหมดหรือล้างข้อมูลทั้งหมด ทำได้ด้านล่างในหมวดนี้
       </ExpandRow>
 
       {/* v1.11.6: "สมาชิกที่เก็บไว้" — recovery list for players archived from แก้ไขสมาชิก → เก็บสมาชิก.
-          Archiving never deletes anything, so this is where they're found again and restored. */}
+          Archiving never deletes anything, so this is where they're found again and restored.
+          v1.12.43 (Localization Phase 3): this row label + the sheet it opens are now translated (the sheet
+          itself is explicitly in this phase's scope); the REST of GeneralSettingsSheet is untouched, per
+          the boundary and per test_v11241_localization_e2e.js's L5 assertions (unaffected -- they don't
+          reference this row's text). */}
       <NavRow onClick={() => setArchivedSheetOpen(true)}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>สมาชิกที่เก็บไว้</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t("player.archived")}</span>
         {archivedPlayers && archivedPlayers.length > 0 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginLeft: 8 }}>{archivedPlayers.length}</span>}
         <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
       </NavRow>
-      {archivedSheetOpen && <ArchivedPlayersSheet archivedPlayers={archivedPlayers || []} restorePlayer={restorePlayer} onClose={() => setArchivedSheetOpen(false)} />}
+      {archivedSheetOpen && <ArchivedPlayersSheet archivedPlayers={archivedPlayers || []} restorePlayer={restorePlayer} t={t} onClose={() => setArchivedSheetOpen(false)} />}
 
       <NavRow onClick={() => setBackupSheetOpen(true)}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>การสำรอง / นำเข้า / ส่งออกข้อมูล</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t ? t("backup.title") : "การสำรอง / นำเข้า / ส่งออกข้อมูล"}</span>
         <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
       </NavRow>
       {backupSheetOpen && (
         <Overlay onClose={() => setBackupSheetOpen(false)}>
-          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>สำรอง / นำเข้า / ส่งออกข้อมูล</div>
-          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} />
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t ? t("backup.title") : "สำรอง / นำเข้า / ส่งออกข้อมูล"}</div>
+          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} t={t} fmtDateTime={fmtDateTime} />
         </Overlay>
       )}
 
       {/* destructive actions — explicit confirmation required, never a single accidental tap */}
-      <button onClick={() => setConfirmDeleteMembers(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 700 }}>ลบข้อมูลสมาชิก</button>
-      <button onClick={() => setConfirmWipeAll(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 800 }}>ล้างข้อมูลทั้งหมด</button>
+      <button onClick={() => setConfirmDeleteMembers(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 700 }}>{t ? t("backup.deleteMembersButton") : "ลบข้อมูลสมาชิก"}</button>
+      <button onClick={() => setConfirmWipeAll(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 800 }}>{t ? t("backup.wipeAll") : "ล้างข้อมูลทั้งหมด"}</button>
 
-      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>ปิด</button>
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>{t ? t("common.close") : "ปิด"}</button>
 
       {confirmDeleteMembers && (
         <Overlay onClose={() => setConfirmDeleteMembers(false)}>
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ลบข้อมูลสมาชิกทั้งหมด?</div>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{t ? t("backup.deleteMembersConfirmTitle") : "ลบข้อมูลสมาชิกทั้งหมด?"}</div>
           <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
-            จะลบรายชื่อ รูป เบอร์โทร และ LINE ID ของสมาชิกทุกคนออกจากรายการผู้เล่นทันที — ประวัติก๊วน ผลการแข่งขัน และข้อมูลการเงินที่ผ่านมาจะยังอยู่ครบ (ชื่อผู้เล่นที่ถูกลบในประวัติเก่าจะแสดงเป็น "?" แทน) การกระทำนี้ไม่สามารถย้อนกลับได้
+            {t ? t("backup.deleteMembersBody") : "จะลบรายชื่อ รูป เบอร์โทร และ LINE ID ของสมาชิกทุกคนออกจากรายการผู้เล่นทันที — ประวัติก๊วน ผลการแข่งขัน และข้อมูลการเงินที่ผ่านมาจะยังอยู่ครบ (ชื่อผู้เล่นที่ถูกลบในประวัติเก่าจะแสดงเป็น \"?\" แทน) การกระทำนี้ไม่สามารถย้อนกลับได้"}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setConfirmDeleteMembers(false)} style={btnSecondary}>ยกเลิก</button>
-            <button onClick={() => { deleteAllMembersData(); setConfirmDeleteMembers(false); }} style={{ ...btnPrimary, background: T.accent }}>ลบข้อมูลสมาชิก</button>
+            <button onClick={() => setConfirmDeleteMembers(false)} style={btnSecondary}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+            <button onClick={() => { deleteAllMembersData(); setConfirmDeleteMembers(false); }} style={{ ...btnPrimary, background: T.accent }}>{t ? t("backup.deleteMembersButton") : "ลบข้อมูลสมาชิก"}</button>
           </div>
         </Overlay>
       )}
       {confirmWipeAll && (
         <Overlay onClose={() => setConfirmWipeAll(false)}>
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ล้างข้อมูลทั้งหมด?</div>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{t ? t("backup.wipeAllConfirm") : "ล้างข้อมูลทั้งหมด?"}</div>
           <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
-            จะลบข้อมูลทั้งหมดในแอปนี้: สมาชิกทุกคน, ประวัติก๊วนทุกครั้ง, ผลการแข่งขัน Tournament ทุกรายการ และข้อมูลการเงิน — เหมือนติดตั้งแอปใหม่ ระบบจะเก็บสำเนาไว้ให้กู้คืนได้ครั้งเดียวผ่าน "ย้อนกลับการนำเข้าครั้งล่าสุด" ในหน้าสำรองข้อมูล
+            {t ? t("backup.wipeAllBody") : "จะลบข้อมูลทั้งหมดในแอปนี้: สมาชิกทุกคน, ประวัติก๊วนทุกครั้ง, ผลการแข่งขัน Tournament ทุกรายการ และข้อมูลการเงิน — เหมือนติดตั้งแอปใหม่ ระบบจะเก็บสำเนาไว้ให้กู้คืนได้ครั้งเดียวผ่าน \"ย้อนกลับการนำเข้าครั้งล่าสุด\" ในหน้าสำรองข้อมูล"}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setConfirmWipeAll(false)} style={btnSecondary}>ยกเลิก</button>
-            <button onClick={() => { wipeAllAppData(); setConfirmWipeAll(false); setWipedNotice(true); }} style={{ ...btnPrimary, background: T.accent }}>ล้างข้อมูลทั้งหมด</button>
+            <button onClick={() => setConfirmWipeAll(false)} style={btnSecondary}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+            <button onClick={() => { wipeAllAppData(); setConfirmWipeAll(false); setWipedNotice(true); }} style={{ ...btnPrimary, background: T.accent }}>{t ? t("backup.wipeAll") : "ล้างข้อมูลทั้งหมด"}</button>
           </div>
         </Overlay>
       )}
       {wipedNotice && (
         <Overlay onClose={() => { setWipedNotice(false); onClose(); }}>
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ล้างข้อมูลทั้งหมดแล้ว</div>
-          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>หากล้างผิด กู้คืนได้ที่ การสำรอง / นำเข้า / ส่งออกข้อมูล → ย้อนกลับการนำเข้าครั้งล่าสุด (ใช้ได้ครั้งเดียว)</div>
-          <button onClick={() => { setWipedNotice(false); onClose(); }} style={btnPrimary}>ปิด</button>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{t ? t("backup.wipeComplete") : "ล้างข้อมูลทั้งหมดแล้ว"}</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>{t ? t("backup.wipedNoticeBody") : "หากล้างผิด กู้คืนได้ที่ การสำรอง / นำเข้า / ส่งออกข้อมูล → ย้อนกลับการนำเข้าครั้งล่าสุด (ใช้ได้ครั้งเดียว)"}</div>
+          <button onClick={() => { setWipedNotice(false); onClose(); }} style={btnPrimary}>{t ? t("common.close") : "ปิด"}</button>
         </Overlay>
       )}
     </Overlay>
@@ -12699,7 +12943,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
 // Step 1: pick ANY club from the list — independent of whichever group is the currently-active session
 // (see rankingConfigs' design note above). Reuses the EXACT SAME dedup-by-name/most-recent-photo logic as
 // SessionTab's own "ชื่อก๊วนที่เคยใช้" picker (pastQuans) so the two club lists can never disagree.
-function RankingClubPickerSheet({ sessionHistory, onPick, onClose }) {
+function RankingClubPickerSheet({ sessionHistory, onPick, onClose, t }) {
   const clubs = useMemo(() => {
     const seen = new Set(), out = [];
     (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push({ name: s.name, photo: s.photo || null }); } });
@@ -12707,10 +12951,10 @@ function RankingClubPickerSheet({ sessionHistory, onPick, onClose }) {
   }, [sessionHistory]);
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>🏆 เลือกก๊วนที่ต้องการตั้งค่า Rank</div>
-      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>Ranking แยกการตั้งค่าและคะแนนเป็นรายก๊วน ไม่ปนกัน</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>🏆 {t ? t("ranking.pickerTitle") : "เลือกก๊วนที่ต้องการตั้งค่า Rank"}</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>{t ? t("ranking.pickerSubtitle") : "Ranking แยกการตั้งค่าและคะแนนเป็นรายก๊วน ไม่ปนกัน"}</div>
       {clubs.length === 0 ? (
-        <div style={{ fontSize: 12.5, color: T.muted, textAlign: "center", padding: "20px 0" }}>ยังไม่มีประวัติก๊วน — จบก๊วนอย่างน้อย 1 ครั้งก่อนตั้งค่า Rank ได้</div>
+        <div style={{ fontSize: 12.5, color: T.muted, textAlign: "center", padding: "20px 0" }}>{t ? t("ranking.pickerEmptyState") : "ยังไม่มีประวัติก๊วน — จบก๊วนอย่างน้อย 1 ครั้งก่อนตั้งค่า Rank ได้"}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
           {clubs.map((c) => (
@@ -12722,13 +12966,13 @@ function RankingClubPickerSheet({ sessionHistory, onPick, onClose }) {
           ))}
         </div>
       )}
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{t ? t("common.close") : "ปิด"}</button>
     </Overlay>
   );
 }
 // Step 2: per-club Rank settings (spec section 10) — toggle / min games / calc range, THEN a compact tier
 // list highest-to-lowest; tap a row to open its full condition editor. Never shows every field at once.
-function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, players, sessionHistory, onClose }) {
+function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, players, sessionHistory, onClose, t }) {
   const rc = rankingConfig;
   const [editingTier, setEditingTier] = useState(null); // a tier object being edited/created, or null
   const [confirmReset, setConfirmReset] = useState(false);
@@ -12736,11 +12980,11 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
   // section 21 note: this Showcase-population count is READ-ONLY here (just to show "N คน" per tier) — it
   // never writes anything; RP/Rank themselves are always derived (see computeClubRanking's design note).
   const ranking = useMemo(() => computeClubRanking(clubName, players, sessionHistory, rc), [clubName, players, sessionHistory, rc]);
-  const conditionLabel = (t) => {
-    if (t.conditionType === "winrate") return `Win Rate ≥ ${t.winRateMin}%`;
-    if (t.conditionType === "rp") return `RP ≥ ${t.rpMin}`;
-    if (t.conditionType === "top") return `Top ${t.topPct}%`;
-    return `RP ≥ ${t.rpMin} + Top ${t.topPct}%`;
+  const conditionLabel = (tier) => {
+    if (tier.conditionType === "winrate") return t ? t("ranking.conditionWinRate", { value: tier.winRateMin }) : `Win Rate ≥ ${tier.winRateMin}%`;
+    if (tier.conditionType === "rp") return t ? t("ranking.conditionRp", { value: tier.rpMin }) : `RP ≥ ${tier.rpMin}`;
+    if (tier.conditionType === "top") return t ? t("ranking.conditionTop", { value: tier.topPct }) : `Top ${tier.topPct}%`;
+    return t ? t("ranking.conditionRpTop", { rp: tier.rpMin, top: tier.topPct }) : `RP ≥ ${tier.rpMin} + Top ${tier.topPct}%`;
   };
   const saveTier = (tier) => {
     const exists = rc.rankTiers.some((t) => t.id === tier.id);
@@ -12751,48 +12995,48 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
   const deleteTier = (tierId) => { updateRankingConfig(clubName, { rankTiers: rc.rankTiers.filter((t) => t.id !== tierId) }); setEditingTier(null); };
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🏆 Ranking — {clubName}</div>
-      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>ตั้งค่านี้มีผลกับก๊วน "{clubName}" เท่านั้น (ไม่กระทบก๊วนอื่น)</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🏆 {t ? t("ranking.settingsHeader", { club: clubName }) : `Ranking — ${clubName}`}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>{t ? t("ranking.settingsScopeNote", { club: clubName }) : `ตั้งค่านี้มีผลกับก๊วน "${clubName}" เท่านั้น (ไม่กระทบก๊วนอื่น)`}</div>
 
       <button onClick={() => updateRankingConfig(clubName, { enabled: !rc.enabled })} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: rc.enabled ? "#e2f5ec" : T.surface, border: `1.5px solid ${rc.enabled ? T.green : T.border}`, color: rc.enabled ? T.green : T.text, fontSize: 13, fontWeight: 800, marginBottom: 10 }}>
-        {rc.enabled ? "✓ เปิดใช้งาน Ranking" : "ปิดใช้งาน Ranking (แตะเพื่อเปิด)"}
+        {rc.enabled ? (t ? t("ranking.toggleEnabledLabel") : "✓ เปิดใช้งาน Ranking") : (t ? t("ranking.toggleDisabledLabel") : "ปิดใช้งาน Ranking (แตะเพื่อเปิด)")}
       </button>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flex: 1 }}>เกมขั้นต่ำก่อนมี Rank</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text, flex: 1 }}>{t ? t("ranking.minGamesRowLabel") : "เกมขั้นต่ำก่อนมี Rank"}</span>
         <input type="number" min={1} value={rc.minGames} onFocus={(e) => e.target.select()}
           onChange={(e) => updateRankingConfig(clubName, { minGames: Math.max(1, Number(e.target.value) || 10) })}
           style={{ width: 56, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }} />
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>เกม</span>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t ? t("ranking.cardGamesLabel") : "เกม"}</span>
       </div>
 
       <div style={{ padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 14 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 8 }}>ช่วงข้อมูลที่ใช้คำนวณ Ranking</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: T.text, marginBottom: 8 }}>{t ? t("ranking.calcRangeTitle") : "ช่วงข้อมูลที่ใช้คำนวณ Ranking"}</div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button onClick={() => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, mode: "all" } })} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12.5, fontWeight: 700, border: `1px solid ${rc.calcRange.mode === "all" ? T.green : T.border}`, background: rc.calcRange.mode === "all" ? "#e2f5ec" : T.surface2, color: rc.calcRange.mode === "all" ? T.green : T.muted }}>เกมทั้งหมด</button>
-          <button onClick={() => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, mode: "latest" } })} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12.5, fontWeight: 700, border: `1px solid ${rc.calcRange.mode === "latest" ? T.green : T.border}`, background: rc.calcRange.mode === "latest" ? "#e2f5ec" : T.surface2, color: rc.calcRange.mode === "latest" ? T.green : T.muted }}>เกมล่าสุด</button>
+          <button onClick={() => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, mode: "all" } })} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12.5, fontWeight: 700, border: `1px solid ${rc.calcRange.mode === "all" ? T.green : T.border}`, background: rc.calcRange.mode === "all" ? "#e2f5ec" : T.surface2, color: rc.calcRange.mode === "all" ? T.green : T.muted }}>{t ? t("ranking.allGamesBtn") : "เกมทั้งหมด"}</button>
+          <button onClick={() => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, mode: "latest" } })} style={{ flex: 1, padding: "8px 0", borderRadius: 9, fontSize: 12.5, fontWeight: 700, border: `1px solid ${rc.calcRange.mode === "latest" ? T.green : T.border}`, background: rc.calcRange.mode === "latest" ? "#e2f5ec" : T.surface2, color: rc.calcRange.mode === "latest" ? T.green : T.muted }}>{t ? t("ranking.recentGamesBtn") : "เกมล่าสุด"}</button>
         </div>
         {rc.calcRange.mode === "latest" && (
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-            <span style={{ fontSize: 12.5, color: T.muted }}>ล่าสุด</span>
+            <span style={{ fontSize: 12.5, color: T.muted }}>{t ? t("ranking.latestLabel") : "ล่าสุด"}</span>
             <input type="number" min={10} value={rc.calcRange.n} onFocus={(e) => e.target.select()}
               onChange={(e) => updateRankingConfig(clubName, { calcRange: { ...rc.calcRange, n: Math.max(10, Number(e.target.value) || 30) } })}
               style={{ width: 56, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }} />
-            <span style={{ fontSize: 12.5, color: T.muted }}>เกม (ขั้นต่ำ 10)</span>
+            <span style={{ fontSize: 12.5, color: T.muted }}>{t ? t("ranking.minTenSuffix") : "เกม (ขั้นต่ำ 10)"}</span>
           </div>
         )}
       </div>
 
-      <Label>Rank Tiers (สูง → ต่ำ)</Label>
+      <Label>{t ? t("ranking.tiersFieldLabel") : "Rank Tiers (สูง → ต่ำ)"}</Label>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
-        {sortedTiers.map((t) => {
-          const countInTier = Object.keys(ranking.rankByPlayer).filter((pid) => ranking.rankByPlayer[pid] && ranking.rankByPlayer[pid].id === t.id).length;
+        {sortedTiers.map((tier) => {
+          const countInTier = Object.keys(ranking.rankByPlayer).filter((pid) => ranking.rankByPlayer[pid] && ranking.rankByPlayer[pid].id === tier.id).length;
           return (
-            <button key={t.id} onClick={() => setEditingTier(t)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, cursor: "pointer" }}>
-              <RankTierImage tier={t} size={30} radius={8} fontSize={20} compact />
+            <button key={tier.id} onClick={() => setEditingTier(tier)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, cursor: "pointer" }}>
+              <RankTierImage tier={tier} size={30} radius={8} fontSize={20} compact />
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>{t.name}</div>
-                <div style={{ fontSize: 11, color: T.muted }}>{conditionLabel(t)}{countInTier > 0 ? ` · ${countInTier} คน` : ""}</div>
+                <div style={{ fontSize: 13.5, fontWeight: 800, color: T.text }}>{tier.name}</div>
+                <div style={{ fontSize: 11, color: T.muted }}>{conditionLabel(tier)}{countInTier > 0 ? ` · ${t ? t("ranking.tierCountSuffix", { count: countInTier }) : `${countInTier} คน`}` : ""}</div>
               </div>
               <ChevronRight size={16} color={T.muted} />
             </button>
@@ -12800,10 +13044,10 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
         })}
       </div>
       <button onClick={() => setEditingTier({ id: uid(), name: "", order: Math.max(0, ...rc.rankTiers.map((t) => t.order || 0)) + 1, icon: "🔰", image: null, conditionType: "rp", rpMin: 0, winRateMin: 0, topPct: 100 })}
-        style={{ width: "100%", padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px dashed ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>+ เพิ่ม Rank</button>
-      <button onClick={() => setConfirmReset(true)} style={{ width: "100%", padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 14 }}>คืนค่า Rank เริ่มต้น</button>
+        style={{ width: "100%", padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px dashed ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{t ? t("ranking.addTierButton") : "+ เพิ่ม Rank"}</button>
+      <button onClick={() => setConfirmReset(true)} style={{ width: "100%", padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 14 }}>{t ? t("ranking.resetTiersButton") : "คืนค่า Rank เริ่มต้น"}</button>
 
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{t ? t("common.close") : "ปิด"}</button>
 
       {editingTier && (
         <RankTierEditSheet
@@ -12811,17 +13055,18 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
           onSave={saveTier}
           onDelete={rc.rankTiers.some((t) => t.id === editingTier.id) ? () => deleteTier(editingTier.id) : null}
           onClose={() => setEditingTier(null)}
+          t={t}
         />
       )}
       {confirmReset && (
         <Overlay onClose={() => setConfirmReset(false)}>
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>คืนค่า Rank เริ่มต้น?</div>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{t ? t("ranking.resetTiersConfirmTitle") : "คืนค่า Rank เริ่มต้น?"}</div>
           <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
-            จะคืนค่ารายชื่อ/เงื่อนไข/รูป Rank ของก๊วน "{clubName}" กลับเป็นค่าเริ่มต้น (Bronze/Silver/Gold/Platinum/Diamond/Commander/Conqueror) — ประวัติการแข่งขันและ RP ที่คำนวณจากประวัติเดิมจะไม่หายไปหรือถูกเขียนทับ (Rank/RP เป็นค่าที่คำนวณสดเสมอ) การกระทำนี้ย้อนกลับไม่ได้
+            {t ? t("ranking.resetTiersBody", { club: clubName }) : `จะคืนค่ารายชื่อ/เงื่อนไข/รูป Rank ของก๊วน "${clubName}" กลับเป็นค่าเริ่มต้น (Bronze/Silver/Gold/Platinum/Diamond/Commander/Conqueror) — ประวัติการแข่งขันและ RP ที่คำนวณจากประวัติเดิมจะไม่หายไปหรือถูกเขียนทับ (Rank/RP เป็นค่าที่คำนวณสดเสมอ) การกระทำนี้ย้อนกลับไม่ได้`}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setConfirmReset(false)} style={btnSecondary}>ยกเลิก</button>
-            <button onClick={() => { updateRankingConfig(clubName, { rankTiers: getDefaultRankTiers() }); setConfirmReset(false); }} style={{ ...btnPrimary, background: T.accent }}>คืนค่าเริ่มต้น</button>
+            <button onClick={() => setConfirmReset(false)} style={btnSecondary}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+            <button onClick={() => { updateRankingConfig(clubName, { rankTiers: getDefaultRankTiers() }); setConfirmReset(false); }} style={{ ...btnPrimary, background: T.accent }}>{t ? t("ranking.resetTiersConfirmButton") : "คืนค่าเริ่มต้น"}</button>
           </div>
         </Overlay>
       )}
@@ -12831,7 +13076,7 @@ function RankingSettingsSheet({ clubName, rankingConfig, updateRankingConfig, pl
 // Full condition editor for ONE Rank tier (spec sections 7/8) — name, order, 1-of-4 condition type + its
 // threshold(s), and image. Reuses the EXACT SAME ImageCropper/fileToDataURL pattern already used for
 // player/club/Tournament images (own local cropJob state — no new global plumbing needed).
-function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
+function RankTierEditSheet({ tier, onSave, onDelete, onClose, t }) {
   const [draft, setDraft] = useState({ ...tier });
   const [cropJob, setCropJob] = useState(null);
   const [iconPickerOpen, setIconPickerOpen] = useState(false); // v1.11.74 (section 13)
@@ -12840,7 +13085,7 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
   const canSave = draft.name.trim().length > 0;
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{onDelete ? "แก้ไข Rank" : "เพิ่ม Rank ใหม่"}</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{onDelete ? (t ? t("ranking.editTierTitle") : "แก้ไข Rank") : (t ? t("ranking.addTierTitle") : "เพิ่ม Rank ใหม่")}</div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
         <button onClick={() => fileRef.current.click()} style={{ position: "relative", width: 56, height: 56, borderRadius: 14, border: `1px solid ${T.border}`, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, padding: 0 }}>
@@ -12848,9 +13093,9 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
         </button>
         <input ref={fileRef} type="file" accept="image/*" onChange={onImageFile} style={{ display: "none" }} />
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <button onClick={() => fileRef.current.click()} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>{draft.image ? "เปลี่ยนรูป" : "อัปโหลดรูป"}</button>
-          <button onClick={() => setIconPickerOpen(true)} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>เลือกไอคอน</button>
-          {draft.image && <button onClick={() => setDraft((d) => ({ ...d, image: null, imageRef: null }))} style={{ padding: "6px 10px", borderRadius: 8, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบรูป (ใช้ไอคอนเริ่มต้น)</button>}
+          <button onClick={() => fileRef.current.click()} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>{draft.image ? (t ? t("ranking.changeImageButton") : "เปลี่ยนรูป") : (t ? t("ranking.uploadImageButton") : "อัปโหลดรูป")}</button>
+          <button onClick={() => setIconPickerOpen(true)} style={{ padding: "6px 10px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 11.5, fontWeight: 700 }}>{t ? t("ranking.chooseIconButton") : "เลือกไอคอน"}</button>
+          {draft.image && <button onClick={() => setDraft((d) => ({ ...d, image: null, imageRef: null }))} style={{ padding: "6px 10px", borderRadius: 8, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 11.5, fontWeight: 700 }}>{t ? t("ranking.removeImageButton") : "ลบรูป (ใช้ไอคอนเริ่มต้น)"}</button>}
         </div>
       </div>
       {/* v1.12.3: purely informational — no logic change, no pixel inspection/guessing. Root-cause
@@ -12863,10 +13108,10 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
           image, and never touches its stored value. */}
       {draft.image && (
         <div style={{ fontSize: 11, color: T.muted, marginBottom: 12, marginTop: -4, lineHeight: 1.5 }}>
-          หากไอคอนนี้ยังแสดงพื้นหลังสีดำใน Ranking Showcase ทั้งที่ไฟล์ต้นฉบับเป็น PNG โปร่งใส — ไฟล์นี้อาจถูกบันทึกไว้ตั้งแต่ก่อนอัปเดตที่แก้ปัญหาความโปร่งใส (แอปไม่สามารถกู้คืนความโปร่งใสของรูปที่บันทึกไปแล้วได้อัตโนมัติ) ลองกด "เปลี่ยนรูป" แล้วเลือกไฟล์ต้นฉบับเดิมอัปโหลดซ้ำอีกครั้ง
+          {t ? t("ranking.transparencyNote") : "หากไอคอนนี้ยังแสดงพื้นหลังสีดำใน Ranking Showcase ทั้งที่ไฟล์ต้นฉบับเป็น PNG โปร่งใส — ไฟล์นี้อาจถูกบันทึกไว้ตั้งแต่ก่อนอัปเดตที่แก้ปัญหาความโปร่งใส (แอปไม่สามารถกู้คืนความโปร่งใสของรูปที่บันทึกไปแล้วได้อัตโนมัติ) ลองกด \"เปลี่ยนรูป\" แล้วเลือกไฟล์ต้นฉบับเดิมอัปโหลดซ้ำอีกครั้ง"}
         </div>
       )}
-      {cropJob && <ImageCropper src={cropJob} circleGuide={false} title="จัดตำแหน่งไอคอน Rank" maxSize={256} onCancel={() => setCropJob(null)} onConfirm={(data) => {
+      {cropJob && <ImageCropper src={cropJob} circleGuide={false} title={t ? t("ranking.cropIconTitle") : "จัดตำแหน่งไอคอน Rank"} maxSize={256} onCancel={() => setCropJob(null)} onConfirm={(data) => {
         // v1.12.20: Custom Rank image target = 256×256, transparency preserved (circleGuide=false already;
         // ImageCropper's own PNG/JPEG choice — see canvasHasTransparency — is untouched). Additive imageRef
         // backfill, same pattern as the other 3 upload flows.
@@ -12875,21 +13120,21 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
         setCropJob(null);
       }} />}
 
-      <Label>ชื่อ Rank</Label>
-      <input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder="เช่น Diamond" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, color: T.text, marginBottom: 12, boxSizing: "border-box" }} />
+      <Label>{t ? t("ranking.nameFieldLabel") : "ชื่อ Rank"}</Label>
+      <input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder={t ? t("ranking.namePlaceholder") : "เช่น Diamond"} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, color: T.text, marginBottom: 12, boxSizing: "border-box" }} />
 
-      <Label>ลำดับ (ตัวเลขสูง = อันดับสูงกว่า)</Label>
+      <Label>{t ? t("ranking.orderFieldLabel") : "ลำดับ (ตัวเลขสูง = อันดับสูงกว่า)"}</Label>
       <input type="number" value={draft.order} onFocus={(e) => e.target.select()} onChange={(e) => setDraft((d) => ({ ...d, order: Number(e.target.value) || 1 }))} style={{ width: 80, padding: "8px 10px", borderRadius: 10, border: `1px solid ${T.border}`, fontSize: 14, color: T.text, marginBottom: 12, textAlign: "center" }} />
 
-      <Label>เงื่อนไข</Label>
+      <Label>{t ? t("ranking.conditionFieldLabel") : "เงื่อนไข"}</Label>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
-        {[["rp", "RP ขั้นต่ำ"], ["winrate", "Win Rate"], ["top", "Top %"], ["rp_top", "RP + Top %"]].map(([key, label]) => (
+        {[["rp", t ? t("ranking.minimumRp") : "RP ขั้นต่ำ"], ["winrate", "Win Rate"], ["top", "Top %"], ["rp_top", "RP + Top %"]].map(([key, label]) => (
           <button key={key} onClick={() => setDraft((d) => ({ ...d, conditionType: key }))} style={{ padding: "7px 11px", borderRadius: 9, fontSize: 12, fontWeight: 700, border: `1px solid ${draft.conditionType === key ? T.green : T.border}`, background: draft.conditionType === key ? "#e2f5ec" : T.surface2, color: draft.conditionType === key ? T.green : T.muted }}>{label}</button>
         ))}
       </div>
       {(draft.conditionType === "rp" || draft.conditionType === "rp_top") && (
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-          <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>RP ≥</span>
+          <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>{t ? t("ranking.rpMinInlineLabel") : "RP ≥"}</span>
           <input type="number" min={0} value={draft.rpMin} onFocus={(e) => e.target.select()} onChange={(e) => setDraft((d) => ({ ...d, rpMin: Math.max(0, Number(e.target.value) || 0) }))} style={{ width: 80, padding: "7px 9px", borderRadius: 9, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800 }} />
         </div>
       )}
@@ -12909,9 +13154,9 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
       )}
 
       <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-        {onDelete && <button onClick={onDelete} style={{ padding: "11px 14px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, color: T.accent, fontSize: 13, fontWeight: 800 }}>ลบ</button>}
-        <button onClick={onClose} style={{ ...btnSecondary, flex: 1 }}>ยกเลิก</button>
-        <button onClick={() => canSave && onSave(draft)} disabled={!canSave} style={{ ...btnPrimary, flex: 1, opacity: canSave ? 1 : 0.5 }}>บันทึก</button>
+        {onDelete && <button onClick={onDelete} style={{ padding: "11px 14px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, color: T.accent, fontSize: 13, fontWeight: 800 }}>{t ? t("common.delete") : "ลบ"}</button>}
+        <button onClick={onClose} style={{ ...btnSecondary, flex: 1 }}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+        <button onClick={() => canSave && onSave(draft)} disabled={!canSave} style={{ ...btnPrimary, flex: 1, opacity: canSave ? 1 : 0.5 }}>{t ? t("common.save") : "บันทึก"}</button>
       </div>
       {iconPickerOpen && (
         // v1.11.74 (sections 12/13) — built-in icon picker. Selecting an icon only ever writes `draft.icon`,
@@ -12922,13 +13167,13 @@ function RankTierEditSheet({ tier, onSave, onDelete, onClose }) {
         // other sibling in this sheet) so it stacks on top within the shared z-index:40 Overlay context —
         // ImageCropper doesn't need this trick because it uses a higher explicit z-index (90).
         <Overlay onClose={() => setIconPickerOpen(false)}>
-          <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 12 }}>เลือกไอคอน Rank</div>
+          <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 12 }}>{t ? t("ranking.iconPickerTitle") : "เลือกไอคอน Rank"}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
             {RANK_ICON_CHOICES.map((ic) => (
               <button key={ic} onClick={() => { setDraft((d) => ({ ...d, icon: ic })); setIconPickerOpen(false); }} style={{ width: 52, height: 52, borderRadius: 12, border: `1px solid ${draft.icon === ic ? T.green : T.border}`, background: draft.icon === ic ? "#e2f5ec" : T.surface2, fontSize: 24, display: "flex", alignItems: "center", justifyContent: "center" }}>{ic}</button>
             ))}
           </div>
-          <button onClick={() => setIconPickerOpen(false)} style={btnSecondary}>ปิด</button>
+          <button onClick={() => setIconPickerOpen(false)} style={btnSecondary}>{t ? t("common.close") : "ปิด"}</button>
         </Overlay>
       )}
     </Overlay>
@@ -13106,7 +13351,20 @@ function firestoreTsToDate(ts) {
 // subscription purely for display — separate from BadQOnlineSheet's full state machine below, which only
 // mounts once the sheet is actually opened. This avoids threading the whole cloud state machine through
 // GeneralSettingsSheet/SettingsTab just to show one line of status text.
-function BadQOnlineNavRow({ deviceId, onOpen }) {
+// v1.12.44 (Localization Closure, task #191): status -> catalog key map for this row's own short status
+// text ONLY. Deliberately does NOT touch ONLINE_STATUS_META/deriveOnlineStatus (used elsewhere, including
+// inside BadQOnlineSheet's own deeper Auth/Workspace UI) or any Unified Login business logic — this is a
+// pure presentation-layer addition, reusing the pre-existing (previously unwired) online.status.* catalog
+// keys, byte-identical to ONLINE_STATUS_META's own Thai labels above.
+const ONLINE_STATUS_LABEL_KEY = {
+  [ONLINE_STATUS.NOT_CONNECTED]: "online.status.notConnected",
+  [ONLINE_STATUS.OFFLINE]: "online.status.offline",
+  [ONLINE_STATUS.UNVERIFIED]: "online.status.unverified",
+  [ONLINE_STATUS.ACTIVE]: "online.status.online",
+  [ONLINE_STATUS.REVOKED]: "online.status.moved",
+  [ONLINE_STATUS.ERROR]: "online.status.error",
+};
+function BadQOnlineNavRow({ deviceId, onOpen, tr }) {
   const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
   const available = !!(cloud && cloud.available);
   const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
@@ -13142,7 +13400,7 @@ function BadQOnlineNavRow({ deviceId, onOpen }) {
   return (
     <button onClick={onOpen} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer" }}>
       <span style={{ fontSize: 15 }}>{meta.icon}</span>
-      <span style={{ fontSize: 13, fontWeight: 700, color: meta.color }}>{meta.label}</span>
+      <span style={{ fontSize: 13, fontWeight: 700, color: meta.color }}>{tr ? tr(ONLINE_STATUS_LABEL_KEY[status]) : meta.label}</span>
       <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
     </button>
   );
@@ -13601,12 +13859,16 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
 // management surface — full editing/stats are still only reachable from the normal Player Profile/
 // แก้ไขสมาชิก once a player is restored. Restore flips the SAME player's archived flag back off (see
 // restorePlayer in App()) — same id, same object, no data is recreated or touched.
-function ArchivedPlayersSheet({ archivedPlayers, restorePlayer, onClose }) {
+// v1.12.43 (Localization Phase 3): the last surface deferred in Phase 2's notes for using HAND_LABEL/
+// MEMBER_TYPE_META directly -- now translated using the SAME surgical HAND_I18N_KEY/MEMBER_TYPE_I18N_KEY
+// lookup-map technique already used elsewhere (see the comment above those maps), without touching the
+// shared HAND_LABEL/MEMBER_TYPE_META objects themselves. Restore/Delete BEHAVIOR is unchanged -- only labels.
+function ArchivedPlayersSheet({ archivedPlayers, restorePlayer, t, onClose }) {
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>สมาชิกที่เก็บไว้</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t("player.archived")}</div>
       {archivedPlayers.length === 0 ? (
-        <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>ยังไม่มีสมาชิกที่เก็บไว้</div>
+        <div style={{ color: T.muted, fontSize: 13, padding: "22px 0", textAlign: "center" }}>{t("player.noArchivedPlayers")}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 14 }}>
           {archivedPlayers.map((p) => {
@@ -13619,17 +13881,17 @@ function ArchivedPlayersSheet({ archivedPlayers, restorePlayer, onClose }) {
                   <div style={{ fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: T.text }}>{p.name}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
                     <span style={{ background: levelColor(p.skillIndex), color: "#fff", fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{p.level}</span>
-                    <span style={{ background: HAND_BADGE[hand].bg, color: HAND_BADGE[hand].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{HAND_LABEL[hand]}</span>
-                    <span style={{ background: MEMBER_TYPE_META[mtype].bg, color: MEMBER_TYPE_META[mtype].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{MEMBER_TYPE_META[mtype].label}</span>
+                    <span style={{ background: HAND_BADGE[hand].bg, color: HAND_BADGE[hand].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{t(HAND_I18N_KEY[hand])}</span>
+                    <span style={{ background: MEMBER_TYPE_META[mtype].bg, color: MEMBER_TYPE_META[mtype].color, fontWeight: 800, fontSize: 11, borderRadius: 7, padding: "3px 6px" }}>{t(MEMBER_TYPE_I18N_KEY[mtype])}</span>
                   </div>
                 </div>
-                <button onClick={() => restorePlayer(p.id)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 10, background: "#e2f5ec", border: `1px solid ${T.green}`, color: T.green, fontSize: 12, fontWeight: 800, whiteSpace: "nowrap" }}>กู้คืนสมาชิก</button>
+                <button onClick={() => restorePlayer(p.id)} style={{ flexShrink: 0, padding: "8px 12px", borderRadius: 10, background: "#e2f5ec", border: `1px solid ${T.green}`, color: T.green, fontSize: 12, fontWeight: 800, whiteSpace: "nowrap" }}>{t("player.restore")}</button>
               </div>
             );
           })}
         </div>
       )}
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{t("common.close")}</button>
     </Overlay>
   );
 }
@@ -13685,7 +13947,7 @@ function Fairness({ sA, sB }) {
 // openSessionPhoto, applyGroupDefaultsFor, QuanSettingsSheet and all its props, fmtMode,
 // quanSettingsSummary) — nothing duplicated, just relocated, plus one small addition (the "🔒 ล็อคคู่ N คู่"
 // line the new mockup calls for, computed directly off the existing lockPairs array).
-function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessionPhoto, sessionHistory, applyGroupDefaultsFor, settings, setSettings, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current }) {
+function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessionPhoto, sessionHistory, applyGroupDefaultsFor, settings, setSettings, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current, t, tc, fmtDateTime }) {
   const [showNameDropdown, setShowNameDropdown] = useState(false);
   const [openQuanSettings, setOpenQuanSettings] = useState(false);
   // unique past quan names + their most-recently-used photo, pulled from ประวัติก๊วน (sessionHistory is
@@ -13701,7 +13963,7 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
     <div style={{ marginBottom: 16 }}>
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: 12, marginBottom: 12 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <button onClick={openSessionPhoto} title="แตะเพื่อเปลี่ยนรูปก๊วน" style={{ position: "relative", flexShrink: 0, border: "none", background: "none", padding: 0, width: 32, height: 32 }}>
+          <button onClick={openSessionPhoto} title={t("session.photoChange")} style={{ position: "relative", flexShrink: 0, border: "none", background: "none", padding: 0, width: 32, height: 32 }}>
             {session.photo ? (
               <img src={session.photo} alt="" style={{ width: 32, height: 32, borderRadius: 9, objectFit: "cover" }} />
             ) : (
@@ -13709,23 +13971,23 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
             )}
             <span style={{ position: "absolute", right: -3, bottom: -3, width: 15, height: 15, borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={8} color={T.muted} /></span>
           </button>
-          <input value={session.name} onChange={(e) => setSession((s) => ({ ...s, name: e.target.value }))} placeholder="ชื่อก๊วน เช่น ก๊วนวันอาทิตย์" style={{ flex: 1, minWidth: 0, border: "none", outline: "none", fontSize: 16, fontWeight: 800, background: "transparent", color: T.text, boxSizing: "border-box" }} />
+          <input value={session.name} onChange={(e) => setSession((s) => ({ ...s, name: e.target.value }))} placeholder={t("session.namePlaceholder")} style={{ flex: 1, minWidth: 0, border: "none", outline: "none", fontSize: 16, fontWeight: 800, background: "transparent", color: T.text, boxSizing: "border-box" }} />
           {pastQuans.length > 0 && (
             <div style={{ position: "relative", flexShrink: 0 }}>
-              <button onClick={() => setShowNameDropdown((v) => !v)} title="เลือกชื่อก๊วนที่เคยใช้" style={{ width: 28, height: 28, borderRadius: 8, background: T.surface2, color: T.muted, border: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <button onClick={() => setShowNameDropdown((v) => !v)} title={t("session.selectPreviousName")} style={{ width: 28, height: 28, borderRadius: 8, background: T.surface2, color: T.muted, border: "none", display: "flex", alignItems: "center", justifyContent: "center" }}>
                 <ChevronDown size={16} />
               </button>
               {showNameDropdown && (
                 <>
                   <div onClick={() => setShowNameDropdown(false)} style={{ position: "fixed", inset: 0, zIndex: 39 }} />
                   <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 40, minWidth: 190, maxHeight: 260, overflowY: "auto", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6 }}>
-                    <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, padding: "6px 8px 4px" }}>ชื่อก๊วนที่เคยใช้</div>
+                    <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, padding: "6px 8px 4px" }}>{t("session.previousNames")}</div>
                     {/* v1.12.4: purely informational, no logic/pixel change — picking a name here loads that
                         club's most-recently-saved photo verbatim (unchanged behavior). If that saved photo
                         predates the transparency fix (v1.11.74) it will still show its old black background
                         here and everywhere else, same root cause already confirmed for Rank tier images —
                         this just tells the organizer why, right where they'll notice it, and what fixes it. */}
-                    <div style={{ fontSize: 10.5, color: T.muted, padding: "0 8px 6px", lineHeight: 1.4 }}>รูปก๊วนเก่าบางรูปอาจมีขอบ/พื้นหลังสีดำ ถ้าถูกบันทึกไว้ก่อนอัปเดตที่แก้ปัญหาความโปร่งใส — เลือกชื่อนั้นแล้วแตะรูปเพื่ออัปโหลดไฟล์เดิมซ้ำเพื่อแก้ไข</div>
+                    <div style={{ fontSize: 10.5, color: T.muted, padding: "0 8px 6px", lineHeight: 1.4 }}>{t("session.previousPhotoHint")}</div>
                     {pastQuans.map((q) => (
                       <button
                         key={q.name}
@@ -13750,7 +14012,7 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, color: T.muted }}>
           <Calendar size={15} />
           <input type="date" value={session.date} onChange={(e) => setSession((s) => ({ ...s, date: e.target.value }))} style={{ border: "none", background: "transparent", color: T.muted, fontSize: 13, outline: "none" }} />
-          {session.photo && <button onClick={clearSessionPhoto} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700 }}>ลบรูปก๊วน</button>}
+          {session.photo && <button onClick={clearSessionPhoto} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700 }}>{t("session.photoRemove")}</button>}
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, color: T.muted }}>
           <Clock size={15} />
@@ -13761,11 +14023,11 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
       </div>
 
       {/* compact format badge — same fmtMode() every other page already used for this exact string */}
-      <div style={{ textAlign: "center", fontSize: 12.5, color: T.muted, fontWeight: 600, marginBottom: lockPairCount > 0 ? 4 : 12 }}>{fmtMode(settings, mode)}</div>
+      <div style={{ textAlign: "center", fontSize: 12.5, color: T.muted, fontWeight: 600, marginBottom: lockPairCount > 0 ? 4 : 12 }}>{fmtMode(settings, mode, t)}</div>
       {/* v1.12.1 (spec 2's mockup): "🔒 ล็อคคู่ N คู่" summary — purely a display of lockPairs.length, the
           pair-lock ENGINE itself is untouched and still fully configured inside ตั้งค่าก๊วน below. */}
       {lockPairCount > 0 && (
-        <div style={{ textAlign: "center", fontSize: 12, color: "#7c3aed", fontWeight: 700, marginBottom: 12 }}>🔒 ล็อคคู่ {lockPairCount} คู่</div>
+        <div style={{ textAlign: "center", fontSize: 12, color: "#7c3aed", fontWeight: 700, marginBottom: 12 }}>{tc("session.lockPairSummary", lockPairCount)}</div>
       )}
 
       {/* SETTINGS ENTRY POINT — the 4 separate accordions that used to live here (เกม/จ่ายเงิน/รางวัล/
@@ -13774,8 +14036,8 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
       <button onClick={() => setOpenQuanSettings(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}` }}>
         <span style={{ fontSize: 17 }}>🏸</span>
         <span style={{ flex: 1, minWidth: 0 }}>
-          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>ตั้งค่าก๊วน</span>
-          <span style={{ display: "block", fontSize: 12, color: T.muted, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{quanSettingsSummary(settings, mode, courtCount)}</span>
+          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>{t("session.settings")}</span>
+          <span style={{ display: "block", fontSize: 12, color: T.muted, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{quanSettingsSummary(settings, mode, courtCount, t, tc)}</span>
         </span>
         <ChevronRight size={18} color={T.muted} />
       </button>
@@ -13785,7 +14047,7 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
           settings={settings} setSettings={setSettings} session={session} setSession={setSession} sessionHistory={sessionHistory}
           players={players} lockPairs={lockPairs} addLockPair={addLockPair} removeLockPair={removeLockPair} setHandPref={setHandPref} getP={getP}
           resetGames={resetGames} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels}
-          groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault}
+          groupDefaults={groupDefaults} saveGroupDefault={saveGroupDefault} t={t} tc={tc} fmtDateTime={fmtDateTime}
           /* v1.12.7 (fix 1): same purpose as the comment on GroupSessionHeader's own qrRef/history/current
              props above — reused unchanged by the new "💵 การชำระเงินและต้นทุน" accordion below. */
           qrRef={qrRef} history={history} current={current}
@@ -13796,12 +14058,12 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
   );
 }
 
-function GameTab({ sessionTabProps, summaryTabProps }) {
+function GameTab({ sessionTabProps, summaryTabProps, t }) {
   const [sub, setSub] = useState("game"); // "game" | "summary" — default "เกม" per spec
   return (
     <div>
       <div style={{ marginBottom: 12 }}>
-        <SegSecondary options={[["game", "เกม"], ["summary", "สรุป"]]} value={sub} onChange={setSub} />
+        <SegSecondary options={[["game", t("session.subTabGames")], ["summary", t("session.subTabSummary")]]} value={sub} onChange={setSub} />
       </div>
       {sub === "game" ? <SessionTab {...sessionTabProps} /> : <SummaryTab {...summaryTabProps} />}
     </div>
@@ -13833,7 +14095,7 @@ function MatchRow({
   manualBenchPool, openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, encounterIndex, mode,
   courtLabels, getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin,
   clearScore, settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
-  COLW, TABLE_MIN_WIDTH,
+  COLW, TABLE_MIN_WIDTH, t, tc,
 }) {
   // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
   // this patch) recreated as a new component instance on every SessionTab re-render — confirmed via
@@ -13911,10 +14173,10 @@ function MatchRow({
   // non-red palette so multiple simultaneous relationships stay visually distinguishable.
   const manualWarnScope = !done && st === "next";
   const benchIds = new Set(bench.map((p) => p.id)); // same eligibility pool replaceSlot's own auto-fill assist trusts (see spec Case C)
-  const constraintWarnings = (manualWarnScope ? computeManualConstraintWarnings(m.teamA, m.teamB, lockPairs, players, benchIds) : []).map((w) => ({ ...w, color: "#c0392b" }));
+  const constraintWarnings = (manualWarnScope ? computeManualConstraintWarnings(m.teamA, m.teamB, lockPairs, players, benchIds, t) : []).map((w) => ({ ...w, color: "#c0392b" }));
   const RECENT_WARN_COLORS = ["#c2650a", "#7c3aed", "#2f6fb2", "#0f9d58"];
   // v1.12.38: every encounter in the current session (buildSessionEncounterIndex), this row itself excluded.
-  const recentWarnings = (manualWarnScope ? computeSessionRepeatWarnings(m.teamA, m.teamB, encounterIndex, lockPairs, players, m.id) : [])
+  const recentWarnings = (manualWarnScope ? computeSessionRepeatWarnings(m.teamA, m.teamB, encounterIndex, lockPairs, players, m.id, t, tc) : [])
     .map((w, i) => ({ ...w, color: RECENT_WARN_COLORS[i % RECENT_WARN_COLORS.length] }));
   const allManualWarnings = [...constraintWarnings, ...recentWarnings]; // priority order per spec 6
   // v1.12.25 (P0 Mixed Singles + Doubles): the ONE invalid slot state this feature must actively BLOCK
@@ -13948,7 +14210,7 @@ function MatchRow({
             "รอสนามว่าง" state instead of an oddly-empty selectable dropdown. */}
         {showNoCourtAvailable ? (
           <div style={{ width: COLW.court, flexShrink: 0, fontSize: 10, fontWeight: 700, padding: "6px 2px", borderRadius: 8, border: `1px dashed ${T.border}`, background: T.surface2, color: T.muted, textAlign: "center" }}>
-            รอสนามว่าง
+            {t("match.waitingForCourtBadge")}
           </div>
         ) : (
           <select
@@ -13964,25 +14226,25 @@ function MatchRow({
                 กำลังเล่น/พักเกม (a physically-occupying match must never lose its court label — see
                 reassignCourt's v1.11.39 comment) and for finished/history rows (a factual past record, not
                 a "to be decided" one) — this only ever appears while st === "next". */}
-            {(m.court == null || (!done && st === "next")) && <option value="">เลือกสนาม</option>}
+            {(m.court == null || (!done && st === "next")) && <option value="">{t("match.emptyCourtOption")}</option>}
             {/* v1.12.13: for a "next" row, only genuinely-free courts are offered (see availableCourtNumbers
                 above); playing/paused/done rows keep the full, unfiltered 1..courtCount list unchanged. */}
             {(!done && st === "next" ? availableCourtNumbers : Array.from({ length: courtCount }, (_, i) => i + 1)).map((c) => (
-              <option key={c} value={c}>สนาม {courtLabelFor(courtLabels, c)}</option>
+              <option key={c} value={c}>{t("match.courtNumber", { court: courtLabelFor(courtLabels, c) })}</option>
             ))}
             {/* v1.12.13: the row's OWN currently-selected court is always kept visible even if it has since
                 become conflicting (see courtNowConflicting) — never silently hidden out from under an
                 existing selection, per spec's explicit conflict-state requirement. */}
             {courtNowConflicting && !availableCourtNumbers.includes(m.court) && (
-              <option value={m.court}>สนาม {courtLabelFor(courtLabels, m.court)} (ถูกใช้แล้ว)</option>
+              <option value={m.court}>{t("match.courtInUse", { court: courtLabelFor(courtLabels, m.court) })}</option>
             )}
           </select>
         )}
         <div style={{ width: COLW.team, flexShrink: 0 }}>
-          <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
+          <TeamSide arr={m.teamA} team="A" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} t={t} />
         </div>
         <div style={{ width: COLW.team, flexShrink: 0 }}>
-          <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} />
+          <TeamSide arr={m.teamB} team="B" m={m} getP={getP} editable replaceSlot={replace} tapSlot={tapSlot} isSel={isSel} bench={pickerBench} openSlot={rowOpenSlot} setOpenSlot={setRowOpenSlot} big={st === "playing"} now={now} done={done} lockPairs={lockPairs} players={players} stats={stats} latestMap={latestMap} warnHighlight={warnHighlight} t={t} />
         </div>
         <div style={{ width: COLW.result, flexShrink: 0, position: "relative" }}>
           {/* v1.11.65 (ผล column redesign): one set per line instead of a single " · "-joined string —
@@ -14000,7 +14262,7 @@ function MatchRow({
             return (
               <button
                 onClick={(e) => setScoreOpen(scoreOpen && scoreOpen.mid === m.id ? null : { mid: m.id, rect: rectOf(e.currentTarget) })}
-                title="แตะเพื่อใส่ผลการแข่งขัน"
+                title={t("score.tapToEnter")}
                 style={{
                   width: "100%", padding: scoreLines ? "4px 2px" : "8px 0", borderRadius: 8, background: T.surface2,
                   border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text,
@@ -14010,7 +14272,7 @@ function MatchRow({
               >
                 {scoreLines
                   ? scoreLines.map((line, i) => <span key={i} style={{ display: "block", textAlign: "center" }}>{line}</span>)
-                  : "ใส่ผล"}
+                  : t("score.enter")}
               </button>
             );
           })()}
@@ -14018,7 +14280,7 @@ function MatchRow({
             <>
               <div onClick={() => setScoreOpen(null)} style={{ position: "fixed", inset: 0, zIndex: 199, background: "transparent" }} />
               <ScorePopover anchorRect={scoreOpen.rect}>
-                <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} winScore={settings.winScore} deuce={settings.deuce} />
+                <ScoreEditor m={m} rounds={rounds} setScore={setScore} setWin={setWin} clearScore={clearScore} winScore={settings.winScore} deuce={settings.deuce} t={t} />
               </ScorePopover>
             </>,
             document.body
@@ -14039,7 +14301,7 @@ function MatchRow({
             onBlur={() => setMatchShuttleUsed(m.id, shuttleDraft)}
             onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
             onFocus={(e) => e.target.select()}
-            title="จำนวนลูกที่ใช้ในเกมนี้"
+            title={t("match.shuttleUsedThisGame")}
             style={{ width: "100%", padding: "7px 2px", borderRadius: 8, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 800, color: T.text, textAlign: "center" }}
           />
         </div>
@@ -14050,7 +14312,7 @@ function MatchRow({
           // request: "ถ้าเป็นคิวที่สนามนั้นยังแข่งไม่เสร็จ ให้แสดงสถานะเป็นเกมถัดไปแบบเดิม ไม่สนามนั้นเล่น
           // จบแล้วจะขึ้นเป็นเริ่มเกม".
           <div style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS.next.color, background: STATUS.next.bg }}>
-            {STATUS.next.label}
+            {t("match.nextGameBadge")}
           </div>
         ) : !done && st === "next" ? (
           // v1.11.29: starting a queued match (once its court is actually free) is a dedicated "▶ เริ่ม
@@ -14060,10 +14322,10 @@ function MatchRow({
           <button
             onClick={() => setMatchStatus(m.id, "playing")}
             disabled={!canStart}
-            title={!startReadyMatch(m) ? "เลือกผู้เล่นให้ครบก่อนเริ่มเกม" : noCourt ? "กรุณาเลือกสนามก่อนเริ่มเกม" : "แตะเพื่อเริ่มเกม"}
+            title={!startReadyMatch(m) ? t("match.fillPlayersBeforeStartGame") : noCourt ? t("match.chooseCourtBeforeStartGame") : t("match.tapToStartGame")}
             style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, color: canStart ? STATUS.playing.color : T.muted, background: canStart ? STATUS.playing.bg : T.surface2, opacity: canStart ? 1 : 0.6 }}
           >
-            <Play size={12} /> เริ่มเกม
+            <Play size={12} /> {t("match.startGameLabel")}
           </button>
         ) : (
           // v1.11.31: the closed box must show the row's CURRENT STATUS as a noun ("กำลังเล่น"/"จบแล้ว"/
@@ -14074,16 +14336,21 @@ function MatchRow({
           // with opacity 0 — taps land on the invisible select (which still opens the OS's native picker
           // showing the real <option> labels/checkmark), while what the user actually SEES before tapping
           // is the visual badge underneath. onChange/value/disabled logic is unchanged from before.
+          // v1.12.44 (Localization Closure): STATUS[st].label/STATUS_OPTIONS[].label themselves are left
+          // untouched (still plain Thai — other, not-yet-localized readers of STATUS/STATUS_OPTIONS
+          // elsewhere in the app still need those exact literals); this row's own render instead looks the
+          // translated text up via STATUS_LABEL_I18N_KEY/STATUS_OPTION_I18N_KEY (see their definitions next
+          // to STATUS_OPTIONS above), leaving STATUS/STATUS_OPTIONS's shape/values 100% unchanged.
           <div style={{ position: "relative", width: COLW.status, flexShrink: 0 }}>
             <div style={{ width: "100%", fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, textAlign: "center", color: STATUS[st].color, background: STATUS[st].bg, display: "flex", alignItems: "center", justifyContent: "center", gap: 3 }}>
-              {STATUS[st].label} <ChevronDown size={11} />
+              {t(STATUS_LABEL_I18N_KEY[st])} <ChevronDown size={11} />
             </div>
             <select
               value={st}
               onChange={(e) => setMatchStatus(m.id, e.target.value)}
               style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, border: "none", padding: 0, margin: 0 }}
             >
-              {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{o.label}</option>)}
+              {STATUS_OPTIONS.map((o) => <option key={o.key} value={o.key} disabled={!allowed.has(o.key)}>{t(STATUS_OPTION_I18N_KEY[o.key])}</option>)}
             </select>
           </div>
         )}
@@ -14093,16 +14360,16 @@ function MatchRow({
               so both icons live together here exactly as before, just moved from the old button row. */}
           {!done && st === "next" && (
             <>
-              <button onClick={() => toggleCurrentLock(m.id)} title={m.locked ? "ล็อกอยู่ — แตะเพื่อปลดล็อก" : "แตะเพื่อล็อกคู่นี้ไว้ (จัดใหม่ทั้งหมดจะไม่เปลี่ยนคู่นี้)"} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.accent : T.muted }}>
+              <button onClick={() => toggleCurrentLock(m.id)} title={m.locked ? t("match.lockedHint") : t("match.lockHint")} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.accent : T.muted }}>
                 {m.locked ? <Lock size={14} /> : <Unlock size={14} />}
               </button>
-              <button onClick={() => regenCourt(m.id)} disabled={m.locked} title="สุ่มผู้เล่นให้อัตโนมัติ (ใช้ได้ทั้งโหมดสุ่ม/เลือกเอง)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.muted, opacity: m.locked ? 0.5 : 1 }}>
+              <button onClick={() => regenCourt(m.id)} disabled={m.locked} title={t("match.autoFillHint")} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.muted, opacity: m.locked ? 0.5 : 1 }}>
                 <Shuffle size={14} />
               </button>
               {/* v1.11.36: cancel/delete this upcoming game entirely (see deleteMatch) — needed now that a
                   game can be created before a court is chosen, so the organizer can back out of one they
                   no longer want without leaving an empty court-less row sitting in the table. */}
-              <button onClick={() => deleteMatch(m.id)} disabled={m.locked} title="ลบเกมนี้ (ผู้เล่นในเกมนี้จะกลับไปพร้อมเล่นทันที)" style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.accent, opacity: m.locked ? 0.5 : 1 }}>
+              <button onClick={() => deleteMatch(m.id)} disabled={m.locked} title={t("match.deleteGameHint")} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.accent, opacity: m.locked ? 0.5 : 1 }}>
                 <Trash2 size={14} />
               </button>
             </>
@@ -14122,7 +14389,7 @@ function MatchRow({
         // unconditionally whenever that exact mismatch exists, not gated behind allManualWarnings.
         <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH }}>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: "#c0392b", background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 8, padding: "6px 9px" }}>
-            ⚠️ จำนวนผู้เล่นไม่ครบ<br />เกมเดี่ยวต้องมีฝั่งละ 1 คน และเกมคู่ต้องมีฝั่งละ 2 คน
+            {t("warn.slotMismatchTitle")}<br />{t("warn.slotMismatchDetail")}
           </div>
         </div>
       )}
@@ -14135,12 +14402,12 @@ function MatchRow({
         <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, display: "flex", flexDirection: "column", gap: 3 }}>
           {constraintWarnings.map((w) => (
             <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
-              {w.kind === "lock" ? "⚠️ ล็อคคู่ — " : "⚠️ ข้อจำกัดการจับคู่ — "}{w.text}
+              {w.kind === "lock" ? t("warn.lockPrefix") : t("warn.constraintPrefix")}{w.text}
             </div>
           ))}
           {recentWarnings.map((w) => (
             <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
-              {w.kind === "teammate" ? "⚠️ เคยคู่กันในก๊วนนี้ — " : "⚠️ เคยเจอกันในก๊วนนี้ — "}{w.text} (ยังเลือกคู่นี้ได้ตามปกติ)
+              ⚠️ {w.text}
             </div>
           ))}
         </div>
@@ -14151,7 +14418,8 @@ function MatchRow({
 
 function SessionTab(props) {
   const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
-    activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint, onGoToMembers } = props;
+    activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint, onGoToMembers,
+    t, tc, fmtDate } = props;
   // v1.12.1: openQuanSettings/showNameDropdown/pastQuans (the editable group-card's own local state) moved
   // out to GroupSessionHeader along with the card itself — see that component, defined just above GameTab.
   const [historyShowAll, setHistoryShowAll] = useState(false); // v1.9.9: cap the expanded match-history list so it never outweighs active courts/queue (Phase 2)
@@ -14177,8 +14445,8 @@ function SessionTab(props) {
       style={{ width: 50, padding: "3px 6px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text, fontWeight: 800, fontSize: 15, textAlign: "center", outline: "none" }}
     />
   ) : (
-    <button onClick={() => startEditCourtLabel(c)} title="แตะเพื่อแก้เลขสนาม" style={{ background: "none", border: "none", padding: 0, fontWeight: 800, fontSize: 15, color: muted ? T.muted : T.text }}>
-      สนาม {courtLabelFor(courtLabels, c)}
+    <button onClick={() => startEditCourtLabel(c)} title={t ? t("match.editCourtNumberHint") : "แตะเพื่อแก้เลขสนาม"} style={{ background: "none", border: "none", padding: 0, fontWeight: 800, fontSize: 15, color: muted ? T.muted : T.text }}>
+      {t ? t("match.courtNumber", { court: courtLabelFor(courtLabels, c) }) : `สนาม ${courtLabelFor(courtLabels, c)}`}
     </button>
   );
   const [confirmRegenAll, setConfirmRegenAll] = useState(false);
@@ -14314,8 +14582,8 @@ function SessionTab(props) {
     <div key={"e" + c} style={{ borderBottom: `1px solid ${T.border}`, padding: 11, display: "flex", alignItems: "center", gap: 10, minWidth: TABLE_MIN_WIDTH }}>
       <span style={{ width: 22, flexShrink: 0, fontSize: 11, fontWeight: 800, color: T.muted }}>–</span>
       {CourtLabelTag(c, true)}
-      <span style={{ fontSize: 12.5, color: T.muted }}>ว่าง</span>
-      {started && <button onClick={() => fillCourt(c)} style={{ marginLeft: "auto", ...btnSecondary, flex: "none", padding: "9px 14px" }}><Plus size={15} /> จัดเกม</button>}
+      <span style={{ fontSize: 12.5, color: T.muted }}>{t ? t("match.emptyBadge") : "ว่าง"}</span>
+      {started && <button onClick={() => fillCourt(c)} style={{ marginLeft: "auto", ...btnSecondary, flex: "none", padding: "9px 14px" }}><Plus size={15} /> {t ? t("match.fillGameButton") : "จัดเกม"}</button>}
     </div>
   );
 
@@ -14323,7 +14591,7 @@ function SessionTab(props) {
   // touches Casual `current`/`history`/`session` state, it only changes what's rendered below
   const ModeSelector = (
     <div style={{ display: "flex", gap: 6, background: T.surface2, borderRadius: 12, padding: 4, marginBottom: 12 }}>
-      <button onClick={() => setSession((s) => ({ ...s, mode: "casual" }))} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: (session.mode || "casual") === "casual" ? T.surface : "none", color: (session.mode || "casual") === "casual" ? T.text : T.muted, boxShadow: (session.mode || "casual") === "casual" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏸 จัดก๊วน</button>
+      <button onClick={() => setSession((s) => ({ ...s, mode: "casual" }))} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: (session.mode || "casual") === "casual" ? T.surface : "none", color: (session.mode || "casual") === "casual" ? T.text : T.muted, boxShadow: (session.mode || "casual") === "casual" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏸 {t ? t("session.casualMode") : "จัดก๊วน"}</button>
       <button onClick={() => setSession((s) => ({ ...s, mode: "tournament" }))} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: session.mode === "tournament" ? T.surface : "none", color: session.mode === "tournament" ? T.text : T.muted, boxShadow: session.mode === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 Tournament</button>
     </div>
   );
@@ -14334,7 +14602,7 @@ function SessionTab(props) {
     return (
       <div>
         {ModeSelector}
-        <TournamentPanel {...{ players, playersById, settings, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, onOpenTournamentPrint }} />
+        <TournamentPanel {...{ players, playersById, settings, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, onOpenTournamentPrint }} tr={t} trc={tc} />
       </div>
     );
   }
@@ -14355,27 +14623,29 @@ function SessionTab(props) {
           <div style={{ width: 26, height: 26, borderRadius: 8, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, flexShrink: 0 }}>🏸</div>
         )}
         <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12.5, fontWeight: 700, color: T.text }}>
-          {session.name || "ก๊วนไม่มีชื่อ"} <span style={{ color: T.muted, fontWeight: 600 }}>· {fmtThaiDate(session.date)} · {fmtMode(settings, mode)}</span>
+          {session.name || (t ? t("session.unnamed") : "ก๊วนไม่มีชื่อ")} <span style={{ color: T.muted, fontWeight: 600 }}>· {fmtDate ? fmtDate(session.date) : fmtThaiDate(session.date)} · {fmtMode(settings, mode, t)}</span>
         </span>
         <ChevronRight size={16} color={T.muted} style={{ flexShrink: 0 }} />
       </button>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
         <button onClick={() => (started ? setConfirmRegenAll(true) : genStart())} style={{ flex: 1, padding: "13px 0", borderRadius: 13, background: T.green, color: "#fff", border: "none", fontSize: 15, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
-          <Shuffle size={17} /> {started ? (settings.pairingMode === "manual" ? "ล้างสนามทั้งหมด" : "จัดก๊วนใหม่ทั้งหมด") : (settings.pairingMode === "manual" ? "เริ่มก๊วน (เลือกเอง)" : "เริ่มจัดก๊วน")}
+          <Shuffle size={17} /> {started
+            ? (settings.pairingMode === "manual" ? (t ? t("session.rearrangeAllManual") : "ล้างสนามทั้งหมด") : (t ? t("session.rearrangeAllAuto") : "จัดก๊วนใหม่ทั้งหมด"))
+            : (settings.pairingMode === "manual" ? (t ? t("session.startFreshManual") : "เริ่มก๊วน (เลือกเอง)") : (t ? t("session.startFresh") : "เริ่มจัดก๊วน"))}
         </button>
-        {nexts.length > 1 && <button onClick={regenFuture} title={settings.pairingMode === "manual" ? "ล้างสนามที่ยังไม่เริ่มทั้งหมด" : "สุ่มสนามที่ยังไม่เริ่มใหม่ทั้งหมด"} style={{ padding: "0 15px", borderRadius: 13, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700 }}><Shuffle size={15} /></button>}
+        {nexts.length > 1 && <button onClick={regenFuture} title={settings.pairingMode === "manual" ? (t ? t("session.clearUnstartedManual") : "ล้างสนามที่ยังไม่เริ่มทั้งหมด") : (t ? t("session.clearUnstartedAuto") : "สุ่มสนามที่ยังไม่เริ่มใหม่ทั้งหมด")} style={{ padding: "0 15px", borderRadius: 13, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700 }}><Shuffle size={15} /></button>}
       </div>
-      {!started && <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "0 0 18px" }}>{settings.pairingMode === "manual" ? 'ติ๊ก "พร้อมเล่น" ในแท็บผู้เล่น แล้วกดเริ่มก๊วน จากนั้นแตะ "+ เลือกคน" เพื่อจัดคู่เอง' : 'ติ๊ก "พร้อมเล่น" ในแท็บผู้เล่น แล้วกดเริ่มจัดก๊วน'}</div>}
+      {!started && <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "0 0 18px" }}>{settings.pairingMode === "manual" ? (t ? t("session.notStartedHintManual") : 'ติ๊ก "พร้อมเล่น" ในแท็บผู้เล่น แล้วกดเริ่มก๊วน จากนั้นแตะ "+ เลือกคน" เพื่อจัดคู่เอง') : (t ? t("session.notStartedHintAuto") : 'ติ๊ก "พร้อมเล่น" ในแท็บผู้เล่น แล้วกดเริ่มจัดก๊วน')}</div>}
 
       {confirmRegenAll && (
         <div onClick={() => setConfirmRegenAll(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{settings.pairingMode === "manual" ? "ล้างคู่ทุกสนามที่ยังไม่เริ่ม?" : "จัดคู่ใหม่ทุกสนาม?"}</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{settings.pairingMode === "manual" ? "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะล้างเฉพาะสนามที่ยังไม่เริ่มให้เลือกคนใหม่" : "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะจัดใหม่เฉพาะเกมที่ยังไม่เริ่ม"}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{settings.pairingMode === "manual" ? (t ? t("session.confirmClearUnstartedManual") : "ล้างคู่ทุกสนามที่ยังไม่เริ่ม?") : (t ? t("session.confirmClearUnstartedAuto") : "จัดคู่ใหม่ทุกสนาม?")}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{settings.pairingMode === "manual" ? (t ? t("session.confirmClearBodyManual") : "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะล้างเฉพาะสนามที่ยังไม่เริ่มให้เลือกคนใหม่") : (t ? t("session.confirmClearBodyAuto") : "เกมที่กำลังเล่นจะไม่ถูกเปลี่ยน ระบบจะจัดใหม่เฉพาะเกมที่ยังไม่เริ่ม")}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmRegenAll(false)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={() => { setConfirmRegenAll(false); regenFuture(); }} style={btnPrimary}>{settings.pairingMode === "manual" ? "ล้างทั้งหมด" : "จัดใหม่ทั้งหมด"}</button>
+              <button onClick={() => setConfirmRegenAll(false)} style={btnSecondary}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+              <button onClick={() => { setConfirmRegenAll(false); regenFuture(); }} style={btnPrimary}>{settings.pairingMode === "manual" ? (t ? t("session.confirmClearAllManual") : "ล้างทั้งหมด") : (t ? t("session.confirmClearAllAuto") : "จัดใหม่ทั้งหมด")}</button>
             </div>
           </div>
         </div>
@@ -14393,17 +14663,17 @@ function SessionTab(props) {
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, marginBottom: 12, overflowX: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 11px", background: T.surface2, fontSize: 10, fontWeight: 800, color: T.muted, textTransform: "uppercase", letterSpacing: 0.3, minWidth: TABLE_MIN_WIDTH }}>
           <span style={{ width: COLW.no, flexShrink: 0 }}>No</span>
-          <span style={{ width: COLW.court, flexShrink: 0 }}>สนาม</span>
-          <span style={{ width: COLW.team, flexShrink: 0 }}>ทีม A</span>
-          <span style={{ width: COLW.team, flexShrink: 0 }}>ทีม B</span>
-          <span style={{ width: COLW.result, flexShrink: 0, textAlign: "center" }}>ผล</span>
-          <span style={{ width: COLW.shuttle, flexShrink: 0, textAlign: "center" }}>ลูก</span>
-          <span style={{ width: COLW.status, flexShrink: 0 }}>สถานะ</span>
+          <span style={{ width: COLW.court, flexShrink: 0 }}>{t ? t("match.colCourt") : "สนาม"}</span>
+          <span style={{ width: COLW.team, flexShrink: 0 }}>{t ? t("match.colTeamA") : "ทีม A"}</span>
+          <span style={{ width: COLW.team, flexShrink: 0 }}>{t ? t("match.colTeamB") : "ทีม B"}</span>
+          <span style={{ width: COLW.result, flexShrink: 0, textAlign: "center" }}>{t ? t("match.colResult") : "ผล"}</span>
+          <span style={{ width: COLW.shuttle, flexShrink: 0, textAlign: "center" }}>{t ? t("match.colShuttle") : "ลูก"}</span>
+          <span style={{ width: COLW.status, flexShrink: 0 }}>{t ? t("match.colStatus") : "สถานะ"}</span>
           <span style={{ width: COLW.actions, flexShrink: 0 }}></span>
         </div>
         {!historyShowAll && hiddenFinishedCount > 0 && (
           <button onClick={() => setHistoryShowAll(true)} style={{ width: "100%", minWidth: TABLE_MIN_WIDTH, padding: "8px 0", background: "none", border: "none", borderBottom: `1px dashed ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>
-            <History size={13} style={{ verticalAlign: -2, marginRight: 4 }} /> แสดงแมตช์ที่จบแล้วเพิ่มเติม ({hiddenFinishedCount})
+            <History size={13} style={{ verticalAlign: -2, marginRight: 4 }} /> {t ? t("match.showMoreCompletedGames") : "แสดงแมตช์ที่จบแล้วเพิ่มเติม"} ({hiddenFinishedCount})
           </button>
         )}
         {/* v1.12.18: MatchRow is now a stable top-level component (see its own definition above SessionTab)
@@ -14416,7 +14686,7 @@ function SessionTab(props) {
             openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, encounterIndex, mode, courtLabels,
             getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin, clearScore,
             settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
-            COLW, TABLE_MIN_WIDTH,
+            COLW, TABLE_MIN_WIDTH, t, tc,
           };
           return (
             <>
@@ -14432,7 +14702,7 @@ function SessionTab(props) {
             "ว่าง"/"จัดเกม" rows above it anymore (see EmptyRow's own comment). */}
         {started && (
           <button onClick={addExtraMatch} style={{ width: "100%", minWidth: TABLE_MIN_WIDTH, padding: "10px 0", background: "none", border: "none", borderTop: `1px dashed ${T.border}`, color: T.accent, fontSize: 12.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", gap: 5 }}>
-            <Plus size={14} /> เพิ่มแมชใหม่
+            <Plus size={14} /> {t ? t("match.addNewGame") : "เพิ่มแมชใหม่"}
           </button>
         )}
       </div>
@@ -14440,15 +14710,15 @@ function SessionTab(props) {
       {/* WAITING — คงรูปแบบเดิมทั้งหมดตามคำขอ (v1.11.18 ตำแหน่งเดิม: ใต้ตารางแมตช์) */}
       {started && (
         <div style={{ marginTop: 12, marginBottom: 8 }}>
-          <SectionHead icon={<Clock size={16} color={T.amber} />} title={`รอเล่น — ${waitQueue.length} คน`} sub="เลือกคนรอนานก่อน" />
-          {waitQueue.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีคนรอ</div> : (
+          <SectionHead icon={<Clock size={16} color={T.amber} />} title={`${t ? t("session.waitingPrefix") : "รอเล่น"} — ${tc ? tc("common.personCount", waitQueue.length) : `${waitQueue.length} คน`}`} sub={t ? t("session.waitingSortHint") : "เลือกคนรอนานก่อน"} />
+          {waitQueue.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{t ? t("session.noOneWaiting") : "ไม่มีคนรอ"}</div> : (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {waitQueue.slice(0, 10).map((p, i) => (
                 <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
                   <span style={{ width: 20, textAlign: "center", fontWeight: 800, fontSize: 13, color: i < 3 ? T.amber : T.muted }}>{i + 1}</span>
                   <Avatar p={p} size={30} />
                   <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: levelColor(p.skillIndex), fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
-                  <span style={{ fontSize: 12, color: T.muted, fontWeight: 600, textAlign: "right" }}>รอ {waitMin(p)} น.<br /><span style={{ fontSize: 11 }}>{p.games || 0} เกม</span></span>
+                  <span style={{ fontSize: 12, color: T.muted, fontWeight: 600, textAlign: "right" }}>{t ? t("session.waitMinutesShort", { minutes: waitMin(p) }) : `รอ ${waitMin(p)} น.`}<br /><span style={{ fontSize: 11 }}>{tc ? tc("common.gameCount", p.games || 0) : `${p.games || 0} เกม`}</span></span>
                 </div>
               ))}
             </div>
@@ -14456,7 +14726,7 @@ function SessionTab(props) {
         </div>
       )}
 
-      {sel && <div style={{ marginTop: 12, fontSize: 12, color: T.green, textAlign: "center", fontWeight: 600 }}>เลือก {getP(sel.playerId)?.name} — แตะอีกคนเพื่อสลับ</div>}
+      {sel && <div style={{ marginTop: 12, fontSize: 12, color: T.green, textAlign: "center", fontWeight: 600 }}>{t ? t("session.selectedSwapHint", { name: getP(sel.playerId)?.name }) : `เลือก ${getP(sel.playerId)?.name} — แตะอีกคนเพื่อสลับ`}</div>}
     </div>
   );
 }
@@ -14467,7 +14737,7 @@ function SessionTab(props) {
 // Casual matchmaking/payment/wheel/level logic is 100% unchanged — only WHERE the controls live moved.
 /* ============ TOURNAMENT UI ============ */
 function TournamentPanel(props) {
-  const { activeTournament } = props;
+  const { activeTournament, tr } = props;
   const [showWizard, setShowWizard] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   // v1.11.2: a status:"draft" activeTournament (saved via the wizard's "บันทึกไว้ก่อน" — see
@@ -14478,21 +14748,21 @@ function TournamentPanel(props) {
       <div>
         <div style={{ textAlign: "center", padding: "30px 20px", color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14 }}>
           <div style={{ fontSize: 32, marginBottom: 8 }}>📝</div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>มีร่าง Tournament ค้างอยู่</div>
-          <div style={{ fontSize: 13, marginBottom: 18 }}>{activeTournament.name || "(ยังไม่ตั้งชื่อ)"}</div>
+          <div style={{ fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 4 }}>{tr("tournament.draftPendingCard")}</div>
+          <div style={{ fontSize: 13, marginBottom: 18 }}>{activeTournament.name || tr("tournament.unnamedDraftFallback")}</div>
           <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-            <button onClick={() => setConfirmDiscard(true)} style={{ ...btnSecondary, flex: "none", padding: "10px 16px" }}>ลบร่าง</button>
-            <button onClick={() => setShowWizard(true)} style={{ ...btnPrimary, flex: "none", padding: "10px 22px", display: "inline-flex" }}>ทำต่อ</button>
+            <button onClick={() => setConfirmDiscard(true)} style={{ ...btnSecondary, flex: "none", padding: "10px 16px" }}>{tr("tournament.deleteDraft")}</button>
+            <button onClick={() => setShowWizard(true)} style={{ ...btnPrimary, flex: "none", padding: "10px 22px", display: "inline-flex" }}>{tr("tournament.continueDraft")}</button>
           </div>
         </div>
-        {showWizard && <TournamentWizard players={props.players} playersById={props.playersById} settings={props.settings} tournamentHistory={props.tournamentHistory} activeDraft={activeTournament} onClose={() => setShowWizard(false)} onSaveDraft={props.saveTournamentDraft} onCreate={(t) => { props.startTournament(t); setShowWizard(false); }} />}
+        {showWizard && <TournamentWizard players={props.players} playersById={props.playersById} settings={props.settings} tournamentHistory={props.tournamentHistory} activeDraft={activeTournament} onClose={() => setShowWizard(false)} onSaveDraft={props.saveTournamentDraft} onCreate={(t) => { props.startTournament(t); setShowWizard(false); }} tr={tr} fmtDate={fmtDate} />}
         {confirmDiscard && (
           <Overlay onClose={() => setConfirmDiscard(false)}>
-            <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ลบร่าง Tournament นี้?</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ข้อมูลที่กรอกไว้ทั้งหมดจะหายไป</div>
+            <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{tr("tournament.deleteDraftConfirmTitle")}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{tr("tournament.draftLossWarning")}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmDiscard(false)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={() => { props.tDeleteTournament(); setConfirmDiscard(false); }} style={{ ...btnPrimary, background: T.accent }}>ลบร่าง</button>
+              <button onClick={() => setConfirmDiscard(false)} style={btnSecondary}>{tr("common.cancel")}</button>
+              <button onClick={() => { props.tDeleteTournament(); setConfirmDiscard(false); }} style={{ ...btnPrimary, background: T.accent }}>{tr("tournament.deleteDraft")}</button>
             </div>
           </Overlay>
         )}
@@ -14504,13 +14774,13 @@ function TournamentPanel(props) {
     <div>
       <div style={{ textAlign: "center", padding: "44px 20px", color: T.muted, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14 }}>
         <div style={{ fontSize: 40, marginBottom: 10 }}>🏆</div>
-        <div style={{ fontSize: 14, marginBottom: 18 }}>ยังไม่มี Tournament ที่กำลังดำเนินอยู่</div>
-        <button onClick={() => setShowWizard(true)} style={{ ...btnPrimary, flex: "none", padding: "12px 22px", display: "inline-flex" }}><Plus size={16} /> สร้าง Tournament</button>
+        <div style={{ fontSize: 14, marginBottom: 18 }}>{tr("tournament.noActiveMixed")}</div>
+        <button onClick={() => setShowWizard(true)} style={{ ...btnPrimary, flex: "none", padding: "12px 22px", display: "inline-flex" }}><Plus size={16} /> {tr("tournament.createButtonMixed")}</button>
       </div>
       {props.tournamentHistory && props.tournamentHistory.length > 0 && (
-        <div style={{ marginTop: 14, textAlign: "center", fontSize: 12, color: T.muted }}>ดู Tournament ที่จบแล้วได้ที่แท็บ “ประวัติ”</div>
+        <div style={{ marginTop: 14, textAlign: "center", fontSize: 12, color: T.muted }}>{tr("tournament.viewCompletedHint")}</div>
       )}
-      {showWizard && <TournamentWizard players={props.players} playersById={props.playersById} settings={props.settings} tournamentHistory={props.tournamentHistory} onClose={() => setShowWizard(false)} onSaveDraft={props.saveTournamentDraft} onCreate={(t) => { props.startTournament(t); setShowWizard(false); }} />}
+      {showWizard && <TournamentWizard players={props.players} playersById={props.playersById} settings={props.settings} tournamentHistory={props.tournamentHistory} onClose={() => setShowWizard(false)} onSaveDraft={props.saveTournamentDraft} onCreate={(t) => { props.startTournament(t); setShowWizard(false); }} tr={tr} fmtDate={fmtDate} />}
     </div>
   );
 }
@@ -14522,7 +14792,7 @@ const TW_STEPS = ["ข้อมูลรายการ", "ผู้เข้า
 // `draftWizard` snapshot of every piece of wizard state so re-opening the wizard resumes exactly where
 // the organizer left off — reusing the SAME persistence layer (IndexedDB/localStorage/LKG/AutoBackup)
 // that already keeps activeTournament safe, rather than inventing a separate save path.
-function TournamentWizard({ players, playersById, settings, tournamentHistory, activeDraft, onClose, onCreate, onSaveDraft }) {
+function TournamentWizard({ players, playersById, settings, tournamentHistory, activeDraft, onClose, onCreate, onSaveDraft, tr, fmtDate }) {
   const iv = (activeDraft && activeDraft.draftWizard) || {};
   const [step, setStep] = useState(() => iv.step || 1);
   // step 1
@@ -14702,8 +14972,8 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
   return (
     <Overlay onClose={onClose}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
-        <div style={{ fontWeight: 800, fontSize: 15 }}>สร้าง Tournament</div>
-        <span style={{ marginLeft: "auto", fontSize: 11.5, color: T.muted, fontWeight: 700 }}>{step}/6 · {TW_STEPS[step - 1]}</span>
+        <div style={{ fontWeight: 800, fontSize: 15 }}>{tr("tournament.createButtonMixed")}</div>
+        <span style={{ marginLeft: "auto", fontSize: 11.5, color: T.muted, fontWeight: 700 }}>{step}/6 · {[tr("tournamentWizard.step1Label"), tr("tournament.participants"), tr("tournament.teams"), "Division", "Seeding", "Preview"][step - 1]}</span>
       </div>
       <div style={{ display: "flex", gap: 3, marginBottom: 16 }}>{TW_STEPS.map((_, i) => <div key={i} style={{ flex: 1, height: 4, borderRadius: 3, background: i < step ? T.green : T.border }} />)}</div>
 
@@ -14714,7 +14984,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
             <ImageCropper
               src={wizardCropJob}
               circleGuide={false}
-              title="จัดตำแหน่งโลโก้ทัวร์นาเมนต์"
+              title={tr("tournamentWizard.logoCropTitle")}
               maxSize={512}
               onCancel={() => setWizardCropJob(null)}
               onConfirm={(data) => {
@@ -14730,16 +15000,16 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
               {draftLogo ? <img src={draftLogo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={20} color={T.muted} />}
             </button>
             <div style={{ flex: 1, minWidth: 0 }}>
-              <button onClick={() => wizardLogoFileRef.current.click()} style={{ padding: "7px 12px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{draftLogo ? "เปลี่ยนโลโก้" : "เพิ่มโลโก้ (ไม่บังคับ)"}</button>
-              {draftLogo && <button onClick={() => { setDraftLogo(null); setDraftLogoRef(null); }} style={{ marginLeft: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700 }}>ลบ</button>}
+              <button onClick={() => wizardLogoFileRef.current.click()} style={{ padding: "7px 12px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{draftLogo ? tr("tournament.logoChange") : tr("tournamentWizard.addLogoOptional")}</button>
+              {draftLogo && <button onClick={() => { setDraftLogo(null); setDraftLogoRef(null); }} style={{ marginLeft: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700 }}>{tr("common.delete")}</button>}
             </div>
           </div>
-          <Label>ชื่อ Tournament</Label>
+          <Label>{tr("tournamentWizard.nameLabel")}</Label>
           <div style={{ position: "relative", marginBottom: 12 }}>
             <div style={{ display: "flex", gap: 6 }}>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="เช่น BadQ Championship" style={{ flex: 1, minWidth: 0, padding: "11px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder={tr("tournamentWizard.namePlaceholder")} style={{ flex: 1, minWidth: 0, padding: "11px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
               {pastTournaments.length > 0 && (
-                <button onClick={() => setShowTNameDropdown((v) => !v)} title="เลือกชื่อ Tournament ที่เคยใช้" style={{ flexShrink: 0, width: 40, borderRadius: 11, background: T.surface2, color: T.muted, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <button onClick={() => setShowTNameDropdown((v) => !v)} title={tr("tournamentWizard.pastNameTooltip")} style={{ flexShrink: 0, width: 40, borderRadius: 11, background: T.surface2, color: T.muted, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
                   <ChevronDown size={18} />
                 </button>
               )}
@@ -14748,7 +15018,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
               <>
                 <div onClick={() => setShowTNameDropdown(false)} style={{ position: "fixed", inset: 0, zIndex: 39 }} />
                 <div style={{ position: "absolute", right: 0, top: "calc(100% + 6px)", zIndex: 40, minWidth: 220, maxHeight: 260, overflowY: "auto", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, boxShadow: "0 6px 20px rgba(0,0,0,0.15)", padding: 6 }}>
-                  <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, padding: "6px 8px 4px" }}>ชื่อ Tournament ที่เคยใช้</div>
+                  <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, padding: "6px 8px 4px" }}>{tr("tournamentWizard.pastNameDropdownHeader")}</div>
                   {pastTournaments.map((pt) => (
                     <button
                       key={pt.name}
@@ -14768,12 +15038,12 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
               </>
             )}
           </div>
-          <Label>วันที่</Label>
+          <Label>{tr("common.date")}</Label>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={{ width: "100%", padding: "11px 12px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, outline: "none", marginBottom: 12, boxSizing: "border-box" }} />
-          <Label>จำนวนสนาม</Label>
+          <Label>{tr("tournament.courtCountFieldLabel")}</Label>
           <div style={{ marginBottom: 12 }}><Stepper value={courtCount} setValue={setCourtCount} min={1} max={12} /></div>
-          <Label>ประเภทการแข่งขัน</Label>
-          <Seg options={[["doubles", "ตีคู่"], ["singles", "ตีเดี่ยว"]]} value={matchMode} onChange={setMatchMode} />
+          <Label>{tr("tournament.type")}</Label>
+          <Seg options={[["doubles", tr("quanSettings.doublesShort")], ["singles", tr("quanSettings.singlesShort")]]} value={matchMode} onChange={setMatchMode} />
           <div style={{ height: 10 }} />
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7 }}>
             {[["knockout", "Knockout"], ["roundRobin", "Round Robin"], ["group", "Group Stage"], ["swiss", "Swiss"], ["league", "League"]].map(([v, l]) => (
@@ -14785,11 +15055,11 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
 
       {step === 2 && (
         <div>
-          <Seg options={[["individual", "ผู้เล่นเดี่ยว"], ["fixedTeam", "ทีม/คู่ที่กำหนดแล้ว"]]} value={teamEntryMode} onChange={setTeamEntryMode} />
+          <Seg options={[["individual", tr("tournament.teamMode.individual")], ["fixedTeam", tr("tournament.teamMode.fixed")]]} value={teamEntryMode} onChange={setTeamEntryMode} />
           <div style={{ height: 10 }} />
           <div style={{ position: "relative", marginBottom: 8 }}>
             <Search size={16} style={{ position: "absolute", left: 11, top: 11, color: T.muted }} />
-            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อสมาชิก" style={{ width: "100%", padding: "10px 12px 10px 34px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, outline: "none", boxSizing: "border-box" }} />
+            <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={tr("tournamentWizard.searchMemberPlaceholder")} style={{ width: "100%", padding: "10px 12px 10px 34px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, outline: "none", boxSizing: "border-box" }} />
           </div>
           <div style={{ maxHeight: 220, overflowY: "auto", border: `1px solid ${T.border}`, borderRadius: 11, marginBottom: 10 }}>
             {[...filteredPlayers, ...guestPlayers].map((p) => {
@@ -14809,38 +15079,38 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
             <select value={guestSkill} onChange={(e) => setGuestSkill(Number(e.target.value))} style={{ padding: "0 8px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700 }}>{activeLevelOptions(settings).map((o) => <option key={o.skillIndex} value={o.skillIndex}>{o.label}</option>)}</select>
             <button onClick={addGuest} style={{ padding: "0 12px", borderRadius: 10, background: T.accent, border: "none", color: "#fff" }}><Plus size={16} /></button>
           </div>
-          {guestPlayers.length > 0 && <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>Guest จะไม่ถูกบันทึกเข้าฐานสมาชิกถาวร เว้นแต่จะเลือก “บันทึกเป็นสมาชิก” ภายหลัง</div>}
+          {guestPlayers.length > 0 && <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>{tr("tournamentWizard.guestNotSavedHint")}</div>}
           {teamEntryMode === "fixedTeam" ? (
             <div>
-              <Label>{teamSize === 2 ? "จับคู่: แตะผู้เล่นคนแรกแล้วคนที่สอง" : "รายชื่อ (Singles = 1 คน 1 ทีม)"}</Label>
+              <Label>{teamSize === 2 ? tr("tournamentWizard.pairInstructionDoubles") : tr("tournamentWizard.pairInstructionSingles")}</Label>
               {fixedPairs.map((p, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700, padding: "6px 0" }}>
                   <span>{p.map((id) => peopleById[id]?.name).join(" + ")}</span>
                   <button onClick={() => setFixedPairs((prev) => prev.filter((_, idx) => idx !== i))} style={{ marginLeft: "auto", background: "none", border: "none", color: T.accent }}><Trash2 size={14} /></button>
                 </div>
               ))}
-              {teamSize === 1 && selectedIds.length > 0 && <button onClick={() => { setFixedPairs((prev) => [...prev, ...selectedIds.map((id) => [id])]); setSelectedIds([]); }} style={{ ...btnSecondary, marginTop: 6 }}>เพิ่มทั้งหมดเป็นทีมเดี่ยว</button>}
+              {teamSize === 1 && selectedIds.length > 0 && <button onClick={() => { setFixedPairs((prev) => [...prev, ...selectedIds.map((id) => [id])]); setSelectedIds([]); }} style={{ ...btnSecondary, marginTop: 6 }}>{tr("tournamentWizard.addAllAsSingles")}</button>}
             </div>
           ) : (
-            <div style={{ fontSize: 12, color: T.muted }}>เลือกแล้ว {selectedIds.length} คน ({matchMode === "doubles" ? `${Math.floor(selectedIds.length / 2)} ทีมโดยประมาณ` : `${selectedIds.length} ทีม`})</div>
+            <div style={{ fontSize: 12, color: T.muted }}>{matchMode === "doubles" ? tr("tournamentWizard.selectedSummaryDoubles", { count: selectedIds.length, teams: Math.floor(selectedIds.length / 2) }) : tr("tournamentWizard.selectedSummarySingles", { count: selectedIds.length, teams: selectedIds.length })}</div>
           )}
         </div>
       )}
 
       {step === 3 && teamEntryMode === "individual" && (
         <div>
-          <Label>วิธีจัดทีม</Label>
+          <Label>{tr("tournamentWizard.teamBuildMethodLabel")}</Label>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 12 }}>
-            {[["random", "สุ่มทีม"], ["balancedRandom", "Balanced Random"], ...(matchMode === "doubles" ? [["advancedBalanced", "Advanced Balanced"]] : [])].map(([v, l]) => (
+            {[["random", tr("tournament.teamBuild.random")], ["balancedRandom", "Balanced Random"], ...(matchMode === "doubles" ? [["advancedBalanced", "Advanced Balanced"]] : [])].map(([v, l]) => (
               <button key={v} onClick={() => { setTeamBuildMode(v); }} style={{ padding: "9px 13px", borderRadius: 10, fontSize: 12.5, fontWeight: 800, border: `1.5px solid ${teamBuildMode === v ? T.green : T.border}`, background: teamBuildMode === v ? "#e2f5ec" : T.surface, color: teamBuildMode === v ? T.green : T.text }}>{l}</button>
             ))}
           </div>
-          <button onClick={buildTeams} style={{ ...btnSecondary, marginBottom: 12 }}><Shuffle size={15} /> สุ่มใหม่</button>
+          <button onClick={buildTeams} style={{ ...btnSecondary, marginBottom: 12 }}><Shuffle size={15} /> {tr("tournamentWizard.reshuffleButton")}</button>
           <div style={{ maxHeight: 260, overflowY: "auto" }}>
             {teams.map((t, i) => (
               <div key={t.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", background: T.surface2, borderRadius: 9, marginBottom: 6, fontSize: 13 }}>
                 <span style={{ fontWeight: 700 }}>{t.playerIds.map((id) => peopleById[id]?.name).join(" + ")}</span>
-                <span style={{ marginLeft: "auto", fontSize: 11, color: T.muted }}>ความแข็งทีม {teamStrength(t, peopleById)}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, color: T.muted }}>{tr("tournament.teamStrengthLabel", { value: teamStrength(t, peopleById) })}</span>
               </div>
             ))}
           </div>
@@ -14849,13 +15119,13 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
 
       {step === 4 && (
         <div>
-          <Seg options={[["none", "ไม่แบ่ง"], ["auto", "แบ่งอัตโนมัติ"], ["manual", "กำหนดเอง"]]} value={divisionMode} onChange={setDivisionMode} />
+          <Seg options={[["none", tr("tournamentWizard.divisionNone")], ["auto", tr("tournamentWizard.divisionAuto")], ["manual", tr("attendance.custom")]]} value={divisionMode} onChange={setDivisionMode} />
           <div style={{ height: 10 }} />
           {divisionMode === "auto" && (
             <div>
               <div style={{ display: "flex", gap: 7, marginBottom: 10 }}>
-                <button onClick={() => { setDivisionPreset("2"); setDivisionRanges([{ name: "Advanced", skillMin: 6, skillMax: 11 }, { name: "Beginner", skillMin: 1, skillMax: 5 }]); }} style={{ ...btnSecondary, flex: "none", padding: "8px 12px", background: divisionPreset === "2" ? "#e2f5ec" : T.surface2 }}>2 ระดับ</button>
-                <button onClick={() => { setDivisionPreset("3"); setDivisionRanges([{ name: "Advanced", skillMin: 8, skillMax: 11 }, { name: "Intermediate", skillMin: 5, skillMax: 7 }, { name: "Beginner", skillMin: 1, skillMax: 4 }]); }} style={{ ...btnSecondary, flex: "none", padding: "8px 12px", background: divisionPreset === "3" ? "#e2f5ec" : T.surface2 }}>3 ระดับ</button>
+                <button onClick={() => { setDivisionPreset("2"); setDivisionRanges([{ name: "Advanced", skillMin: 6, skillMax: 11 }, { name: "Beginner", skillMin: 1, skillMax: 5 }]); }} style={{ ...btnSecondary, flex: "none", padding: "8px 12px", background: divisionPreset === "2" ? "#e2f5ec" : T.surface2 }}>{tr("tournamentWizard.divisionPreset2")}</button>
+                <button onClick={() => { setDivisionPreset("3"); setDivisionRanges([{ name: "Advanced", skillMin: 8, skillMax: 11 }, { name: "Intermediate", skillMin: 5, skillMax: 7 }, { name: "Beginner", skillMin: 1, skillMax: 4 }]); }} style={{ ...btnSecondary, flex: "none", padding: "8px 12px", background: divisionPreset === "3" ? "#e2f5ec" : T.surface2 }}>{tr("tournamentWizard.divisionPreset3")}</button>
               </div>
               {divisionRanges.map((r, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, fontSize: 12.5 }}>
@@ -14866,7 +15136,7 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
                   <input type="number" value={r.skillMax} onChange={(e) => setDivisionRanges((prev) => prev.map((x, idx) => (idx === i ? { ...x, skillMax: Number(e.target.value) } : x)))} style={{ width: 44, padding: "7px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center" }} />
                 </div>
               ))}
-              <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>จัดตาม “ความแข็งทีมเฉลี่ยต่อคน” (Average Team Skill) — แก้ Range เองได้</div>
+              <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>{tr("tournamentWizard.autoDivisionHint")}</div>
             </div>
           )}
           {divisionMode === "manual" && (
@@ -14884,8 +15154,8 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
             const low = divs.filter((d) => d.teamIds.length > 0 && d.teamIds.length < 2);
             return (
               <div style={{ marginTop: 12, fontSize: 12, color: T.muted }}>
-                {divs.filter((d) => d.teamIds.length > 0).map((d) => <div key={d.name}>{d.name}: {d.teamIds.length} ทีม</div>)}
-                {low.length > 0 && <div style={{ color: T.accent, marginTop: 4 }}>⚠️ บาง Division มีทีมน้อยเกินไป (ต้องอย่างน้อย 2 ทีม)</div>}
+                {divs.filter((d) => d.teamIds.length > 0).map((d) => <div key={d.name}>{tr("tournamentWizard.divisionTeamCountLine", { name: d.name, count: d.teamIds.length })}</div>)}
+                {low.length > 0 && <div style={{ color: T.accent, marginTop: 4 }}>{tr("tournamentWizard.lowDivisionWarning")}</div>}
               </div>
             );
           })()}
@@ -14919,35 +15189,35 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
           )}
           {format === "group" && (
             <div style={{ marginTop: 14 }}>
-              <Label>จำนวน Group</Label>
+              <Label>{tr("tournamentWizard.groupCountLabel")}</Label>
               <Stepper value={groupCount} setValue={setGroupCount} min={2} max={8} />
               <div style={{ height: 8 }} />
-              <Label>เข้ารอบต่อ Group (Top N)</Label>
+              <Label>{tr("tournamentWizard.qualifyTopNLabel")}</Label>
               <Stepper value={qualifyTopN} setValue={setQualifyTopN} min={1} max={4} />
             </div>
           )}
           {format === "swiss" && (
             <div style={{ marginTop: 14 }}>
-              <Label>จำนวน Rounds</Label>
+              <Label>{tr("tournamentWizard.roundsCountLabel")}</Label>
               <Stepper value={swissRounds} setValue={setSwissRounds} min={2} max={9} />
             </div>
           )}
           {format === "league" && (
             <div style={{ marginTop: 14 }}>
-              <Label>รอบการแข่งขัน</Label>
+              <Label>{tr("tournamentWizard.roundFormatLabel")}</Label>
               <Seg options={[[false, "Single Round Robin"], [true, "Double Round Robin"]]} value={doubleRound} onChange={setDoubleRound} />
             </div>
           )}
           {format === "knockout" && (
             <div style={{ marginTop: 14 }}>
-              <Label>อันดับ 3</Label>
-              <Seg options={[[false, "ไม่มี (ที่ 3 ร่วม)"], [true, "มีชิงที่ 3"]]} value={hasThirdPlaceMatch} onChange={setHasThirdPlaceMatch} />
-              <div style={{ fontSize: 11.5, color: T.muted, marginTop: 5 }}>{hasThirdPlaceMatch ? "ผู้แพ้รอบรองชนะเลิศทั้ง 2 ทีมจะแข่งกันเพื่อชิงอันดับ 3" : "ผู้แพ้รอบรองชนะเลิศทั้ง 2 ทีมได้อันดับ 3 ร่วมกัน ไม่ต้องแข่งเพิ่ม"}</div>
+              <Label>{tr("tournamentWizard.thirdPlaceLabel")}</Label>
+              <Seg options={[[false, tr("tournamentWizard.thirdPlaceNone")], [true, tr("tournamentWizard.thirdPlaceMatch")]]} value={hasThirdPlaceMatch} onChange={setHasThirdPlaceMatch} />
+              <div style={{ fontSize: 11.5, color: T.muted, marginTop: 5 }}>{hasThirdPlaceMatch ? tr("tournamentWizard.thirdPlaceHintMatch") : tr("tournamentWizard.thirdPlaceHintShared")}</div>
             </div>
           )}
           <div style={{ marginTop: 14 }}>
             <Label>Handicap</Label>
-            <Seg options={[["off", "ปิด"], ["manual", "กำหนดเอง"], ["skill", "ตาม Skill (คำแนะนำ)"]]} value={handicapMode} onChange={setHandicapMode} />
+            <Seg options={[["off", tr("tournamentWizard.handicapOff")], ["manual", tr("attendance.custom")], ["skill", tr("tournamentWizard.handicapSkillBased")]]} value={handicapMode} onChange={setHandicapMode} />
           </div>
         </div>
       )}
@@ -14972,12 +15242,12 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
         return (
           <div>
             <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 12, fontSize: 12.5, lineHeight: 1.9 }}>
-              <div><b>{name || "Tournament"}</b> · {fmtThaiDate(date)}</div>
-              <div>รูปแบบ: {format} · {matchMode === "doubles" ? "ตีคู่" : "ตีเดี่ยว"} · {courtCount} สนาม</div>
-              <div>ผู้เข้าร่วม: {teams.reduce((s, t) => s + t.playerIds.length, 0)} คน · {teams.length} ทีม</div>
-              <div>Division: {divs.map((d) => `${d.name}(${d.teamIds.length})`).join(", ") || "-"}</div>
-              <div>Seed: {seedMode}{seedMode === "advanced" ? ` (${advSeedKind})` : ""}</div>
-              <div>จำนวนแมตช์โดยประมาณ: {estTotal}</div>
+              <div><b>{name || "Tournament"}</b> · {fmtDate ? fmtDate(date) : fmtThaiDate(date)}</div>
+              <div>{tr("tournamentWizard.previewFormatLine", { format, mode: matchMode === "doubles" ? tr("quanSettings.doublesShort") : tr("quanSettings.singlesShort"), courts: courtCount })}</div>
+              <div>{tr("tournamentWizard.previewParticipantsLine", { people: teams.reduce((s, t) => s + t.playerIds.length, 0), teams: teams.length })}</div>
+              <div>{tr("tournamentWizard.previewDivisionLine", { list: divs.map((d) => `${d.name}(${d.teamIds.length})`).join(", ") || "-" })}</div>
+              <div>{tr("tournamentWizard.previewSeedLabel")}: {seedMode}{seedMode === "advanced" ? ` (${advSeedKind})` : ""}</div>
+              <div>{tr("tournamentWizard.previewEstimatedMatches", { count: estTotal })}</div>
             </div>
             <div style={{ maxHeight: 320, overflowY: "auto" }}>
               {previewBlocks.map(({ division: d, divTeams, groupsPreview }) => (
@@ -14989,12 +15259,12 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
                         <div style={{ fontSize: 12, fontWeight: 800, color: T.muted, marginBottom: 4 }}>Group {g.name}</div>
                         {g.teamIds.map((tid) => {
                           const t = divTeams.find((x) => x.id === tid); if (!t) return null;
-                          return <div key={tid} style={{ fontSize: 12, padding: "2px 0" }}>{t.playerIds.map((id) => peopleById[id]?.name).join(" + ")} <span style={{ color: T.muted }}>· ความแข็งทีม {teamStrength(t, peopleById)}</span></div>;
+                          return <div key={tid} style={{ fontSize: 12, padding: "2px 0" }}>{t.playerIds.map((id) => peopleById[id]?.name).join(" + ")} <span style={{ color: T.muted }}>· {tr("tournament.teamStrengthLabel", { value: teamStrength(t, peopleById) })}</span></div>;
                         })}
                       </div>
                     ))
                   ) : (
-                    divTeams.map((t) => <div key={t.id} style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>{t.playerIds.map((id) => peopleById[id]?.name).join(" + ")} · ความแข็งทีม {teamStrength(t, peopleById)}</div>)
+                    divTeams.map((t) => <div key={t.id} style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>{t.playerIds.map((id) => peopleById[id]?.name).join(" + ")} · {tr("tournament.teamStrengthLabel", { value: teamStrength(t, peopleById) })}</div>)
                   )}
                 </div>
               ))}
@@ -15004,15 +15274,15 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
       })()}
 
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        {step > 1 && <button onClick={() => setStep((s) => s - 1)} style={btnSecondary}>ย้อนกลับ</button>}
-        {step < 6 && step !== 2 && <button disabled={step === 1 ? !canNext1 : step === 3 ? !canNext3 : false} onClick={() => setStep((s) => s + 1)} style={{ ...btnPrimary, opacity: (step === 1 && !canNext1) || (step === 3 && !canNext3) ? 0.5 : 1 }}>ถัดไป</button>}
-        {step === 2 && <button disabled={!canNext2} onClick={goStep3} style={{ ...btnPrimary, opacity: canNext2 ? 1 : 0.5 }}>ถัดไป</button>}
-        {step === 6 && <button onClick={create} style={{ ...btnPrimary, background: T.accent }}><Play size={15} /> เริ่มการแข่งขัน</button>}
+        {step > 1 && <button onClick={() => setStep((s) => s - 1)} style={btnSecondary}>{tr("common.back")}</button>}
+        {step < 6 && step !== 2 && <button disabled={step === 1 ? !canNext1 : step === 3 ? !canNext3 : false} onClick={() => setStep((s) => s + 1)} style={{ ...btnPrimary, opacity: (step === 1 && !canNext1) || (step === 3 && !canNext3) ? 0.5 : 1 }}>{tr("common.next")}</button>}
+        {step === 2 && <button disabled={!canNext2} onClick={goStep3} style={{ ...btnPrimary, opacity: canNext2 ? 1 : 0.5 }}>{tr("common.next")}</button>}
+        {step === 6 && <button onClick={create} style={{ ...btnPrimary, background: T.accent }}><Play size={15} /> {tr("tournament.start")}</button>}
       </div>
       {/* v1.11.2: save-and-resume-later — real tournament setup often spans multiple days (see saveDraft
           above); available at every step so an organizer can bank whatever they've entered so far. */}
       <button onClick={saveDraft} style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 10, background: "none", border: "none", color: T.muted, fontSize: 12, fontWeight: 700 }}>
-        💾 บันทึกไว้ก่อน (ทำต่อทีหลัง)
+        💾 {tr("tournamentWizard.saveDraftButton")}
       </button>
     </Overlay>
   );
@@ -15197,7 +15467,7 @@ function BracketFull({ rounds, bracket, teamsById, peopleById, groupNameById }) 
   );
 }
 // entry point: toggle between the two views above, plus the champion banner (only when decided).
-function TournamentBracket({ bracket, teamsById, peopleById, champion, groupNameById }) {
+function TournamentBracket({ bracket, teamsById, peopleById, champion, groupNameById, tr }) {
   const [mode, setMode] = useState("round");
   const rounds = bracketRoundsWithFixedLabels(bracket);
   // default round shown = the earliest one that isn't fully decided yet (the "current" round for an
@@ -15210,13 +15480,13 @@ function TournamentBracket({ bracket, teamsById, peopleById, champion, groupName
   const thirdMatch = bracket.matches.find((m) => m.isThirdPlaceMatch);
   return (
     <div>
-      {rounds.length > 1 && <div style={{ marginBottom: 10 }}><Seg options={[["round", "ทีละรอบ"], ["full", "เต็มสาย"]]} value={mode} onChange={setMode} /></div>}
+      {rounds.length > 1 && <div style={{ marginBottom: 10 }}><Seg options={[["round", tr("tournamentBracket.roundByRound")], ["full", tr("tournamentBracket.fullBracket")]]} value={mode} onChange={setMode} /></div>}
       {mode === "round" || rounds.length <= 1
         ? <BracketRoundByRound rounds={rounds} bracket={bracket} teamsById={teamsById} peopleById={peopleById} groupNameById={groupNameById} defaultIdx={defaultIdx} />
         : <BracketFull rounds={rounds} bracket={bracket} teamsById={teamsById} peopleById={peopleById} groupNameById={groupNameById} />}
       {thirdMatch && (
         <div style={{ marginTop: 10 }}>
-          <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, textAlign: "center", marginBottom: 4 }}>ชิงที่ 3</div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, textAlign: "center", marginBottom: 4 }}>{tr("tournamentBracket.thirdPlaceMatchLabel")}</div>
           <BracketMatchCard m={thirdMatch} teamsById={teamsById} peopleById={peopleById} />
         </div>
       )}
@@ -15260,14 +15530,14 @@ function BracketView({ bracket, teamsById, peopleById, champion, groupNameById }
 // and (b) optionally highlights the qualification cutoff (top `qualifyCount` rows) when this group's
 // teams actually carry a stamped groupRank from a real group->knockout promotion (tGenerateGroupKnockout).
 // Kept as a separate component from StandingsTable (which stays untouched — still used during live play).
-function StandingsTableNoD({ teams, matches, pointsConfig, peopleById, qualifyCount = 0 }) {
+function StandingsTableNoD({ teams, matches, pointsConfig, peopleById, qualifyCount = 0, tr }) {
   const standings = computeStandings(teams.filter(Boolean), matches, pointsConfig);
   return (
     <div>
       <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
           <thead><tr style={{ color: T.muted, textAlign: "left" }}>
-            <th style={{ padding: "5px 6px" }}>ทีม</th><th style={{ padding: "5px 4px", textAlign: "center" }}>P</th><th style={{ padding: "5px 4px", textAlign: "center" }}>W</th><th style={{ padding: "5px 4px", textAlign: "center" }}>L</th><th style={{ padding: "5px 4px", textAlign: "center" }}>Pts</th><th style={{ padding: "5px 4px", textAlign: "center" }}>+/-</th>
+            <th style={{ padding: "5px 6px" }}>{tr("tournament.teams")}</th><th style={{ padding: "5px 4px", textAlign: "center" }}>P</th><th style={{ padding: "5px 4px", textAlign: "center" }}>W</th><th style={{ padding: "5px 4px", textAlign: "center" }}>L</th><th style={{ padding: "5px 4px", textAlign: "center" }}>Pts</th><th style={{ padding: "5px 4px", textAlign: "center" }}>+/-</th>
           </tr></thead>
           <tbody>
             {standings.map((row, i) => {
@@ -15285,14 +15555,14 @@ function StandingsTableNoD({ teams, matches, pointsConfig, peopleById, qualifyCo
           </tbody>
         </table>
       </div>
-      {qualifyCount > 0 && <div style={{ fontSize: 10.5, color: T.green, fontWeight: 700, marginTop: 6 }}>อันดับ 1-{qualifyCount} ผ่านเข้ารอบ Knockout</div>}
+      {qualifyCount > 0 && <div style={{ fontSize: 10.5, color: T.green, fontWeight: 700, marginTop: 6 }}>{tr("tournament.qualifyRangeNote", { count: qualifyCount })}</div>}
     </div>
   );
 }
 // v1.11.4: tab-per-group Standings — shows one group at a time instead of every group fully expanded
 // (previously the biggest source of a long Summary page for group-stage tournaments). A single-group
 // tournament skips the chip row entirely and just shows that one group's table directly.
-function GroupStandingsTabs({ groups, teamsById, peopleById, pointsConfig }) {
+function GroupStandingsTabs({ groups, teamsById, peopleById, pointsConfig, tr }) {
   const [gi, setGi] = useState(0);
   if (!groups || !groups.length) return null;
   const g = groups[Math.min(gi, groups.length - 1)];
@@ -15309,7 +15579,7 @@ function GroupStandingsTabs({ groups, teamsById, peopleById, pointsConfig }) {
       )}
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 10 }}>
         {groups.length === 1 && <div style={{ fontWeight: 700, fontSize: 12.5, marginBottom: 6 }}>Group {g.name}</div>}
-        <StandingsTableNoD teams={groupTeams} matches={g.matches} pointsConfig={pointsConfig} peopleById={peopleById} qualifyCount={qualifyCount} />
+        <StandingsTableNoD teams={groupTeams} matches={g.matches} pointsConfig={pointsConfig} peopleById={peopleById} qualifyCount={qualifyCount} tr={tr} />
       </div>
     </div>
   );
@@ -15342,7 +15612,11 @@ function StandingsTable({ teams, matches, pointsConfig, peopleById }) {
 }
 
 function TournamentDashboard(props) {
-  const { activeTournament: t, playersById, settings, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, onOpenTournamentPrint } = props;
+  // v1.12.44 (Localization Closure, task 190): `t` is the ACTIVE TOURNAMENT OBJECT here (pre-existing
+  // convention throughout this whole Tournament domain, not introduced by this pass) -- the translate
+  // functions are threaded through under the distinct names `tr`/`trc` instead, so every existing `t.xxx`
+  // usage below is completely untouched.
+  const { activeTournament: t, playersById, settings, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, onOpenTournamentPrint, tr, trc, fmtDate } = props;
   const [view, setView] = useState("courts");
   const [confirmComplete, setConfirmComplete] = useState(false);
   const [editingMatch, setEditingMatch] = useState(null);
@@ -15379,30 +15653,30 @@ function TournamentDashboard(props) {
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           {t.logo && <img src={t.logo} alt="" style={{ width: 32, height: 32, borderRadius: 9, objectFit: "cover", flexShrink: 0 }} />}
           <div style={{ fontWeight: 800, fontSize: 15.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>🏆 {t.name}</div>
-          <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11, fontWeight: 800, color: t.status === "paused" ? T.accent : T.green, background: t.status === "paused" ? "#fdecea" : "#e2f5ec", padding: "3px 9px", borderRadius: 20 }}>{t.status === "paused" ? "พักการแข่งขัน" : "กำลังแข่งขัน"}</span>
-          <button onClick={() => setShowProfileEditor(true)} title="แก้ไขข้อมูลรายการ" style={{ flexShrink: 0, background: "none", border: "none", color: T.muted, padding: 2 }}>✎</button>
+          <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11, fontWeight: 800, color: t.status === "paused" ? T.accent : T.green, background: t.status === "paused" ? "#fdecea" : "#e2f5ec", padding: "3px 9px", borderRadius: 20 }}>{t.status === "paused" ? tr("tournament.pause") : tr("tournament.active")}</span>
+          <button onClick={() => setShowProfileEditor(true)} title={tr("tournament.editProfileTitle")} style={{ flexShrink: 0, background: "none", border: "none", color: T.muted, padding: 2 }}>✎</button>
         </div>
         {(t.venue || t.description) && (
           <div style={{ fontSize: 11.5, color: T.muted, marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             {t.venue}{t.venue && t.description ? " · " : ""}{t.description}
           </div>
         )}
-        <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{t.format} · {t.courtCount} สนาม · {done} / {total} แมตช์</div>
+        <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{t.format} · {tr("tournament.courtsAndMatchesLine", { courts: t.courtCount, done, total })}</div>
         <div style={{ height: 6, background: T.surface2, borderRadius: 4, marginTop: 8, overflow: "hidden" }}><div style={{ height: "100%", width: `${total ? (done / total) * 100 : 0}%`, background: T.green }} /></div>
         <button onClick={() => setShowFinance(true)} style={{ width: "100%", marginTop: 10, display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>
-          <span>💰 ค่าสมัครและการเงิน</span>
+          <span>💰 {tr("tournament.regAndFinance")}</span>
           <span style={{ color: T.muted, fontWeight: 700, display: "flex", alignItems: "center", gap: 8 }}>
-            {t.registration.feeMode !== "none" && <span>ชำระแล้ว {regProgress.paid}/{regProgress.total}</span>}
-            <span style={{ color: finTotals.profit >= 0 ? T.green : T.accent }}>{finTotals.profit >= 0 ? "กำไร" : "ขาดทุน"} ฿{Math.abs(finTotals.profit).toLocaleString()}</span>
+            {t.registration.feeMode !== "none" && <span>{tr("tournament.paidProgressShort", { paid: regProgress.paid, total: regProgress.total })}</span>}
+            <span style={{ color: finTotals.profit >= 0 ? T.green : T.accent }}>{finTotals.profit >= 0 ? tr("finance.profit") : tr("finance.loss")} ฿{Math.abs(finTotals.profit).toLocaleString()}</span>
             <ChevronRight size={15} />
           </span>
         </button>
       </div>
-      {showProfileEditor && <TournamentProfileEditor t={t} onSave={(patch) => { tUpdateProfile(patch); setShowProfileEditor(false); }} onOpenLogoPicker={openTournamentLogo} onClose={() => setShowProfileEditor(false)} />}
-      {showFinance && <TournamentFinancePanel t={t} teamsById={teamsById} peopleById={peopleById} tSetRegistrationConfig={tSetRegistrationConfig} tToggleTeamPaid={tToggleTeamPaid} tAddFinanceEntry={tAddFinanceEntry} tRemoveFinanceEntry={tRemoveFinanceEntry} onClose={() => setShowFinance(false)} />}
+      {showProfileEditor && <TournamentProfileEditor t={t} tr={tr} onSave={(patch) => { tUpdateProfile(patch); setShowProfileEditor(false); }} onOpenLogoPicker={openTournamentLogo} onClose={() => setShowProfileEditor(false)} />}
+      {showFinance && <TournamentFinancePanel t={t} tr={tr} teamsById={teamsById} peopleById={peopleById} tSetRegistrationConfig={tSetRegistrationConfig} tToggleTeamPaid={tToggleTeamPaid} tAddFinanceEntry={tAddFinanceEntry} tRemoveFinanceEntry={tRemoveFinanceEntry} onClose={() => setShowFinance(false)} />}
 
       <div style={{ display: "flex", gap: 6, marginBottom: 12, overflowX: "auto" }}>
-        {[["courts", "สนาม"], ["bracket", "Bracket/Standings"], ["teams", "ทีม"], ["results", "ผล"]].map(([v, l]) => (
+        {[["courts", tr("match.court")], ["bracket", "Bracket/Standings"], ["teams", tr("tournament.teams")], ["results", tr("match.colResult")]].map(([v, l]) => (
           <button key={v} onClick={() => setView(v)} style={{ flex: "none", padding: "8px 13px", borderRadius: 10, fontSize: 12.5, fontWeight: 800, border: `1.5px solid ${view === v ? T.green : T.border}`, background: view === v ? "#e2f5ec" : T.surface, color: view === v ? T.green : T.muted }}>{l}</button>
         ))}
       </div>
@@ -15410,7 +15684,7 @@ function TournamentDashboard(props) {
       {view === "courts" && (
         <div>
           <button onClick={() => setEditCourtLabels((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "8px 11px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: editCourtLabels ? 6 : 10, display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 12 }}>🔢</span> แก้ไขจำนวน/เลขสนาม<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtLabels ? "rotate(180deg)" : "none" }} />
+            <span style={{ fontSize: 12 }}>🔢</span> {tr("tournament.dashEditCourtCount")}<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtLabels ? "rotate(180deg)" : "none" }} />
           </button>
           {editCourtLabels && (
             <div style={{ marginBottom: 10, padding: "10px 11px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
@@ -15418,16 +15692,16 @@ function TournamentDashboard(props) {
                   courts mid-event. tSetCourtCount blocks shrinking below whatever court a match is
                   CURRENTLY playing on, so an in-progress game is never orphaned. */}
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                <span style={{ fontSize: 12, color: T.muted, fontWeight: 700 }}>จำนวนสนาม</span>
+                <span style={{ fontSize: 12, color: T.muted, fontWeight: 700 }}>{tr("tournament.courtCountFieldLabel")}</span>
                 <Stepper value={t.courtCount} setValue={tSetCourtCount} min={Math.max(1, ...[...busyCourts, 0])} max={24} />
               </div>
               {[...busyCourts].length > 0 && Math.max(...busyCourts) >= t.courtCount && (
-                <div style={{ fontSize: 10.5, color: T.accent, marginBottom: 8 }}>ลดสนามไม่ได้ต่ำกว่าสนามที่กำลังแข่งอยู่</div>
+                <div style={{ fontSize: 10.5, color: T.accent, marginBottom: 8 }}>{tr("tournament.courtShrinkBlocked")}</div>
               )}
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               {Array.from({ length: t.courtCount }, (_, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                  <span style={{ fontSize: 11, color: T.muted, fontWeight: 700 }}>สนามที่ {i + 1}:</span>
+                  <span style={{ fontSize: 11, color: T.muted, fontWeight: 700 }}>{tr("tournament.courtNumberFieldLabel", { n: i + 1 })}</span>
                   <input
                     value={(t.courtLabels && t.courtLabels[i]) ?? ""}
                     onChange={(e) => tSetCourtLabel(i, e.target.value)}
@@ -15442,34 +15716,34 @@ function TournamentDashboard(props) {
           {playing.map((m) => (
             <div key={m.id} style={{ background: T.surface, border: `1px solid ${T.green}`, borderRadius: 14, padding: 11, marginBottom: 9 }}>
               <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-                <span style={{ fontWeight: 800, fontSize: 15 }}>สนาม {courtLabelFor(t.courtLabels, m.court)}</span>
-                <span style={{ marginLeft: "auto", fontSize: 11, fontWeight: 800, color: T.green, background: "#e2f5ec", padding: "3px 9px", borderRadius: 20 }}>🔴 กำลังแข่งขัน</span>
+                <span style={{ fontWeight: 800, fontSize: 15 }}>{tr("match.courtNumber", { court: courtLabelFor(t.courtLabels, m.court) })}</span>
+                <span style={{ marginLeft: "auto", fontSize: 11, fontWeight: 800, color: T.green, background: "#e2f5ec", padding: "3px 9px", borderRadius: 20 }}>{tr("tournament.liveBadge")}</span>
               </div>
               {(() => { const tags = matchGroupTags(m); return (tags.a || tags.b) && (
                 <div style={{ fontSize: 11, color: T.muted, fontWeight: 700, marginBottom: 2 }}>{tags.a || "?"} <span style={{ fontWeight: 400 }}>vs</span> {tags.b || "?"}</div>
               ); })()}
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{tMatchLabel(m, teamsById, peopleById).a} <span style={{ color: T.muted, fontWeight: 400 }}>vs</span> {tMatchLabel(m, teamsById, peopleById).b}</div>
-              <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} winScore={settings.winScore} deuce={settings.deuce} />
-              <button onClick={() => tFinishMatch(m.id)} disabled={!hasScore(m) || !matchWinner(m)} style={{ ...btnPrimary, marginTop: 8, opacity: (!hasScore(m) || !matchWinner(m)) ? 0.5 : 1 }}><Check size={16} /> จบแมตช์</button>
+              <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} winScore={settings.winScore} deuce={settings.deuce} t={tr} />
+              <button onClick={() => tFinishMatch(m.id)} disabled={!hasScore(m) || !matchWinner(m)} style={{ ...btnPrimary, marginTop: 8, opacity: (!hasScore(m) || !matchWinner(m)) ? 0.5 : 1 }}><Check size={16} /> {tr("match.finish")}</button>
             </div>
           ))}
           {emptyCourts.map((c) => (
             <div key={c} style={{ background: T.surface2, border: `1px dashed ${T.border}`, borderRadius: 14, padding: 11, marginBottom: 9 }}>
-              <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 6 }}>สนาม {courtLabelFor(t.courtLabels, c)} — ว่าง</div>
+              <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 6 }}>{tr("tournament.emptyCourtHeader", { label: courtLabelFor(t.courtLabels, c) })}</div>
               {suggested ? (
                 <div>
                   {(() => { const tags = matchGroupTags(suggested); return (tags.a || tags.b) && (
                     <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, marginBottom: 2 }}>{tags.a || "?"} <span style={{ fontWeight: 400 }}>vs</span> {tags.b || "?"}</div>
                   ); })()}
                   <div style={{ fontSize: 12.5, marginBottom: 8 }}>{tMatchLabel(suggested, teamsById, peopleById).a} vs {tMatchLabel(suggested, teamsById, peopleById).b}</div>
-                  <button onClick={() => tStartMatch(suggested.id, c)} style={btnPrimary}><Play size={15} /> เริ่มที่สนามนี้</button>
+                  <button onClick={() => tStartMatch(suggested.id, c)} style={btnPrimary}><Play size={15} /> {tr("tournament.startHereButton")}</button>
                 </div>
-              ) : <div style={{ fontSize: 12, color: T.muted }}>ยังไม่มีแมตช์พร้อมเล่น</div>}
+              ) : <div style={{ fontSize: 12, color: T.muted }}>{tr("tournament.noMatchReadyYet")}</div>}
             </div>
           ))}
           {readyList.length > 0 && (
             <div style={{ marginTop: 14 }}>
-              <SectionHead icon={<ClipboardList size={16} color={T.muted} />} title="พร้อมแข่ง" sub={`${readyList.length} แมตช์`} />
+              <SectionHead icon={<ClipboardList size={16} color={T.muted} />} title={tr("tournament.ready")} sub={trc("common.matchCount", readyList.length)} />
               {readyList.map((m) => { const tags = matchGroupTags(m); return (
                 <div key={m.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, marginBottom: 6, fontSize: 12.5 }}>
                   <span>{(tags.a || tags.b) ? <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700 }}>{tags.a || "?"} vs {tags.b || "?"} · </span> : null}{tMatchLabel(m, teamsById, peopleById).a} vs {tMatchLabel(m, teamsById, peopleById).b}</span>
@@ -15478,7 +15752,7 @@ function TournamentDashboard(props) {
               ); })}
             </div>
           )}
-          {playing.length === 0 && emptyCourts.length === 0 && readyList.length === 0 && <div style={{ textAlign: "center", color: T.muted, fontSize: 13, padding: 30 }}>ไม่มีแมตช์เหลืออยู่</div>}
+          {playing.length === 0 && emptyCourts.length === 0 && readyList.length === 0 && <div style={{ textAlign: "center", color: T.muted, fontSize: 13, padding: 30 }}>{tr("match.noRemaining")}</div>}
         </div>
       )}
 
@@ -15493,27 +15767,27 @@ function TournamentDashboard(props) {
                   completed-tournament History view) — same components, same computeDivisionPodium, so
                   an in-progress tournament shows the "เส้นทางสู่แชมป์" placeholder (never a fake
                   champion) and a decided final flips it to the real podium automatically. */}
-              {d.bracket && <TournamentPodium podium={rd.podium} teamsById={teamsById} peopleById={peopleById} />}
-              {d.bracket && <TournamentBracket bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={rd.podium.champion} groupNameById={groupNameById} />}
+              {d.bracket && <TournamentPodium podium={rd.podium} teamsById={teamsById} peopleById={peopleById} tr={tr} />}
+              {d.bracket && <TournamentBracket bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={rd.podium.champion} groupNameById={groupNameById} tr={tr} />}
               {d.groups && d.groups.length > 0 && (
                 <div>
-                  <GroupStandingsTabs groups={d.groups} teamsById={teamsById} peopleById={peopleById} pointsConfig={t.pointsConfig} />
+                  <GroupStandingsTabs groups={d.groups} teamsById={teamsById} peopleById={peopleById} pointsConfig={t.pointsConfig} tr={tr} />
                   {!d.bracket && d.groups.every((g) => g.matches.every((m) => m.status === "completed" || m.status === "bye")) && (
-                    <button onClick={() => tGenerateGroupKnockout(d.id, t.qualifyTopN || 2)} style={{ ...btnPrimary, marginTop: 6 }}>สร้าง Knockout รอบต่อไป</button>
+                    <button onClick={() => tGenerateGroupKnockout(d.id, t.qualifyTopN || 2)} style={{ ...btnPrimary, marginTop: 6 }}>{tr("tournament.generateKnockoutNext")}</button>
                   )}
                 </div>
               )}
               {!d.bracket && (!d.groups || !d.groups.length) && d.swissMatches && d.swissMatches.length > 0 && (
                 <div>
-                  <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>Swiss รอบ {d.swissRound + 1} / {d.swissRounds}</div>
-                  <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
+                  <div style={{ fontSize: 12, color: T.muted, marginBottom: 6 }}>{tr("tournament.swissRoundLabel", { round: d.swissRound + 1, total: d.swissRounds })}</div>
+                  <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} tr={tr} />
                   {d.swissMatches.filter((m) => m.roundIndex === d.swissRound).every((m) => m.status === "completed" || m.status === "bye") && d.swissRound + 1 < (d.swissRounds || 1) && (
-                    <button onClick={() => tGenerateSwissNextRound(d.id)} style={{ ...btnPrimary, marginTop: 8 }}>จับคู่รอบถัดไป</button>
+                    <button onClick={() => tGenerateSwissNextRound(d.id)} style={{ ...btnPrimary, marginTop: 8 }}>{tr("tournament.generateSwissNext")}</button>
                   )}
                 </div>
               )}
               {!d.bracket && (!d.groups || !d.groups.length) && (!d.swissMatches || !d.swissMatches.length) && d.matches && d.matches.length > 0 && (
-                <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
+                <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches} pointsConfig={t.pointsConfig} peopleById={peopleById} tr={tr} />
               )}
             </div>
           );})}
@@ -15529,7 +15803,7 @@ function TournamentDashboard(props) {
                 <div key={id} style={{ display: "flex", alignItems: "center", padding: "9px 11px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, marginBottom: 6, fontSize: 13 }}>
                   {tm.seed && <span style={{ fontWeight: 800, color: T.muted, marginRight: 8 }}>#{tm.seed}</span>}
                   <span style={{ fontWeight: 700 }}>{tTeamName(tm, peopleById)}</span>
-                  <span style={{ marginLeft: "auto", fontSize: 11, color: T.muted }}>ความแข็งทีม {teamStrength(tm, peopleById)}</span>
+                  <span style={{ marginLeft: "auto", fontSize: 11, color: T.muted }}>{tr("tournament.teamStrengthLabel", { value: teamStrength(tm, peopleById) })}</span>
                 </div>
               ); })}
             </div>
@@ -15545,40 +15819,40 @@ function TournamentDashboard(props) {
               {matchScoreText(m) && <div style={{ fontSize: 11, color: T.muted, marginTop: 3 }}>{matchScoreText(m)}</div>}
               {editingMatch === m.id ? (
                 <div>
-                  <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} winScore={settings.winScore} deuce={settings.deuce} />
+                  <ScoreEditor m={m} rounds={tournamentRoundsFor(settings.rounds)} setScore={tSetScore} setWin={tSetWin} clearScore={tClearScore} winScore={settings.winScore} deuce={settings.deuce} t={tr} />
                   <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-                    <button onClick={() => { if (tEditAffectsDownstream(m.id)) setPendingCascade(m.id); else { tUndoMatch(m.id, false); tFinishMatch(m.id); } setEditingMatch(null); }} style={btnPrimary}>บันทึกผลใหม่</button>
-                    <button onClick={() => setEditingMatch(null)} style={btnSecondary}>ยกเลิก</button>
+                    <button onClick={() => { if (tEditAffectsDownstream(m.id)) setPendingCascade(m.id); else { tUndoMatch(m.id, false); tFinishMatch(m.id); } setEditingMatch(null); }} style={btnPrimary}>{tr("tournament.saveNewResult")}</button>
+                    <button onClick={() => setEditingMatch(null)} style={btnSecondary}>{tr("common.cancel")}</button>
                   </div>
                 </div>
               ) : (
-                <button onClick={() => setEditingMatch(m.id)} style={{ background: "none", border: "none", color: T.accent, fontSize: 11.5, fontWeight: 700, marginTop: 4 }}>แก้ไขผล</button>
+                <button onClick={() => setEditingMatch(m.id)} style={{ background: "none", border: "none", color: T.accent, fontSize: 11.5, fontWeight: 700, marginTop: 4 }}>{tr("tournament.editResult")}</button>
               )}
             </div>
           ))}
-          {allMatches.filter((m) => m.status === "completed").length === 0 && <div style={{ textAlign: "center", color: T.muted, fontSize: 13, padding: 30 }}>ยังไม่มีผลการแข่งขัน</div>}
+          {allMatches.filter((m) => m.status === "completed").length === 0 && <div style={{ textAlign: "center", color: T.muted, fontSize: 13, padding: 30 }}>{tr("tournament.noResult")}</div>}
           {report.playerStats.length > 0 && <div style={{ marginTop: 16 }}><PlayerPerformanceList playerStats={report.playerStats} peopleById={peopleById} /></div>}
         </div>
       )}
 
       <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-        <button onClick={() => (t.status === "paused" ? tResumeTournament() : tPauseTournament())} style={btnSecondary}>{t.status === "paused" ? "เล่นต่อ" : "พักการแข่งขัน"}</button>
-        <button onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById))} style={btnSecondary}><Share2 size={15} /> แชร์</button>
-        <button onClick={() => setConfirmComplete(true)} style={{ ...btnPrimary, background: T.accent }}><LogOut size={15} /> จบ Tournament</button>
+        <button onClick={() => (t.status === "paused" ? tResumeTournament() : tPauseTournament())} style={btnSecondary}>{t.status === "paused" ? tr("match.resume") : tr("tournament.pause")}</button>
+        <button onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate))} style={btnSecondary}><Share2 size={15} /> {tr("common.share")}</button>
+        <button onClick={() => setConfirmComplete(true)} style={{ ...btnPrimary, background: T.accent }}><LogOut size={15} /> {tr("tournament.endButton")}</button>
       </div>
       {/* v1.11.4: Export PDF available on the live dashboard too — same buildTournamentResultReport +
           TournamentPrintView as the completed-tournament History page, so an in-progress event can
           already be exported/printed mid-tournament (partial bracket, no fake podium). */}
       <button onClick={() => onOpenTournamentPrint && onOpenTournamentPrint(report)} style={{ ...btnPrimary, width: "100%", marginTop: 8, background: T.green }}><Download size={15} /> Export PDF</button>
-      <button onClick={() => exportTournamentJSON(t, playersById)} style={{ ...btnSecondary, width: "100%", marginTop: 8 }}><Download size={15} /> ส่งออกข้อมูล Tournament (JSON)</button>
+      <button onClick={() => exportTournamentJSON(t, playersById)} style={{ ...btnSecondary, width: "100%", marginTop: 8 }}><Download size={15} /> {tr("tournament.exportJson")}</button>
 
       {pendingCascade && (
         <Overlay onClose={() => setPendingCascade(null)}>
-          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>ผลการแข่งขันนี้มีผลต่อแมตช์รอบถัดไป</div>
-          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>แมตช์รอบถัดไปเริ่มเล่น/จบไปแล้ว หากบันทึกผลใหม่ ระบบจะรีเซ็ตแมตช์รอบถัดไปให้แข่งใหม่</div>
+          <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{tr("tournament.cascadeWarningTitle")}</div>
+          <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{tr("tournament.cascadeWarningBody")}</div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => setPendingCascade(null)} style={btnSecondary}>ยกเลิก</button>
-            <button onClick={() => { tUndoMatch(pendingCascade, true); tFinishMatch(pendingCascade); setPendingCascade(null); }} style={{ ...btnPrimary, background: T.accent }}>ยืนยัน</button>
+            <button onClick={() => setPendingCascade(null)} style={btnSecondary}>{tr("common.cancel")}</button>
+            <button onClick={() => { tUndoMatch(pendingCascade, true); tFinishMatch(pendingCascade); setPendingCascade(null); }} style={{ ...btnPrimary, background: T.accent }}>{tr("common.confirm")}</button>
           </div>
         </Overlay>
       )}
@@ -15591,12 +15865,12 @@ function TournamentDashboard(props) {
         });
         return (
           <Overlay onClose={() => setConfirmComplete(false)}>
-            <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>จบ Tournament "{t.name}"?</div>
-            {champ && <div style={{ fontSize: 13.5, marginBottom: 10 }}>🏆 แชมป์: {tTeamName(teamsById[champ], peopleById)}</div>}
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ระบบจะบันทึก Tournament นี้ไว้ในประวัติ</div>
+            <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{tr("tournament.endConfirmTitle", { name: t.name })}</div>
+            {champ && <div style={{ fontSize: 13.5, marginBottom: 10 }}>🏆 {tr("tournament.champion")}: {tTeamName(teamsById[champ], peopleById)}</div>}
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{tr("tournament.endWillArchive")}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmComplete(false)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={() => { tCompleteTournament(); setConfirmComplete(false); }} style={{ ...btnPrimary, background: T.accent }}>ยืนยันจบ</button>
+              <button onClick={() => setConfirmComplete(false)} style={btnSecondary}>{tr("common.cancel")}</button>
+              <button onClick={() => { tCompleteTournament(); setConfirmComplete(false); }} style={{ ...btnPrimary, background: T.accent }}>{tr("tournament.confirmEndButton")}</button>
             </div>
           </Overlay>
         );
@@ -15609,41 +15883,41 @@ function TournamentDashboard(props) {
 // reuses the app-wide crop/position flow (see openTournamentLogo in App()) — the logo itself saves
 // immediately on crop-confirm, independent of this sheet's own "บันทึก" button, exactly like every
 // other photo field in the app (player photo, ก๊วน photo, QR). Only the text fields batch into onSave.
-function TournamentProfileEditor({ t, onSave, onOpenLogoPicker, onClose }) {
+function TournamentProfileEditor({ t, tr, onSave, onOpenLogoPicker, onClose }) {
   const [name, setName] = useState(t.name || "");
   const [venue, setVenue] = useState(t.venue || "");
   const [description, setDescription] = useState(t.description || "");
   const canSave = name.trim().length > 0;
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontWeight: 800, fontSize: 15.5, marginBottom: 14 }}>แก้ไขข้อมูลรายการ</div>
+      <div style={{ fontWeight: 800, fontSize: 15.5, marginBottom: 14 }}>{tr("tournament.editProfileTitle")}</div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16 }}>
         <button onClick={onOpenLogoPicker} style={{ flexShrink: 0, width: 62, height: 62, borderRadius: 14, background: T.surface2, border: `1px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", padding: 0 }}>
           {t.logo ? <img src={t.logo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span style={{ fontSize: 20 }}>🏆</span>}
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <button onClick={onOpenLogoPicker} style={{ padding: "7px 12px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{t.logo ? "เปลี่ยนโลโก้" : "เพิ่มโลโก้"}</button>
-          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 5 }}>ไม่บังคับ — จะแสดงในหน้าภาพรวม, หัวข้อ และสายแข่ง</div>
+          <button onClick={onOpenLogoPicker} style={{ padding: "7px 12px", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{t.logo ? tr("tournament.logoChange") : tr("tournament.logoAdd")}</button>
+          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 5 }}>{tr("tournament.logoHelp")}</div>
         </div>
       </div>
 
       <div style={{ marginBottom: 12 }}>
-        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>ชื่อรายการ</div>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="เช่น BadQ Open 2026" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>{tr("tournament.nameFieldLabel")}</div>
+        <input value={name} onChange={(e) => setName(e.target.value)} placeholder={tr("tournament.namePlaceholder")} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
       </div>
       <div style={{ marginBottom: 12 }}>
-        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>สถานที่จัด</div>
-        <input value={venue} onChange={(e) => setVenue(e.target.value)} placeholder="เช่น สนามแบดมินตัน ABC" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>{tr("tournament.venue")}</div>
+        <input value={venue} onChange={(e) => setVenue(e.target.value)} placeholder={tr("tournament.venuePlaceholder")} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
       </div>
       <div style={{ marginBottom: 18 }}>
-        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>รายละเอียด (ไม่บังคับ)</div>
-        <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder="เช่น รุ่นคู่ผสม, จำกัด 16 ทีม" style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }} />
+        <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>{tr("finance.descriptionPlaceholder")}</div>
+        <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} placeholder={tr("tournament.descPlaceholder")} style={{ width: "100%", padding: "10px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }} />
       </div>
 
       <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={onClose} style={btnSecondary}>ยกเลิก</button>
-        <button onClick={() => canSave && onSave({ name: name.trim(), venue: venue.trim(), description: description.trim() })} disabled={!canSave} style={{ ...btnPrimary, opacity: canSave ? 1 : 0.5 }}>บันทึก</button>
+        <button onClick={onClose} style={btnSecondary}>{tr("common.cancel")}</button>
+        <button onClick={() => canSave && onSave({ name: name.trim(), venue: venue.trim(), description: description.trim() })} disabled={!canSave} style={{ ...btnPrimary, opacity: canSave ? 1 : 0.5 }}>{tr("common.save")}</button>
       </div>
     </Overlay>
   );
@@ -15654,34 +15928,34 @@ function TournamentProfileEditor({ t, onSave, onOpenLogoPicker, onClose }) {
 // "don't clutter main screen" instruction. Entry-fee income is NEVER entered here directly — it's
 // derived (registrationFeeAmountFor / tournamentEntryFeeTotal) from feeMode+feeAmount+paidTeamIds, so
 // there is exactly one source of truth and no way to double-count it against manual finance entries.
-function TournamentFinancePanel({ t, teamsById, peopleById, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, onClose }) {
+function TournamentFinancePanel({ t, tr, teamsById, peopleById, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, onClose }) {
   const [showPaidList, setShowPaidList] = useState(false);
   const [addingIncome, setAddingIncome] = useState(false);
   const [addingExpense, setAddingExpense] = useState(false);
   const reg = t.registration || { feeMode: "none", feeAmount: 0, paidTeamIds: [] };
   const progress = registrationProgress(t);
   const totals = tournamentFinanceTotals(t);
-  const feeModeLabel = { none: "ไม่เก็บค่าสมัคร", perTeam: "เก็บต่อทีม", perPlayer: "เก็บต่อคน" };
+  const feeModeLabel = { none: tr("tournament.fee.none"), perTeam: tr("tournament.fee.perTeam"), perPlayer: tr("tournament.fee.perPerson") };
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontWeight: 800, fontSize: 15.5, marginBottom: 14 }}>ค่าสมัครและการเงิน</div>
+      <div style={{ fontWeight: 800, fontSize: 15.5, marginBottom: 14 }}>{tr("tournament.regAndFinance")}</div>
 
-      <SectionHead icon={<span style={{ fontSize: 14 }}>🎫</span>} title="ค่าสมัคร" sub={feeModeLabel[reg.feeMode] || ""} />
+      <SectionHead icon={<span style={{ fontSize: 14 }}>🎫</span>} title={tr("finance.registrationFee")} sub={feeModeLabel[reg.feeMode] || ""} />
       <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
-        {[["none", "ไม่เก็บ"], ["perTeam", "ต่อทีม"], ["perPlayer", "ต่อคน"]].map(([v, l]) => (
+        {[["none", tr("tournament.feeShort.none")], ["perTeam", tr("tournament.feeShort.perTeam")], ["perPlayer", tr("tournament.feeShort.perPerson")]].map(([v, l]) => (
           <button key={v} onClick={() => tSetRegistrationConfig({ feeMode: v })} style={{ flex: 1, padding: "8px 6px", borderRadius: 9, fontSize: 12, fontWeight: 800, border: `1.5px solid ${reg.feeMode === v ? T.green : T.border}`, background: reg.feeMode === v ? "#e2f5ec" : T.surface2, color: reg.feeMode === v ? T.green : T.muted }}>{l}</button>
         ))}
       </div>
       {reg.feeMode !== "none" && (
         <div style={{ marginBottom: 10 }}>
-          <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>ค่าสมัคร ({reg.feeMode === "perTeam" ? "บาท/ทีม" : "บาท/คน"})</div>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>{tr("tournament.feeAmountLabel", { unit: reg.feeMode === "perTeam" ? tr("tournament.perTeamBaht") : tr("tournament.perPersonBaht") })}</div>
           <input type="number" inputMode="numeric" value={reg.feeAmount || ""} onChange={(e) => tSetRegistrationConfig({ feeAmount: Math.max(0, Number(e.target.value) || 0) })} placeholder="0" style={{ width: "100%", padding: "9px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, boxSizing: "border-box" }} />
         </div>
       )}
       {reg.feeMode !== "none" && (
         <button onClick={() => setShowPaidList((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 700, marginBottom: showPaidList ? 6 : 16, display: "flex", alignItems: "center", gap: 6 }}>
-          <span>ชำระแล้ว {progress.paid}/{progress.total} ทีม</span><ChevronDown size={14} style={{ marginLeft: "auto", transform: showPaidList ? "rotate(180deg)" : "none" }} />
+          <span>{tr("tournament.paidProgressTeams", { paid: progress.paid, total: progress.total })}</span><ChevronDown size={14} style={{ marginLeft: "auto", transform: showPaidList ? "rotate(180deg)" : "none" }} />
         </button>
       )}
       {reg.feeMode !== "none" && showPaidList && (
@@ -15692,27 +15966,27 @@ function TournamentFinancePanel({ t, teamsById, peopleById, tSetRegistrationConf
               <div key={team.id} style={{ display: "flex", alignItems: "center", padding: "8px 10px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 10, marginBottom: 6 }}>
                 <span style={{ fontSize: 12.5, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tTeamName(team, peopleById)}</span>
                 <span style={{ fontSize: 11, color: T.muted, marginRight: 8 }}>฿{registrationFeeAmountFor(t, team).toLocaleString()}</span>
-                <button onClick={() => tToggleTeamPaid(team.id)} style={{ flexShrink: 0, padding: "5px 11px", borderRadius: 8, fontSize: 11.5, fontWeight: 800, border: "none", background: paid ? "#e2f5ec" : T.surface2, color: paid ? T.green : T.muted }}>{paid ? "ชำระแล้ว ✓" : "ยังไม่จ่าย"}</button>
+                <button onClick={() => tToggleTeamPaid(team.id)} style={{ flexShrink: 0, padding: "5px 11px", borderRadius: 8, fontSize: 11.5, fontWeight: 800, border: "none", background: paid ? "#e2f5ec" : T.surface2, color: paid ? T.green : T.muted }}>{paid ? tr("tournament.paidCheckLabel") : tr("finance.unpaidStatusShort")}</button>
               </div>
             );
           })}
-          {t.teams.length === 0 && <div style={{ fontSize: 12, color: T.muted, textAlign: "center", padding: 10 }}>ยังไม่มีทีม</div>}
+          {t.teams.length === 0 && <div style={{ fontSize: 12, color: T.muted, textAlign: "center", padding: 10 }}>{tr("tournament.noTeams")}</div>}
         </div>
       )}
 
-      <SectionHead icon={<span style={{ fontSize: 14 }}>💵</span>} title="รายรับ-รายจ่าย" />
+      <SectionHead icon={<span style={{ fontSize: 14 }}>💵</span>} title={tr("tournament.incomeExpenseTitle")} />
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 11, marginBottom: 10 }}>
-        <Row label="ค่าสมัคร (อัตโนมัติ)" value={`฿${totals.entryFee.toLocaleString()}`} color={T.green} />
-        <Row label="รายรับอื่นๆ" value={`฿${totals.otherIncome.toLocaleString()}`} color={T.green} />
-        <Row label="รายจ่ายรวม" value={`฿${totals.expense.toLocaleString()}`} color={T.accent} />
+        <Row label={tr("tournament.regFeeAutoLabel")} value={`฿${totals.entryFee.toLocaleString()}`} color={T.green} />
+        <Row label={tr("tournament.otherIncomeLabel")} value={`฿${totals.otherIncome.toLocaleString()}`} color={T.green} />
+        <Row label={tr("tournament.totalExpenseLabel")} value={`฿${totals.expense.toLocaleString()}`} color={T.accent} />
         <div style={{ height: 1, background: T.border, margin: "7px 0" }} />
-        <Row label={totals.profit >= 0 ? "กำไร" : "ขาดทุน"} value={`฿${Math.abs(totals.profit).toLocaleString()}`} bold color={totals.profit >= 0 ? T.green : T.accent} />
+        <Row label={totals.profit >= 0 ? tr("finance.profit") : tr("finance.loss")} value={`฿${Math.abs(totals.profit).toLocaleString()}`} bold color={totals.profit >= 0 ? T.green : T.accent} />
       </div>
 
-      <FinanceEntryList title="รายรับอื่นๆ" categories={TOURNAMENT_INCOME_CATEGORIES} entries={t.finance.income} adding={addingIncome} setAdding={setAddingIncome} onAdd={(entry) => tAddFinanceEntry("income", entry)} onRemove={(id) => tRemoveFinanceEntry("income", id)} />
-      <FinanceEntryList title="รายจ่าย" categories={TOURNAMENT_EXPENSE_CATEGORIES} entries={t.finance.expense} adding={addingExpense} setAdding={setAddingExpense} onAdd={(entry) => tAddFinanceEntry("expense", entry)} onRemove={(id) => tRemoveFinanceEntry("expense", id)} />
+      <FinanceEntryList title={tr("tournament.otherIncomeLabel")} categories={TOURNAMENT_INCOME_CATEGORIES} entries={t.finance.income} adding={addingIncome} setAdding={setAddingIncome} onAdd={(entry) => tAddFinanceEntry("income", entry)} onRemove={(id) => tRemoveFinanceEntry("income", id)} tr={tr} />
+      <FinanceEntryList title={tr("tournament.expenseLabel")} categories={TOURNAMENT_EXPENSE_CATEGORIES} entries={t.finance.expense} adding={addingExpense} setAdding={setAddingExpense} onAdd={(entry) => tAddFinanceEntry("expense", entry)} onRemove={(id) => tRemoveFinanceEntry("expense", id)} tr={tr} />
 
-      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 4 }}>ปิด</button>
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 4 }}>{tr("common.close")}</button>
     </Overlay>
   );
 }
@@ -15727,7 +16001,7 @@ function Row({ label, value, bold, color }) {
 
 // simple line-item entry list shared by tournament finance's income/expense sections (spec section 15:
 // "simple line-item entry, not full accounting") — collapsed add-form, tap-to-remove existing entries.
-function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd, onRemove }) {
+function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd, onRemove, tr }) {
   const [category, setCategory] = useState(categories[0][0]);
   const [label, setLabel] = useState("");
   const [amount, setAmount] = useState("");
@@ -15741,9 +16015,9 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: "flex", alignItems: "center", marginBottom: 6 }}>
         <span style={{ fontSize: 12.5, fontWeight: 800, color: T.muted }}>{title}</span>
-        <button onClick={() => setAdding((v) => !v)} style={{ marginLeft: "auto", fontSize: 11.5, fontWeight: 800, color: T.green, background: "none", border: "none", padding: "2px 4px" }}>{adding ? "ยกเลิก" : "+ เพิ่มรายการ"}</button>
+        <button onClick={() => setAdding((v) => !v)} style={{ marginLeft: "auto", fontSize: 11.5, fontWeight: 800, color: T.green, background: "none", border: "none", padding: "2px 4px" }}>{adding ? tr("common.cancel") : "+ " + tr("finance.addEntry")}</button>
       </div>
-      {entries.length === 0 && !adding && <div style={{ fontSize: 11.5, color: T.muted, padding: "4px 2px" }}>ยังไม่มีรายการ</div>}
+      {entries.length === 0 && !adding && <div style={{ fontSize: 11.5, color: T.muted, padding: "4px 2px" }}>{tr("finance.noEntriesYet")}</div>}
       {entries.map((e) => {
         const catLabel = (categories.find((c) => c[0] === e.category) || [, e.category])[1];
         return (
@@ -15764,10 +16038,10 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
               <button key={v} onClick={() => setCategory(v)} style={{ flex: "none", padding: "6px 10px", borderRadius: 8, fontSize: 11.5, fontWeight: 800, border: `1.5px solid ${category === v ? T.green : T.border}`, background: category === v ? "#e2f5ec" : T.surface, color: category === v ? T.green : T.muted }}>{l}</button>
             ))}
           </div>
-          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="รายละเอียด (ไม่บังคับ)" style={{ width: "100%", padding: "8px 10px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, boxSizing: "border-box", marginBottom: 8 }} />
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={tr("finance.descriptionPlaceholder")} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, boxSizing: "border-box", marginBottom: 8 }} />
           <div style={{ display: "flex", gap: 8 }}>
-            <input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="จำนวนเงิน (บาท)" style={{ flex: 1, padding: "8px 10px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, boxSizing: "border-box" }} />
-            <button onClick={submit} disabled={!canAdd} style={{ padding: "8px 16px", borderRadius: 8, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: canAdd ? 1 : 0.5 }}>เพิ่ม</button>
+            <input type="number" inputMode="numeric" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={tr("finance.amountPlaceholder")} style={{ flex: 1, padding: "8px 10px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, boxSizing: "border-box" }} />
+            <button onClick={submit} disabled={!canAdd} style={{ padding: "8px 16px", borderRadius: 8, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: canAdd ? 1 : 0.5 }}>{tr("tournament.addShortButton")}</button>
           </div>
         </div>
       )}
@@ -15775,7 +16049,7 @@ function FinanceEntryList({ title, categories, entries, adding, setAdding, onAdd
   );
 }
 
-function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, session, setSession, sessionHistory, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current, onClose }) {
+function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, settings, setSettings, session, setSession, sessionHistory, players, lockPairs, addLockPair, removeLockPair, setHandPref, getP, resetGames, changeLevelPreset, setCustomLevels, groupDefaults, saveGroupDefault, qrRef, history, current, onClose, t, tc, fmtDateTime }) {
   // v1.8.4: ค่าใช้จ่าย (💳) and รางวัล (🏆) moved out of this sheet into FinanceSettingsSheet, opened from the
   // ชำระเงิน tab instead — Today/ตั้งค่าก๊วน is now Game Operations only, money settings live with money UI.
   // v1.12.7 (ตั้งค่าก๊วน accordion follow-up, fix 1): reversed — a "💵 การชำระเงินและต้นทุน" accordion is back
@@ -15808,11 +16082,11 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>⚙️ ตั้งค่าก๊วน</div>
+      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>⚙️ {t("session.settings")}</div>
 
       {/* 🎮 การเล่น */}
       <button onClick={() => toggle("play")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "play" ? 0 : 8 }}>
-        <Shuffle size={15} color={T.muted} /> 🎮 การเล่น
+        <Shuffle size={15} color={T.muted} /> 🎮 {t("quanSettings.playSection")}
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "play" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "play" && (
@@ -15825,20 +16099,20 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
               zero calculation or persistence changes. */}
 
           {/* 1) รูปแบบการเล่น */}
-          <SectionHead icon={<span style={{ fontSize: 14 }}>🏸</span>} title="รูปแบบการเล่น" />
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🏸</span>} title={t("quanSettings.playModeTitle")} />
           <div style={{ marginBottom: 18 }}>
-            <Seg options={[["doubles", "ตีคู่ (2v2)"], ["singles", "ตีเดี่ยว (1v1)"]]} value={mode} onChange={setMode} />
+            <Seg options={[["doubles", t("quanSettings.doublesOption")], ["singles", t("quanSettings.singlesOption")]]} value={mode} onChange={setMode} />
           </div>
 
           {/* 2) รูปแบบการเก็บคะแนน — จำนวนเซต/จำนวนแต้ม/ดิว now visually grouped as one compact block. */}
-          <SectionHead icon={<span style={{ fontSize: 14 }}>🎯</span>} title="รูปแบบการเก็บคะแนน" />
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🎯</span>} title={t("quanSettings.scoringFormatTitle")} />
           <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนเซต</div>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t("quanSettings.setsCountLabel")}</div>
             {/* kept as the existing 3-way Seg (1 / 2fixed / 2-ใน-3), NOT a linear +/- stepper — "2 เซต"
                 (always play exactly 2, no decider) and "2 ใน 3 เซต" (best-of-3) are qualitatively different
                 match formats, not adjacent counts, so a numeric stepper can't represent them without
                 inventing new logic. Same settings.rounds state/values as before. */}
-            <Seg options={[[1, "1 เซต"], ["2fixed", "2 เซต"], [2, "2 ใน 3 เซต"]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
+            <Seg options={[[1, t("score.oneSetFormat")], ["2fixed", t("score.twoSetsFixedFormat")], [2, t("score.bestOfNSetsFormat", { r: 2, max: maxSetsFor(2) })]]} value={settings.rounds || 1} onChange={(v) => setSettings((s) => ({ ...s, rounds: v }))} />
           </div>
           <div style={{ marginBottom: 10 }}>
             {/* v1.12.6: จำนวนแต้ม is now a free numeric field (was fixed 9/15/21 buttons) via the project's
@@ -15848,27 +16122,27 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
                 display fallback for legacy data missing the field (identical to the old Seg's own fallback)
                 — it never writes 21 into an existing session; getDefaultSettings() already seeds new
                 groups/sessions with winScore: 21, so that default is untouched by this patch. */}
-            <NumField label="จำนวนแต้ม" value={settings.winScore || 21} onChange={(v) => setSettings((s) => ({ ...s, winScore: Math.max(1, Math.round(v)) }))} />
+            <NumField label={t("quanSettings.pointsCountLabel")} value={settings.winScore || 21} onChange={(v) => setSettings((s) => ({ ...s, winScore: Math.max(1, Math.round(v)) }))} />
           </div>
           <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>ดิว</div>
-            <Seg options={[[true, "มี"], [false, "ไม่มี"]]} value={!!settings.deuce} onChange={(v) => setSettings((s) => ({ ...s, deuce: v }))} />
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t("quanSettings.deuceLabel")}</div>
+            <Seg options={[[true, t("quanSettings.deuceOn")], [false, t("quanSettings.deuceOff")]]} value={!!settings.deuce} onChange={(v) => setSettings((s) => ({ ...s, deuce: v }))} />
           </div>
 
           {/* 3) โหมดจับคู่ — label renamed from "โหมดจัดคู่" per spec; options/values/algorithm untouched. */}
-          <SectionHead icon={<span style={{ fontSize: 14 }}>🔀</span>} title="โหมดจับคู่" />
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🔀</span>} title={t("quanSettings.matchmakingModeTitle")} />
           <div style={{ marginBottom: 18 }}>
-            <Seg options={[["auto", "สุ่มอัตโนมัติ"], ["manual", "เลือกเอง (Manual)"]]} value={settings.pairingMode || "auto"} onChange={(v) => setSettings((s) => ({ ...s, pairingMode: v }))} />
+            <Seg options={[["auto", t("quanSettings.matchmakingAuto")], ["manual", t("quanSettings.matchmakingManual")]]} value={settings.pairingMode || "auto"} onChange={(v) => setSettings((s) => ({ ...s, pairingMode: v }))} />
           </div>
 
           {/* 4) จำนวนผู้เล่นและสนาม — player cap + court count/labels + court recommendation grouped together. */}
-          <SectionHead icon={<span style={{ fontSize: 14 }}>🏟️</span>} title="จำนวนผู้เล่นและสนาม" />
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🏟️</span>} title={t("quanSettings.playersAndCourtsTitle")} />
           {/* v1.11.17 (spec section 3): จำนวนผู้เล่น cap — null/0 = ไม่จำกัด. When จำกัดจำนวน is picked, a
               new check-in past the cap is redirected to the Waiting List (see setStatus) instead of
               being blocked outright, so the organizer never loses the ability to register someone. */}
           <div style={{ marginBottom: 14 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนผู้เล่น</div>
-            <Seg options={[[false, "ไม่จำกัด"], [true, "จำกัดจำนวน"]]} value={!!settings.maxPlayers} onChange={(v) => setSettings((s) => ({ ...s, maxPlayers: v ? (s.maxPlayers || 24) : null }))} />
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t("quanSettings.playerCountLabel")}</div>
+            <Seg options={[[false, t("quanSettings.playerCountUnlimited")], [true, t("quanSettings.playerCountLimited")]]} value={!!settings.maxPlayers} onChange={(v) => setSettings((s) => ({ ...s, maxPlayers: v ? (s.maxPlayers || 24) : null }))} />
             {!!settings.maxPlayers && (
               <div style={{ marginTop: 8 }}>
                 <Stepper value={settings.maxPlayers} setValue={(v) => setSettings((s) => ({ ...s, maxPlayers: Math.max(1, v) }))} min={1} max={200} />
@@ -15876,17 +16150,17 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
             )}
           </div>
           <div style={{ marginBottom: 10 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>จำนวนสนาม</div>
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t("quanSettings.courtCountLabel")}</div>
             <Stepper value={courtCount} setValue={setCourtCount} min={1} max={12} />
           </div>
           <button onClick={() => setEditCourtLabels((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "8px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{ fontSize: 12 }}>🔢</span> แก้ไขเลขสนาม (เช่น มี 3 สนาม แต่เป็นเบอร์ 1, 3, 5)<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtLabels ? "rotate(180deg)" : "none" }} />
+            <span style={{ fontSize: 12 }}>🔢</span> {t("quanSettings.editCourtLabels")}<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtLabels ? "rotate(180deg)" : "none" }} />
           </button>
           {editCourtLabels && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
               {Array.from({ length: courtCount }, (_, i) => (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                  <span style={{ fontSize: 11, color: T.muted, fontWeight: 700 }}>สนามที่ {i + 1}:</span>
+                  <span style={{ fontSize: 11, color: T.muted, fontWeight: 700 }}>{t("quanSettings.courtLabelAt", { n: i + 1 })}</span>
                   <input
                     value={courtLabels[i] ?? ""}
                     onChange={(e) => setCourtLabel(i, e.target.value)}
@@ -15904,27 +16178,31 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
               is lost, just no longer duplicated on the compact card). DECISION SUPPORT ONLY — never writes
               to courtCount/setCourtCount; algorithm/calculation itself is completely unchanged. */}
           <div style={{ marginBottom: 18, padding: 12, borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}` }}>
-            <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 6 }}>🏸 คำแนะนำการจองสนาม</div>
+            <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 6 }}>🏸 {t("quanSettings.courtRecTitle")}</div>
             {courtRec.totalRegistered === 0 ? (
-              <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>ยังไม่มีคนลงทะเบียนก๊วนนี้ — ไปที่แท็บผู้เล่นก่อน</div>
+              <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>{t("quanSettings.courtRecEmpty")}</div>
             ) : (
               <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>
-                ลงทะเบียน {courtRec.totalRegistered} คน · แนะนำสูงสุด {peakBucket ? `${peakBucket.courts} สนาม` : "-"} · รวม {Math.round(courtRec.courtHoursTotal * 10) / 10} Court-hours
+                {t("quanSettings.courtRecSummary", {
+                  count: courtRec.totalRegistered,
+                  courts: peakBucket ? tc("common.courtCount", peakBucket.courts) : t("quanSettings.courtRecNoSuggestion"),
+                  hours: Math.round(courtRec.courtHoursTotal * 10) / 10,
+                })}
               </div>
             )}
-            <button onClick={() => setShowCourtRecDetail(true)} style={{ width: "100%", textAlign: "center", padding: "8px 0", borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>ดูรายละเอียด</button>
+            <button onClick={() => setShowCourtRecDetail(true)} style={{ width: "100%", textAlign: "center", padding: "8px 0", borderRadius: 9, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>{t("quanSettings.viewDetails")}</button>
           </div>
           {showCourtRecDetail && (
-            <CourtRecommendationDetailSheet players={players} session={session} settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} courtCount={courtCount} mode={mode} onClose={() => setShowCourtRecDetail(false)} />
+            <CourtRecommendationDetailSheet players={players} session={session} settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} courtCount={courtCount} mode={mode} onClose={() => setShowCourtRecDetail(false)} t={t} tc={tc} />
           )}
 
           {/* 5) ความต้องการผู้เล่น — same lock/avoid constraint data model & matchmaking behavior as before;
               only the entry form is now progressive disclosure (see LockPairEditor's showAddForm). */}
-          <SectionHead icon={<span style={{ fontSize: 14 }}>🤝</span>} title="ความต้องการผู้เล่น" />
-          <div style={{ fontSize: 11, color: T.muted, marginBottom: 8 }}>เฉพาะโหมดตีคู่ ยกเว้น "ไม่อยากสู้/ไม่อยากเจอเลย" ใช้ได้ทั้งเดี่ยว-คู่</div>
-          <LockPairEditor {...{ players, attendees: attendeePlayers, lockPairs, addLockPair, removeLockPair, setHandPref, getP }} />
+          <SectionHead icon={<span style={{ fontSize: 14 }}>🤝</span>} title={t("quanSettings.playerRequirementsTitle")} />
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 8 }}>{t("constraint.onlyDoublesExceptAvoidBoth")}</div>
+          <LockPairEditor {...{ players, attendees: attendeePlayers, lockPairs, addLockPair, removeLockPair, setHandPref, getP, t }} />
 
-          <button onClick={resetGames} style={{ marginTop: 14, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><RotateCcw size={14} /> รีเซ็ตจำนวนเกม</button>
+          <button onClick={resetGames} style={{ marginTop: 14, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><RotateCcw size={14} /> {t("quanSettings.resetGameCount")}</button>
         </div>
       )}
 
@@ -15934,23 +16212,23 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           calculations. No new payment/cost system, no duplicated state — editing here and editing from
           ชำระเงิน both read/write the SAME settings object. */}
       <button onClick={() => toggle("payment")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "payment" ? 0 : 8 }}>
-        <Wallet size={15} color={T.muted} /> 💵 การชำระเงินและต้นทุน
+        <Wallet size={15} color={T.muted} /> 💵 {t("finance.paymentAndCostSettings")}
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "payment" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "payment" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
+          <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, t }} />
         </div>
       )}
 
       {/* 🏸 ระดับฝีมือ */}
       <button onClick={() => toggle("level")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "level" ? 0 : 4 }}>
-        <ClipboardList size={15} color={T.muted} /> 🏸 ระดับฝีมือ ({getPresetMeta(settings.levelPresetId || "badweb-central").name})
+        <ClipboardList size={15} color={T.muted} /> 🏸 {t("quanSettings.levelSection")} ({presetDisplayName(settings.levelPresetId || "badweb-central", t)})
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "level" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "level" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14 }}>
-          <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} />
+          <LevelPresetEditor settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} t={t} />
         </div>
       )}
 
@@ -15963,12 +16241,16 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
       {(session.name || "").trim() && (
         <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${T.border}` }}>
           <button onClick={saveGroupDefault} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 800 }}>
-            💾 บันทึกเป็นค่าเริ่มต้นของก๊วน "{session.name}"
+            💾 {t("session.saveAsDefaultFor", { name: session.name })}
           </button>
           <div style={{ fontSize: 10.5, color: T.muted, textAlign: "center", marginTop: 6 }}>
             {groupDefaults[session.name]
-              ? `บันทึกล่าสุด: ${new Date(groupDefaults[session.name].savedAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })} (ระบบบันทึกให้อัตโนมัติทุกครั้งที่แก้ไข)`
-              : "ยังไม่เคยบันทึกค่าเริ่มต้นของก๊วนนี้"}
+              // v1.12.44 (Localization Closure, task item 3): the {when} value now follows uiLocale via the
+              // shared fmtDateTime helper (AppInner) -- was hardcoded to "th-TH" earlier in this same phase;
+              // closed as part of the date-display-formatting pass. Same Intl options as before
+              // (dateStyle/timeStyle "medium"/"short"), so Thai output is byte-identical to before this fix.
+              ? t("session.savedDefaultsAt", { when: fmtDateTime ? fmtDateTime(groupDefaults[session.name].savedAt) : new Date(groupDefaults[session.name].savedAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" }) })
+              : t("session.noSavedDefaults")}
           </div>
         </div>
       )}
@@ -15980,7 +16262,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
 // (live recalculation), per-time expected attendance with a goal-relative explanation (estimated wait OR
 // estimated games/person), and the "จองจริง" (actual booked) vs "BadQ แนะนำ" comparison broken down by time
 // period. Organizer makes the final call — this NEVER writes to courtCount.
-function CourtRecommendationDetailSheet({ players, session, settings, setSettings, sessionHistory, courtCount, mode, onClose }) {
+function CourtRecommendationDetailSheet({ players, session, settings, setSettings, sessionHistory, courtCount, mode, onClose, t, tc }) {
   const [showCalcSettings, setShowCalcSettings] = useState(false);
   const rec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
   // v1.11.72: busiest merged period, used as the representative period for the candidate comparison table.
@@ -16016,18 +16298,18 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>คำแนะนำการจองสนาม</div>
-      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>คำนวณจากช่วงเวลาที่คาดว่าแต่ละคนจะอยู่เล่น (19:00-23:00 ฯลฯ) ไม่ใช่แค่จำนวนคนลงทะเบียนทั้งหมด</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>{t("courtRec.summaryTitle")}</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 14 }}>{t("courtRec.summarySubtitle")}</div>
 
-      <Label>🎯 เป้าหมายการจองสนาม</Label>
+      <Label>🎯 {t("courtRec.goalTitle")}</Label>
       <div style={{ marginBottom: 10 }}>
-        <Seg options={[["max_wait", "รอไม่เกิน"], ["min_games", "เล่นอย่างน้อย"]]} value={rec.goal} onChange={(v) => setSettings((s) => ({ ...s, courtRecommendationGoal: v }))} />
+        <Seg options={[["max_wait", t("courtRec.goalMaxWait")], ["min_games", t("courtRec.goalMinGames")]]} value={rec.goal} onChange={(v) => setSettings((s) => ({ ...s, courtRecommendationGoal: v }))} />
       </div>
       <div style={{ marginBottom: 8 }}>
         {rec.goal === "min_games" ? (
-          <NumField label="เกม/คน (ขั้นต่ำ)" value={rec.minGamesPerPerson} onChange={(v) => setSettings((s) => ({ ...s, minGamesPerPerson: Math.max(1, v) }))} />
+          <NumField label={t("courtRec.minGamesPerPersonLabel")} value={rec.minGamesPerPerson} onChange={(v) => setSettings((s) => ({ ...s, minGamesPerPerson: Math.max(1, v) }))} />
         ) : (
-          <NumField label="รอไม่เกิน (นาที)" value={rec.maxWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, maxWaitMinutes: Math.max(1, v) }))} />
+          <NumField label={t("courtRec.maxWaitMinutesLabel")} value={rec.maxWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, maxWaitMinutes: Math.max(1, v) }))} />
         )}
       </div>
       {/* v1.11.73: เวลารอเป้าหมาย — organizer-facing control for the "min_games" goal's joint games/wait
@@ -16036,37 +16318,39 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
           the same groupDefaults auto-save (see the useEffect near saveGroupDefault) with zero extra code. */}
       {rec.goal === "min_games" && (
         <div style={{ marginBottom: 8 }}>
-          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เวลารอเป้าหมาย (นาที)</div>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t("courtRec.targetWaitMinutesLabel")}</div>
           <div style={{ marginBottom: 8 }}>
             <Seg options={[[10, "10"], [15, "15"], [20, "20"], [30, "30"]]} value={rec.targetWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, targetWaitMinutes: v }))} />
           </div>
-          <NumField label="กำหนดเอง (นาที)" value={rec.targetWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, targetWaitMinutes: Math.max(1, v) }))} />
+          <NumField label={t("courtRec.targetWaitCustomLabel")} value={rec.targetWaitMinutes} onChange={(v) => setSettings((s) => ({ ...s, targetWaitMinutes: Math.max(1, v) }))} />
         </div>
       )}
       {/* v1.11.13: the target is per player's WHOLE attendance window, never re-applied fresh inside every
           time block below — make that explicit so the per-block numbers are never mistaken for separate
           per-block targets (bug report: this ambiguity is exactly what the old formula got wrong). */}
       <div style={{ fontSize: 11, color: T.muted, marginBottom: 16 }}>
-        {rec.goal === "min_games" ? `เป้าหมาย: อย่างน้อย ${rec.minGamesPerPerson} เกม/คน ตลอดช่วงเวลาที่แต่ละคนมาเล่น (ไม่ใช่ต่อช่วงเวลาย่อยด้านล่าง) · รอเป้าหมาย ~${rec.targetWaitMinutes} นาที (ระบบจะเพิ่มสนามให้เกินขั้นต่ำถ้าจำเป็น เพื่อลดเวลารอให้เข้าใกล้เป้านี้)` : `เป้าหมาย: รอไม่เกิน ${rec.maxWaitMinutes} นาที ในแต่ละช่วงเวลา`}
+        {rec.goal === "min_games"
+          ? t("courtRec.goalSummaryMinGames", { minGames: rec.minGamesPerPerson, targetWait: rec.targetWaitMinutes })
+          : t("courtRec.goalSummaryMaxWait", { maxWait: rec.maxWaitMinutes })}
       </div>
 
-      <SectionHead icon={<span style={{ fontSize: 14 }}>🕐</span>} title="จำนวนคนที่คาดว่าจะอยู่เล่น ตามช่วงเวลา" />
+      <SectionHead icon={<span style={{ fontSize: 14 }}>🕐</span>} title={t("courtRec.expectedByPeriodTitle")} />
       {rec.merged.length === 0 ? (
-        <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ยังไม่มีคนลงทะเบียนก๊วนนี้</div>
+        <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{t("courtRec.noOneRegistered")}</div>
       ) : (
         <div style={{ marginBottom: 14, display: "flex", flexDirection: "column", gap: 8 }}>
           {rec.merged.map((b, i) => (
             <div key={i} style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 10, padding: "8px 11px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
                 <span style={{ fontSize: 12.5, fontWeight: 700 }}>{minutesToTimeStr(b.start)}–{minutesToTimeStr(b.end)}</span>
-                <span style={{ fontSize: 12.5, color: T.muted }}>{b.active} คน</span>
-                <span style={{ fontWeight: 800, fontSize: 13, color: b.courts > 0 ? T.green : T.muted }}>→ {b.courts > 0 ? `${b.courts} สนาม` : "ไม่พอเล่น"}</span>
+                <span style={{ fontSize: 12.5, color: T.muted }}>{t("courtRec.activeCount", { count: b.active })}</span>
+                <span style={{ fontWeight: 800, fontSize: 13, color: b.courts > 0 ? T.green : T.muted }}>→ {b.courts > 0 ? tc("common.courtCount", b.courts) : t("courtRec.notEnoughToPlay")}</span>
               </div>
               {b.courts > 0 && (
                 <div style={{ fontSize: 11, color: T.muted }}>
                   {rec.goal === "min_games"
-                    ? `ในช่วงนี้คาดว่าได้เล่นประมาณ ${Math.round(b.expectedGamesPerPlayer * 10) / 10} เกม/คน (ประมาณการ — ไม่ใช่เป้าหมายแยกของช่วงนี้)`
-                    : `คาดว่ารอประมาณ ${b.estimatedWaitMinutes != null ? Math.round(b.estimatedWaitMinutes) : 0} นาที (ประมาณการ)`}
+                    ? t("courtRec.expectedGamesNote", { games: Math.round(b.expectedGamesPerPlayer * 10) / 10 })
+                    : t("courtRec.expectedWaitNote", { minutes: b.estimatedWaitMinutes != null ? Math.round(b.estimatedWaitMinutes) : 0 })}
                 </div>
               )}
             </div>
@@ -16074,7 +16358,7 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
         </div>
       )}
 
-      <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>รวม {Math.round(rec.courtHoursTotal * 10) / 10} Court-hours (ประมาณการ)</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>{t("courtRec.totalCourtHours", { hours: Math.round(rec.courtHoursTotal * 10) / 10 })}</div>
 
       {/* v1.11.72 (minutes shown directly since v1.11.73): "เล่นอย่างน้อย X เกม/คน" alone can pick a court
           count so small that many players wait at once — this table shows the actual trade-off (≥
@@ -16086,17 +16370,17 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
           รอน้อย/ปานกลาง/รอนาน category kept as a small secondary label. Decision support only. */}
       {candidates.length > 0 && (
         <>
-          <SectionHead icon={<span style={{ fontSize: 14 }}>⚖️</span>} title="เทียบจำนวนสนาม (ช่วงที่คนเยอะที่สุด)" />
+          <SectionHead icon={<span style={{ fontSize: 14 }}>⚖️</span>} title={t("courtRec.compareTitle")} />
           <div style={{ marginBottom: 8, display: "flex", flexDirection: "column", gap: 6 }}>
             {candidates.map((c) => {
               const isRecommended = peakBucket && c.courts === peakBucket.courts;
               const mins = Math.round(c.estimatedWaitMinutes);
               return (
                 <div key={c.courts} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: isRecommended ? T.surface2 : "transparent", border: `1px solid ${isRecommended ? T.border : "transparent"}`, borderRadius: 9, padding: "6px 10px", fontSize: 12.5 }}>
-                  <span style={{ fontWeight: 700 }}>{c.courts} สนาม</span>
-                  <span style={{ color: T.muted }}>≥{rec.minGamesPerPerson} เกม/คน</span>
+                  <span style={{ fontWeight: 700 }}>{tc("common.courtCount", c.courts)}</span>
+                  <span style={{ color: T.muted }}>{t("courtRec.minGamesShort", { minGames: rec.minGamesPerPerson })}</span>
                   <span style={{ display: "flex", flexDirection: "column", alignItems: "flex-end" }}>
-                    <span style={{ fontWeight: 800 }}>~{mins} นาที{c.waitLabel === "รอนาน" ? " ⚠️" : ""}{isRecommended ? " ⭐" : ""}</span>
+                    <span style={{ fontWeight: 800 }}>{t("courtRec.aboutMinutes", { minutes: mins })}{c.waitLabel === "รอนาน" ? " ⚠️" : ""}{isRecommended ? " ⭐" : ""}</span>
                     <span style={{ fontSize: 10, color: T.muted }}>{c.waitLabel}</span>
                   </span>
                 </div>
@@ -16104,59 +16388,59 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
             })}
           </div>
           <div style={{ fontSize: 11, color: T.muted, marginBottom: 16 }}>
-            ขั้นต่ำ {candidates[0].minFeasible} สนาม (พอครบเกม/คนขั้นต่ำ) / แนะนำ {peakBucket ? peakBucket.courts : candidates[0].minFeasible} สนาม (ครบเกม/คน และลดเวลารอ)
+            {t("courtRec.minFeasibleAndRecommended", { minFeasible: candidates[0].minFeasible, recommended: peakBucket ? peakBucket.courts : candidates[0].minFeasible })}
           </div>
         </>
       )}
 
-      <SectionHead icon={<span style={{ fontSize: 14 }}>📋</span>} title="จองจริง เทียบกับ BadQ แนะนำ" />
+      <SectionHead icon={<span style={{ fontSize: 14 }}>📋</span>} title={t("courtRec.actualVsRecommendedTitle")} />
       <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: 12, marginBottom: 16, fontSize: 12.5 }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-          <span style={{ color: T.muted }}>จองจริง</span>
-          <span style={{ fontWeight: 700 }}>{courtCount} สนาม × {(sessionMinutes / 60).toFixed(1)} ชม. = {Math.round(actualCourtHours * 10) / 10} Court-hours</span>
+          <span style={{ color: T.muted }}>{t("courtRec.actualBooking")}</span>
+          <span style={{ fontWeight: 700 }}>{t("courtRec.actualCourtHours", { courts: courtCount, hours: (sessionMinutes / 60).toFixed(1), total: Math.round(actualCourtHours * 10) / 10 })}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: costDiff != null || diffCourtHours !== 0 ? 6 : 0 }}>
-          <span style={{ color: T.muted }}>BadQ แนะนำ</span>
+          <span style={{ color: T.muted }}>{t("courtRec.badqRecommends")}</span>
           <span style={{ fontWeight: 700 }}>{Math.round(rec.courtHoursTotal * 10) / 10} Court-hours</span>
         </div>
         {diffCourtHours !== 0 && (
           <div style={{ color: diffCourtHours > 0 ? T.green : T.accent, fontWeight: 700, marginBottom: shortfallPeriods.length ? 8 : 0 }}>
-            {diffCourtHours > 0 ? `ลด ${diffCourtHours} Court-hours ได้` : `แนะนำเพิ่ม ${totalShortfallCourtHours} Court-hours`}
-            {costDiff != null && diffCourtHours > 0 && ` · ประหยัดประมาณ ${formatCurrency(costDiff)}`}
-            {costDiff != null && diffCourtHours < 0 && ` · เพิ่มประมาณ ${formatCurrency(Math.abs(costDiff))}`}
+            {diffCourtHours > 0 ? t("courtRec.canReduce", { hours: diffCourtHours }) : t("courtRec.shouldAddMore", { hours: totalShortfallCourtHours })}
+            {costDiff != null && diffCourtHours > 0 && t("courtRec.estimatedSavings", { amount: formatCurrency(costDiff) })}
+            {costDiff != null && diffCourtHours < 0 && t("courtRec.estimatedExtraCost", { amount: formatCurrency(Math.abs(costDiff)) })}
           </div>
         )}
         {shortfallPeriods.length > 0 && (
           <div>
-            <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 4 }}>แนะนำเพิ่ม:</div>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 4 }}>{t("courtRec.addMorePrefix")}</div>
             {shortfallPeriods.map((p, i) => (
               <div key={i} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                 <span style={{ color: T.text }}>{minutesToTimeStr(p.start)}–{minutesToTimeStr(p.end)}</span>
-                <span style={{ fontWeight: 700, color: T.accent }}>+{p.extra} สนาม</span>
+                <span style={{ fontWeight: 700, color: T.accent }}>{t("courtRec.extraCourts", { count: p.extra })}</span>
               </div>
             ))}
           </div>
         )}
-        <div style={{ color: T.muted, fontSize: 11, marginTop: 6 }}>เป็นคำแนะนำเท่านั้น — ระบบจะไม่แก้ไขจำนวนสนามที่จองจริงให้อัตโนมัติ ผู้จัดก๊วนเป็นผู้ตัดสินใจสุดท้าย</div>
+        <div style={{ color: T.muted, fontSize: 11, marginTop: 6 }}>{t("courtRec.decisionSupportOnly")}</div>
       </div>
 
       <button onClick={() => setShowCalcSettings((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "9px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: showCalcSettings ? 10 : 16, display: "flex", alignItems: "center", gap: 6 }}>
-        <span>⚙️ ตั้งค่าการคำนวณ</span><ChevronDown size={14} style={{ marginLeft: "auto", transform: showCalcSettings ? "rotate(180deg)" : "none" }} />
+        <span>⚙️ {t("courtRec.calcSettingsToggle")}</span><ChevronDown size={14} style={{ marginLeft: "auto", transform: showCalcSettings ? "rotate(180deg)" : "none" }} />
       </button>
       {showCalcSettings && (
         <div style={{ marginBottom: 16 }}>
           <div style={{ marginBottom: 8 }}>
-            <NumField label="เวลาเฉลี่ยต่อ 1 เซต (นาที)" value={settings.averageSetMinutes || 15} onChange={(v) => setSettings((s) => ({ ...s, averageSetMinutes: Math.max(1, v) }))} />
+            <NumField label={t("courtRec.avgMinutesPerSet")} value={settings.averageSetMinutes || 15} onChange={(v) => setSettings((s) => ({ ...s, averageSetMinutes: Math.max(1, v) }))} />
           </div>
-          <div style={{ fontSize: 11, color: T.muted, marginBottom: 4 }}>จำนวนเซตต่อแมตช์อ่านจากการตั้งค่า "จำนวนเซต" ของก๊วนนี้อัตโนมัติ ({roundsLabel(settings.rounds)}) ไม่ต้องตั้งซ้ำที่นี่</div>
+          <div style={{ fontSize: 11, color: T.muted, marginBottom: 4 }}>{t("courtRec.setsPerMatchAuto", { roundsLabel: roundsLabel(settings.rounds, t) })}</div>
           {/* v1.11.7 (Part L): transparency only — never a separate editable field, so there is exactly
               one avgMatchMinutes value in play at any time (either the config above, or this real
               historical average once enough reliable samples exist). */}
-          <div style={{ fontSize: 11, color: T.muted }}>{rec.avgSource === "history" ? `กำลังใช้ค่าเฉลี่ยจากประวัติจริงของก๊วนนี้ (${rec.avgMatchMinutes} นาที/แมตช์) แทนค่าด้านบน เพราะมีข้อมูลเพียงพอแล้ว` : `ยังไม่มีประวัติแมตช์เพียงพอ — ใช้ค่าที่ตั้งไว้ด้านบน (${rec.avgMatchMinutes} นาที/แมตช์)`}</div>
+          <div style={{ fontSize: 11, color: T.muted }}>{rec.avgSource === "history" ? t("courtRec.usingHistoryAverage", { minutes: rec.avgMatchMinutes }) : t("courtRec.notEnoughHistory", { minutes: rec.avgMatchMinutes })}</div>
         </div>
       )}
 
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{t("common.close")}</button>
     </Overlay>
   );
 }
@@ -16167,76 +16451,76 @@ function CourtRecommendationDetailSheet({ players, session, settings, setSetting
 // v1.11.12 (model F: หารค่าใช้จ่าย) — organizer enters the 4 real cost lines, app auto-splits ONLY by
 // ผู้เล่นที่มาจริง (never registered/roster count — see computeSplitExpenseSummary). Feeds computeBill's
 // revenue side directly and computeCostModelExpenses' expense side at endSession — no isolated records.
-function SplitExpensesEditor({ settings, setSettings, players }) {
+function SplitExpensesEditor({ settings, setSettings, players, t }) {
   const se = settings.splitExpenses || {};
   const setField = (key) => (v) => setSettings((s) => ({ ...s, splitExpenses: { ...(s.splitExpenses || {}), [key]: v } }));
   const summary = useMemo(() => computeSplitExpenseSummary(players, settings), [players, settings]);
   return (
     <div style={{ marginBottom: 10 }}>
-      <Label>💰 ค่าใช้จ่าย</Label>
+      <Label>💰 {t ? t("finance.expenses") : "ค่าใช้จ่าย"}</Label>
       <div style={{ display: "flex", gap: 10, marginBottom: 8 }}>
-        <NumField label="ค่าสนาม (฿)" value={se.court || 0} onChange={setField("court")} />
-        <NumField label="ค่าลูก (฿)" value={se.shuttle || 0} onChange={setField("shuttle")} />
+        <NumField label={t ? t("finance.splitCourtFeeLabel") : "ค่าสนาม (฿)"} value={se.court || 0} onChange={setField("court")} />
+        <NumField label={t ? t("finance.splitShuttleFeeLabel") : "ค่าลูก (฿)"} value={se.shuttle || 0} onChange={setField("shuttle")} />
       </div>
       <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-        <NumField label="ค่าน้ำ (฿)" value={se.water || 0} onChange={setField("water")} />
-        <NumField label="ค่าอื่น ๆ (฿)" value={se.other || 0} onChange={setField("other")} />
+        <NumField label={t ? t("finance.splitWaterFeeLabel") : "ค่าน้ำ (฿)"} value={se.water || 0} onChange={setField("water")} />
+        <NumField label={t ? t("finance.splitOtherFeeLabel") : "ค่าอื่น ๆ (฿)"} value={se.other || 0} onChange={setField("other")} />
       </div>
 
       <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginBottom: 12, fontSize: 12.5 }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-          <span style={{ color: T.muted }}>รวมค่าใช้จ่าย</span>
+          <span style={{ color: T.muted }}>{t ? t("finance.sumExpensesLabel") : "รวมค่าใช้จ่าย"}</span>
           <span style={{ fontWeight: 800 }}>{formatCurrency(summary.total)}</span>
         </div>
         {summary.hasAttendance ? (
           <>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-              <span style={{ color: T.muted }}>ผู้เล่นที่มาจริง</span>
-              <span style={{ fontWeight: 800 }}>{summary.attendedCount} คน</span>
+              <span style={{ color: T.muted }}>{t ? t("finance.actualPlayers") : "ผู้เล่นที่มาจริง"}</span>
+              <span style={{ fontWeight: 800 }}>{summary.attendedCount} {t ? t("finance.peopleCountUnit") : "คน"}</span>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: T.muted }}>เฉลี่ย</span>
-              <span style={{ fontWeight: 800 }}>{summary.perPersonRaw.toFixed(2)} บาท/คน</span>
+              <span style={{ color: T.muted }}>{t ? t("finance.averageLabel") : "เฉลี่ย"}</span>
+              <span style={{ fontWeight: 800 }}>{summary.perPersonRaw.toFixed(2)} {t ? t("tournament.perPersonBaht") : "บาท/คน"}</span>
             </div>
           </>
         ) : (
           <>
-            <div style={{ color: T.accent, fontWeight: 700, marginBottom: summary.projectedRegistered > 0 ? 4 : 0 }}>ยังไม่มีข้อมูลผู้เล่นที่มาจริง</div>
+            <div style={{ color: T.accent, fontWeight: 700, marginBottom: summary.projectedRegistered > 0 ? 4 : 0 }}>{t ? t("finance.noActualAttendanceYet") : "ยังไม่มีข้อมูลผู้เล่นที่มาจริง"}</div>
             {summary.projectedRegistered > 0 && (
-              <div style={{ color: T.muted, fontSize: 11.5 }}>ประมาณการจากผู้ลงทะเบียน {summary.projectedRegistered} คน · {formatCurrency(Math.round(summary.perPersonEstimate * 100) / 100)}/คน (ประมาณการ ไม่ใช่ยอดจริง)</div>
+              <div style={{ color: T.muted, fontSize: 11.5 }}>{t ? t("finance.projectedFromRegisteredLine", { count: summary.projectedRegistered, amount: formatCurrency(Math.round(summary.perPersonEstimate * 100) / 100) }) : `ประมาณการจากผู้ลงทะเบียน ${summary.projectedRegistered} คน · ${formatCurrency(Math.round(summary.perPersonEstimate * 100) / 100)}/คน (ประมาณการ ไม่ใช่ยอดจริง)`}</div>
             )}
           </>
         )}
       </div>
 
-      <Label>การปัดยอดเรียกเก็บ</Label>
+      <Label>{t ? t("finance.rounding") : "การปัดยอดเรียกเก็บ"}</Label>
       <div style={{ marginBottom: 12 }}>
-        <Seg options={[["none", "ไม่ปัด"], ["round5", "ปัดเป็น 5 บาท"], ["round10", "ปัดเป็น 10 บาท"]]} value={settings.roundingMode || "none"} onChange={(v) => setSettings((s) => ({ ...s, roundingMode: v }))} />
+        <Seg options={[["none", t ? t("finance.round.none") : "ไม่ปัด"], ["round5", t ? t("finance.round.five") : "ปัดเป็น 5 บาท"], ["round10", t ? t("finance.round.ten") : "ปัดเป็น 10 บาท"]]} value={settings.roundingMode || "none"} onChange={(v) => setSettings((s) => ({ ...s, roundingMode: v }))} />
       </div>
 
       {summary.hasAttendance && (
         <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 11, marginBottom: 6, fontSize: 12.5 }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-            <span style={{ color: T.muted }}>ต้นทุนจริงเฉลี่ย</span>
-            <span>{summary.perPersonRaw.toFixed(2)} บาท</span>
+            <span style={{ color: T.muted }}>{t ? t("finance.actualAverageCost") : "ต้นทุนจริงเฉลี่ย"}</span>
+            <span>{summary.perPersonRaw.toFixed(2)} {t ? t("finance.bahtUnit") : "บาท"}</span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-            <span style={{ color: T.muted }}>ยอดเรียกเก็บ</span>
-            <span style={{ fontWeight: 800 }}>{formatCurrency(summary.charge)}/คน</span>
+            <span style={{ color: T.muted }}>{t ? t("finance.amountToCharge") : "ยอดเรียกเก็บ"}</span>
+            <span style={{ fontWeight: 800 }}>{formatCurrency(summary.charge)}/{t ? t("finance.peopleCountUnit") : "คน"}</span>
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: summary.diff !== 0 ? 5 : 0 }}>
-            <span style={{ color: T.muted }}>รวมเรียกเก็บ</span>
+            <span style={{ color: T.muted }}>{t ? t("finance.totalCharged") : "รวมเรียกเก็บ"}</span>
             <span style={{ fontWeight: 800 }}>{formatCurrency(summary.totalCollected)}</span>
           </div>
           {summary.diff !== 0 && (
             <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span style={{ color: T.muted }}>ส่วนต่างจากต้นทุน</span>
+              <span style={{ color: T.muted }}>{t ? t("finance.costDifferenceLabel") : "ส่วนต่างจากต้นทุน"}</span>
               <span style={{ fontWeight: 800, color: summary.diff > 0 ? T.green : T.accent }}>{formatCurrency(summary.diff, { showPlus: true })}</span>
             </div>
           )}
         </div>
       )}
-      <div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>ยอดนี้จะเรียกเก็บแทนค่าสนาม/ค่าลูกแบบเดิม และค่าใช้จ่าย 4 รายการด้านบนจะถูกบันทึกลงสรุปการเงินอัตโนมัติเมื่อจบก๊วน</div>
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 6 }}>{t ? t("finance.splitChargeNote") : "ยอดนี้จะเรียกเก็บแทนค่าสนาม/ค่าลูกแบบเดิม และค่าใช้จ่าย 4 รายการด้านบนจะถูกบันทึกลงสรุปการเงินอัตโนมัติเมื่อจบก๊วน"}</div>
     </div>
   );
 }
@@ -16251,7 +16535,11 @@ function SplitExpensesEditor({ settings, setSettings, players }) {
 // types their own number (spec C/D) — mirroring the AUTO/MANUAL pattern CourtCostSection below already
 // established for per-court hours. Purchase amount is never treated as this session's cost (spec F) — only
 // `usage.used × unit` ever is.
-function ShuttlecockCostSection({ settings, setSettings, session, setSession, matchesSoFar, actualShuttleUsed, carryForward, opening }) {
+function shuttleCountLabel(count, t) {
+  if (!t) return `${count} ลูก`;
+  return t(Number(count) === 1 ? "shuttle.count.one" : "shuttle.count.other", { count });
+}
+function ShuttlecockCostSection({ settings, setSettings, session, setSession, matchesSoFar, actualShuttleUsed, carryForward, opening, t }) {
   const eco = settings.shuttleEco || {};
   const rows = Array.isArray(eco.purchaseRows) ? eco.purchaseRows : [];
   const cf = carryForward || { qty: 0, avgCost: 0 };
@@ -16283,91 +16571,91 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
   const smallInput = { flex: 1, minWidth: 0, padding: "7px 9px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 700, outline: "none", boxSizing: "border-box" };
   return (
     <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
-      <Label>🏸 ต้นทุนลูกแบด</Label>
+      <Label>🏸 {t ? t("shuttle.title") : "ต้นทุนลูกแบด"}</Label>
 
       {/* v1.11.54 (Inventory-Lite spec B/K): ลูกยกมา */}
       <div style={{ marginBottom: 10, padding: 9, borderRadius: 10, background: T.surface2 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
-          <span style={{ fontSize: 12, fontWeight: 800, color: T.muted }}>ลูกยกมา</span>
+          <span style={{ fontSize: 12, fontWeight: 800, color: T.muted }}>{t ? t("shuttle.openingLabel") : "ลูกยกมา"}</span>
           <span style={{ fontSize: 10.5, fontWeight: 800, color: openingTouched ? T.accent : T.green, padding: "2px 7px", borderRadius: 20, background: openingTouched ? "#fdecea" : "#e2f5ec" }}>
-            {openingTouched ? "กำหนดเอง" : (cf.qty > 0 || cf.avgCost > 0) ? "ดึงจากก๊วนก่อน" : "ก๊วนใหม่"}
+            {openingTouched ? (t ? t("attendance.custom") : "กำหนดเอง") : (cf.qty > 0 || cf.avgCost > 0) ? (t ? t("shuttle.carriedFromPrevious") : "ดึงจากก๊วนก่อน") : (t ? t("shuttle.newGroupBadge") : "ก๊วนใหม่")}
           </span>
-          {openingTouched && <button onClick={resetOpening} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 10.5, fontWeight: 700 }}>ใช้ยอดจากก๊วนก่อน</button>}
+          {openingTouched && <button onClick={resetOpening} style={{ marginLeft: "auto", background: "none", border: "none", color: T.muted, fontSize: 10.5, fontWeight: 700 }}>{t ? t("shuttle.useCarriedForwardButton") : "ใช้ยอดจากก๊วนก่อน"}</button>}
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <NumField label="จำนวนลูกยกมา" value={ob.qty} onChange={setOpeningQty} />
-          <NumField label="ต้นทุนเฉลี่ยยกมา/ลูก (฿)" value={ob.avgCost} onChange={setOpeningAvgCost} />
+          <NumField label={t ? t("shuttle.opening") : "จำนวนลูกยกมา"} value={ob.qty} onChange={setOpeningQty} />
+          <NumField label={t ? t("shuttle.openingAvgCostLabel") : "ต้นทุนเฉลี่ยยกมา/ลูก (฿)"} value={ob.avgCost} onChange={setOpeningAvgCost} />
         </div>
       </div>
 
-      <div style={{ fontSize: 11.5, color: T.muted, fontWeight: 700, marginBottom: 6 }}>ซื้อเพิ่มครั้งนี้</div>
+      <div style={{ fontSize: 11.5, color: T.muted, fontWeight: 700, marginBottom: 6 }}>{t ? t("shuttle.purchase") : "ซื้อเพิ่มครั้งนี้"}</div>
       {rows.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
           {rows.map((row) => (
             <div key={row.id} style={{ padding: 9, borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7 }}>
-                <input type="text" value={row.brand} onChange={(e) => updateRow(row.id, { brand: e.target.value })} placeholder="ยี่ห้อ (ไม่บังคับ)" style={smallInput} />
+                <input type="text" value={row.brand} onChange={(e) => updateRow(row.id, { brand: e.target.value })} placeholder={t ? t("shuttle.brandOptionalPlaceholder") : "ยี่ห้อ (ไม่บังคับ)"} style={smallInput} />
                 <button onClick={() => removeRow(row.id)} style={{ background: "none", border: "none", color: T.accent, padding: 4, flexShrink: 0 }}><Trash2 size={14} /></button>
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 7 }}>
-                <NumField label="ราคาต่อหลอด (฿)" value={row.costPerTube} onChange={(v) => updateRow(row.id, { costPerTube: v })} />
-                <NumField label="จำนวนหลอด" value={row.tubes} onChange={(v) => updateRow(row.id, { tubes: v })} />
+                <NumField label={t ? t("shuttle.tubePriceBahtLabel") : "ราคาต่อหลอด (฿)"} value={row.costPerTube} onChange={(v) => updateRow(row.id, { costPerTube: v })} />
+                <NumField label={t ? t("shuttle.tubeCount") : "จำนวนหลอด"} value={row.tubes} onChange={(v) => updateRow(row.id, { tubes: v })} />
               </div>
-              <NumField label="จำนวนลูกต่อหลอด" value={row.shuttlesPerTube} onChange={(v) => updateRow(row.id, { shuttlesPerTube: v })} />
+              <NumField label={t ? t("shuttle.perTube") : "จำนวนลูกต่อหลอด"} value={row.shuttlesPerTube} onChange={(v) => updateRow(row.id, { shuttlesPerTube: v })} />
             </div>
           ))}
         </div>
       )}
-      {rows.length === 0 && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "6px 0", marginBottom: 8 }}>ยังไม่มีรายการลูกแบด</div>}
-      <button onClick={addRow} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}><Plus size={14} /> เพิ่มรายการลูกแบด</button>
+      {rows.length === 0 && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "6px 0", marginBottom: 8 }}>{t ? t("shuttle.noPurchaseRowsYet") : "ยังไม่มีรายการลูกแบด"}</div>}
+      <button onClick={addRow} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 10 }}><Plus size={14} /> {t ? t("shuttle.addPurchaseRowButton") : "เพิ่มรายการลูกแบด"}</button>
 
       {/* v1.11.54 (Inventory-Lite spec K): สรุปต้นทุนลูกแบด — opening + this session's purchases combined. */}
       <div style={{ paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 4 }}>
-          <span>ลูกยกมา</span><span>{finance.openingQty} ลูก</span>
+          <span>{t ? t("shuttle.openingLabel") : "ลูกยกมา"}</span><span>{shuttleCountLabel(finance.openingQty, t)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 4 }}>
-          <span>ซื้อเพิ่มครั้งนี้</span><span>{finance.purchaseQty} ลูก</span>
+          <span>{t ? t("shuttle.purchase") : "ซื้อเพิ่มครั้งนี้"}</span><span>{shuttleCountLabel(finance.purchaseQty, t)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 8 }}>
-          <span>ลูกพร้อมใช้ทั้งหมด</span><span>{finance.totalAvailable} ลูก</span>
+          <span>{t ? t("shuttle.available") : "ลูกพร้อมใช้ทั้งหมด"}</span><span>{shuttleCountLabel(finance.totalAvailable, t)}</span>
         </div>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>
-        <span style={{ color: T.muted }}>ต้นทุนเฉลี่ย/ลูก</span><span style={{ fontWeight: 800 }}>{formatCurrency(finance.weightedAvgCost)}</span>
+        <span style={{ color: T.muted }}>{t ? t("shuttle.perUnitAverageCostLabel") : "ต้นทุนเฉลี่ย/ลูก"}</span><span style={{ fontWeight: 800 }}>{formatCurrency(finance.weightedAvgCost)}</span>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, marginBottom: 6 }}>
-        <span>เกมที่จบแล้ว</span><span>{matchesSoFar} เกม</span>
+        <span>{t ? t("shuttle.matchesDoneLabel") : "เกมที่จบแล้ว"}</span><span>{matchesSoFar} {t ? t("ranking.cardGamesLabel") : "เกม"}</span>
       </div>
       {/* v1.11.55 (Per-Match Shuttle Usage spec I): "จำนวนลูกที่ใช้" is now a READ-ONLY summary — the real
           source of truth is each match's own "ลูก" field in the วันนี้ tab's match table (SUM over only
           matches marked "จบแล้ว"). No editable input/AUTO-MANUAL badge/reset-button here anymore. */}
       <div style={{ marginBottom: 6 }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, marginBottom: 3 }}>
-          <span style={{ color: T.muted }}>จำนวนลูกที่ใช้จริง</span><span>{usage.used} ลูก</span>
+          <span style={{ color: T.muted }}>{t ? t("shuttle.usedActual") : "จำนวนลูกที่ใช้จริง"}</span><span>{shuttleCountLabel(usage.used, t)}</span>
         </div>
-        <div style={{ fontSize: 10.5, color: T.muted }}>อิงจากจำนวนลูกที่บันทึกในแต่ละเกม</div>
+        <div style={{ fontSize: 10.5, color: T.muted }}>{t ? t("shuttle.usageNote") : "อิงจากจำนวนลูกที่บันทึกในแต่ละเกม"}</div>
       </div>
       {/* v1.11.54 (Inventory-Lite spec F): explicit, visible warning — never silently capped. Blocking End
           Session on this is deliberately NOT done (spec F: only do so if it can never risk reintroducing
           the End Session persistence crash fixed in v1.11.44/46/48 — this stays a pure display concern). */}
       {finance.overUsed && (
         <div style={{ fontSize: 11.5, fontWeight: 700, color: "#c0392b", background: "#fdecea", borderRadius: 8, padding: "7px 9px", marginBottom: 8 }}>
-          ⚠️ จำนวนลูกที่ใช้มากกว่าลูกที่มีอยู่ {finance.overUsedBy} ลูก
+          ⚠️ {t ? t("shuttle.overUsedWarningLine", { count: finance.overUsedBy }) : `จำนวนลูกที่ใช้มากกว่าลูกที่มีอยู่ ${finance.overUsedBy} ลูก`}
         </div>
       )}
-      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{usage.used} ลูก × {formatCurrency(finance.weightedAvgCost)}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{shuttleCountLabel(usage.used, t)} × {formatCurrency(finance.weightedAvgCost)}</div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, paddingTop: 8, borderTop: `1px solid ${T.border}`, marginBottom: 10 }}>
-        <span style={{ color: T.muted, fontWeight: 700 }}>รวมต้นทุนลูกแบด</span><span>{formatCurrency(cost)}</span>
+        <span style={{ color: T.muted, fontWeight: 700 }}>{t ? t("shuttle.totalCostLabel") : "รวมต้นทุนลูกแบด"}</span><span>{formatCurrency(cost)}</span>
       </div>
 
       {/* v1.11.54 (Inventory-Lite spec H/I): ลูกคงเหลือ — carries forward as the next session's (same ก๊วน
           name) opening balance once End Session freezes it into shuttleCostSnapshot.closingQty/closingAvgCost. */}
       <div style={{ paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 700, marginBottom: 3 }}>
-          <span style={{ color: T.muted }}>ลูกคงเหลือ</span><span>{finance.closingQty} ลูก @ {formatCurrency(finance.closingAvgCost)}</span>
+          <span style={{ color: T.muted }}>{t ? t("shuttle.remaining") : "ลูกคงเหลือ"}</span><span>{shuttleCountLabel(finance.closingQty, t)} @ {formatCurrency(finance.closingAvgCost)}</span>
         </div>
-        <div style={{ fontSize: 10.5, color: T.muted }}>จะยกยอดนี้ไปก๊วนครั้งถัดไป</div>
+        <div style={{ fontSize: 10.5, color: T.muted }}>{t ? t("shuttle.carryForwardNote") : "จะยกยอดนี้ไปก๊วนครั้งถัดไป"}</div>
       </div>
     </div>
   );
@@ -16383,7 +16671,7 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
 // hours) and a separately-editable "billable hours" that can differ from its actual usage duration (venue
 // free/bonus court-time). See reconcileCourtHours/buildCourtCostRows's own v1.12.12 comments for the full
 // storage-model rationale — this component is purely the editing UI on top of that.
-function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, courtLabels, durationHours, session, setSession }) {
+function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, courtLabels, durationHours, session, setSession, t }) {
   const rate = (settings.courtCost && settings.courtCost.ratePerHour) || 0;
   const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), rate);
   const total = totalCourtCostFromRows(rows);
@@ -16420,26 +16708,26 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
   };
   return (
     <div style={{ marginBottom: 16, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
-      <Label>🏟️ ต้นทุนค่าคอร์ด</Label>
+      <Label>🏟️ {t ? t("court.title") : "ต้นทุนค่าคอร์ด"}</Label>
       <div style={{ marginBottom: 10 }}>
-        <NumField label="ค่าสนาม/ชั่วโมง (฿)" value={rate} onChange={setRate} />
+        <NumField label={t ? t("court.ratePerHourLabel") : "ค่าสนาม/ชั่วโมง (฿)"} value={rate} onChange={setRate} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
         {rows.map((row) => (
           <div key={row.court} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "9px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span style={{ fontSize: 12.5, fontWeight: 800, flexShrink: 0 }}>สนาม {courtLabelFor(courtLabels, row.court)}</span>
-              <span style={{ fontSize: 10.5, color: T.muted, marginLeft: "auto", flexShrink: 0 }}>{row.source === "manual" ? "แก้ไขแล้ว" : "อัตโนมัติ"}</span>
+              <span style={{ fontSize: 12.5, fontWeight: 800, flexShrink: 0 }}>{t ? t("match.colCourt") : "สนาม"} {courtLabelFor(courtLabels, row.court)}</span>
+              <span style={{ fontSize: 10.5, color: T.muted, marginLeft: "auto", flexShrink: 0 }}>{row.source === "manual" ? (t ? t("court.manualEditedLabel") : "แก้ไขแล้ว") : (t ? t("court.autoLabel") : "อัตโนมัติ")}</span>
               <span style={{ fontSize: 13, fontWeight: 800, flexShrink: 0 }}>{formatCurrency(row.cost)}</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
               <input type="time" value={row.startAt || ""} onChange={(e) => setCourtStartAt(row.court, e.target.value)} style={{ padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none" }} />
               <span style={{ fontSize: 11, color: T.muted }}>→</span>
               <input type="time" value={row.endAt || ""} onChange={(e) => setCourtEndAt(row.court, e.target.value)} style={{ padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none" }} />
-              <span style={{ fontSize: 11, color: T.muted, marginLeft: 4 }}>ใช้จริง {Math.round(row.actualDurationHours * 100) / 100} ชม.</span>
+              <span style={{ fontSize: 11, color: T.muted, marginLeft: 4 }}>{t ? t("court.actualUsedPrefix") : "ใช้จริง"} {Math.round(row.actualDurationHours * 100) / 100} {t ? t("court.hourUnit") : "ชม."}</span>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 11.5, color: T.muted, flexShrink: 0 }}>คิดเงินจริง</span>
+              <span style={{ fontSize: 11.5, color: T.muted, flexShrink: 0 }}>{t ? t("court.billableLabel") : "คิดเงินจริง"}</span>
               <input
                 type="number"
                 value={row.billableHours}
@@ -16447,19 +16735,19 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
                 onFocus={(e) => e.target.select()}
                 style={{ width: 52, padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 12.5, fontWeight: 800, outline: "none", flexShrink: 0 }}
               />
-              <span style={{ fontSize: 11, color: T.muted }}>ชม. × ฿{rate}</span>
+              <span style={{ fontSize: 11, color: T.muted }}>{t ? t("court.hourUnit") : "ชม."} × ฿{rate}</span>
             </div>
           </div>
         ))}
       </div>
       <button onClick={addCourt} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>
-        <Plus size={14} /> เปิดสนามเพิ่ม
+        <Plus size={14} /> {t ? t("court.addCourtButton") : "เปิดสนามเพิ่ม"}
       </button>
       <div style={{ fontSize: 11, color: T.muted, marginBottom: 8 }}>
-        เวลาเริ่มต้นของแต่ละสนามอิงจากเวลาก๊วน (ตั้งค่าใน "ตั้งค่าก๊วน"/"วันนี้") จนกว่าจะแก้เอง — สนามที่เปิดเพิ่มระหว่างก๊วนจะเริ่มจากเวลาปัจจุบันโดยอัตโนมัติ และแก้ไขเวลา/ชั่วโมงที่คิดเงินจริงได้ทุกเมื่อ
+        {t ? t("court.scheduleNote") : `เวลาเริ่มต้นของแต่ละสนามอิงจากเวลาก๊วน (ตั้งค่าใน "ตั้งค่าก๊วน"/"วันนี้") จนกว่าจะแก้เอง — สนามที่เปิดเพิ่มระหว่างก๊วนจะเริ่มจากเวลาปัจจุบันโดยอัตโนมัติ และแก้ไขเวลา/ชั่วโมงที่คิดเงินจริงได้ทุกเมื่อ`}
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 4, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        <span style={{ color: T.muted, fontWeight: 700 }}>รวมค่าคอร์ด</span><span>{formatCurrency(total)}</span>
+        <span style={{ color: T.muted, fontWeight: 700 }}>{t ? t("court.totalLabel") : "รวมค่าคอร์ด"}</span><span>{formatCurrency(total)}</span>
       </div>
     </div>
   );
@@ -16467,7 +16755,7 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
 // v1.11.50 (spec E): free-form "ค่าใช้จ่ายอื่น ๆ" list editor — [{id, name, amount}], no category/date (those
 // belong to the full ExpenseListEditor used for History/custom-cost-model rows; this is a lighter, purpose-
 // built list so the settings sheet doesn't get cluttered per spec section M).
-function OtherExpensesEditor({ items, setSettings }) {
+function OtherExpensesEditor({ items, setSettings, t }) {
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
@@ -16475,6 +16763,9 @@ function OtherExpensesEditor({ items, setSettings }) {
   const add = () => {
     const amt = Number(amount) || 0;
     if (amt <= 0) return;
+    // NOTE: this fallback name is PERSISTED DATA (settings.otherExpenses[].name), not display text — it must
+    // stay the fixed Thai literal regardless of UI locale, per the standing rule that language switching must
+    // never alter stored business data. Only the placeholder/label text above this is translated.
     setSettings((s) => ({ ...s, otherExpenses: [...(s.otherExpenses || []), { id: uid(), name: name.trim() || "ค่าใช้จ่ายอื่น", amount: amt }] }));
     setName(""); setAmount(""); setAdding(false);
   };
@@ -16482,13 +16773,13 @@ function OtherExpensesEditor({ items, setSettings }) {
   const remove = (id) => setSettings((s) => ({ ...s, otherExpenses: (s.otherExpenses || []).filter((it) => it.id !== id) }));
   return (
     <div style={{ marginBottom: 4, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
-      <Label>🧾 ค่าใช้จ่ายอื่น ๆ</Label>
-      {list.length === 0 && !adding && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "6px 0" }}>ยังไม่มีรายการ</div>}
+      <Label>🧾 {t ? t("finance.otherExpensesSectionTitle") : "ค่าใช้จ่ายอื่น ๆ"}</Label>
+      {list.length === 0 && !adding && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "6px 0" }}>{t ? t("finance.noEntriesYet") : "ยังไม่มีรายการ"}</div>}
       {list.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
           {list.map((it) => (
             <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
-              <input type="text" value={it.name} onChange={(e) => update(it.id, { name: e.target.value })} placeholder="ชื่อค่าใช้จ่าย" style={{ flex: 1, minWidth: 0, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700, outline: "none", boxSizing: "border-box" }} />
+              <input type="text" value={it.name} onChange={(e) => update(it.id, { name: e.target.value })} placeholder={t ? t("finance.expenseNamePlaceholder") : "ชื่อค่าใช้จ่าย"} style={{ flex: 1, minWidth: 0, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700, outline: "none", boxSizing: "border-box" }} />
               <span style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 13, fontWeight: 800, flexShrink: 0 }}>
                 ฿<input type="number" value={it.amount} onChange={(e) => update(it.id, { amount: Number(e.target.value) || 0 })} onFocus={(e) => e.target.select()} style={{ width: 64, padding: "6px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 800, outline: "none" }} />
               </span>
@@ -16499,18 +16790,18 @@ function OtherExpensesEditor({ items, setSettings }) {
       )}
       {adding ? (
         <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 10 }}>
-          <input type="text" placeholder="ชื่อค่าใช้จ่าย เช่น น้ำดื่ม" value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
-          <input type="number" placeholder="จำนวนเงิน (฿)" value={amount} onChange={(e) => setAmount(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
+          <input type="text" placeholder={t ? t("finance.expenseNameExamplePlaceholder") : "ชื่อค่าใช้จ่าย เช่น น้ำดื่ม"} value={name} onChange={(e) => setName(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
+          <input type="number" placeholder={t ? t("finance.amountBahtPlaceholder") : "จำนวนเงิน (฿)"} value={amount} onChange={(e) => setAmount(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={add} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>บันทึก</button>
-            <button onClick={() => { setAdding(false); setName(""); setAmount(""); }} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}>ยกเลิก</button>
+            <button onClick={add} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>{t ? t("common.save") : "บันทึก"}</button>
+            <button onClick={() => { setAdding(false); setName(""); setAmount(""); }} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}>{t ? t("common.cancel") : "ยกเลิก"}</button>
           </div>
         </div>
       ) : (
-        <button onClick={() => setAdding(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><Plus size={14} /> เพิ่มค่าใช้จ่าย</button>
+        <button onClick={() => setAdding(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><Plus size={14} /> {t ? t("finance.addExpense") : "เพิ่มค่าใช้จ่าย"}</button>
       )}
       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        <span style={{ color: T.muted, fontWeight: 700 }}>ค่าใช้จ่ายอื่นรวม</span><span>{formatCurrency(otherExpensesTotal(list))}</span>
+        <span style={{ color: T.muted, fontWeight: 700 }}>{t ? t("finance.otherExpensesTotalLabel") : "ค่าใช้จ่ายอื่นรวม"}</span><span>{formatCurrency(otherExpensesTotal(list))}</span>
       </div>
     </div>
   );
@@ -16524,7 +16815,7 @@ function OtherExpensesEditor({ items, setSettings }) {
 // change actual attendance/matchmaking/payment records (spec A) — session.estimate is a session-scoped
 // planning field, same storage pattern as session.courtHours/shuttleUsage (see normSession), always resets
 // to a clean slate on a brand new session.
-function FinancialEstimatePanel({ settings, players, courtCount, session, setSession, history, current, mode, openingBalance }) {
+function FinancialEstimatePanel({ settings, players, courtCount, session, setSession, history, current, mode, openingBalance, t }) {
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.51 (spec J): reflects the new per-court hours × rate total — updates immediately when any court's
   // hours are edited (session.courtHours), never the old single-figure ratePerHour×courtCount×duration. Court
@@ -16566,23 +16857,23 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
   const profitEstimate = Math.round((revenueEstimate - expenseTotal) * 100) / 100;
   return (
     <div>
-      <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>ประมาณการสำหรับวางแผน (ไม่ใช่ยอดจริง) — ยอดจริงตอนนี้ดูได้ที่หน้า "การชำระเงิน" ยอดจริงสุดท้ายดูได้เมื่อ "จบก๊วน"</div>
+      <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>{t ? t("finance.planningEstimateNote") : `ประมาณการสำหรับวางแผน (ไม่ใช่ยอดจริง) — ยอดจริงตอนนี้ดูได้ที่หน้า "การชำระเงิน" ยอดจริงสุดท้ายดูได้เมื่อ "จบก๊วน"`}</div>
       <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
-        <NumField label="จำนวนผู้เล่นคาดการณ์" value={expectedPlayers} onChange={setExpectedPlayers} />
-        <NumField label="เกมเฉลี่ยต่อคน" value={expectedGamesPerPerson} onChange={setExpectedGamesPerPerson} />
+        <NumField label={t ? t("finance.expectedPlayersLabel") : "จำนวนผู้เล่นคาดการณ์"} value={expectedPlayers} onChange={setExpectedPlayers} />
+        <NumField label={t ? t("finance.expectedGamesPerPersonLabel") : "เกมเฉลี่ยต่อคน"} value={expectedGamesPerPerson} onChange={setExpectedGamesPerPerson} />
       </div>
-      <div style={{ fontSize: 10.5, color: T.muted, marginTop: -6, marginBottom: 10 }}>≈ {expectedMatches} เกมที่คาดว่าจะเล่น ({mode === "singles" ? "เดี่ยว 2 คน/เกม" : "คู่ 4 คน/เกม"})</div>
+      <div style={{ fontSize: 10.5, color: T.muted, marginTop: -6, marginBottom: 10 }}>{t ? t("finance.expectedMatchesLine", { count: expectedMatches, modeHint: mode === "singles" ? t("finance.singlesModeHint") : t("finance.doublesModeHint") }) : `≈ ${expectedMatches} เกมที่คาดว่าจะเล่น (${mode === "singles" ? "เดี่ยว 2 คน/เกม" : "คู่ 4 คน/เกม"})`}</div>
       <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 11, padding: 12 }}>
-        <BillRow label="รายได้คาดการณ์" v={revenueEstimate} kind="revenue" />
-        <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, margin: "8px 0 4px" }}>ค่าใช้จ่ายคาดการณ์</div>
-        <BillRow label="ค่าคอร์ด" v={courtCostTotal} kind="expense" />
-        <BillRow label="ต้นทุนลูกแบด" v={shuttleEstimate} kind="expense" />
-        <BillRow label="ค่าใช้จ่ายอื่น" v={otherTotal} kind="expense" />
+        <BillRow label={t ? t("finance.estimatedRevenue") : "รายได้คาดการณ์"} v={revenueEstimate} kind="revenue" />
+        <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, margin: "8px 0 4px" }}>{t ? t("finance.estimatedExpenses") : "ค่าใช้จ่ายคาดการณ์"}</div>
+        <BillRow label={t ? t("finance.courtCostBillRowLabel") : "ค่าคอร์ด"} v={courtCostTotal} kind="expense" />
+        <BillRow label={t ? t("shuttle.title") : "ต้นทุนลูกแบด"} v={shuttleEstimate} kind="expense" />
+        <BillRow label={t ? t("finance.otherCost") : "ค่าใช้จ่ายอื่น"} v={otherTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, marginTop: 4, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
-          <span>รวมค่าใช้จ่าย</span><span style={{ color: T.accent }}>{formatCurrency(expenseTotal)}</span>
+          <span>{t ? t("finance.sumExpensesLabel") : "รวมค่าใช้จ่าย"}</span><span style={{ color: T.accent }}>{formatCurrency(expenseTotal)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-          <span>{profitEstimate >= 0 ? "กำไรคาดการณ์" : "ขาดทุนคาดการณ์"}</span>
+          <span>{profitEstimate >= 0 ? (t ? t("finance.estimatedProfitLabel") : "กำไรคาดการณ์") : (t ? t("finance.estimatedLossLabel") : "ขาดทุนคาดการณ์")}</span>
           <span style={{ color: profitEstimate >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(profitEstimate))}</span>
         </div>
       </div>
@@ -16596,7 +16887,7 @@ function FinancialEstimatePanel({ settings, players, courtCount, session, setSes
 // Overlay/backdrop, no duplicated payment/cost system. FinanceSettingsSheet (the existing standalone modal
 // opened from the ชำระเงิน tab) keeps its exact same props/call site/behavior; it is now just
 // <Overlay><heading/><FinanceSettingsBody/></Overlay>.
-function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }) {
+function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, t }) {
   const [open, setOpen] = useState("payment"); // "payment" | "cost" | "estimate" | null — v1.12.1: "prize" moved to RewardSettingsSheet (Advanced Settings)
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   // v1.11.52 (spec C): "จำนวนลูกที่ใช้"'s AUTO baseline — the SAME live completed-match definition already
@@ -16629,29 +16920,29 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCour
           billed to players, Revenue side of computeBill) vs 💸 ต้นทุนก๊วน (below — the organizer's own real
           out-of-pocket costs, configured HERE now instead of only after the fact in the การเงิน tab). */}
       <button onClick={() => toggle("payment")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "payment" ? 0 : 8 }}>
-        <Wallet size={15} color={T.muted} /> 💳 รายได้ — เรียกเก็บจากผู้เล่น
+        <Wallet size={15} color={T.muted} /> 💳 {t ? t("finance.revenueSectionTitle") : "รายได้ — เรียกเก็บจากผู้เล่น"}
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "payment" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "payment" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
           {/* v1.9.4: รูปแบบคิดค่าใช้จ่าย — progressive disclosure, only the selected model's fields show below.
               "simple" = the original ค่าสนาม/ค่าลูก fields, unchanged behavior/position for existing groups. */}
-          <Label>รูปแบบคิดค่าใช้จ่าย</Label>
+          <Label>{t ? t("finance.costModelLabel") : "รูปแบบคิดค่าใช้จ่าย"}</Label>
           <div style={{ marginBottom: 14 }}>
-            <Seg options={[["splitExpenses", "หารค่าใช้จ่าย"], ["simple", "แบบง่าย"], ["perPerson", "รายคน"]]} value={model === "perCourt" || model === "hourly" || model === "custom" ? "" : model} onChange={(v) => setSettings((s) => ({ ...s, costModel: v }))} />
+            <Seg options={[["splitExpenses", t ? t("finance.chargeMode.split") : "หารค่าใช้จ่าย"], ["simple", t ? t("finance.chargeMode.simple") : "แบบง่าย"], ["perPerson", t ? t("finance.chargeMode.perPerson") : "รายคน"]]} value={model === "perCourt" || model === "hourly" || model === "custom" ? "" : model} onChange={(v) => setSettings((s) => ({ ...s, costModel: v }))} />
             <div style={{ marginTop: 6 }}>
-              <Seg options={[["perCourt", "แยกรายสนาม"], ["hourly", "รายชั่วโมง"], ["custom", "กำหนดเอง"]]} value={["perCourt", "hourly", "custom"].includes(model) ? model : ""} onChange={(v) => setSettings((s) => ({ ...s, costModel: v }))} />
+              <Seg options={[["perCourt", t ? t("finance.chargeMode.perCourt") : "แยกรายสนาม"], ["hourly", t ? t("finance.chargeMode.hourly") : "รายชั่วโมง"], ["custom", t ? t("finance.chargeMode.custom") : "กำหนดเอง"]]} value={["perCourt", "hourly", "custom"].includes(model) ? model : ""} onChange={(v) => setSettings((s) => ({ ...s, costModel: v }))} />
             </div>
           </div>
 
           {model === "splitExpenses" && (
-            <SplitExpensesEditor settings={settings} setSettings={setSettings} players={players || []} />
+            <SplitExpensesEditor settings={settings} setSettings={setSettings} players={players || []} t={t} />
           )}
 
           {model === "simple" && (<>
-            <Label>อัตราเรียกเก็บจากผู้เล่น</Label>
+            <Label>{t ? t("finance.chargeRateFromPlayersLabel") : "อัตราเรียกเก็บจากผู้เล่น"}</Label>
             <div style={{ display: "flex", gap: 10, marginBottom: 6 }}>
-              <NumField label="ค่าสนาม/คน (฿)" value={settings.court} onChange={(v) => setSettings((s) => ({ ...s, court: v }))} />
+              <NumField label={t ? t("finance.simpleCourtFeePerPersonLabel") : "ค่าสนาม/คน (฿)"} value={settings.court} onChange={(v) => setSettings((s) => ({ ...s, court: v }))} />
             </div>
             {/* v1.12.25 (P0 Mixed Singles + Doubles): the old single "ค่าลูก/เกม" field is now split into a
                 doubles rate and a singles rate, so a group that plays both in the same session can charge
@@ -16660,27 +16951,27 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCour
                 organizer explicitly sets one — so an existing group's saved rate keeps showing/working
                 exactly as before, with zero action required, and nothing about historical bills changes
                 unless they deliberately configure a different singles rate. */}
-            <Label>ค่าลูก/คน/เกม (฿)</Label>
+            <Label>{t ? t("finance.simpleShuttleFeePerGameLabel") : "ค่าลูก/คน/เกม (฿)"}</Label>
             <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-              <NumField label="เกมคู่" value={settings.shuttleDoubles ?? settings.shuttle ?? 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleDoubles: v }))} />
-              <NumField label="เกมเดี่ยว" value={settings.shuttleSingles ?? settings.shuttle ?? 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleSingles: v }))} />
+              <NumField label={t ? t("finance.doublesGameLabel") : "เกมคู่"} value={settings.shuttleDoubles ?? settings.shuttle ?? 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleDoubles: v }))} />
+              <NumField label={t ? t("finance.singlesGameLabel") : "เกมเดี่ยว"} value={settings.shuttleSingles ?? settings.shuttle ?? 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleSingles: v }))} />
             </div>
           </>)}
 
           {model === "perPerson" && (
             <div style={{ marginBottom: 10 }}>
-              <NumField label="ราคาต่อคน (฿) — เหมาแทนค่าสนาม+ค่าลูก" value={settings.perPersonRate || 0} onChange={(v) => setSettings((s) => ({ ...s, perPersonRate: v }))} />
-              <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>คำนวณรายได้จากจำนวนผู้เล่นที่เข้าร่วม ตามระบบเรียกเก็บเงินเดิม</div>
+              <NumField label={t ? t("finance.perPersonRateLabel") : "ราคาต่อคน (฿) — เหมาแทนค่าสนาม+ค่าลูก"} value={settings.perPersonRate || 0} onChange={(v) => setSettings((s) => ({ ...s, perPersonRate: v }))} />
+              <div style={{ fontSize: 11, color: T.muted, marginTop: 6 }}>{t ? t("finance.perPersonRateNote") : "คำนวณรายได้จากจำนวนผู้เล่นที่เข้าร่วม ตามระบบเรียกเก็บเงินเดิม"}</div>
             </div>
           )}
 
           {model === "perCourt" && (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>ค่าคอร์ทของแต่ละสนาม (฿) — บันทึกเป็นค่าใช้จ่ายอัตโนมัติเมื่อจบก๊วน</div>
+              <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{t ? t("finance.perCourtRateNote") : "ค่าคอร์ทของแต่ละสนาม (฿) — บันทึกเป็นค่าใช้จ่ายอัตโนมัติเมื่อจบก๊วน"}</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {Array.from({ length: courtCount || 1 }, (_, i) => i + 1).map((c) => (
                   <div key={c} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 700, minWidth: 64 }}>สนาม {courtLabelFor(courtLabels || [], c)}</span>
+                    <span style={{ fontSize: 12.5, fontWeight: 700, minWidth: 64 }}>{t ? t("match.colCourt") : "สนาม"} {courtLabelFor(courtLabels || [], c)}</span>
                     <input type="number" placeholder="0" value={courtRateFor(c)} onChange={(e) => setCourtRate(c, Number(e.target.value) || 0)} style={{ flex: 1, padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700, outline: "none", boxSizing: "border-box" }} />
                   </div>
                 ))}
@@ -16691,44 +16982,44 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCour
           {model === "hourly" && (
             <div style={{ marginBottom: 10 }}>
               <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-                <NumField label="จำนวนสนาม" value={settings.hourly?.courts || 0} onChange={(v) => setSettings((s) => ({ ...s, hourly: { ...(s.hourly || {}), courts: v } }))} />
-                <NumField label="ราคา/ชั่วโมง (฿)" value={settings.hourly?.rate || 0} onChange={(v) => setSettings((s) => ({ ...s, hourly: { ...(s.hourly || {}), rate: v } }))} />
+                <NumField label={t ? t("settings.courtCount") : "จำนวนสนาม"} value={settings.hourly?.courts || 0} onChange={(v) => setSettings((s) => ({ ...s, hourly: { ...(s.hourly || {}), courts: v } }))} />
+                <NumField label={t ? t("finance.hourlyRateLabel") : "ราคา/ชั่วโมง (฿)"} value={settings.hourly?.rate || 0} onChange={(v) => setSettings((s) => ({ ...s, hourly: { ...(s.hourly || {}), rate: v } }))} />
               </div>
-              <NumField label="จำนวนชั่วโมง" value={settings.hourly?.hours || 0} onChange={(v) => setSettings((s) => ({ ...s, hourly: { ...(s.hourly || {}), hours: v } }))} />
+              <NumField label={t ? t("finance.hourlyHoursLabel") : "จำนวนชั่วโมง"} value={settings.hourly?.hours || 0} onChange={(v) => setSettings((s) => ({ ...s, hourly: { ...(s.hourly || {}), hours: v } }))} />
             </div>
           )}
 
           {(model === "perCourt" || model === "hourly") && (
             <div style={{ marginBottom: 10, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
-              <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>ค่าลูกแบด (ไม่บังคับ — รวมเป็นค่าใช้จ่ายอีกรายการ)</div>
+              <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{t ? t("finance.hourlyShuttleOptionalNote") : "ค่าลูกแบด (ไม่บังคับ — รวมเป็นค่าใช้จ่ายอีกรายการ)"}</div>
               <div style={{ display: "flex", gap: 10 }}>
-                <NumField label="จำนวนลูก" value={settings.shuttleCalc?.qty || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleCalc: { ...(s.shuttleCalc || {}), qty: v } }))} />
-                <NumField label="ราคา/ลูก (฿)" value={settings.shuttleCalc?.pricePerUnit || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleCalc: { ...(s.shuttleCalc || {}), pricePerUnit: v } }))} />
+                <NumField label={t ? t("finance.shuttleQtyLabel") : "จำนวนลูก"} value={settings.shuttleCalc?.qty || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleCalc: { ...(s.shuttleCalc || {}), qty: v } }))} />
+                <NumField label={t ? t("finance.shuttlePricePerUnitLabel") : "ราคา/ลูก (฿)"} value={settings.shuttleCalc?.pricePerUnit || 0} onChange={(v) => setSettings((s) => ({ ...s, shuttleCalc: { ...(s.shuttleCalc || {}), pricePerUnit: v } }))} />
               </div>
             </div>
           )}
 
           {model === "custom" && (
             <div style={{ marginBottom: 10 }}>
-              <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>รายการค่าใช้จ่าย — บันทึกเป็นค่าใช้จ่ายอัตโนมัติเมื่อจบก๊วน</div>
+              <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{t ? t("finance.customExpenseListNote") : "รายการค่าใช้จ่าย — บันทึกเป็นค่าใช้จ่ายอัตโนมัติเมื่อจบก๊วน"}</div>
               <ExpenseListEditor items={settings.customCostRows || []} onAdd={setCustomRow} onUpdate={updateCustomRow} onRemove={removeCustomRow} categories={EXPENSE_CATEGORIES} />
             </div>
           )}
 
-          <div style={{ marginBottom: 16 }}><NumField label="อื่น ๆ ที่เรียกเก็บรวม (หารเท่ากัน) (฿)" value={settings.other || 0} onChange={(v) => setSettings((s) => ({ ...s, other: v }))} /></div>
-          <Label>QR รับเงิน</Label>
+          <div style={{ marginBottom: 16 }}><NumField label={t ? t("finance.otherFlatChargeLabel") : "อื่น ๆ ที่เรียกเก็บรวม (หารเท่ากัน) (฿)"} value={settings.other || 0} onChange={(v) => setSettings((s) => ({ ...s, other: v }))} /></div>
+          <Label>{t ? t("finance.paymentQr") : "QR รับเงิน"}</Label>
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 6 }}>
             {settings.qr
               ? <img src={settings.qr} alt="QR" style={{ width: 72, height: 72, borderRadius: 10, objectFit: "contain", background: "#fff", border: `1px solid ${T.border}` }} />
               : <div style={{ width: 72, height: 72, borderRadius: 10, background: T.surface2, border: `1px dashed ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center", color: T.muted }}><QrCode size={26} /></div>}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <button onClick={() => qrRef.current.click()} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 700 }}><Upload size={14} /> {settings.qr ? "เปลี่ยน QR" : "แนบ QR"}</button>
-              {settings.qr && <button onClick={() => setSettings((s) => ({ ...s, qr: null }))} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, background: "none", border: `1px solid ${T.border}`, color: T.accent, fontSize: 12.5, fontWeight: 700 }}><Trash2 size={14} /> ลบ QR</button>}
+              <button onClick={() => qrRef.current.click()} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 700 }}><Upload size={14} /> {settings.qr ? (t ? t("finance.changeQr") : "เปลี่ยน QR") : (t ? t("finance.attachQr") : "แนบ QR")}</button>
+              {settings.qr && <button onClick={() => setSettings((s) => ({ ...s, qr: null }))} style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 12px", borderRadius: 10, background: "none", border: `1px solid ${T.border}`, color: T.accent, fontSize: 12.5, fontWeight: 700 }}><Trash2 size={14} /> {t ? t("finance.removeQr") : "ลบ QR"}</button>}
             </div>
           </div>
           <div style={{ marginBottom: 6 }}>
-            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>เลขบัญชี / พร้อมเพย์ (สำหรับคนที่โอนเอง)</div>
-            <textarea value={settings.bank || ""} onChange={(e) => setSettings((s) => ({ ...s, bank: e.target.value }))} placeholder="เช่น ธ.กสิกร 123-4-56789-0 นาย A / พร้อมเพย์ 08x-xxx-xxxx" rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, outline: "none", boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }} />
+            <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 5 }}>{t ? t("finance.bankTransferNote") : "เลขบัญชี / พร้อมเพย์ (สำหรับคนที่โอนเอง)"}</div>
+            <textarea value={settings.bank || ""} onChange={(e) => setSettings((s) => ({ ...s, bank: e.target.value }))} placeholder={t ? t("finance.bankDetailsPlaceholder") : "เช่น ธ.กสิกร 123-4-56789-0 นาย A / พร้อมเพย์ 08x-xxx-xxxx"} rows={2} style={{ width: "100%", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, outline: "none", boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }} />
           </div>
         </div>
       )}
@@ -16738,26 +17029,26 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCour
           (moved here from the รายได้ section above, "ราคาขายต่อลูก" removed per spec B) + new ต้นทุนค่าคอร์ด +
           new ค่าใช้จ่ายอื่น ๆ. */}
       <button onClick={() => toggle("cost")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "cost" ? 0 : 8 }}>
-        <Wallet size={15} color={T.muted} /> 💸 ต้นทุนก๊วน
+        <Wallet size={15} color={T.muted} /> 💸 {t ? t("finance.costSectionTitle") : "ต้นทุนก๊วน"}
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "cost" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "cost" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} actualShuttleUsed={actualShuttleUsed} carryForward={shuttleOpeningCarryForward} opening={shuttleOpeningResolved} />
-          <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} />
-          <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} />
+          <ShuttlecockCostSection settings={settings} setSettings={setSettings} session={session} setSession={setSession} matchesSoFar={matchesSoFar} actualShuttleUsed={actualShuttleUsed} carryForward={shuttleOpeningCarryForward} opening={shuttleOpeningResolved} t={t} />
+          <CourtCostSection settings={settings} setSettings={setSettings} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} durationHours={durationHours} session={session} setSession={setSession} t={t} />
+          <OtherExpensesEditor items={settings.otherExpenses} setSettings={setSettings} t={t} />
         </div>
       )}
 
       {/* v1.11.50 (spec F): 📊 ประมาณการก๊วน — read-only summary, presentation only (never feeds back into
           any stored value). */}
       <button onClick={() => toggle("estimate")} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: open === "estimate" ? 0 : 8 }}>
-        <span style={{ fontSize: 15 }}>📊</span> ประมาณการก๊วน
+        <span style={{ fontSize: 15 }}>📊</span> {t ? t("finance.estimate") : "ประมาณการก๊วน"}
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: open === "estimate" ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       {open === "estimate" && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 8 }}>
-          <FinancialEstimatePanel settings={settings} players={players} courtCount={courtCount} session={session} setSession={setSession} history={history} current={current} mode={mode} openingBalance={shuttleOpeningResolved} />
+          <FinancialEstimatePanel settings={settings} players={players} courtCount={courtCount} session={session} setSession={setSession} history={history} current={current} mode={mode} openingBalance={shuttleOpeningResolved} t={t} />
         </div>
       )}
 
@@ -16773,11 +17064,11 @@ function FinanceSettingsBody({ settings, setSettings, qrRef, courtCount, setCour
 // v1.12.7: thin standalone-sheet wrapper around FinanceSettingsBody (see comment above it) — same props,
 // same Overlay/heading/onClose behavior as before this patch, used unchanged by its one existing call site
 // (the ชำระเงิน tab's "การชำระเงินและต้นทุน" button).
-function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, onClose }) {
+function FinanceSettingsSheet({ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, t, onClose }) {
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>💵 การชำระเงินและต้นทุน</div>
-      <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory }} />
+      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 14 }}>💵 {t ? t("finance.paymentAndCostSettings") : "การชำระเงินและต้นทุน"}</div>
+      <FinanceSettingsBody {...{ settings, setSettings, qrRef, courtCount, setCourtCount, courtLabels, players, session, setSession, history, current, mode, sessionHistory, t }} />
     </Overlay>
   );
 }
@@ -16844,10 +17135,13 @@ function CompactMatch({ m, getP, onClick }) {
 
 // win/lose dropdown for one side of one round. `state` is "win" | "lose" | "" (undetermined).
 // Locked (disabled, greyed) once a numeric score decides the round automatically — see roundWinner().
-function WinLoseSelect({ state, onPick, locked }) {
+function WinLoseSelect({ state, onPick, locked, t }) {
   const bg = state === "win" ? "#e2f5ec" : state === "lose" ? "#fdeae7" : T.surface;
   const border = state === "win" ? T.green : state === "lose" ? T.accent : T.border;
   const color = state === "win" ? T.green : state === "lose" ? T.accent : T.muted;
+  // v1.12.44: `t` is OPTIONAL -- ScoreEditor is shared with the (still Thai-only, out-of-scope-for-this-
+  // task) Tournament module's own ScoreEditor call sites, which do not pass `t`. Falls back to the exact
+  // original Thai literal when omitted, matching the same convention already used for fmtMode/roundsLabel.
   return (
     <select
       value={state}
@@ -16856,8 +17150,8 @@ function WinLoseSelect({ state, onPick, locked }) {
       style={{ width: 54, padding: "7px 2px", borderRadius: 9, background: bg, border: `1px solid ${border}`, color, fontSize: 11, fontWeight: 800, textAlign: "center", outline: "none", opacity: locked ? 0.75 : 1 }}
     >
       <option value="">-</option>
-      <option value="win">ชนะ</option>
-      <option value="lose">แพ้</option>
+      <option value="win">{t ? t("score.win") : "ชนะ"}</option>
+      <option value="lose">{t ? t("score.lose") : "แพ้"}</option>
     </select>
   );
 }
@@ -16869,8 +17163,11 @@ function WinLoseSelect({ state, onPick, locked }) {
 // e.g. 20-20 for a 21-point game) — matching real badminton — and once either side is at/above winScore in
 // that state the winning margin must be exactly 2 (e.g. 20-22, 23-25). Returns a short Thai reason string,
 // or null when the pair is fine (including "still mid-entry", i.e. either side not filled in yet).
-function scorePairIssue(aNum, bNum, winScore, deuceOn) {
-  if ((aNum != null && aNum < 0) || (bNum != null && bNum < 0)) return "ห้ามติดลบ";
+function scorePairIssue(aNum, bNum, winScore, deuceOn, t) {
+  // v1.12.44: `t` is an OPTIONAL trailing param -- see WinLoseSelect's comment above for why (shared with
+  // the out-of-scope Tournament module). Every returned string below falls back to the exact original
+  // Thai literal when `t` is omitted.
+  if ((aNum != null && aNum < 0) || (bNum != null && bNum < 0)) return t ? t("score.negativeNotAllowed") : "ห้ามติดลบ";
   if (aNum == null || bNum == null) return null; // one side still empty -- nothing to compare yet
   // v1.12.22 (Winning Score Minimum): ADDED ON TOP of the existing v1.11.80 checks below (none removed or
   // altered) -- a set is never valid/complete unless at least one side has actually reached the configured
@@ -16881,13 +17178,15 @@ function scorePairIssue(aNum, bNum, winScore, deuceOn) {
   // gate and the live on-screen warning), and each set of a multi-set match is checked independently since
   // ScoreEditor calls this once per set row.
   const maxScore = Math.max(aNum, bNum);
-  if (maxScore < winScore) return `คะแนนยังไม่ถึงเกณฑ์ชนะ เกมนี้กำหนดชนะที่ ${winScore} คะแนน แต่คะแนนสูงสุดปัจจุบันคือ ${maxScore} กรุณาตรวจสอบคะแนนอีกครั้ง`;
-  if (!deuceOn) return aNum > winScore || bNum > winScore ? `เกิน ${winScore} แต้ม` : null;
+  if (maxScore < winScore) return t ? t("score.belowWinTarget", { winScore, maxScore }) : `คะแนนยังไม่ถึงเกณฑ์ชนะ เกมนี้กำหนดชนะที่ ${winScore} คะแนน แต่คะแนนสูงสุดปัจจุบันคือ ${maxScore} กรุณาตรวจสอบคะแนนอีกครั้ง`;
+  if (!deuceOn) return aNum > winScore || bNum > winScore ? (t ? t("score.exceedsPoints", { winScore }) : `เกิน ${winScore} แต้ม`) : null;
   const hi = Math.max(aNum, bNum), lo = Math.min(aNum, bNum);
-  if (lo < winScore - 1) return hi > winScore ? `เกิน ${winScore} แต้ม (ยังไม่ดิว)` : null; // deuce not reached yet
-  return hi >= winScore && hi - lo !== 2 ? "ช่วงดิวต้องห่างกัน 2 แต้ม" : null; // genuine deuce zone -- must win by 2
+  if (lo < winScore - 1) return hi > winScore ? (t ? t("score.exceedsPointsNoDeuce", { winScore }) : `เกิน ${winScore} แต้ม (ยังไม่ดิว)`) : null; // deuce not reached yet
+  return hi >= winScore && hi - lo !== 2 ? (t ? t("score.deuceMustWinByTwo") : "ช่วงดิวต้องห่างกัน 2 แต้ม") : null; // genuine deuce zone -- must win by 2
 }
-function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce }) {
+function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce, t }) {
+  // v1.12.44: `t` is OPTIONAL here too -- see WinLoseSelect's comment above (shared with Tournament, whose
+  // own ScoreEditor call sites do not pass `t` yet). Falls back to the exact original Thai literals.
   const wsc = winScore || 21;
   const deuceOn = deuce !== false;
   // `rounds` here is "sets needed to win" (see maxSetsFor/visibleSetCount) — best-of-3 for 2, best-of-5
@@ -16936,8 +17235,10 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
   // per the v1.11.80 "reflect the draft live" comment on `draftScores` -- only untouched here).
   const [settledDraft, setSettledDraft] = useState(buildDraft);
   useEffect(() => {
-    const t = setTimeout(() => setSettledDraft(draft), 550); // ~550ms pause = "done typing"
-    return () => clearTimeout(t);
+    // v1.12.44: renamed from `t` to `timer` -- ScoreEditor now takes a `t` (translator) param, and this
+    // local timeout-id would otherwise shadow it within this effect's scope. No behavior change.
+    const timer = setTimeout(() => setSettledDraft(draft), 550); // ~550ms pause = "done typing"
+    return () => clearTimeout(timer);
   }, [draft]);
   const settleNow = () => setSettledDraft(draft); // explicit triggers: blur, Enter (blurs), focus leaving
   const mRef = useRef(m);
@@ -16950,7 +17251,7 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
         // persisted here — the popover simply reverts to the last-committed value the next time it's
         // opened, instead of silently saving a score the organizer almost certainly mistyped.
         const aNum = row.a === "" ? null : Number(row.a), bNum = row.b === "" ? null : Number(row.b);
-        if (scorePairIssue(aNum, bNum, wsc, deuceOn)) return;
+        if (scorePairIssue(aNum, bNum, wsc, deuceOn, t)) return;
         ["a", "b"].forEach((side) => {
           const val = row[side];
           const committedRaw = finalM.scores && finalM.scores[ri] ? finalM.scores[ri][side] : null;
@@ -17013,7 +17314,7 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
     const row = draft[ri] || { a: "", b: "" };
     const aNum = row.a === "" ? null : Number(row.a), bNum = row.b === "" ? null : Number(row.b);
     if (aNum == null || bNum == null) return; // incomplete -- nothing to commit yet, never on every digit
-    if (scorePairIssue(aNum, bNum, wsc, deuceOn)) return; // invalid -- never silently committed
+    if (scorePairIssue(aNum, bNum, wsc, deuceOn, t)) return; // invalid -- never silently committed
     ["a", "b"].forEach((side) => {
       const val = row[side];
       const committedRaw = m.scores && m.scores[ri] ? m.scores[ri][side] : null;
@@ -17058,19 +17359,19 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
         // promptly once the organizer actually pauses or moves on. `issue` is null while either settled
         // side is still empty, so an in-progress entry never shows red.
         const sr = settledScores[ri] || { a: null, b: null };
-        const issue = scorePairIssue(sr.a, sr.b, wsc, deuceOn);
+        const issue = scorePairIssue(sr.a, sr.b, wsc, deuceOn, t);
         const badInput = { ...scoreInput, border: `1px solid ${T.accent}`, background: "#fdecea" };
         return (
           <div key={ri} style={{ marginBottom: ri < visible - 1 ? 8 : 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>เซต {ri + 1}</span>}
-              {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} />}
+              {visible > 1 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, minWidth: 40 }}>{t ? t("score.setLabel", { n: ri + 1 }) : `เซต ${ri + 1}`}</span>}
+              {setWin && <WinLoseSelect state={stateFor("A")} onPick={pick("A")} locked={locked} t={t} />}
               <span style={{ fontSize: 11.5, fontWeight: 700, color: T.green }}>A</span>
               <input type="number" min={0} value={d.a} onChange={(e) => setDraftVal(ri, "a", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={() => { settleNow(); commitRow(ri); }} style={issue ? badInput : scoreInput} />
               <span style={{ color: T.muted, fontWeight: 800 }}>–</span>
               <input type="number" min={0} value={d.b} onChange={(e) => setDraftVal(ri, "b", e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }} onFocus={(e) => e.target.select()} onBlur={() => { settleNow(); commitRow(ri); }} style={issue ? badInput : scoreInput} />
               <span style={{ fontSize: 11.5, fontWeight: 700, color: T.blue }}>B</span>
-              {setWin && <WinLoseSelect state={stateFor("B")} onPick={pick("B")} locked={locked} />}
+              {setWin && <WinLoseSelect state={stateFor("B")} onPick={pick("B")} locked={locked} t={t} />}
             </div>
             {/* v1.12.23 (Warning Visual Style): reuses the SAME soft-warning box language already used
                 elsewhere in the app (e.g. the "ข้อมูลเดิมเสียหาย" boot-warning card) -- pale-red background,
@@ -17082,7 +17383,7 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
                 <span style={{ fontSize: 13, flexShrink: 0, lineHeight: "15px" }}>⚠️</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 11.5, fontWeight: 800, color: T.text }}>{issue}</div>
-                  <div style={{ fontSize: 10, color: T.muted, marginTop: 1 }}>คะแนนนี้จะไม่ถูกบันทึก</div>
+                  <div style={{ fontSize: 10, color: T.muted, marginTop: 1 }}>{t ? t("score.willNotBeSaved") : "คะแนนนี้จะไม่ถูกบันทึก"}</div>
                 </div>
               </div>
             )}
@@ -17090,8 +17391,8 @@ function ScoreEditor({ m, rounds, setScore, setWin, clearScore, winScore, deuce 
         );
       })}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
-        <span style={{ fontSize: 11, color: T.muted }}>คะแนนไม่บังคับ · แก้ภายหลังได้</span>
-        {hasScore(m) && <button onClick={handleClearScore} style={{ background: "none", border: "none", color: T.accent, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><Trash2 size={13} /> ลบคะแนน</button>}
+        <span style={{ fontSize: 11, color: T.muted }}>{t ? t("score.optionalEditableLater") : "คะแนนไม่บังคับ · แก้ภายหลังได้"}</span>
+        {hasScore(m) && <button onClick={handleClearScore} style={{ background: "none", border: "none", color: T.accent, fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><Trash2 size={13} /> {t ? t("score.clearScoreButton") : "ลบคะแนน"}</button>}
       </div>
     </div>
   );
@@ -17105,7 +17406,12 @@ function SectionHead({ icon, title, sub }) {
 /* ============ FINANCE — reusable expense / income list editors (v1.8.4) ============
    Used by: HistoricalDetail (per-session ค่าใช้จ่าย), FinanceTab (ค่าใช้จ่ายทั่วไป + รายได้อื่น).
    `categories` present → expense mode (category select shown, no sign). `categories` absent → income mode. */
-function ExpenseListEditor({ items, onAdd, onUpdate, onRemove, categories }) {
+// v1.12.44 (Localization Closure, task 189): `t` is OPTIONAL, matching the established roundsLabel/fmtMode
+// convention (`t ? t("key") : "literal"`) -- this component is shared by call sites already translated this
+// phase (FinanceTab, SessionFinancialDetail) and call sites not yet reached (FinanceSettingsBody -- task 192
+// scope; the History-tab session detail -- task 190 scope). Untouched call sites keep passing no `t` and
+// render the exact original Thai literal, zero behavior change; translated call sites pass `t={t}`.
+function ExpenseListEditor({ items, onAdd, onUpdate, onRemove, categories, t }) {
   const [adding, setAdding] = useState(false);
   const blank = () => ({ category: categories ? categories[0] : undefined, description: "", amount: "", date: todayLocalISO() });
   const [draft, setDraft] = useState(blank());
@@ -17118,14 +17424,14 @@ function ExpenseListEditor({ items, onAdd, onUpdate, onRemove, categories }) {
   };
   return (
     <div>
-      {items.length === 0 && !adding && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "8px 0" }}>ยังไม่มีรายการ</div>}
+      {items.length === 0 && !adding && <div style={{ color: T.muted, fontSize: 12.5, textAlign: "center", padding: "8px 0" }}>{t ? t("finance.noEntriesYet") : "ยังไม่มีรายการ"}</div>}
       {items.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
           {items.map((it) => (
             <div key={it.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}` }}>
               <span style={{ flex: 1, minWidth: 0 }}>
-                {categories && <span style={{ display: "block", fontSize: 11, color: T.muted, fontWeight: 700 }}>{it.category}{it.auto ? " · ประมาณการ" : ""}</span>}
-                <span style={{ display: "block", fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.description || (categories ? "-" : "ไม่มีรายละเอียด")}</span>
+                {categories && <span style={{ display: "block", fontSize: 11, color: T.muted, fontWeight: 700 }}>{it.category}{it.auto ? (t ? t("finance.autoEstimatedSuffix") : " · ประมาณการ") : ""}</span>}
+                <span style={{ display: "block", fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{it.description || (categories ? "-" : (t ? t("finance.noDescriptionFallback") : "ไม่มีรายละเอียด"))}</span>
               </span>
               <span style={{ display: "flex", alignItems: "center", gap: 3, fontSize: 13, fontWeight: 800 }}>
                 ฿<input type="number" value={it.amount} onChange={(e) => onUpdate(it.id, { amount: e.target.value })} style={{ width: 64, padding: "6px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 800, outline: "none" }} />
@@ -17142,18 +17448,18 @@ function ExpenseListEditor({ items, onAdd, onUpdate, onRemove, categories }) {
               {categories.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           )}
-          <input type="text" placeholder="รายละเอียด (ไม่บังคับ)" value={draft.description} onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
+          <input type="text" placeholder={t ? t("finance.descriptionPlaceholder") : "รายละเอียด (ไม่บังคับ)"} value={draft.description} onChange={(e) => setDraft((d) => ({ ...d, description: e.target.value }))} style={{ width: "100%", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8, boxSizing: "border-box", outline: "none" }} />
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-            <input type="number" placeholder="จำนวนเงิน (฿)" value={draft.amount} onChange={(e) => setDraft((d) => ({ ...d, amount: e.target.value }))} style={{ flex: 1, padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: "border-box", outline: "none" }} />
+            <input type="number" placeholder={t ? t("finance.amountBahtPlaceholder") : "จำนวนเงิน (฿)"} value={draft.amount} onChange={(e) => setDraft((d) => ({ ...d, amount: e.target.value }))} style={{ flex: 1, padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: "border-box", outline: "none" }} />
             <input type="date" value={draft.date} onChange={(e) => setDraft((d) => ({ ...d, date: e.target.value }))} style={{ flex: 1, padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, boxSizing: "border-box", outline: "none" }} />
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={submit} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>บันทึก</button>
-            <button onClick={() => { setAdding(false); setDraft(blank()); }} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}>ยกเลิก</button>
+            <button onClick={submit} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>{t ? t("common.save") : "บันทึก"}</button>
+            <button onClick={() => { setAdding(false); setDraft(blank()); }} style={{ flex: 1, padding: "9px 0", borderRadius: 9, background: "none", border: `1px solid ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}>{t ? t("common.cancel") : "ยกเลิก"}</button>
           </div>
         </div>
       ) : (
-        <button onClick={() => setAdding(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><Plus size={14} /> เพิ่มรายการ</button>
+        <button onClick={() => setAdding(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 10, background: "none", border: `1.5px dashed ${T.border}`, color: T.muted, fontSize: 12.5, fontWeight: 700 }}><Plus size={14} /> {t ? t("finance.addEntry") : "เพิ่มรายการ"}</button>
       )}
     </div>
   );
@@ -17180,7 +17486,7 @@ function fmtThaiMonthLabel(ym) {
 // their own detail sheet sorted newest-first. Deliberately reads straight off the flat `rewardHistory` ledger
 // (never per-session `s.wheelPrizes`/bill state) so it survives sessions being deleted from sessionHistory —
 // exactly like discountCredits' own ledger already does elsewhere in this app.
-function GlobalRewardHistory({ rewardHistory }) {
+function GlobalRewardHistory({ rewardHistory, fmtDate }) {
   const [openPlayerId, setOpenPlayerId] = useState(null);
   const grouped = useMemo(() => {
     const byPlayer = {};
@@ -17211,7 +17517,7 @@ function GlobalRewardHistory({ rewardHistory }) {
                 <span style={{ marginLeft: "auto", fontSize: 11.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>ได้รางวัล {g.entries.length} ครั้ง</span>
               </div>
               <div style={{ fontSize: 11.5, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summarize(g.entries)}</div>
-              <div style={{ fontSize: 10.5, color: T.muted }}>ล่าสุด: {fmtThaiDate(latest.date)} · {latest.groupNameSnapshot}</div>
+              <div style={{ fontSize: 10.5, color: T.muted }}>ล่าสุด: {fmtDate ? fmtDate(latest.date) : fmtThaiDate(latest.date)} · {latest.groupNameSnapshot}</div>
             </button>
           );
         })}
@@ -17226,7 +17532,7 @@ function GlobalRewardHistory({ rewardHistory }) {
                 <span style={{ fontSize: 16, flexShrink: 0 }}>{rewardIcon(r.rewardType)}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.rewardNameSnapshot}</div>
-                  <div style={{ fontSize: 11, color: T.muted }}>{fmtThaiDate(r.date)} · {r.groupNameSnapshot}</div>
+                  <div style={{ fontSize: 11, color: T.muted }}>{fmtDate ? fmtDate(r.date) : fmtThaiDate(r.date)} · {r.groupNameSnapshot}</div>
                 </div>
               </div>
             ))}
@@ -17236,7 +17542,7 @@ function GlobalRewardHistory({ rewardHistory }) {
     </>
   );
 }
-function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }) {
+function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings, tr, trc, fmtDate, fmtDateFull, fmtDateTime }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState("latest"); // "latest" | "oldest"
   const [openId, setOpenId] = useState(null); // id of session shown in read-only detail overlay
@@ -17280,13 +17586,13 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
           (rewardHistory) is untouched and reappears the instant Reward is turned back on. */}
       {rewardFeatureOn && (
       <button onClick={() => setOpenRewardHistory((v) => !v)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, marginBottom: openRewardHistory ? 0 : 12 }}>
-        🎁 ประวัติผู้ที่ได้รางวัล
+        🎁 {tr("history.rewardHistoryToggle")}
         <ChevronDown size={17} color={T.muted} style={{ marginLeft: "auto", transform: openRewardHistory ? "rotate(180deg)" : "none", transition: "transform .15s" }} />
       </button>
       )}
       {rewardFeatureOn && openRewardHistory && (
         <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderTop: "none", borderRadius: "0 0 12px 12px", padding: 14, marginBottom: 12 }}>
-          <GlobalRewardHistory rewardHistory={rewardHistory} />
+          <GlobalRewardHistory rewardHistory={rewardHistory} fmtDate={fmtDate} />
         </div>
       )}
 
@@ -17305,6 +17611,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
           sessionHistory={sessionHistory}
           onPick={(name) => { setRankingPickerOpen(false); setRankingShowcaseClub(name); }}
           onClose={() => setRankingPickerOpen(false)}
+          t={tr}
         />
       )}
       {rankingShowcaseClub && (
@@ -17314,50 +17621,54 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
           sessionHistory={sessionHistory}
           rankingConfig={getRankingConfigFor(rankingConfigs, rankingShowcaseClub)}
           onClose={() => setRankingShowcaseClub(null)}
+          tr={tr}
+          trc={trc}
+          fmtDateFull={fmtDateFull}
+          fmtDateTime={fmtDateTime}
         />
       )}
 
       <div style={{ position: "relative", marginBottom: 10 }}>
         <Search size={17} style={{ position: "absolute", left: 12, top: 12, color: T.muted }} />
-        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="ค้นหาชื่อก๊วน หรือวันที่" style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
+        <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={tr("history.listSearchPlaceholder")} style={{ width: "100%", padding: "11px 12px 11px 36px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none", boxSizing: "border-box" }} />
       </div>
       <div style={{ marginBottom: 12 }}>
-        <Seg options={[["latest", "ล่าสุด"], ["oldest", "เก่าสุด"]]} value={sort} onChange={setSort} />
+        <Seg options={[["latest", tr("history.sortLatest")], ["oldest", tr("history.sortOldest")]]} value={sort} onChange={setSort} />
       </div>
 
       {sessionHistory.length === 0 && th.length === 0 ? (
-        <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีประวัติก๊วน<br />เมื่อจบก๊วนหรือ Tournament ข้อมูลจะถูกบันทึกไว้ที่นี่</div>
+        <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>{tr("history.noSessions")}<br />{tr("history.emptyAllLine2")}</div>
       ) : list.length === 0 ? (
-        <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "24px 0" }}>ไม่พบรายการที่ค้นหา</div>
+        <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "24px 0" }}>{tr("history.emptySearchResult")}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {list.map((row) => {
             if (row._kind === "tournament") {
-              const t = row.t;
-              const teamCount = (t.teams || []).length;
-              const playerCount = (t.playerSnapshots || []).length;
-              const champTeam = (t.divisions || []).map((d) => d.champion).find(Boolean);
-              const champTm = champTeam ? (t.teams || []).find((tm) => tm.id === champTeam) : null;
+              const tour = row.t;
+              const teamCount = (tour.teams || []).length;
+              const playerCount = (tour.playerSnapshots || []).length;
+              const champTeam = (tour.divisions || []).map((d) => d.champion).find(Boolean);
+              const champTm = champTeam ? (tour.teams || []).find((tm) => tm.id === champTeam) : null;
               const champName = champTm ? tTeamName(champTm, playersById) : null;
               return (
-                <button key={"t" + t.id} onClick={() => setOpenTId(t.id)} style={{ textAlign: "left", display: "flex", alignItems: "flex-start", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 14px" }}>
+                <button key={"t" + tour.id} onClick={() => setOpenTId(tour.id)} style={{ textAlign: "left", display: "flex", alignItems: "flex-start", gap: 10, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "12px 14px" }}>
                   {/* v1.11.3: Tournament rows now show their logo, exactly like ก๊วน sessions show s.photo
                       just below — previously this row skipped straight to the 🏆 emoji even when the
                       organizer had set a logo (see the wizard's step-1 logo picker, added in v1.11.1). */}
                   {/* v1.12.20: resolve a ref-only frozen logo (see logoRef fix above) back through the
                       local Image Asset Store before falling back to the 🏆 placeholder. */}
-                  {(t.logo || resolveImageRef(t.logoRef)) ? (
-                    <img src={t.logo || resolveImageRef(t.logoRef)} alt="" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
+                  {(tour.logo || resolveImageRef(tour.logoRef)) ? (
+                    <img src={tour.logo || resolveImageRef(tour.logoRef)} alt="" style={{ width: 34, height: 34, borderRadius: 10, objectFit: "cover", flexShrink: 0 }} />
                   ) : (
                     <div style={{ width: 34, height: 34, borderRadius: 10, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 17, flexShrink: 0 }}>🏆</div>
                   )}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
-                      <span style={{ fontWeight: 800, fontSize: 14.5 }}>{t.name || "Tournament ไม่มีชื่อ"}</span>
-                      <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontWeight: 700 }}>{fmtThaiDate(t.date)}</span>
+                      <span style={{ fontWeight: 800, fontSize: 14.5 }}>{tour.name || tr("tournament.unnamedFallback")}</span>
+                      <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontWeight: 700 }}>{fmtDate ? fmtDate(tour.date) : fmtThaiDate(tour.date)}</span>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: T.muted }}>
-                      <span>{playerCount} คน · {teamCount} ทีม · {TOURNAMENT_FORMAT_LABELS[t.format] || t.format}</span>
+                      <span>{tr("history.tournamentRowSummary", { playerCount, teamCount, format: TOURNAMENT_FORMAT_LABELS[tour.format] || tour.format })}</span>
                     </div>
                     {champName && <div style={{ marginTop: 4, fontSize: 11, color: T.green, fontWeight: 700 }}>🏆 {champName}</div>}
                   </div>
@@ -17380,14 +17691,14 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
                 )}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", marginBottom: 4 }}>
-                    <span style={{ fontWeight: 800, fontSize: 14.5 }}>{s.name || "ก๊วนไม่มีชื่อ"}</span>
-                    <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontWeight: 700 }}>{fmtThaiDate(s.date)}</span>
+                    <span style={{ fontWeight: 800, fontSize: 14.5 }}>{s.name || tr("session.unnamed")}</span>
+                    <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontWeight: 700 }}>{fmtDate ? fmtDate(s.date) : fmtThaiDate(s.date)}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: T.muted }}>
-                    <span>{(s.players || []).length} คน · {(s.stats?.totalMatches ?? 0)} แมตช์ · {s.courtCount || 1} สนาม</span>
+                    <span>{tr("history.sessionRowSummary", { count: (s.players || []).length, matches: (s.stats?.totalMatches ?? 0), courts: s.courtCount || 1 })}</span>
                     <span style={{ marginLeft: "auto", fontWeight: 800, color: T.green }}>{formatCurrency((s.bill || []).reduce((sum, b) => sum + (b.total || 0), 0))}</span>
                   </div>
-                  {payableSBill.length > 0 && <div style={{ marginTop: 4, fontSize: 11, color: T.muted }}>จ่ายแล้ว {paidCount}/{payableSBill.length} คน</div>}
+                  {payableSBill.length > 0 && <div style={{ marginTop: 4, fontSize: 11, color: T.muted }}>{tr("history.paidProgressCasual", { paid: paidCount, total: payableSBill.length })}</div>}
                 </div>
               </button>
             );
@@ -17397,24 +17708,24 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 
       {open && (
         <Overlay onClose={() => setOpenId(null)}>
-          <HistoricalDetail s={open} playersById={playersById} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} updateHistSessionDate={updateHistSessionDate} />
+          <HistoricalDetail s={open} playersById={playersById} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} updateHistSessionDate={updateHistSessionDate} tr={tr} fmtDate={fmtDate} />
         </Overlay>
       )}
 
       {openT && (
         <Overlay onClose={() => setOpenTId(null)}>
-          <TournamentHistoricalDetail t={openT} playersById={playersById} onOpenTournamentPrint={onOpenTournamentPrint} />
+          <TournamentHistoricalDetail t={openT} playersById={playersById} onOpenTournamentPrint={onOpenTournamentPrint} tr={tr} fmtDate={fmtDate} />
         </Overlay>
       )}
 
       {confirmDeleteId && (
         <div onClick={() => setConfirmDeleteId(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 70, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>ลบประวัติก๊วนนี้?</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ข้อมูลแมตช์และการชำระเงินของก๊วนนี้จะถูกลบออกจากเครื่อง</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{tr("history.deleteConfirmTitle")}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{tr("history.deleteConfirmBody")}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmDeleteId(null)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={() => { const id = confirmDeleteId; setConfirmDeleteId(null); setOpenId(null); deleteSessionHistory(id); }} style={{ ...btnPrimary, background: T.accent }}><Trash2 size={15} /> ลบ</button>
+              <button onClick={() => setConfirmDeleteId(null)} style={btnSecondary}>{tr("common.cancel")}</button>
+              <button onClick={() => { const id = confirmDeleteId; setConfirmDeleteId(null); setOpenId(null); deleteSessionHistory(id); }} style={{ ...btnPrimary, background: T.accent }}><Trash2 size={15} /> {tr("common.delete")}</button>
             </div>
           </div>
         </div>
@@ -17435,6 +17746,9 @@ function SettingsTab({
   openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint,
   exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog,
   autoOpen, onAutoOpenConsumed,
+  uiLocale, setUiLocale, t, // v1.12.41 (Localization Phase 1)
+  tc, // v1.12.44 (Localization Closure)
+  fmtDate, fmtDateFull, fmtDateTime,
 }) {
   const [view, setView] = useState(null); // null | "online" | "advanced" | "general" | "history" | "backup"
 
@@ -17455,8 +17769,8 @@ function SettingsTab({
   if (view === "history") {
     return (
       <div>
-        <button onClick={() => setView(null)} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: T.muted, fontSize: 13, fontWeight: 700, padding: "2px 0 12px" }}>‹ ตั้งค่า</button>
-        <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings }} />
+        <button onClick={() => setView(null)} style={{ display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: T.muted, fontSize: 13, fontWeight: 700, padding: "2px 0 12px" }}>‹ {t("settings.title")}</button>
+        <HistoryTab {...{ sessionHistory, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint, rankingConfigs, settings, fmtDate, fmtDateFull, fmtDateTime }} tr={t} trc={tc} />
       </div>
     );
   }
@@ -17485,17 +17799,17 @@ function SettingsTab({
           must never read as Beta, and BadQOnlineNavRow's own live status text is functional, not the
           feature's marketing name). */}
       <SectionLabel>☁️ BadQ Online (Beta)</SectionLabel>
-      <BadQOnlineNavRow deviceId={deviceId} onOpen={() => setView("online")} />
-      <SectionLabel>การตั้งค่า</SectionLabel>
-      <Row icon="🚀" title="ตั้งค่าขั้นสูง" sub="Ranking · Tournament · รางวัล" onClick={() => setView("advanced")} />
-      <Row icon="⚙️" title="ตั้งค่าทั่วไป" sub="ระดับฝีมือ · ความเป็นส่วนตัว · ภาษา" onClick={() => setView("general")} />
-      <SectionLabel>ประวัติ</SectionLabel>
-      <Row icon="🕘" title="ประวัติ" sub="ก๊วน · Tournament · Ranking · ผู้ได้รับรางวัล" onClick={() => setView("history")} />
-      <SectionLabel>ข้อมูล</SectionLabel>
-      <Row icon="💾" title="ข้อมูลและการสำรอง" sub="สำรอง · กู้คืน · นำเข้า/ส่งออก" onClick={() => setView("backup")} />
+      <BadQOnlineNavRow deviceId={deviceId} onOpen={() => setView("online")} tr={t} />
+      <SectionLabel>{t("settings.sectionLabel")}</SectionLabel>
+      <Row icon="🚀" title={t("settings.advanced")} sub={t("settings.advancedRowSub")} onClick={() => setView("advanced")} />
+      <Row icon="⚙️" title={t("settings.general")} sub={t("settings.generalRowSub")} onClick={() => setView("general")} />
+      <SectionLabel>{t("history.title")}</SectionLabel>
+      <Row icon="🕘" title={t("history.title")} sub={t("settings.historyRowSub")} onClick={() => setView("history")} />
+      <SectionLabel>{t("settings.dataSectionLabel")}</SectionLabel>
+      <Row icon="💾" title={t("settings.backup")} sub={t("settings.backupRowSub")} onClick={() => setView("backup")} />
 
       {view === "advanced" && (
-        <AdvancedSettingsSheet settings={settings} setSettings={setSettings} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig} players={players} sessionHistory={sessionHistory} onClose={() => setView(null)} />
+        <AdvancedSettingsSheet settings={settings} setSettings={setSettings} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig} players={players} sessionHistory={sessionHistory} onClose={() => setView(null)} t={t} />
       )}
       {view === "general" && (
         <GeneralSettingsSheet
@@ -17506,6 +17820,7 @@ function SettingsTab({
           archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
           players={players}
           sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
+          uiLocale={uiLocale} setUiLocale={setUiLocale} t={t} fmtDateTime={fmtDateTime}
           onClose={() => setView(null)}
         />
       )}
@@ -17518,19 +17833,20 @@ function SettingsTab({
       )}
       {view === "backup" && (
         <Overlay onClose={() => setView(null)}>
-          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>💾 ข้อมูลและการสำรอง</div>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>💾 {t("settings.backup")}</div>
           <BackupSettingsEditor
             exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore}
             lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog}
+            t={t} tc={tc} fmtDateTime={fmtDateTime}
           />
-          <button onClick={() => setView(null)} style={{ ...btnSecondary, marginTop: 14 }}>ปิด</button>
+          <button onClick={() => setView(null)} style={{ ...btnSecondary, marginTop: 14 }}>{t("common.close")}</button>
         </Overlay>
       )}
     </div>
   );
 }
 
-function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, updateHistSessionDate }) {
+function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, updateHistSessionDate, tr, fmtDate }) {
   // v1.12.15 (retroactive session date edit): tap-to-edit, same pattern as the court-label inline editor
   // (CourtLabelTag) elsewhere in this file — a small pencil button toggles a native <input type="date">
   // in place of the static text; committing (onChange, since a native date picker's selection IS the
@@ -17560,7 +17876,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 14 }}>
-        <button onClick={() => openHistPhoto(s.id)} title="แตะเพื่อเพิ่ม/เปลี่ยนรูปก๊วน" style={{ position: "relative", flexShrink: 0, border: "none", background: "none", padding: 0, width: 48, height: 48 }}>
+        <button onClick={() => openHistPhoto(s.id)} title={tr("historicalDetail.photoTooltip")} style={{ position: "relative", flexShrink: 0, border: "none", background: "none", padding: 0, width: 48, height: 48 }}>
           {/* v1.12.20: resolve a ref-only frozen photo back through the local Image Asset Store first. */}
           {(s.photo || resolveImageRef(s.photoRef)) ? (
             <img src={s.photo || resolveImageRef(s.photoRef)} alt="" style={{ width: 48, height: 48, borderRadius: 13, objectFit: "cover" }} />
@@ -17570,7 +17886,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
           <span style={{ position: "absolute", right: -3, bottom: -3, width: 19, height: 19, borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={10} color={T.muted} /></span>
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 17, fontWeight: 800 }}>{s.name || "ก๊วนไม่มีชื่อ"}</div>
+          <div style={{ fontSize: 17, fontWeight: 800 }}>{s.name || tr("session.unnamed")}</div>
           <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
             {editingDate && updateHistSessionDate ? (
               <input
@@ -17582,37 +17898,37 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
                 style={{ border: `1px solid ${T.border}`, borderRadius: 6, background: T.surface, color: T.text, fontSize: 12.5, padding: "2px 6px" }}
               />
             ) : (
-              <span>{fmtThaiDate(s.date)}</span>
+              <span>{fmtDate ? fmtDate(s.date) : fmtThaiDate(s.date)}</span>
             )}
             {updateHistSessionDate && !editingDate && (
-              <button onClick={() => setEditingDate(true)} title="แก้ไขวันที่ย้อนหลัง" style={{ background: "none", border: "none", padding: 0, display: "flex", color: T.muted }}><Calendar size={11} /></button>
+              <button onClick={() => setEditingDate(true)} title={tr("history.editDate")} style={{ background: "none", border: "none", padding: 0, display: "flex", color: T.muted }}><Calendar size={11} /></button>
             )}
-            <span>· {(s.players || []).length} คน · {s.courtCount || 1} สนาม · {fmtMode(s.settings || {}, s.mode)}</span>
+            <span>· {tr("historicalDetail.summaryLine", { count: (s.players || []).length, courts: s.courtCount || 1, mode: fmtMode(s.settings || {}, s.mode) })}</span>
           </div>
-          {(s.photo || s.photoRef) && <button onClick={() => clearHistPhoto(s.id)} style={{ background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700, padding: 0, marginTop: 3 }}>ลบรูปก๊วน</button>}
+          {(s.photo || s.photoRef) && <button onClick={() => clearHistPhoto(s.id)} style={{ background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700, padding: 0, marginTop: 3 }}>{tr("historicalDetail.removePhoto")}</button>}
         </div>
       </div>
 
       <button
-        onClick={() => shareSummary(buildShareText({ name: s.name, date: fmtThaiDate(s.date), playerCount: (s.players || []).length, totalMatches: stats.totalMatches || 0, maxGames: stats.maxGames || 0, totalExpense: grandTotal }))}
+        onClick={() => shareSummary(buildShareText({ name: s.name, date: fmtDate ? fmtDate(s.date) : fmtThaiDate(s.date), playerCount: (s.players || []).length, totalMatches: stats.totalMatches || 0, maxGames: stats.maxGames || 0, totalExpense: grandTotal }))}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 14 }}
-      ><Share2 size={15} /> แชร์สรุปก๊วน</button>
+      ><Share2 size={15} /> {tr("historicalDetail.shareButton")}</button>
 
-      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title="สรุป" />
+      <SectionHead icon={<ClipboardList size={16} color={T.green} />} title={tr("history.summary")} />
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <MiniStat label="แมตช์" value={stats.totalMatches ?? 0} />
-        <MiniStat label="เกมรวม" value={stats.totalGames ?? 0} />
-        <MiniStat label="เกมมากสุด" value={stats.maxGames ?? 0} />
+        <MiniStat label={tr("match.title")} value={stats.totalMatches ?? 0} />
+        <MiniStat label={tr("historicalDetail.statTotalGames")} value={stats.totalGames ?? 0} />
+        <MiniStat label={tr("historicalDetail.statMaxGames")} value={stats.maxGames ?? 0} />
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
-        <MiniStat label="เกมน้อยสุด" value={stats.minGames ?? 0} />
-        <MiniStat label="รอเฉลี่ย (นาที)" value={stats.avgWaitMin ?? "-"} />
-        <MiniStat label="รอนานสุด (นาที)" value={stats.maxWaitMin ?? "-"} />
+        <MiniStat label={tr("historicalDetail.statMinGames")} value={stats.minGames ?? 0} />
+        <MiniStat label={tr("historicalDetail.statAvgWaitMin")} value={stats.avgWaitMin ?? "-"} />
+        <MiniStat label={tr("historicalDetail.statMaxWaitMin")} value={stats.maxWaitMin ?? "-"} />
       </div>
 
-      <SectionHead icon={<User size={16} color={T.green} />} title="ผู้เล่น" sub="ชนะ-แพ้-เสมอ" />
+      <SectionHead icon={<User size={16} color={T.green} />} title={tr("player.title")} sub={tr("historicalDetail.playersSubtitle")} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
-        {ranking.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีผู้เล่น</div> :
+        {ranking.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{tr("historicalDetail.noPlayers")}</div> :
           ranking.map((p) => {
             const st = playerStats(p.id, s.matches || []);
             // v1.11.47: new-style historical player records (see endSession()) no longer carry a frozen
@@ -17628,31 +17944,31 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
                 <Avatar p={avatarPhoto ? { ...p, photo: avatarPhoto } : p} size={28} />
                 <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: levelColor(p.skillIndex), fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
                 {(st.win + st.loss + st.draw) > 0 && <span style={{ fontSize: 11.5, color: T.muted }}>{st.win}-{st.loss}-{st.draw}</span>}
-                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{p.games || 0} เกม</span>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{tr("historicalDetail.gamesCountLabel", { count: p.games || 0 })}</span>
               </div>
             );
           })}
       </div>
 
-      <SectionHead icon={<Wallet size={16} color={T.green} />} title="การชำระเงิน" sub="แตะเพื่อรับ/ยกเลิก — แก้ย้อนหลังได้" />
+      <SectionHead icon={<Wallet size={16} color={T.green} />} title={tr("finance.payment")} sub={tr("historicalDetail.paymentSubtitle")} />
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-          <div style={{ fontSize: 11, color: T.muted }}>จ่ายแล้ว</div>
-          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{paidCount}/{payableBill.length} คน</div>
+          <div style={{ fontSize: 11, color: T.muted }}>{tr("finance.paidStatusShort")}</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{tr("historicalDetail.paidCountValue", { paid: paidCount, total: payableBill.length })}</div>
         </div>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-          <div style={{ fontSize: 11, color: T.muted }}>รับแล้ว</div>
+          <div style={{ fontSize: 11, color: T.muted }}>{tr("finance.received")}</div>
           <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{formatCurrency(collected)} <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>/ {formatCurrency(grandTotal)}</span></div>
         </div>
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
-        {bill.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีข้อมูลการชำระเงิน</div> : bill.map((b) => (
+        {bill.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{tr("historicalDetail.noPaymentData")}</div> : bill.map((b) => (
           <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
-            <span style={{ flex: 1, fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span> <span style={{ color: T.muted, fontWeight: 600, fontSize: 11.5 }}>· {b.isOwnerExempt ? "ฟรี (เจ้าของก๊วน)" : formatCurrency(b.total)}</span></span>
+            <span style={{ flex: 1, fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span> <span style={{ color: T.muted, fontWeight: 600, fontSize: 11.5 }}>· {b.isOwnerExempt ? tr("historicalDetail.ownerFreeInline") : formatCurrency(b.total)}</span></span>
             {b.isOwnerExempt ? (
-              <span style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, background: "#efe7fc", color: "#7c3aed" }}>👑 เจ้าของก๊วน</span>
+              <span style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, background: "#efe7fc", color: "#7c3aed" }}>👑 {tr("historicalDetail.ownerBadge")}</span>
             ) : (
-              <button onClick={() => toggleHistoricalPaid(s.id, b.id)} style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: b.paid ? "#e2f5ec" : "#fdecea", color: b.paid ? T.green : T.accent }}>{b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+              <button onClick={() => toggleHistoricalPaid(s.id, b.id)} style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: b.paid ? "#e2f5ec" : "#fdecea", color: b.paid ? T.green : T.accent }}>{b.paid ? `🟢 ${tr("finance.paidStatusShort")}` : `🔴 ${tr("finance.unpaidStatusShort")}`}</button>
             )}
           </div>
         ))}
@@ -17660,7 +17976,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
 
       {sessionRewards.length > 0 && (
         <>
-          <SectionHead icon={<span style={{ fontSize: 15 }}>🎁</span>} title="รางวัลที่แจก" sub={`${sessionRewards.length} รางวัล`} />
+          <SectionHead icon={<span style={{ fontSize: 15 }}>🎁</span>} title={tr("reward.distributed")} sub={tr("historicalDetail.rewardCountLabel", { count: sessionRewards.length })} />
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
             {sessionRewards.map((r) => (
               <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
@@ -17672,7 +17988,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
         </>
       )}
 
-      <SectionHead icon={<Wallet size={16} color={T.green} />} title="ค่าใช้จ่าย" sub="แก้ไขได้ — เพิ่มยอดจริงที่มาทีหลังได้" />
+      <SectionHead icon={<Wallet size={16} color={T.green} />} title={tr("finance.expenses")} sub={tr("historicalDetail.expenseSubtitle")} />
       <div style={{ marginBottom: 10 }}>
         <ExpenseListEditor
           items={expenseList}
@@ -17680,29 +17996,30 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
           onAdd={(item) => addHistExpense(s.id, item)}
           onUpdate={(id, patch) => updateHistExpense(s.id, id, patch)}
           onRemove={(id) => removeHistExpense(s.id, id)}
+          t={tr}
         />
       </div>
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 18 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 8 }}>สรุปกำไรขาดทุน</div>
-        <BillRow label="รายได้ (ยอดเรียกเก็บ)" v={grandTotal} kind="revenue" />
-        <BillRow label="รับแล้วจริง" v={collected} kind="revenue" />
-        <BillRow label="ค้างรับ" v={receivable} kind="revenue" />
-        {sessionShuttlecockRevenue(s) > 0 && <BillRow label="รายได้ค่าลูกแบด" v={sessionShuttlecockRevenue(s)} kind="revenue" />}
-        <BillRow label="ค่าใช้จ่ายรวม" v={expenseTotal} kind="expense" />
+        <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 8 }}>{tr("finance.summary")}</div>
+        <BillRow label={tr("historicalDetail.revenueBilled")} v={grandTotal} kind="revenue" />
+        <BillRow label={tr("historicalDetail.revenueCollectedActual")} v={collected} kind="revenue" />
+        <BillRow label={tr("finance.outstanding")} v={receivable} kind="revenue" />
+        {sessionShuttlecockRevenue(s) > 0 && <BillRow label={tr("finance.shuttlecockRevenue")} v={sessionShuttlecockRevenue(s)} kind="revenue" />}
+        <BillRow label={tr("finance.totalExpenses")} v={expenseTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-          <span>{profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"}</span>
+          <span>{profit >= 0 ? tr("finance.netProfit") : tr("finance.netLoss")}</span>
           <span style={{ color: profit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(profit))}</span>
         </div>
       </div>
 
-      <SectionHead icon={<History size={16} color={T.muted} />} title="ประวัติแมตช์" sub={`${(s.matches || []).length} เกม`} />
-      {(s.matches || []).length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0", marginBottom: 18 }}>ยังไม่มีแมตช์ที่จบ</div> : (
+      <SectionHead icon={<History size={16} color={T.muted} />} title={tr("history.matchHistory")} sub={tr("historicalDetail.gamesCountLabel", { count: (s.matches || []).length })} />
+      {(s.matches || []).length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0", marginBottom: 18 }}>{tr("historicalDetail.noCompletedMatches")}</div> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
           {(s.matches || []).map((m) => <CompactMatch key={m.id} m={m} getP={getSP} onClick={() => {}} />)}
         </div>
       )}
 
-      <button onClick={onDelete} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px 0", borderRadius: 11, background: "none", border: `1px solid ${T.accent}`, color: T.accent, fontSize: 13, fontWeight: 700 }}><Trash2 size={15} /> ลบประวัติก๊วน</button>
+      <button onClick={onDelete} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "11px 0", borderRadius: 11, background: "none", border: `1px solid ${T.accent}`, color: T.accent, fontSize: 13, fontWeight: 700 }}><Trash2 size={15} /> {tr("historicalDetail.deleteButton")}</button>
     </div>
   );
 }
@@ -17710,7 +18027,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
 /* ============ FINANCE (v1.8.4) — dashboard scoped to sessionHistory + general income/expense ============ */
 // drill-down detail for one archived session's finances only (revenue/collected/receivable + editable
 // expenses + profit) — a narrower view than HistoricalDetail (which also shows matches/player photos/etc.)
-function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHistExpense, onClose }) {
+function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHistExpense, onClose, t, fmtDate }) {
   const revenue = sessionRevenue(s);
   const collected = sessionCollected(s);
   const receivable = sessionReceivable(s);
@@ -17719,18 +18036,18 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
   const profit = sessionProfit(s);
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 2 }}>{s.name || "ก๊วนไม่มีชื่อ"}</div>
-      <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>{fmtThaiDate(s.date)}</div>
+      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 2 }}>{s.name || t("session.unnamed")}</div>
+      <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>{fmtDate ? fmtDate(s.date) : fmtThaiDate(s.date)}</div>
 
-      <SectionHead icon={<Wallet size={16} color={T.green} />} title="รายได้" />
+      <SectionHead icon={<Wallet size={16} color={T.green} />} title={t("finance.revenue")} />
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 14 }}>
-        <BillRow label="ยอดเรียกเก็บ" v={revenue} kind="revenue" />
-        <BillRow label="รับจริง" v={collected} kind="revenue" />
-        <BillRow label="ค้างรับ" v={receivable} kind="revenue" />
-        {sessionShuttlecockRevenue(s) > 0 && <BillRow label="รายได้ค่าลูกแบด" v={sessionShuttlecockRevenue(s)} kind="revenue" />}
+        <BillRow label={t("finance.amountToCharge")} v={revenue} kind="revenue" />
+        <BillRow label={t("finance.actualCollected")} v={collected} kind="revenue" />
+        <BillRow label={t("finance.outstanding")} v={receivable} kind="revenue" />
+        {sessionShuttlecockRevenue(s) > 0 && <BillRow label={t("finance.shuttlecockRevenue")} v={sessionShuttlecockRevenue(s)} kind="revenue" />}
       </div>
 
-      <SectionHead icon={<Wallet size={16} color={T.accent} />} title="ค่าใช้จ่าย" sub="แก้ไขได้" />
+      <SectionHead icon={<Wallet size={16} color={T.accent} />} title={t("finance.expenses")} sub={t("common.editable")} />
       <div style={{ marginBottom: 14 }}>
         <ExpenseListEditor
           items={expenseList}
@@ -17738,13 +18055,14 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
           onAdd={(item) => addHistExpense(s.id, item)}
           onUpdate={(id, patch) => updateHistExpense(s.id, id, patch)}
           onRemove={(id) => removeHistExpense(s.id, id)}
+          t={t}
         />
       </div>
 
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12 }}>
-        <BillRow label="ค่าใช้จ่ายรวม" v={expenseTotal} kind="expense" />
+        <BillRow label={t("finance.totalExpenses")} v={expenseTotal} kind="expense" />
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-          <span>{profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"}</span>
+          <span>{profit >= 0 ? t("finance.netProfit") : t("finance.netLoss")}</span>
           <span style={{ color: profit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(profit))}</span>
         </div>
       </div>
@@ -17756,7 +18074,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }) {
   // v1.11.53: this component's OWN local `mode` state (below) is the finance period view toggle
   // (day/month/overview) — unrelated to and pre-dating the doubles/singles game format, hence the `gameMode`
   // prop name here specifically (every other component in this file still just calls it `mode`, matching
@@ -17785,7 +18103,8 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
   const effectiveDate = datesInDayYm.includes(selectedDate) ? selectedDate : (datesInDayYm[0] || null);
   // ส่งออกรายงานการเงิน (Financial Report Export) — always follows whatever period is CURRENTLY selected on
   // this page (Requirement #2); the sheet itself may additionally offer a custom-range override.
-  const exportDefaultPeriod = financePeriodMeta(mode, effectiveDate, monthYm, year, null);
+  const dateFormats = { fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime };
+  const exportDefaultPeriod = financePeriodMeta(mode, effectiveDate, monthYm, year, null, dateFormats);
 
   // drill-down: รายเดือน's daily-performance row -> รายวัน with that exact date selected (Requirement 8/11)
   const goDay = (dateStr) => { setMode("day"); setDayYm(dateStr.slice(0, 7)); setSelectedDate(dateStr); };
@@ -17800,11 +18119,11 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
   const discountRow = availCredits.length > 0 ? (
     <button onClick={() => setDiscountSheetOpen(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 18 }}>
       <span style={{ fontSize: 15 }}>🎁</span>
-      <span style={{ flex: 1, fontSize: 13, fontWeight: 700 }}>ส่วนลดคงเหลือ — {availCreditPeople} คน · {formatCurrency(availCreditTotal)}</span>
+      <span style={{ flex: 1, fontSize: 13, fontWeight: 700 }}>{t("finance.remainingCreditSummary", { people: tc("common.personCount", availCreditPeople), amount: formatCurrency(availCreditTotal) })}</span>
       <ChevronRight size={16} color={T.muted} />
     </button>
   ) : (discountCredits || []).length > 0 ? (
-    <div style={{ fontSize: 11.5, color: T.muted, padding: "0 2px 14px" }}>ไม่มีส่วนลดคงเหลือ</div>
+    <div style={{ fontSize: 11.5, color: T.muted, padding: "0 2px 14px" }}>{t("finance.noRemainingCredit")}</div>
   ) : null;
 
   const openSession = openId ? (sessionHistory || []).find((s) => s.id === openId) : null;
@@ -17814,7 +18133,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
   return (
     <div>
       <div style={{ marginBottom: 16 }}>
-        <Seg options={[["payment", "ชำระเงิน"], ["overview", "ภาพรวมการเงิน"]]} value={payTab} onChange={setPayTab} />
+        <Seg options={[["payment", t("finance.paymentTabLabel")], ["overview", t("finance.overviewTabLabel")]]} value={payTab} onChange={setPayTab} />
       </div>
 
       {/* v1.11.6: FinanceTab already receives the FULL top-level roster as `players` (its own call site
@@ -17822,72 +18141,72 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
           sees every player regardless of archive status, and a member who played earlier today keeps
           showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
-        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} retryEndSessionCommit={retryEndSessionCommit} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} sessionHistory={sessionHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} />
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} retryEndSessionCommit={retryEndSessionCommit} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} sessionHistory={sessionHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} t={t} tc={tc} fmtDate={fmtDate} />
       ) : (
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <SectionHead icon={<span style={{ fontSize: 16 }}>💰</span>} title="การเงิน" sub="รายรับ-รายจ่ายของก๊วน" />
-        <button onClick={() => setExportSheetOpen(true)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 11px", borderRadius: 20, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 800, color: T.text, flexShrink: 0, marginBottom: 10 }}>📤 ส่งออก</button>
+        <SectionHead icon={<span style={{ fontSize: 16 }}>💰</span>} title={t("finance.title")} sub={t("finance.tabSubtitle")} />
+        <button onClick={() => setExportSheetOpen(true)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 11px", borderRadius: 20, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 800, color: T.text, flexShrink: 0, marginBottom: 10 }}>📤 {t("common.export")}</button>
       </div>
 
       <div style={{ marginBottom: 16 }}>
-        <Seg options={[["day", "รายวัน"], ["month", "รายเดือน"], ["overview", "ภาพรวม"]]} value={mode} onChange={setMode} />
+        <Seg options={[["day", t("finance.periodDay")], ["month", t("finance.periodMonth")], ["overview", t("finance.periodOverview")]]} value={mode} onChange={setMode} />
       </div>
 
-      {mode === "day" && (noDataAtAll ? emptyBlock("ยังไม่มีข้อมูลการเงิน") : (
+      {mode === "day" && (noDataAtAll ? emptyBlock(t("finance.noDataYet")) : (
         <>
-          <MonthNav ym={dayYm} months={allMonths} onChange={(ym) => { setDayYm(ym); setSelectedDate(null); }} onOpenPicker={() => setPickerOpen("day-month")} />
-          {datesInDayYm.length === 0 ? emptyBlock("ไม่มีรายการในเดือนนี้") : (() => {
+          <MonthNav ym={dayYm} months={allMonths} onChange={(ym) => { setDayYm(ym); setSelectedDate(null); }} onOpenPicker={() => setPickerOpen("day-month")} fmtMonthFull={fmtMonthFull} />
+          {datesInDayYm.length === 0 ? emptyBlock(t("finance.noEntriesThisMonth")) : (() => {
             const f = getFinanceForDate(effectiveDate, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
             return (
               <>
                 <DayChipRow dates={datesInDayYm} selected={effectiveDate} onSelect={setSelectedDate} />
-                <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>{fmtThaiDateFull(effectiveDate)}</div>
-                <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>{fmtDateFull ? fmtDateFull(effectiveDate) : fmtThaiDateFull(effectiveDate)}</div>
+                <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} t={t} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} t={t} />
                 {discountRow}
-                <FinanceGroupsList title="ก๊วนในวันนี้" sessions={f.sessionsInRange} onOpen={setOpenId} />
-                {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในวันนี้" tournaments={f.tournamentsInRange} />}
-                <SectionHead title="ค่าใช้จ่ายทั่วไป" sub="ไม่ผูกกับก๊วน" />
-                <div style={{ marginBottom: 18 }}><ExpenseListEditor items={f.genExpInRange} categories={EXPENSE_CATEGORIES} onAdd={addGeneralExpense} onUpdate={updateGeneralExpense} onRemove={removeGeneralExpense} /></div>
-                <SectionHead title="รายได้อื่น" sub="สปอนเซอร์ / รายได้นอกก๊วน" />
-                <div style={{ marginBottom: 10 }}><ExpenseListEditor items={f.otherIncInRange} onAdd={addOtherIncome} onUpdate={updateOtherIncome} onRemove={removeOtherIncome} /></div>
+                <FinanceGroupsList title={t("finance.sessionsToday")} sessions={f.sessionsInRange} onOpen={setOpenId} t={t} tc={tc} />
+                {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title={t("finance.tournamentsToday")} tournaments={f.tournamentsInRange} t={t} tc={tc} />}
+                <SectionHead title={t("finance.generalExpenses")} sub={t("finance.notLinkedToSession")} />
+                <div style={{ marginBottom: 18 }}><ExpenseListEditor items={f.genExpInRange} categories={EXPENSE_CATEGORIES} onAdd={addGeneralExpense} onUpdate={updateGeneralExpense} onRemove={removeGeneralExpense} t={t} /></div>
+                <SectionHead title={t("finance.otherIncome")} sub={t("finance.otherIncomeSub")} />
+                <div style={{ marginBottom: 10 }}><ExpenseListEditor items={f.otherIncInRange} onAdd={addOtherIncome} onUpdate={updateOtherIncome} onRemove={removeOtherIncome} t={t} /></div>
               </>
             );
           })()}
         </>
       ))}
 
-      {mode === "month" && (noDataAtAll ? emptyBlock("ยังไม่มีข้อมูลการเงิน") : (
+      {mode === "month" && (noDataAtAll ? emptyBlock(t("finance.noDataYet")) : (
         <>
-          <MonthNav ym={monthYm} months={allMonths} onChange={setMonthYm} onOpenPicker={() => setPickerOpen("month-month")} />
+          <MonthNav ym={monthYm} months={allMonths} onChange={setMonthYm} onOpenPicker={() => setPickerOpen("month-month")} fmtMonthFull={fmtMonthFull} />
           {(() => {
             const f = getFinanceForMonth(monthYm, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
             const empty = f.sessionsInRange.length === 0 && f.genExpInRange.length === 0 && f.otherIncInRange.length === 0 && f.tournamentsInRange.length === 0;
-            if (empty) return emptyBlock("ไม่มีรายการในเดือนนี้");
+            if (empty) return emptyBlock(t("finance.noEntriesThisMonth"));
             const days = financeByDay(monthYm, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
             return (
               <>
-                <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} t={t} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} t={t} />
                 {discountRow}
-                <FinancePerformanceList title="ผลประกอบการรายวัน" rows={days.map((d) => ({ key: d.date, label: fmtThaiMonthDay(d.date), count: d.sessionCount, profit: d.profit }))} onPick={goDay} />
-                {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในเดือนนี้" tournaments={f.tournamentsInRange} />}
-                <SectionHead title="ค่าใช้จ่ายทั่วไป" sub="ไม่ผูกกับก๊วน" />
-                <div style={{ marginBottom: 18 }}><ExpenseListEditor items={f.genExpInRange} categories={EXPENSE_CATEGORIES} onAdd={addGeneralExpense} onUpdate={updateGeneralExpense} onRemove={removeGeneralExpense} /></div>
-                <SectionHead title="รายได้อื่น" sub="สปอนเซอร์ / รายได้นอกก๊วน" />
-                <div style={{ marginBottom: 10 }}><ExpenseListEditor items={f.otherIncInRange} onAdd={addOtherIncome} onUpdate={updateOtherIncome} onRemove={removeOtherIncome} /></div>
+                <FinancePerformanceList title={t("finance.dailyPerformance")} rows={days.map((d) => ({ key: d.date, label: fmtMonthDay ? fmtMonthDay(d.date) : fmtThaiMonthDay(d.date), count: d.sessionCount, profit: d.profit }))} onPick={goDay} t={t} tc={tc} />
+                {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title={t("finance.tournamentsThisMonth")} tournaments={f.tournamentsInRange} t={t} tc={tc} />}
+                <SectionHead title={t("finance.generalExpenses")} sub={t("finance.notLinkedToSession")} />
+                <div style={{ marginBottom: 18 }}><ExpenseListEditor items={f.genExpInRange} categories={EXPENSE_CATEGORIES} onAdd={addGeneralExpense} onUpdate={updateGeneralExpense} onRemove={removeGeneralExpense} t={t} /></div>
+                <SectionHead title={t("finance.otherIncome")} sub={t("finance.otherIncomeSub")} />
+                <div style={{ marginBottom: 10 }}><ExpenseListEditor items={f.otherIncInRange} onAdd={addOtherIncome} onUpdate={updateOtherIncome} onRemove={removeOtherIncome} t={t} /></div>
               </>
             );
           })()}
         </>
       ))}
 
-      {mode === "overview" && (allYears.length === 0 ? emptyBlock("ยังไม่มีข้อมูลการเงิน") : (
+      {mode === "overview" && (allYears.length === 0 ? emptyBlock(t("finance.noDataYet")) : (
         <>
           <div style={{ textAlign: "center" }}>
             <button onClick={() => setPickerOpen("year")} style={{ display: "inline-flex", alignItems: "center", gap: 6, margin: "0 auto 16px", padding: "8px 16px", borderRadius: 20, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 15, fontWeight: 800, color: T.text }}>
-              {year === "all" ? "ทั้งหมด" : Number(year) + 543} <ChevronDown size={16} color={T.muted} />
+              {year === "all" ? t("common.all") : Number(year) + 543} <ChevronDown size={16} color={T.muted} />
             </button>
           </div>
           {(() => {
@@ -17895,22 +18214,22 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
             const months = financeByMonthForYear(year, sessionHistory, generalExpenses, otherIncome, tournamentHistory);
             return (
               <>
-                <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} />
-                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} />
+                <FinanceSummaryCard revenue={f.revenue} expense={f.expense} profit={f.profit} t={t} />
+                <FinancePL sessionRevenueTotal={f.sessionRevenueTotal} shuttlecockRevenueTotal={f.shuttlecockRevenueTotal} otherIncomeTotal={f.otherIncomeTotal} membershipIncomeTotal={f.membershipIncomeTotal} tournamentIncomeTotal={f.tournamentIncomeTotal} catTotals={f.catTotals} expense={f.expense} profit={f.profit} t={t} />
                 {discountRow}
-                <FinancePerformanceList title="ผลประกอบการรายเดือน" rows={months.map((m) => ({ key: m.ym, label: fmtThaiMonthLabel(m.ym), count: null, profit: m.profit }))} onPick={goMonth} />
-                {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title="ทัวร์นาเมนต์ในช่วงนี้" tournaments={f.tournamentsInRange} />}
-                <SectionHead title="ค่าใช้จ่ายทั่วไป" sub="ไม่ผูกกับก๊วน" />
-                <div style={{ marginBottom: 18 }}><ExpenseListEditor items={f.genExpInRange} categories={EXPENSE_CATEGORIES} onAdd={addGeneralExpense} onUpdate={updateGeneralExpense} onRemove={removeGeneralExpense} /></div>
-                <SectionHead title="รายได้อื่น" sub="สปอนเซอร์ / รายได้นอกก๊วน" />
-                <div style={{ marginBottom: 10 }}><ExpenseListEditor items={f.otherIncInRange} onAdd={addOtherIncome} onUpdate={updateOtherIncome} onRemove={removeOtherIncome} /></div>
+                <FinancePerformanceList title={t("finance.monthlyPerformance")} rows={months.map((m) => ({ key: m.ym, label: fmtMonthLabel ? fmtMonthLabel(m.ym) : fmtThaiMonthLabel(m.ym), count: null, profit: m.profit }))} onPick={goMonth} t={t} tc={tc} />
+                {f.tournamentsInRange.length > 0 && <TournamentFinanceGroupsList title={t("finance.tournamentsThisPeriod")} tournaments={f.tournamentsInRange} t={t} tc={tc} />}
+                <SectionHead title={t("finance.generalExpenses")} sub={t("finance.notLinkedToSession")} />
+                <div style={{ marginBottom: 18 }}><ExpenseListEditor items={f.genExpInRange} categories={EXPENSE_CATEGORIES} onAdd={addGeneralExpense} onUpdate={updateGeneralExpense} onRemove={removeGeneralExpense} t={t} /></div>
+                <SectionHead title={t("finance.otherIncome")} sub={t("finance.otherIncomeSub")} />
+                <div style={{ marginBottom: 10 }}><ExpenseListEditor items={f.otherIncInRange} onAdd={addOtherIncome} onUpdate={updateOtherIncome} onRemove={removeOtherIncome} t={t} /></div>
               </>
             );
           })()}
         </>
       ))}
 
-      {openSession && <SessionFinancialDetail s={openSession} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} onClose={() => setOpenId(null)} />}
+      {openSession && <SessionFinancialDetail s={openSession} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} onClose={() => setOpenId(null)} t={t} fmtDate={fmtDate} />}
       {discountSheetOpen && (
         <DiscountCreditSheet
           discountCredits={discountCredits}
@@ -17919,11 +18238,15 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
           applyDiscountCredits={applyDiscountCredits}
           cancelDiscountCredit={cancelDiscountCredit}
           onClose={() => setDiscountSheetOpen(false)}
+          t={t}
+          tc={tc}
+          fmtDate={fmtDate}
+          fmtDateTime={fmtDateTime}
         />
       )}
-      {pickerOpen === "day-month" && <MonthPickerSheet months={allMonths} onPick={(ym) => { setDayYm(ym); setSelectedDate(null); }} onClose={() => setPickerOpen(null)} />}
-      {pickerOpen === "month-month" && <MonthPickerSheet months={allMonths} onPick={setMonthYm} onClose={() => setPickerOpen(null)} />}
-      {pickerOpen === "year" && <YearPickerSheet years={allYears} onPick={setYear} onClose={() => setPickerOpen(null)} />}
+      {pickerOpen === "day-month" && <MonthPickerSheet months={allMonths} onPick={(ym) => { setDayYm(ym); setSelectedDate(null); }} onClose={() => setPickerOpen(null)} t={t} fmtMonthFull={fmtMonthFull} />}
+      {pickerOpen === "month-month" && <MonthPickerSheet months={allMonths} onPick={setMonthYm} onClose={() => setPickerOpen(null)} t={t} fmtMonthFull={fmtMonthFull} />}
+      {pickerOpen === "year" && <YearPickerSheet years={allYears} onPick={setYear} onClose={() => setPickerOpen(null)} t={t} />}
       {exportSheetOpen && (
         <FinanceExportSheet
           defaultPeriod={exportDefaultPeriod}
@@ -17934,6 +18257,9 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
           tournamentHistory={tournamentHistory}
           onOpenPrint={onOpenFinancePrint}
           onClose={() => setExportSheetOpen(false)}
+          t={t}
+          tc={tc}
+          dateFormats={dateFormats}
         />
       )}
       </>
@@ -17946,7 +18272,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
 // Compact entry point's sheet: shows the period currently being exported (always follows what's selected on
 // the Finance page — Requirement #2 — with an optional custom-range override scoped to export only, so it
 // never touches the Finance page's own period selection), a live preview, then TXT / Excel / PDF.
-function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory, onOpenPrint, onClose }) {
+function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory, onOpenPrint, onClose, t, tc, dateFormats = {} }) {
   const [customOn, setCustomOn] = useState(false);
   const [customFrom, setCustomFrom] = useState(defaultPeriod ? defaultPeriod.range.from.slice(0, 10) : "");
   const [customTo, setCustomTo] = useState(defaultPeriod ? defaultPeriod.range.to.slice(0, 10) : "");
@@ -17954,12 +18280,12 @@ function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, ot
   const [status, setStatus] = useState(null); // { kind: "ok"|"error", msg } | null
 
   const period = useMemo(() => {
-    if (customOn && customFrom && customTo) return financePeriodMeta(null, null, null, null, { from: customFrom, to: customTo });
+    if (customOn && customFrom && customTo) return financePeriodMeta(null, null, null, null, { from: customFrom, to: customTo }, dateFormats);
     return defaultPeriod;
   }, [customOn, customFrom, customTo, defaultPeriod]);
 
   const ctx = { sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory };
-  const report = useMemo(() => (period ? buildFinancialReport(period, ctx) : null), [period, sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory]); // eslint-disable-line react-hooks/exhaustive-deps
+  const report = useMemo(() => (period ? buildFinancialReport(period, ctx, dateFormats.fmtDate) : null), [period, sessionHistory, generalExpenses, otherIncome, discountCredits, tournamentHistory, dateFormats.fmtDate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isEmpty = report && report.sessions.length === 0 && report.transactions.length === 0 && report.outstandingPayments.length === 0 && report.discountCredits.length === 0;
 
@@ -17968,12 +18294,12 @@ function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, ot
     setBusy(fmt);
     setStatus(null);
     try {
-      const outcome = fmt === "txt" ? await downloadFinancialReportTxt(report) : await downloadFinancialReportXlsx(report);
-      if (outcome === "done") setStatus({ kind: "ok", msg: "บันทึก/แชร์ไฟล์แล้ว" });
+      const outcome = fmt === "txt" ? await downloadFinancialReportTxt(report, dateFormats) : await downloadFinancialReportXlsx(report, dateFormats);
+      if (outcome === "done") setStatus({ kind: "ok", msg: t("finance.exportSavedShared") });
       else if (outcome === "cancelled") setStatus(null);
-      else setStatus({ kind: "error", msg: "ส่งออกไม่สำเร็จ ลองอีกครั้ง" });
+      else setStatus({ kind: "error", msg: t("finance.exportFailedRetry") });
     } catch (e) {
-      setStatus({ kind: "error", msg: "ส่งออกไม่สำเร็จ ลองอีกครั้ง" });
+      setStatus({ kind: "error", msg: t("finance.exportFailedRetry") });
     }
     setBusy(null);
   };
@@ -17986,12 +18312,12 @@ function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, ot
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>ส่งออกรายงานการเงิน</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>{t("finance.export")}</div>
 
-      <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, marginBottom: 4 }}>ช่วงเวลา</div>
+      <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, marginBottom: 4 }}>{t("finance.exportPeriodLabel")}</div>
       <div style={{ fontSize: 14.5, fontWeight: 800, marginBottom: 10 }}>{period ? period.label : "-"}</div>
       <button onClick={() => setCustomOn((v) => !v)} style={{ fontSize: 12, fontWeight: 700, color: T.accent, background: "none", border: "none", padding: 0, marginBottom: customOn ? 8 : 14 }}>
-        {customOn ? "✕ ยกเลิกกำหนดช่วงเอง" : "กำหนดช่วงวันที่เอง"}
+        {customOn ? t("finance.exportCustomRangeOn") : t("finance.exportCustomRangeOff")}
       </button>
       {customOn && (
         <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
@@ -18001,12 +18327,12 @@ function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, ot
       )}
 
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
-        {isEmpty && <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "6px 0" }}>ไม่พบข้อมูลการเงินในช่วงเวลานี้</div>}
-        <div style={rowStyle}><span style={{ color: T.muted }}>{report ? `${report.sessions.length} ก๊วน` : "-"}</span><span /></div>
-        <div style={rowStyle}><span>รายได้</span><span style={{ fontWeight: 800 }}>{report ? formatCurrency(report.summary.revenue) : "-"}</span></div>
-        <div style={rowStyle}><span>ค่าใช้จ่าย</span><span style={{ fontWeight: 800 }}>{report ? formatCurrency(report.summary.expense) : "-"}</span></div>
+        {isEmpty && <div style={{ fontSize: 13, color: T.muted, textAlign: "center", padding: "6px 0" }}>{t("finance.exportNoDataInPeriod")}</div>}
+        <div style={rowStyle}><span style={{ color: T.muted }}>{report ? tc("common.sessionCount", report.sessions.length) : "-"}</span><span /></div>
+        <div style={rowStyle}><span>{t("finance.revenue")}</span><span style={{ fontWeight: 800 }}>{report ? formatCurrency(report.summary.revenue) : "-"}</span></div>
+        <div style={rowStyle}><span>{t("finance.expenses")}</span><span style={{ fontWeight: 800 }}>{report ? formatCurrency(report.summary.expense) : "-"}</span></div>
         <div style={rowStyle}>
-          <span>{report && report.summary.profit < 0 ? "ขาดทุน" : "กำไร"}</span>
+          <span>{report && report.summary.profit < 0 ? t("finance.loss") : t("finance.profit")}</span>
           <span style={{ fontWeight: 800, color: report && report.summary.profit < 0 ? T.accent : T.green }}>{report ? formatCurrency(Math.abs(report.summary.profit)) : "-"}</span>
         </div>
       </div>
@@ -18021,7 +18347,7 @@ function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, ot
             onClick={() => doExport(fmt)}
             style={{ width: "100%", padding: "12px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 800, color: T.text, opacity: !report || busy !== null ? 0.6 : 1 }}
           >
-            {busy === fmt ? "กำลังสร้างไฟล์…" : label}
+            {busy === fmt ? t("finance.exportGeneratingFile") : label}
           </button>
         ))}
         <button disabled={!report} onClick={openPdf} style={{ width: "100%", padding: "12px 14px", borderRadius: 12, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 800, color: T.text, opacity: !report ? 0.6 : 1 }}>
@@ -18035,7 +18361,7 @@ function FinanceExportSheet({ defaultPeriod, sessionHistory, generalExpenses, ot
 // ===================== FINANCIAL REPORT EXPORT — PDF PRINT VIEW (Requirements #15/#16) =====================
 // Small reusable table for the print report's detail sections — plain <table>, browsers paginate long ones
 // across pages on their own (Requirement #16 "long tables may continue on the next page").
-function PrintTable({ headers, rows, rightCols }) {
+function PrintTable({ headers, rows, rightCols, tr }) {
   const isRight = (i) => !!(rightCols && rightCols.includes(i));
   const th = { border: "1px solid #ccc", padding: "4px 6px", fontSize: 10.5, fontWeight: 800, background: "#f3f6f4" };
   const td = { border: "1px solid #ddd", padding: "4px 6px", fontSize: 10.5 };
@@ -18046,7 +18372,7 @@ function PrintTable({ headers, rows, rightCols }) {
       </thead>
       <tbody>
         {rows.length === 0 ? (
-          <tr><td colSpan={headers.length} style={{ ...td, textAlign: "center", color: "#6b7d74" }}>ไม่มีรายการ</td></tr>
+          <tr><td colSpan={headers.length} style={{ ...td, textAlign: "center", color: "#6b7d74" }}>{tr ? tr("finance.noEntries") : "ไม่มีรายการ"}</td></tr>
         ) : rows.map((r, ri) => (
           <tr key={ri}>{r.map((c, ci) => <td key={ci} style={{ ...td, textAlign: isRight(ci) ? "right" : "left" }}>{c}</td>)}</tr>
         ))}
@@ -18057,7 +18383,7 @@ function PrintTable({ headers, rows, rightCols }) {
 function PrintSectionTitle({ children }) {
   return <div style={{ fontSize: 13, fontWeight: 800, margin: "18px 0 6px", color: "#16241d" }}>{children}</div>;
 }
-function FinancePrintView({ report, onClose }) {
+function FinancePrintView({ report, onClose, fmtDateFull, fmtDateTime }) {
   const negative = report.summary.profit < 0;
   const negativePnl = report.pnl.netProfit < 0;
   const expenseRows = Object.entries(report.pnl.expenseByCategory).filter(([, amt]) => amt > 0);
@@ -18080,7 +18406,7 @@ function FinancePrintView({ report, onClose }) {
           <div style={{ fontSize: 20, fontWeight: 800 }}>BadQ</div>
           <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 6 }}>รายงานการเงิน</div>
           <div style={{ fontSize: 12.5, color: "#6b7d74" }}>ช่วงเวลา: {report.period.label}</div>
-          <div style={{ fontSize: 11, color: "#6b7d74" }}>วันที่สร้างรายงาน: {fmtGeneratedAt(report.generatedAt)}</div>
+          <div style={{ fontSize: 11, color: "#6b7d74" }}>วันที่สร้างรายงาน: {fmtDateTime ? fmtDateTime(report.generatedAt) : fmtGeneratedAt(report.generatedAt)}</div>
         </div>
 
         <div className="fpv-avoidbreak" style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -18129,21 +18455,21 @@ function FinancePrintView({ report, onClose }) {
         <PrintTable
           headers={["วันที่", "ชื่อก๊วน", "ผู้เล่น", "แมตช์", "สนาม", "รายได้", "ค่าใช้จ่าย", "กำไร/ขาดทุน"]}
           rightCols={[2, 3, 4, 5, 6, 7]}
-          rows={report.sessions.map((s) => [fmtThaiDateFull(s.date), s.name, s.playerCount, s.matchCount, s.courtCount, formatCurrency(s.revenue), formatCurrency(s.expense), formatCurrency(s.profit)])}
+          rows={report.sessions.map((s) => [fmtDateFull ? fmtDateFull(s.date) : fmtThaiDateFull(s.date), s.name, s.playerCount, s.matchCount, s.courtCount, formatCurrency(s.revenue), formatCurrency(s.expense), formatCurrency(s.profit)])}
         />
 
         <PrintSectionTitle>รายรับรายจ่าย</PrintSectionTitle>
         <PrintTable
           headers={["วันที่", "ประเภท", "หมวด", "รายละเอียด", "ก๊วน", "จำนวนเงิน"]}
           rightCols={[5]}
-          rows={report.transactions.map((t) => [fmtThaiDateFull(t.date), t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย", t.category, t.description, t.session, formatCurrency(t.amount)])}
+          rows={report.transactions.map((t) => [fmtDateFull ? fmtDateFull(t.date) : fmtThaiDateFull(t.date), t.type === "revenue" ? "รายได้" : "ค่าใช้จ่าย", t.category, t.description, t.session, formatCurrency(t.amount)])}
         />
 
         <PrintSectionTitle>ค้างชำระ</PrintSectionTitle>
         <PrintTable
           headers={["วันที่", "ก๊วน", "ผู้เล่น", "ยอดที่ต้องชำระ", "รับแล้ว", "ค้างชำระ"]}
           rightCols={[3, 4, 5]}
-          rows={report.outstandingPayments.length === 0 ? [] : report.outstandingPayments.map((o) => [fmtThaiDateFull(o.date), o.sessionName, o.playerName, formatCurrency(o.due), formatCurrency(o.collected), formatCurrency(o.outstanding)])}
+          rows={report.outstandingPayments.length === 0 ? [] : report.outstandingPayments.map((o) => [fmtDateFull ? fmtDateFull(o.date) : fmtThaiDateFull(o.date), o.sessionName, o.playerName, formatCurrency(o.due), formatCurrency(o.collected), formatCurrency(o.outstanding)])}
         />
         {report.outstandingPayments.length === 0 && <div style={{ fontSize: 11.5, color: "#6b7d74", marginTop: -6, marginBottom: 8 }}>ไม่มีรายการค้างชำระ</div>}
 
@@ -18156,7 +18482,7 @@ function FinancePrintView({ report, onClose }) {
         {report.discountCredits.length === 0 && <div style={{ fontSize: 11.5, color: "#6b7d74", marginTop: -6, marginBottom: 8 }}>ไม่มีส่วนลดคงเหลือ</div>}
 
         <div style={{ textAlign: "center", fontSize: 10.5, color: "#6b7d74", marginTop: 24, borderTop: "1px solid #dde5e1", paddingTop: 10 }}>
-          สร้างจาก BadQ · {fmtGeneratedAt(report.generatedAt)}
+          สร้างจาก BadQ · {fmtDateTime ? fmtDateTime(report.generatedAt) : fmtGeneratedAt(report.generatedAt)}
         </div>
       </div>
     </div>
@@ -18179,9 +18505,9 @@ function tournamentPdfFilename(t) {
   const clean = (t.name || "Tournament").replace(/[^\p{L}\p{N}\- ]/gu, "").trim().replace(/\s+/g, "-");
   return `BadQ_${clean || "Tournament"}_${t.date || "report"}`;
 }
-function PrintPodiumBlock({ podium, teamsById, peopleById }) {
+function PrintPodiumBlock({ podium, teamsById, peopleById, tr }) {
   if (!podium || !podium.champion) {
-    return <div style={{ textAlign: "center", padding: "16px 0", color: "#6b7d74", fontSize: 12.5 }}>ยังไม่ทราบผู้ชนะ — Tournament กำลังดำเนินอยู่</div>;
+    return <div style={{ textAlign: "center", padding: "16px 0", color: "#6b7d74", fontSize: 12.5 }}>{tr("printExport.unknownWinnerHint")}</div>;
   }
   const champTeam = teamsById[podium.champion];
   const champName = tTeamName(champTeam, peopleById);
@@ -18193,7 +18519,7 @@ function PrintPodiumBlock({ podium, teamsById, peopleById }) {
     <div className="tpv-avoidbreak" style={{ textAlign: "center", marginBottom: 12 }}>
       <div style={{ border: "1.5px solid #d97706", background: "#fff8ec", borderRadius: 10, padding: "14px 10px", marginBottom: 8 }}>
         <div style={{ fontSize: 32 }}>🏆</div>
-        <div style={{ fontSize: 11, color: "#d97706", fontWeight: 800, letterSpacing: 0.5, marginBottom: 5 }}>แชมป์เปี้ยน</div>
+        <div style={{ fontSize: 11, color: "#d97706", fontWeight: 800, letterSpacing: 0.5, marginBottom: 5 }}>{tr("tournamentPodium.championLabel")}</div>
         <PodiumTeamPeople team={champTeam} peopleById={peopleById} photoSize={36} fontSize={12.5} gap={16} />
       </div>
       {(runnerName || thirdNames.length > 0) && (
@@ -18201,14 +18527,14 @@ function PrintPodiumBlock({ podium, teamsById, peopleById }) {
           {runnerName && (
             <div style={{ flex: 1, border: "1px solid #dde5e1", borderRadius: 8, padding: "8px 6px" }}>
               <div style={{ fontSize: 20 }}>🥈</div>
-              <div style={{ fontSize: 10, color: "#6b7d74", fontWeight: 700, marginBottom: 4 }}>รองแชมป์</div>
+              <div style={{ fontSize: 10, color: "#6b7d74", fontWeight: 700, marginBottom: 4 }}>{tr("tournament.runnerUp")}</div>
               <PodiumTeamPeople team={runnerTeam} peopleById={peopleById} photoSize={26} fontSize={11} gap={8} maxWidth={54} />
             </div>
           )}
           {thirdNames.length > 0 && (
             <div style={{ flex: 1, border: "1px solid #dde5e1", borderRadius: 8, padding: "8px 6px" }}>
               <div style={{ fontSize: 20 }}>🥉</div>
-              <div style={{ fontSize: 10, color: "#6b7d74", fontWeight: 700, marginBottom: 4 }}>{thirdNames.length > 1 ? "ร่วมอันดับ 3" : "อันดับ 3"}</div>
+              <div style={{ fontSize: 10, color: "#6b7d74", fontWeight: 700, marginBottom: 4 }}>{thirdNames.length > 1 ? tr("tournamentPodium.thirdSharedLabel") : tr("tournament.third")}</div>
               {thirdIds.length > 1 ? (
                 <div style={{ display: "flex", gap: 5 }}>
                   {thirdIds.map((id) => <div key={id} style={{ flex: 1, minWidth: 0 }}><PodiumTeamPeople team={teamsById[id]} peopleById={peopleById} photoSize={16} fontSize={8} gap={3} maxWidth={30} /></div>)}
@@ -18223,7 +18549,7 @@ function PrintPodiumBlock({ podium, teamsById, peopleById }) {
     </div>
   );
 }
-function PrintBracket({ divisions, teamsById, peopleById }) {
+function PrintBracket({ divisions, teamsById, peopleById, tr }) {
   const th = { fontSize: 9.5, fontWeight: 800, color: "#6b7d74", textAlign: "center", marginBottom: 4 };
   const renderMatch = (m) => {
     const lbl = tMatchLabel(m, teamsById, peopleById);
@@ -18259,7 +18585,7 @@ function PrintBracket({ divisions, teamsById, peopleById }) {
                     {r.matchIds.map((mid) => { const m = d.bracket.matches.find((x) => x.id === mid); return m ? renderMatch(m) : null; })}
                   </div>
                 ))}
-                {thirdMatch && <div style={{ flex: 1, minWidth: 0 }}><div style={th}>ชิงที่ 3</div>{renderMatch(thirdMatch)}</div>}
+                {thirdMatch && <div style={{ flex: 1, minWidth: 0 }}><div style={th}>{tr("tournamentBracket.thirdPlaceMatchLabel")}</div>{renderMatch(thirdMatch)}</div>}
               </div>
             ) : (
               // CSS grid, not flexbox, for the match cards: Chromium's print pagination treats a
@@ -18277,7 +18603,7 @@ function PrintBracket({ divisions, teamsById, peopleById }) {
                 ))}
                 {thirdMatch && (
                   <div style={{ marginBottom: 10 }}>
-                    <div style={{ ...th, textAlign: "left" }}>ชิงที่ 3</div>
+                    <div style={{ ...th, textAlign: "left" }}>{tr("tournamentBracket.thirdPlaceMatchLabel")}</div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}><div>{renderMatch(thirdMatch)}</div></div>
                   </div>
                 )}
@@ -18326,25 +18652,25 @@ function rankingPdfFilename(clubName) {
 // so small the lower tiers become hard to read (floor 34px) — same idea as Tournament's podium sizing,
 // applied across however many tiers a club actually has players in (not hardcoded to exactly 3 places).
 const RANKING_SHOWCASE_AVATAR_SIZES = [56, 48, 44, 40, 38, 36, 34];
-function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig, onClose }) {
+function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig, onClose, tr, trc, fmtDateFull, fmtDateTime }) {
   const [printOpen, setPrintOpen] = useState(false);
   const report = useMemo(() => buildRankingShowcaseReport(clubName, players, sessionHistory, rankingConfig), [clubName, players, sessionHistory, rankingConfig]);
   if (!rankingConfig.enabled) {
     return (
       <Overlay onClose={onClose}>
         <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>🏆 Ranking — {clubName}</div>
-        <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>ก๊วนนี้ยังไม่ได้เปิดใช้งาน Ranking — เปิดได้ที่ ⚙️ ตั้งค่า (หน้าผู้เล่น) → 🏆 ตั้งค่า Rank</div>
-        <button onClick={onClose} style={btnSecondary}>ปิด</button>
+        <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>{tr ? tr("ranking.showcaseNotEnabledHint") : "ก๊วนนี้ยังไม่ได้เปิดใช้งาน Ranking — เปิดได้ที่ ⚙️ ตั้งค่า (หน้าผู้เล่น) → 🏆 ตั้งค่า Rank"}</div>
+        <button onClick={onClose} style={btnSecondary}>{tr ? tr("common.close") : "ปิด"}</button>
       </Overlay>
     );
   }
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🏆 Ranking Showcase</div>
-      <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>{clubName} · อัปเดตล่าสุด {fmtThaiDateFull(todayLocalISO())}</div>
+      <div style={{ fontSize: 12, color: T.muted, marginBottom: 16 }}>{clubName} · {tr ? tr("ranking.showcaseLastUpdatedLabel") : "อัปเดตล่าสุด"} {fmtDateFull ? fmtDateFull(todayLocalISO()) : fmtThaiDateFull(todayLocalISO())}</div>
 
       {report.groups.length === 0 && report.unqualified.length === 0 ? (
-        <div style={{ fontSize: 12.5, color: T.muted, textAlign: "center", padding: "24px 0" }}>ยังไม่มีข้อมูลการแข่งขันในก๊วนนี้</div>
+        <div style={{ fontSize: 12.5, color: T.muted, textAlign: "center", padding: "24px 0" }}>{tr ? tr("ranking.showcaseNoDataYet") : "ยังไม่มีข้อมูลการแข่งขันในก๊วนนี้"}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 16 }}>
           {report.groups.map((g, gi) => {
@@ -18354,7 +18680,7 @@ function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
                   <RankTierImage tier={g.tier} size={22} radius={6} fontSize={18} />
                   <span style={{ fontSize: 14, fontWeight: 800, color: T.text }}>{g.tier.name.toUpperCase()}</span>
-                  <span style={{ fontSize: 11, color: T.muted }}>{g.players.length} คน</span>
+                  <span style={{ fontSize: 11, color: T.muted }}>{trc ? trc("common.personCount", g.players.length) : `${g.players.length} คน`}</span>
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
                   {g.players.map((row) => (
@@ -18373,13 +18699,13 @@ function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig
 
       {report.unqualified.length > 0 && (
         <div style={{ marginBottom: 16 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>🔒 ยังไม่มี Rank</div>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.muted, marginBottom: 8 }}>🔒 {tr ? tr("ranking.showcaseNoRankLabel") : "ยังไม่มี Rank"}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
             {report.unqualified.map((row) => (
               <div key={row.player.id} style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 50 }}>
                 <Avatar p={row.player} size={32} />
                 <div style={{ fontSize: 10, fontWeight: 700, color: T.text, marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 54 }}>{row.player.name}</div>
-                <div style={{ fontSize: 9.5, color: T.muted }}>{row.gamesPlayed}/{row.minGames} เกม</div>
+                <div style={{ fontSize: 9.5, color: T.muted }}>{tr ? tr("ranking.showcaseGamesRatio", { played: row.gamesPlayed, min: row.minGames }) : `${row.gamesPlayed}/${row.minGames} เกม`}</div>
               </div>
             ))}
           </div>
@@ -18387,18 +18713,18 @@ function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <button onClick={() => shareSummary(rankingShareText(report))} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}>📤 แชร์ Ranking</button>
+        <button onClick={() => shareSummary(rankingShareText(report))} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}>📤 {tr ? tr("ranking.showcaseShareButton") : "แชร์ Ranking"}</button>
         <button onClick={() => setPrintOpen(true)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>🖨️ Export PDF</button>
       </div>
-      <button onClick={onClose} style={btnSecondary}>ปิด</button>
+      <button onClick={onClose} style={btnSecondary}>{tr ? tr("common.close") : "ปิด"}</button>
 
-      {printOpen && <RankingPrintView report={report} onClose={() => setPrintOpen(false)} />}
+      {printOpen && <RankingPrintView report={report} onClose={() => setPrintOpen(false)} tr={tr} trc={trc} fmtDateFull={fmtDateFull} fmtDateTime={fmtDateTime} />}
     </Overlay>
   );
 }
 // Printable poster — same window.print()-to-PDF approach as TournamentPrintView (sticky non-print header,
 // @media print page rules) so both features stay consistent and reliable across the same set of browsers.
-function RankingPrintView({ report, onClose }) {
+function RankingPrintView({ report, onClose, tr, trc, fmtDateFull, fmtDateTime }) {
   useEffect(() => {
     const original = document.title;
     document.title = rankingPdfFilename(report.clubName);
@@ -18417,23 +18743,23 @@ function RankingPrintView({ report, onClose }) {
         }
       `}</style>
       <div className="rpv-noprint" style={{ position: "sticky", top: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#16241d", color: "#fff", zIndex: 5 }}>
-        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 14, fontWeight: 700 }}>‹ ปิด</button>
-        <button onClick={() => window.print()} style={{ background: "#fff", color: "#16241d", border: "none", borderRadius: 20, padding: "8px 16px", fontSize: 13.5, fontWeight: 800 }}>🖨️ พิมพ์ / บันทึกเป็น PDF</button>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 14, fontWeight: 700 }}>‹ {tr ? tr("common.close") : "ปิด"}</button>
+        <button onClick={() => window.print()} style={{ background: "#fff", color: "#16241d", border: "none", borderRadius: 20, padding: "8px 16px", fontSize: 13.5, fontWeight: 800 }}>🖨️ {tr ? tr("printExport.printOrSavePdf") : "พิมพ์ / บันทึกเป็น PDF"}</button>
       </div>
       <div className="rpv-page" style={{ maxWidth: 780, margin: "0 auto", padding: "20px 18px 60px", boxSizing: "border-box" }}>
         <div className="rpv-avoidbreak" style={{ textAlign: "center", marginBottom: 20 }}>
           <div style={{ fontSize: 20, fontWeight: 800, color: "#12986a" }}>BadQ</div>
           <div style={{ fontSize: 16, fontWeight: 800, marginTop: 4 }}>{report.clubName} · Ranking</div>
-          <div style={{ fontSize: 12, color: "#6b7d74", marginTop: 3 }}>อัปเดตล่าสุด {fmtThaiDateFull(todayLocalISO())}</div>
+          <div style={{ fontSize: 12, color: "#6b7d74", marginTop: 3 }}>{tr ? tr("ranking.showcaseLastUpdatedLabel") : "อัปเดตล่าสุด"} {fmtDateFull ? fmtDateFull(todayLocalISO()) : fmtThaiDateFull(todayLocalISO())}</div>
         </div>
         {report.groups.length === 0 ? (
-          <div style={{ textAlign: "center", fontSize: 12.5, color: "#6b7d74", padding: "20px 0" }}>ยังไม่มีผู้เล่นที่มี Rank</div>
+          <div style={{ textAlign: "center", fontSize: 12.5, color: "#6b7d74", padding: "20px 0" }}>{tr ? tr("ranking.printNoRankedPlayers") : "ยังไม่มีผู้เล่นที่มี Rank"}</div>
         ) : report.groups.map((g, gi) => (
           <div key={g.tier.id} className="rpv-avoidbreak" style={{ marginBottom: 20 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, borderBottom: "1px solid #dde5e1", paddingBottom: 6 }}>
               <RankTierImage tier={g.tier} size={22} radius={6} fontSize={18} />
               <span style={{ fontSize: 14, fontWeight: 800 }}>{g.tier.name.toUpperCase()}</span>
-              <span style={{ fontSize: 11, color: "#6b7d74" }}>{g.players.length} คน</span>
+              <span style={{ fontSize: 11, color: "#6b7d74" }}>{trc ? trc("common.personCount", g.players.length) : `${g.players.length} คน`}</span>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
               {g.players.map((row) => {
@@ -18450,14 +18776,14 @@ function RankingPrintView({ report, onClose }) {
           </div>
         ))}
         <div style={{ textAlign: "center", fontSize: 10.5, color: "#6b7d74", marginTop: 24, borderTop: "1px solid #dde5e1", paddingTop: 10 }}>
-          สร้างจาก BadQ · {fmtGeneratedAt(Date.now())}
+          {tr ? tr("printExport.generatedByFooter", { generatedAt: fmtDateTime ? fmtDateTime(Date.now()) : fmtGeneratedAt(Date.now()) }) : `สร้างจาก BadQ · ${fmtDateTime ? fmtDateTime(Date.now()) : fmtGeneratedAt(Date.now())}`}
         </div>
       </div>
     </div>
   );
 }
 
-function TournamentPrintView({ report, onClose }) {
+function TournamentPrintView({ report, onClose, tr, fmtDateFull, fmtDateTime }) {
   const { t, teamsById, peopleById, divisions, totals, playerStats, podium, isCompleted } = report;
   // best-effort filename hint for "Save as PDF" — most browsers title the suggested PDF file after
   // document.title at the moment window.print() is invoked; restored on unmount so it never leaks
@@ -18484,28 +18810,28 @@ function TournamentPrintView({ report, onClose }) {
         }
       `}</style>
       <div className="tpv-noprint" style={{ position: "sticky", top: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#16241d", color: "#fff", zIndex: 5 }}>
-        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 14, fontWeight: 700 }}>‹ ปิด</button>
-        <button onClick={() => window.print()} style={{ background: "#fff", color: "#16241d", border: "none", borderRadius: 20, padding: "8px 16px", fontSize: 13.5, fontWeight: 800 }}>🖨️ พิมพ์ / บันทึกเป็น PDF</button>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "#fff", fontSize: 14, fontWeight: 700 }}>‹ {tr("common.close")}</button>
+        <button onClick={() => window.print()} style={{ background: "#fff", color: "#16241d", border: "none", borderRadius: 20, padding: "8px 16px", fontSize: 13.5, fontWeight: 800 }}>🖨️ {tr("printExport.printOrSavePdf")}</button>
       </div>
       <div className="tpv-page" style={{ maxWidth: 780, margin: "0 auto", padding: "20px 18px 60px", boxSizing: "border-box" }}>
         <div className="tpv-avoidbreak" style={{ textAlign: "center", marginBottom: 18 }}>
           <div style={{ fontSize: 20, fontWeight: 800, color: "#12986a" }}>BadQ</div>
-          <div style={{ fontSize: 16, fontWeight: 800, marginTop: 4 }}>{t.name || "Tournament ไม่มีชื่อ"}</div>
-          <div style={{ fontSize: 12, color: "#6b7d74", marginTop: 3 }}>{fmtThaiDateFull(t.date)} · {totals.teamCount} ทีม · {totals.playerCount} คน · {totals.stagePath}</div>
-          {!isCompleted && <div style={{ display: "inline-block", marginTop: 6, padding: "3px 10px", borderRadius: 20, background: "#fef3c7", color: "#92400e", fontSize: 11, fontWeight: 800 }}>สถานะ: กำลังแข่งขัน</div>}
+          <div style={{ fontSize: 16, fontWeight: 800, marginTop: 4 }}>{t.name || tr("tournament.unnamedFallback")}</div>
+          <div style={{ fontSize: 12, color: "#6b7d74", marginTop: 3 }}>{fmtDateFull ? fmtDateFull(t.date) : fmtThaiDateFull(t.date)} · {tr("printExport.summaryLine", { teamCount: totals.teamCount, playerCount: totals.playerCount, stagePath: totals.stagePath })}</div>
+          {!isCompleted && <div style={{ display: "inline-block", marginTop: 6, padding: "3px 10px", borderRadius: 20, background: "#fef3c7", color: "#92400e", fontSize: 11, fontWeight: 800 }}>{tr("tournamentResultHeader.statusLine", { status: tr("tournament.active") })}</div>}
         </div>
-        <PrintPodiumBlock podium={podium} teamsById={teamsById} peopleById={peopleById} />
+        <PrintPodiumBlock podium={podium} teamsById={teamsById} peopleById={peopleById} tr={tr} />
 
         {totals.hasBracket && (
           <div className="tpv-pagebreak">
             <PrintSectionTitle>Knockout Bracket</PrintSectionTitle>
-            <PrintBracket divisions={divisions} teamsById={teamsById} peopleById={peopleById} />
+            <PrintBracket divisions={divisions} teamsById={teamsById} peopleById={peopleById} tr={tr} />
           </div>
         )}
 
         {totals.hasGroups && (
           <div className="tpv-pagebreak">
-            <PrintSectionTitle>ผลรอบแบ่งกลุ่ม (Group Stage)</PrintSectionTitle>
+            <PrintSectionTitle>{tr("printExport.groupStageTitle")}</PrintSectionTitle>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               {groupsFlat.map((g) => {
                 const gTeams = (g.teamIds || []).map((id) => teamsById[id]).filter(Boolean);
@@ -18515,34 +18841,36 @@ function TournamentPrintView({ report, onClose }) {
                   <div key={g.id} className="tpv-avoidbreak">
                     <div style={{ fontSize: 12, fontWeight: 800, marginBottom: 4 }}>Group {g.name}</div>
                     <PrintTable
-                      headers={["ทีม", "P", "W", "L", "Pts", "+/-"]}
+                      headers={[tr("tournament.teams"), "P", "W", "L", "Pts", "+/-"]}
                       rightCols={[1, 2, 3, 4, 5]}
                       rows={standings.map((row, i) => {
                         const team = gTeams.find((tm) => tm.id === row.teamId);
                         return [`${i + 1}. ${team ? tTeamName(team, peopleById) : "-"}${qualifyCount > 0 && i < qualifyCount ? " ✓" : ""}`, row.played, row.win, row.loss, row.points, (row.diff > 0 ? "+" : "") + row.diff];
                       })}
+                      tr={tr}
                     />
                   </div>
                 );
               })}
             </div>
-            {hasQualifyMarks && <div style={{ fontSize: 9.5, color: "#12986a", marginTop: 6 }}>✓ ผ่านเข้ารอบ Knockout</div>}
+            {hasQualifyMarks && <div style={{ fontSize: 9.5, color: "#12986a", marginTop: 6 }}>{tr("printExport.qualifiedCheckmark")}</div>}
           </div>
         )}
 
         {playerStats.length > 0 && (
           <div className="tpv-pagebreak">
-            <PrintSectionTitle>สถิติผู้เล่น</PrintSectionTitle>
+            <PrintSectionTitle>{tr("playerPerformance.title")}</PrintSectionTitle>
             <PrintTable
-              headers={["ผู้เล่น", "ชนะ", "แพ้"]}
+              headers={[tr("player.title"), tr("player.wins"), tr("player.losses")]}
               rightCols={[1, 2]}
               rows={[...playerStats].sort((a, b) => b.wins - a.wins).map((ps) => [peopleById[ps.playerId]?.name || "?", ps.wins, ps.losses])}
+              tr={tr}
             />
           </div>
         )}
 
         <div style={{ textAlign: "center", fontSize: 10.5, color: "#6b7d74", marginTop: 24, borderTop: "1px solid #dde5e1", paddingTop: 10 }}>
-          สร้างจาก BadQ · {fmtGeneratedAt(Date.now())}
+          {tr("printExport.generatedByFooter", { generatedAt: fmtDateTime ? fmtDateTime(Date.now()) : fmtGeneratedAt(Date.now()) })}
         </div>
       </div>
     </div>
@@ -18552,13 +18880,13 @@ function TournamentPrintView({ report, onClose }) {
 // ‹ month › nav shared by รายวัน and รายเดือน — arrows jump to the nearest ACTIVE month (can skip empty
 // months/years entirely, Requirement 3); tapping the label opens the compact picker sheet instead of a
 // full calendar (Requirement 3/19).
-function MonthNav({ ym, months, onChange, onOpenPicker }) {
+function MonthNav({ ym, months, onChange, onOpenPicker, fmtMonthFull }) {
   const prev = adjacentActiveMonth(ym, "prev", months);
   const next = adjacentActiveMonth(ym, "next", months);
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, marginBottom: 14 }}>
       <button onClick={() => prev && onChange(prev)} disabled={!prev} style={{ background: "none", border: "none", padding: 8, fontSize: 20, fontWeight: 700, color: prev ? T.text : T.border, cursor: prev ? "pointer" : "default" }}>‹</button>
-      <button onClick={onOpenPicker} style={{ background: "none", border: "none", fontSize: 15, fontWeight: 800, color: T.text, padding: "4px 8px", minWidth: 140, textAlign: "center" }}>{fmtThaiMonthFull(ym)}</button>
+      <button onClick={onOpenPicker} style={{ background: "none", border: "none", fontSize: 15, fontWeight: 800, color: T.text, padding: "4px 8px", minWidth: 140, textAlign: "center" }}>{fmtMonthFull ? fmtMonthFull(ym) : fmtThaiMonthFull(ym)}</button>
       <button onClick={() => next && onChange(next)} disabled={!next} style={{ background: "none", border: "none", padding: 8, fontSize: 20, fontWeight: 700, color: next ? T.text : T.border, cursor: next ? "pointer" : "default" }}>›</button>
     </div>
   );
@@ -18581,21 +18909,21 @@ function DayChipRow({ dates, selected, onSelect }) {
 }
 
 // ONE compact row — รายได้ | ค่าใช้จ่าย | กำไร/ขาดทุน — replaces the old 3 stacked cards (Requirement 4/14)
-function FinanceSummaryCard({ revenue, expense, profit }) {
+function FinanceSummaryCard({ revenue, expense, profit, t }) {
   const loss = profit < 0;
   const col = { flex: 1, padding: "12px 4px", textAlign: "center", minWidth: 0 };
   return (
     <div style={{ display: "flex", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, marginBottom: 16, overflow: "hidden" }}>
       <div style={{ ...col, borderRight: `1px solid ${T.border}` }}>
-        <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>รายได้</div>
+        <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>{t("finance.revenue")}</div>
         <div style={{ fontSize: 14.5, fontWeight: 800, color: T.green, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{formatCurrency(revenue)}</div>
       </div>
       <div style={{ ...col, borderRight: `1px solid ${T.border}` }}>
-        <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>ค่าใช้จ่าย</div>
+        <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>{t("finance.expenses")}</div>
         <div style={{ fontSize: 14.5, fontWeight: 800, color: T.accent, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{formatCurrency(expense)}</div>
       </div>
       <div style={col}>
-        <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>{loss ? "ขาดทุน" : "กำไร"}</div>
+        <div style={{ fontSize: 11, color: T.muted, marginBottom: 3 }}>{loss ? t("finance.loss") : t("finance.profit")}</div>
         <div style={{ fontSize: 14.5, fontWeight: 800, color: loss ? T.accent : T.green, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{formatCurrency(Math.abs(profit))}</div>
       </div>
     </div>
@@ -18603,7 +18931,7 @@ function FinanceSummaryCard({ revenue, expense, profit }) {
 }
 
 // สรุปกำไรขาดทุน — same P&L shape at every period level (Requirement 5/7/10), one shared renderer
-function FinancePL({ sessionRevenueTotal, otherIncomeTotal, membershipIncomeTotal, tournamentIncomeTotal, shuttlecockRevenueTotal, catTotals, expense, profit }) {
+function FinancePL({ sessionRevenueTotal, otherIncomeTotal, membershipIncomeTotal, tournamentIncomeTotal, shuttlecockRevenueTotal, catTotals, expense, profit, t }) {
   // v1.11.41: the "ค่าลูกแบต" expense category already flows through catTotals below (same category string
   // the legacy shuttleCalc line always used — see computeCostModelExpenses) — reused here (not re-summed
   // separately) so this ONE number always matches what's shown/exported in the expense breakdown too.
@@ -18612,37 +18940,37 @@ function FinancePL({ sessionRevenueTotal, otherIncomeTotal, membershipIncomeTota
   const shuttleProfit = (shuttlecockRevenueTotal || 0) - shuttleExpenseTotal;
   return (
     <>
-      <SectionHead title="สรุปกำไรขาดทุน" />
+      <SectionHead title={t("finance.summary")} />
       <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginBottom: 18 }}>
         {/* v1.11.20: order + labels + colors per organizer request — ก๊วน revenue, then Tournament
             revenue, then other revenue (all green); expense categories below (all red), already
             suffixed "- ก๊วนแบต"/"- Tournament" and fixed-ordered by EXPENSE_CATEGORY_ORDER upstream in
             computeFinanceForRange, so this component only renders — it never re-sorts or re-labels. */}
-        <BillRow label="รายได้จากการจัดก๊วน" v={sessionRevenueTotal} kind="revenue" />
-        {tournamentIncomeTotal > 0 && <BillRow label="รายได้จากการจัด Tournament" v={tournamentIncomeTotal} kind="revenue" />}
+        <BillRow label={t("finance.sessionRevenueLine")} v={sessionRevenueTotal} kind="revenue" />
+        {tournamentIncomeTotal > 0 && <BillRow label={t("finance.tournamentRevenueLine")} v={tournamentIncomeTotal} kind="revenue" />}
         {/* v1.11.41: ต้นทุน/ราคาขายลูกแบดต่อลูก — a NEW, separate revenue line (never folded into "ค่าก๊วน"
             or the flat ค่าลูก/เกม player charge above it) per explicit organizer decision. */}
-        {shuttlecockRevenueTotal > 0 && <BillRow label="รายได้ค่าลูกแบด" v={shuttlecockRevenueTotal} kind="revenue" />}
+        {shuttlecockRevenueTotal > 0 && <BillRow label={t("finance.shuttlecockRevenue")} v={shuttlecockRevenueTotal} kind="revenue" />}
         {/* v1.11.67: membership payments already flow into otherIncomeTotal (below) exactly like before —
             this is purely a DISPLAY split so a group using the new Membership Fee feature can see it as
             its own line instead of it disappearing into "รายได้อื่น" (section L). */}
-        {(membershipIncomeTotal || 0) > 0 && <BillRow label="รายได้ค่าสมาชิก" v={membershipIncomeTotal} kind="revenue" />}
-        <BillRow label="รายได้อื่น" v={otherIncomeTotal - (membershipIncomeTotal || 0)} kind="revenue" />
+        {(membershipIncomeTotal || 0) > 0 && <BillRow label={t("finance.membershipRevenueLine")} v={membershipIncomeTotal} kind="revenue" />}
+        <BillRow label={t("finance.otherIncome")} v={otherIncomeTotal - (membershipIncomeTotal || 0)} kind="revenue" />
         <div style={{ height: 4 }} />
         {Object.keys(catTotals).length === 0
-          ? <div style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>ไม่มีค่าใช้จ่ายในช่วงนี้</div>
-          : Object.entries(catTotals).map(([cat, amt]) => <BillRow key={cat} label={`หัก ${cat}`} v={-amt} kind="expense" />)}
+          ? <div style={{ fontSize: 12, color: T.muted, padding: "3px 0" }}>{t("finance.noExpensesThisPeriod")}</div>
+          : Object.entries(catTotals).map(([cat, amt]) => <BillRow key={cat} label={t("finance.deductCategoryLine", { category: cat })} v={-amt} kind="expense" />)}
         {shuttleRevOrExp && (
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: T.muted, fontWeight: 700, padding: "3px 0" }}>
-            <span>{shuttleProfit >= 0 ? "กำไรจากลูกแบด" : "ขาดทุนจากลูกแบด"}</span>
+            <span>{shuttleProfit >= 0 ? t("finance.shuttlecockProfit") : t("finance.shuttlecockLoss")}</span>
             <span style={{ color: shuttleProfit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(shuttleProfit))}</span>
           </div>
         )}
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700, padding: "3px 0", borderTop: `1px solid ${T.border}`, marginTop: 4, paddingTop: 6 }}>
-          <span>ค่าใช้จ่ายรวม</span><span style={{ color: T.accent }}>{formatCurrency(-expense)}</span>
+          <span>{t("finance.totalExpenses")}</span><span style={{ color: T.accent }}>{formatCurrency(-expense)}</span>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-          <span>{profit >= 0 ? "กำไรสุทธิ" : "ขาดทุนสุทธิ"}</span>
+          <span>{profit >= 0 ? t("finance.netProfit") : t("finance.netLoss")}</span>
           <span style={{ color: profit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(profit))}</span>
         </div>
       </div>
@@ -18651,19 +18979,19 @@ function FinancePL({ sessionRevenueTotal, otherIncomeTotal, membershipIncomeTota
 }
 
 // ก๊วนในวันนี้ — tapping a row opens the EXISTING SessionFinancialDetail overlay, never a duplicate screen
-function FinanceGroupsList({ title, sessions, onOpen }) {
+function FinanceGroupsList({ title, sessions, onOpen, t, tc }) {
   return (
     <>
-      <SectionHead title={title} sub={`${sessions.length} ก๊วน`} />
+      <SectionHead title={title} sub={tc("common.sessionCount", sessions.length)} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
-        {sessions.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีก๊วนในวันนี้</div> :
+        {sessions.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{t("finance.noSessionsToday")}</div> :
           sessions.map((s) => {
             const rev = sessionRevenue(s) + sessionShuttlecockRevenue(s), exp = sessionExpenseTotal(s), prof = sessionProfit(s);
             return (
               <button key={s.id} onClick={() => onOpen(s.id)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
                 <span style={{ flex: 1, minWidth: 0 }}>
-                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name || "ก๊วนไม่มีชื่อ"}</span>
-                  <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>รายได้ {formatCurrency(rev)} · ค่าใช้จ่าย {formatCurrency(exp)}</span>
+                  <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.name || t("session.unnamed")}</span>
+                  <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{t("finance.revenueExpenseInline", { revenue: formatCurrency(rev), expense: formatCurrency(exp) })}</span>
                 </span>
                 <span style={{ fontSize: 13, fontWeight: 800, color: prof >= 0 ? T.green : T.accent, flexShrink: 0 }}>{prof >= 0 ? "+" : "-"}{formatCurrency(Math.abs(prof))}</span>
                 <ChevronRight size={16} color={T.muted} style={{ flexShrink: 0 }} />
@@ -18680,13 +19008,13 @@ function FinanceGroupsList({ title, sessions, onOpen }) {
 // computeFinanceForRange), but there was no per-tournament ROW like ก๊วน sessions get — organizers could
 // see the combined number move but couldn't tell which tournament it came from. Kept self-contained
 // (inline expand, no separate overlay) rather than wiring a new drill-through prop across the whole app.
-function TournamentFinanceGroupsList({ title, tournaments }) {
+function TournamentFinanceGroupsList({ title, tournaments, t: tt, tc }) {
   const [openId, setOpenId] = useState(null);
   return (
     <>
-      <SectionHead title={title} sub={`${tournaments.length} รายการ`} />
+      <SectionHead title={title} sub={tc("common.itemCount", tournaments.length)} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
-        {tournaments.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีทัวร์นาเมนต์ในช่วงนี้</div> :
+        {tournaments.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{tt("finance.noTournamentsThisPeriod")}</div> :
           tournaments.map((t) => {
             const ft = tournamentFinanceTotals(t);
             const open = openId === t.id;
@@ -18695,18 +19023,18 @@ function TournamentFinanceGroupsList({ title, tournaments }) {
                 <button onClick={() => setOpenId(open ? null : t.id)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", background: "none", border: "none" }}>
                   {t.logo ? <img src={t.logo} alt="" style={{ width: 22, height: 22, borderRadius: 7, objectFit: "cover", flexShrink: 0 }} /> : <span style={{ fontSize: 15, flexShrink: 0 }}>🏆</span>}
                   <span style={{ flex: 1, minWidth: 0 }}>
-                    <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name || "Tournament ไม่มีชื่อ"}</span>
-                    <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>รายได้ {formatCurrency(ft.income)} · ค่าใช้จ่าย {formatCurrency(ft.expense)}</span>
+                    <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name || tt("finance.tournamentUnnamed")}</span>
+                    <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{tt("finance.revenueExpenseInline", { revenue: formatCurrency(ft.income), expense: formatCurrency(ft.expense) })}</span>
                   </span>
                   <span style={{ fontSize: 13, fontWeight: 800, color: ft.profit >= 0 ? T.green : T.accent, flexShrink: 0 }}>{ft.profit >= 0 ? "+" : "-"}{formatCurrency(Math.abs(ft.profit))}</span>
                   <ChevronDown size={16} color={T.muted} style={{ flexShrink: 0, transform: open ? "rotate(180deg)" : "none" }} />
                 </button>
                 {open && (
                   <div style={{ padding: "0 12px 12px", fontSize: 12, color: T.muted, lineHeight: 1.8 }}>
-                    {ft.entryFee > 0 && <div>ค่าสมัคร: {formatCurrency(ft.entryFee)}</div>}
-                    {(t.finance?.income || []).map((e) => <div key={e.id}>รายได้ · {e.label || TOURNAMENT_INCOME_CAT_LABEL[e.category] || e.category}: {formatCurrency(e.amount)}</div>)}
-                    {(t.finance?.expense || []).map((e) => <div key={e.id}>ค่าใช้จ่าย · {e.label || TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category}: {formatCurrency(e.amount)}</div>)}
-                    {ft.entryFee === 0 && !(t.finance?.income || []).length && !(t.finance?.expense || []).length && <div>ไม่มีรายการ</div>}
+                    {ft.entryFee > 0 && <div>{tt("finance.registrationFeeLine", { amount: formatCurrency(ft.entryFee) })}</div>}
+                    {(t.finance?.income || []).map((e) => <div key={e.id}>{tt("finance.incomeLine", { label: e.label || TOURNAMENT_INCOME_CAT_LABEL[e.category] || e.category, amount: formatCurrency(e.amount) })}</div>)}
+                    {(t.finance?.expense || []).map((e) => <div key={e.id}>{tt("finance.expenseLine", { label: e.label || TOURNAMENT_EXPENSE_CAT_LABEL[e.category] || e.category, amount: formatCurrency(e.amount) })}</div>)}
+                    {ft.entryFee === 0 && !(t.finance?.income || []).length && !(t.finance?.expense || []).length && <div>{tt("finance.noEntries")}</div>}
                   </div>
                 )}
               </div>
@@ -18719,16 +19047,16 @@ function TournamentFinanceGroupsList({ title, tournaments }) {
 
 // generic drill-down row list — powers both "ผลประกอบการรายวัน" (รายเดือน, has a count) and
 // "ผลประกอบการรายเดือน" (ภาพรวม, no count) per Requirement 8/10. Only ACTIVE periods are ever passed in.
-function FinancePerformanceList({ title, rows, onPick }) {
+function FinancePerformanceList({ title, rows, onPick, t, tc }) {
   return (
     <>
       <SectionHead title={title} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
-        {rows.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีรายการ</div> :
+        {rows.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{t("finance.noEntries")}</div> :
           rows.map((r) => (
             <button key={r.key} onClick={() => onPick(r.key)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
               <span style={{ fontSize: 13.5, fontWeight: 700, flexShrink: 0, minWidth: r.count != null ? 60 : "auto" }}>{r.label}</span>
-              {r.count != null && <span style={{ fontSize: 11.5, color: T.muted, flex: 1 }}>{r.count} ก๊วน</span>}
+              {r.count != null && <span style={{ fontSize: 11.5, color: T.muted, flex: 1 }}>{tc("common.sessionCount", r.count)}</span>}
               {r.count == null && <span style={{ flex: 1 }} />}
               <span style={{ fontSize: 13, fontWeight: 800, color: r.profit >= 0 ? T.green : T.accent, flexShrink: 0 }}>{r.profit >= 0 ? "+" : "-"}{formatCurrency(Math.abs(r.profit))}</span>
               <ChevronRight size={16} color={T.muted} style={{ flexShrink: 0 }} />
@@ -18741,26 +19069,26 @@ function FinancePerformanceList({ title, rows, onPick }) {
 
 // compact "tap the title" alternative to the ‹ › arrows — lists ONLY months/years that actually have data,
 // never a full calendar (Requirement 3/9/19)
-function MonthPickerSheet({ months, onPick, onClose }) {
+function MonthPickerSheet({ months, onPick, onClose, t, fmtMonthFull }) {
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>เลือกเดือน</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>{t("finance.selectMonth")}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {months.map((m) => (
-          <button key={m} onClick={() => { onPick(m); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>{fmtThaiMonthFull(m)}</button>
+          <button key={m} onClick={() => { onPick(m); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>{fmtMonthFull ? fmtMonthFull(m) : fmtThaiMonthFull(m)}</button>
         ))}
       </div>
     </Overlay>
   );
 }
-function YearPickerSheet({ years, onPick, onClose }) {
+function YearPickerSheet({ years, onPick, onClose, t }) {
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>เลือกช่วงเวลา</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>{t("finance.selectPeriod")}</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <button onClick={() => { onPick("all"); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>ทั้งหมด (ตลอดกาล)</button>
+        <button onClick={() => { onPick("all"); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>{t("finance.allTimeOption")}</button>
         {years.map((y) => (
-          <button key={y} onClick={() => { onPick(y); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>ปี {Number(y) + 543}</button>
+          <button key={y} onClick={() => { onPick(y); onClose(); }} style={{ width: "100%", textAlign: "left", padding: "11px 14px", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 14, fontWeight: 700, color: T.text }}>{t("finance.yearOption", { year: Number(y) + 543 })}</button>
         ))}
       </div>
     </Overlay>
@@ -18770,32 +19098,35 @@ function YearPickerSheet({ years, onPick, onClose }) {
 // ===================== DISCOUNT CREDIT SHEET (v1.9.1) =====================
 // Full detail lives ONLY here — the Finance page itself shows just the one compact summary row, per spec
 // ("avoid clutter — never show full names/list directly on the Finance page").
-function DiscountCreditSheet({ discountCredits, session, sessionHistory, applyDiscountCredits, cancelDiscountCredit, onClose }) {
+function DiscountCreditSheet({ discountCredits, session, sessionHistory, applyDiscountCredits, cancelDiscountCredit, onClose, t, tc, fmtDate, fmtDateTime }) {
   const [filter, setFilter] = useState("available");
   const [openCredit, setOpenCredit] = useState(null); // credit id with detail/actions expanded
   const list = (discountCredits || []).filter((c) => c.status === filter).sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
   const availTotal = (discountCredits || []).filter((c) => c.status === "available").reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const availPeople = new Set((discountCredits || []).filter((c) => c.status === "available").map((c) => c.playerId || c.playerNameSnapshot)).size;
-  const FILTERS = [["available", "คงเหลือ"], ["used", "ใช้แล้ว"], ["cancelled", "ยกเลิก"]];
+  const FILTERS = [["available", t("finance.creditStatusAvailable")], ["used", t("finance.creditStatusUsed")], ["cancelled", t("finance.creditStatusCancelledTab")]];
+  // v1.12.44 (Localization Closure): STATUS_LABEL is unused dead code (verified -- nothing in this
+  // component ever reads it; the visible "สถานะ: ..." line below is a separate inline ternary) and is
+  // left exactly as-is, per this task's UI-localization-only scope (no unrelated code changes).
   const STATUS_LABEL = { available: "คงเหลือ", used: "ใช้แล้ว", cancelled: "ยกเลิกแล้ว" };
   const active = openCredit ? (discountCredits || []).find((c) => c.id === openCredit) : null;
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 2 }}>🎁 ส่วนลดคงเหลือ</div>
-      <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>{availPeople} คน · รวม {formatCurrency(availTotal)}</div>
+      <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 2 }}>🎁 {t("finance.remainingCreditsTitle")}</div>
+      <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>{t("finance.creditPeopleTotalSummary", { people: tc("common.personCount", availPeople), amount: formatCurrency(availTotal) })}</div>
       <div style={{ marginBottom: 10 }}>
         <Seg options={FILTERS} value={filter} onChange={setFilter} />
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
         {list.length === 0 ? (
-          <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>ไม่มีรายการ</div>
+          <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{t("finance.noEntries")}</div>
         ) : list.map((c) => (
           <button key={c.id} onClick={() => setOpenCredit(c.id)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
             <span style={{ flex: 1, minWidth: 0 }}>
               <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.playerNameSnapshot}</span>
               <span style={{ display: "block", fontSize: 11.5, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                จาก {resolveSessionLabel(c.sourceSessionId, session, sessionHistory) || "ก๊วนที่ผ่านมา"}
-                {c.status === "used" && c.usedSessionId ? ` · ใช้กับ ${resolveSessionLabel(c.usedSessionId, session, sessionHistory) || "ก๊วนที่ผ่านมา"}` : ""}
+                {t("finance.creditFromLabel", { source: resolveSessionLabel(c.sourceSessionId, session, sessionHistory, fmtDate || fmtThaiDate) || t("finance.creditSourceFallback") })}
+                {c.status === "used" && c.usedSessionId ? t("finance.creditUsedWithSuffix", { source: resolveSessionLabel(c.usedSessionId, session, sessionHistory, fmtDate || fmtThaiDate) || t("finance.creditSourceFallback") }) : ""}
               </span>
             </span>
             <span style={{ fontSize: 13.5, fontWeight: 800, color: c.status === "available" ? T.green : T.muted, flexShrink: 0 }}>{formatCurrency(c.amount)}</span>
@@ -18811,6 +19142,9 @@ function DiscountCreditSheet({ discountCredits, session, sessionHistory, applyDi
           applyDiscountCredits={applyDiscountCredits}
           cancelDiscountCredit={cancelDiscountCredit}
           onClose={() => setOpenCredit(null)}
+          t={t}
+          fmtDate={fmtDate}
+          fmtDateTime={fmtDateTime}
         />
       )}
     </Overlay>
@@ -18820,7 +19154,7 @@ function DiscountCreditSheet({ discountCredits, session, sessionHistory, applyDi
 // Detail/actions for ONE credit — reachable from the Discount Credit Sheet OR the Payment-page notice.
 // `players` (optional) is passed only from the Payment-page flow, to run the CRITICAL double-discount check
 // against the current session's live player.discount before allowing "ใช้ส่วนลดตอนนี้".
-function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCredits, cancelDiscountCredit, players, onClose }) {
+function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCredits, cancelDiscountCredit, players, onClose, t, fmtDate, fmtDateTime }) {
   const [confirmUse, setConfirmUse] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const livePlayer = players ? players.find((p) => p.id === credit.playerId) : null;
@@ -18830,9 +19164,9 @@ function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCr
       <Overlay onClose={onClose}>
         <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>{credit.playerNameSnapshot}</div>
         <div style={{ fontSize: 20, fontWeight: 800, color: T.muted, marginBottom: 10 }}>{formatCurrency(credit.amount)}</div>
-        <div style={{ fontSize: 12.5, color: T.muted }}>สถานะ: {credit.status === "used" ? "ใช้แล้ว" : "ยกเลิกแล้ว"}</div>
-        {credit.status === "used" && credit.usedAt && <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>เมื่อ {fmtThaiDateTime(new Date(credit.usedAt).toISOString())}</div>}
-        {credit.status === "cancelled" && credit.cancelledAt && <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>เมื่อ {fmtThaiDateTime(new Date(credit.cancelledAt).toISOString())}</div>}
+        <div style={{ fontSize: 12.5, color: T.muted }}>{t("finance.creditStatusLine", { status: credit.status === "used" ? t("finance.creditStatusUsed") : t("finance.creditStatusCancelledFull") })}</div>
+        {credit.status === "used" && credit.usedAt && <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{t("finance.creditUsedAtLine", { datetime: fmtDateTime ? fmtDateTime(credit.usedAt) : fmtThaiDateTime(new Date(credit.usedAt).toISOString()) })}</div>}
+        {credit.status === "cancelled" && credit.cancelledAt && <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{t("finance.creditUsedAtLine", { datetime: fmtDateTime ? fmtDateTime(credit.cancelledAt) : fmtThaiDateTime(new Date(credit.cancelledAt).toISOString()) })}</div>}
       </Overlay>
     );
   }
@@ -18840,39 +19174,39 @@ function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCr
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>{credit.playerNameSnapshot}</div>
       <div style={{ fontSize: 20, fontWeight: 800, color: T.green, marginBottom: 10 }}>{formatCurrency(credit.amount)}</div>
-      <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ได้รับจาก {resolveSessionLabel(credit.sourceSessionId, session, sessionHistory) || "ก๊วนที่ผ่านมา"}</div>
+      <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{t("finance.creditReceivedFromLabel", { source: resolveSessionLabel(credit.sourceSessionId, session, sessionHistory, fmtDate || fmtThaiDate) || t("finance.creditSourceFallback") })}</div>
 
       {alreadyHasManualDiscount && !confirmUse && (
         <div style={{ background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "#8a6300" }}>
-          ⚠️ ผู้เล่นคนนี้มีส่วนลดในก๊วนปัจจุบันแล้ว {formatCurrency(livePlayer.discount)}
+          ⚠️ {t("finance.existingDiscountWarningShort", { amount: formatCurrency(livePlayer.discount) })}
         </div>
       )}
 
       {!confirmUse && !confirmCancel && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <button onClick={() => setConfirmUse(true)} style={{ width: "100%", padding: "12px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13.5, fontWeight: 800 }}>ใช้ส่วนลดตอนนี้</button>
-          <button onClick={() => setConfirmCancel(true)} style={{ width: "100%", padding: "12px 0", borderRadius: 11, border: `1.5px solid ${T.accent}`, background: "none", color: T.accent, fontSize: 13.5, fontWeight: 800 }}>ยกเลิกส่วนลดครั้งถัดไป</button>
+          <button onClick={() => setConfirmUse(true)} style={{ width: "100%", padding: "12px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13.5, fontWeight: 800 }}>{t("finance.useDiscountNowButton")}</button>
+          <button onClick={() => setConfirmCancel(true)} style={{ width: "100%", padding: "12px 0", borderRadius: 11, border: `1.5px solid ${T.accent}`, background: "none", color: T.accent, fontSize: 13.5, fontWeight: 800 }}>{t("finance.cancelNextDiscountButton")}</button>
         </div>
       )}
 
       {confirmUse && (
         <div>
-          <div style={{ fontSize: 13.5, marginBottom: 4 }}>ใช้ส่วนลด {formatCurrency(credit.amount)} กับก๊วนปัจจุบัน?</div>
-          {alreadyHasManualDiscount && <div style={{ fontSize: 12, color: T.accent, marginBottom: 10 }}>ผู้เล่นคนนี้มีส่วนลดในก๊วนปัจจุบันอยู่แล้ว {formatCurrency(livePlayer.discount)} — การกด "ใช้ส่วนลด" จะเพิ่มส่วนลดนี้เข้าไปอีก</div>}
+          <div style={{ fontSize: 13.5, marginBottom: 4 }}>{t("finance.useDiscountConfirmTitle", { amount: formatCurrency(credit.amount) })}</div>
+          {alreadyHasManualDiscount && <div style={{ fontSize: 12, color: T.accent, marginBottom: 10 }}>{t("finance.existingDiscountWarningDetail", { amount: formatCurrency(livePlayer.discount) })}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button onClick={() => setConfirmUse(false)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>ยกเลิก</button>
-            <button onClick={() => { applyDiscountCredits(credit.id); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>ใช้ส่วนลด</button>
+            <button onClick={() => setConfirmUse(false)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>{t("common.cancel")}</button>
+            <button onClick={() => { applyDiscountCredits(credit.id); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>{t("finance.useDiscountButton")}</button>
           </div>
         </div>
       )}
 
       {confirmCancel && (
         <div>
-          <div style={{ fontSize: 13.5, marginBottom: 4 }}>ยกเลิกสิทธิ์ส่วนลด {formatCurrency(credit.amount)} ของ {credit.playerNameSnapshot}?</div>
-          <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>ประวัติรางวัลจะยังถูกเก็บไว้ แต่ส่วนลดนี้จะไม่ถูกนำไปใช้อีก</div>
+          <div style={{ fontSize: 13.5, marginBottom: 4 }}>{t("finance.cancelDiscountConfirmTitle", { amount: formatCurrency(credit.amount), name: credit.playerNameSnapshot })}</div>
+          <div style={{ fontSize: 12, color: T.muted, marginBottom: 10 }}>{t("finance.cancelDiscountConfirmBody")}</div>
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-            <button onClick={() => setConfirmCancel(false)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>ยกเลิก</button>
-            <button onClick={() => { cancelDiscountCredit(credit.id); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800 }}>ยืนยันยกเลิกสิทธิ์</button>
+            <button onClick={() => setConfirmCancel(false)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>{t("common.cancel")}</button>
+            <button onClick={() => { cancelDiscountCredit(credit.id); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800 }}>{t("finance.confirmCancelCreditButton")}</button>
           </div>
         </div>
       )}
@@ -18884,22 +19218,22 @@ function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCr
 // "available" credits to the CURRENT session at once. Same CRITICAL double-discount guard as
 // DiscountCreditDetail: if the player already has a nonzero manual discount this session, warn and
 // require an explicit tap-through rather than applying silently.
-function ApplyCreditsConfirm({ player, credits, applyDiscountCredits, onClose }) {
+function ApplyCreditsConfirm({ player, credits, applyDiscountCredits, onClose, t }) {
   if (!player || !credits.length) return null;
   const total = credits.reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const alreadyHasManualDiscount = Number(player.discount) > 0;
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>{player.name}</div>
-      <div style={{ fontSize: 13.5, marginBottom: 4 }}>ใช้ส่วนลด {formatCurrency(total)} กับก๊วนปัจจุบัน?</div>
+      <div style={{ fontSize: 13.5, marginBottom: 4 }}>{t("finance.useDiscountConfirmTitle", { amount: formatCurrency(total) })}</div>
       {alreadyHasManualDiscount && (
         <div style={{ background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "10px 12px", margin: "10px 0", fontSize: 12.5, color: "#8a6300" }}>
-          ⚠️ ผู้เล่นคนนี้มีส่วนลดในก๊วนปัจจุบันแล้ว {formatCurrency(player.discount)} — การกด "ใช้ส่วนลด" จะเพิ่มส่วนลดนี้เข้าไปอีก
+          ⚠️ {t("finance.existingDiscountWarningFull", { amount: formatCurrency(player.discount) })}
         </div>
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-        <button onClick={onClose} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>ยกเลิก</button>
-        <button onClick={() => { applyDiscountCredits(credits.map((c) => c.id)); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>ใช้ส่วนลด</button>
+        <button onClick={onClose} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>{t("common.cancel")}</button>
+        <button onClick={() => { applyDiscountCredits(credits.map((c) => c.id)); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>{t("finance.useDiscountButton")}</button>
       </div>
     </Overlay>
   );
@@ -18910,7 +19244,7 @@ function ApplyCreditsConfirm({ player, credits, applyDiscountCredits, onClose })
 // completed — never the player's current (possibly later-edited) level, per the archive rule.
 // v1.11.4: shared header used by the completed Summary page (and, later, the live in-progress
 // dashboard + PDF export) — shows the tournament's own logo exactly like the History list rows do.
-function TournamentResultHeader({ t, totals, statusLabel }) {
+function TournamentResultHeader({ t, totals, statusLabel, tr, fmtDate }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 14 }}>
       {/* v1.12.20: resolve a ref-only frozen logo back through the local Image Asset Store first. */}
@@ -18920,9 +19254,9 @@ function TournamentResultHeader({ t, totals, statusLabel }) {
         <div style={{ width: 42, height: 42, borderRadius: 12, background: T.surface2, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>🏆</div>
       )}
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 17, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name || "Tournament ไม่มีชื่อ"}</div>
-        <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2 }}>{fmtThaiDate(t.date)} · {totals.playerCount} คน · {totals.teamCount} ทีม · {totals.stagePath}</div>
-        {statusLabel && <div style={{ fontSize: 11.5, color: T.amber, fontWeight: 800, marginTop: 3 }}>สถานะ: {statusLabel}</div>}
+        <div style={{ fontSize: 17, fontWeight: 800, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name || tr("tournament.unnamedFallback")}</div>
+        <div style={{ fontSize: 12.5, color: T.muted, marginTop: 2 }}>{fmtDate ? fmtDate(t.date) : fmtThaiDate(t.date)} · {tr("tournamentResultHeader.summaryLine", { playerCount: totals.playerCount, teamCount: totals.teamCount, stagePath: totals.stagePath })}</div>
+        {statusLabel && <div style={{ fontSize: 11.5, color: T.amber, fontWeight: 800, marginTop: 3 }}>{tr("tournamentResultHeader.statusLine", { status: statusLabel })}</div>}
       </div>
     </div>
   );
@@ -18961,13 +19295,13 @@ function PodiumTeamPeople({ team, peopleById, photoSize, fontSize, gap = 14, max
     </div>
   );
 }
-function TournamentPodium({ podium, teamsById, peopleById }) {
+function TournamentPodium({ podium, teamsById, peopleById, tr }) {
   if (!podium || !podium.champion) {
     return (
       <div style={{ textAlign: "center", padding: "20px 14px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, marginBottom: 14 }}>
         <div style={{ fontSize: 28 }}>🏆</div>
-        <div style={{ fontSize: 14.5, fontWeight: 800, marginTop: 2 }}>เส้นทางสู่แชมป์</div>
-        <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>ยังไม่ทราบผู้ชนะ — ติดตามผลแต่ละคู่ได้ด้านล่าง</div>
+        <div style={{ fontSize: 14.5, fontWeight: 800, marginTop: 2 }}>{tr("tournamentPodium.pathToChampionTitle")}</div>
+        <div style={{ fontSize: 12, color: T.muted, marginTop: 4 }}>{tr("tournamentPodium.unknownWinnerHint")}</div>
       </div>
     );
   }
@@ -18982,7 +19316,7 @@ function TournamentPodium({ podium, teamsById, peopleById }) {
     <div style={{ marginBottom: 14 }}>
       <div style={{ textAlign: "center", padding: "18px 14px", background: "#fff8ec", border: `1.5px solid ${GOLD}`, borderRadius: 14, marginBottom: 8 }}>
         <div style={{ fontSize: 42 }}>🏆</div>
-        <div style={{ fontSize: 11.5, color: GOLD, fontWeight: 800, letterSpacing: 0.5, marginTop: 2, marginBottom: 6 }}>แชมป์เปี้ยน</div>
+        <div style={{ fontSize: 11.5, color: GOLD, fontWeight: 800, letterSpacing: 0.5, marginTop: 2, marginBottom: 6 }}>{tr("tournamentPodium.championLabel")}</div>
         <PodiumTeamPeople team={champTeam} peopleById={peopleById} photoSize={42} fontSize={13} gap={18} />
       </div>
       {(runnerName || thirdNames.length > 0) && (
@@ -18990,14 +19324,14 @@ function TournamentPodium({ podium, teamsById, peopleById }) {
           {runnerName && (
             <div style={{ flex: 1, textAlign: "center", padding: "10px 8px", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, minWidth: 0 }}>
               <div style={{ fontSize: 26 }}>🥈</div>
-              <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, marginTop: 1, marginBottom: 5 }}>รองแชมป์</div>
+              <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, marginTop: 1, marginBottom: 5 }}>{tr("tournament.runnerUp")}</div>
               <PodiumTeamPeople team={runnerTeam} peopleById={peopleById} photoSize={30} fontSize={11.5} gap={10} maxWidth={62} />
             </div>
           )}
           {thirdNames.length > 0 && (
             <div style={{ flex: 1, textAlign: "center", padding: "10px 8px", background: T.surface, border: `1px solid ${BRONZE}55`, borderRadius: 12, minWidth: 0 }}>
               <div style={{ fontSize: 26 }}>🥉</div>
-              <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, marginTop: 1, marginBottom: 5 }}>{thirdNames.length > 1 ? "ร่วมอันดับ 3" : "อันดับ 3"}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, marginTop: 1, marginBottom: 5 }}>{thirdNames.length > 1 ? tr("tournamentPodium.thirdSharedLabel") : tr("tournament.third")}</div>
               {thirdIds.length > 1 ? (
                 // joint 3rd: the box splits into a left half (first team's own photo+name column(s))
                 // and a right half (the other team's), per explicit request — not one merged row.
@@ -19016,7 +19350,7 @@ function TournamentPodium({ podium, teamsById, peopleById }) {
     </div>
   );
 }
-function TournamentHistoricalDetail({ t, playersById, onOpenTournamentPrint }) {
+function TournamentHistoricalDetail({ t, playersById, onOpenTournamentPrint, tr, fmtDate }) {
   // v1.11.4 fix: playerSnapshots only ever froze {id, name, level, skillIndex} (by design — so the
   // archived tournament always shows the player's skill/level AS OF completion, never a later edit).
   // The old merge (`{...playersById, ...snapById}`) replaced each player's ENTIRE live record with the
@@ -19034,45 +19368,45 @@ function TournamentHistoricalDetail({ t, playersById, onOpenTournamentPrint }) {
   const report = buildTournamentResultReport(t, peopleById);
   return (
     <div>
-      <TournamentResultHeader t={t} totals={report.totals} />
-      {report.mainDivision && <TournamentPodium podium={report.mainDivision.podium} teamsById={teamsById} peopleById={peopleById} />}
+      <TournamentResultHeader t={t} totals={report.totals} tr={tr} fmtDate={fmtDate} />
+      {report.mainDivision && <TournamentPodium podium={report.mainDivision.podium} teamsById={teamsById} peopleById={peopleById} tr={tr} />}
 
       {report.divisions.map((d) => (
         <div key={d.id} style={{ marginBottom: 18 }}>
           {report.divisions.length > 1 && <div style={{ fontWeight: 800, fontSize: 13.5, marginBottom: 8 }}>{d.name}</div>}
-          {report.divisions.length > 1 && <TournamentPodium podium={d.podium} teamsById={teamsById} peopleById={peopleById} />}
-          {d.bracket && <TournamentBracket bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={d.podium.champion} groupNameById={Object.fromEntries((d.groups || []).map((g) => [g.id, g.name]))} />}
-          {d.groups && d.groups.length > 0 && <GroupStandingsTabs groups={d.groups} teamsById={teamsById} peopleById={peopleById} pointsConfig={t.pointsConfig} />}
+          {report.divisions.length > 1 && <TournamentPodium podium={d.podium} teamsById={teamsById} peopleById={peopleById} tr={tr} />}
+          {d.bracket && <TournamentBracket bracket={d.bracket} teamsById={teamsById} peopleById={peopleById} champion={d.podium.champion} groupNameById={Object.fromEntries((d.groups || []).map((g) => [g.id, g.name]))} tr={tr} />}
+          {d.groups && d.groups.length > 0 && <GroupStandingsTabs groups={d.groups} teamsById={teamsById} peopleById={peopleById} pointsConfig={t.pointsConfig} tr={tr} />}
           {!d.bracket && (!d.groups || !d.groups.length) && (d.matches?.length > 0 || d.swissMatches?.length > 0) && (
-            <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches?.length ? d.matches : d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} />
+            <StandingsTableNoD teams={d.teamIds.map((id) => teamsById[id])} matches={d.matches?.length ? d.matches : d.swissMatches} pointsConfig={t.pointsConfig} peopleById={peopleById} tr={tr} />
           )}
         </div>
       ))}
 
-      <PlayerPerformanceList playerStats={report.playerStats} peopleById={peopleById} />
+      <PlayerPerformanceList playerStats={report.playerStats} peopleById={peopleById} tr={tr} />
 
       {/* v1.11.4: compact share/export bar at the very bottom, per spec — PDF is the polished
           user-facing report and sits at the same visual tier as Share; the old JSON export is kept
           (still needed as a data backup/import path) but demoted to a small text-link below, not
           given equal visual weight with the new PDF button. */}
-      <SectionHead icon={<Share2 size={16} color={T.green} />} title="แชร์และส่งออก" />
+      <SectionHead icon={<Share2 size={16} color={T.green} />} title={tr("tournamentSummary.shareExportTitle")} />
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <button
-          onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById))}
+          onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate))}
           style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}
-        ><Share2 size={15} /> แชร์สรุป</button>
+        ><Share2 size={15} /> {tr("tournamentSummary.shareSummaryButton")}</button>
         <button
           onClick={() => onOpenTournamentPrint && onOpenTournamentPrint(report)}
           style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}
         ><Download size={15} /> Export PDF</button>
       </div>
-      <button onClick={() => exportTournamentJSON(t, playersById)} style={{ width: "100%", textAlign: "center", padding: "8px 0", marginBottom: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700, textDecoration: "underline" }}>ข้อมูล/สำรอง/เพิ่มเติม — ส่งออก JSON</button>
+      <button onClick={() => exportTournamentJSON(t, playersById)} style={{ width: "100%", textAlign: "center", padding: "8px 0", marginBottom: 8, background: "none", border: "none", color: T.muted, fontSize: 11.5, fontWeight: 700, textDecoration: "underline" }}>{tr("tournamentSummary.exportJsonLink")}</button>
     </div>
   );
 }
 // v1.11.4: top-5 by wins + a "ดูทั้งหมด" drill-down for the rest, instead of the full list always
 // fully expanded — one of the biggest single contributors to a long Summary page for big tournaments.
-function PlayerPerformanceList({ playerStats, peopleById }) {
+function PlayerPerformanceList({ playerStats, peopleById, tr }) {
   const [showAll, setShowAll] = useState(false);
   const sorted = [...(playerStats || [])].sort((a, b) => b.wins - a.wins || a.losses - b.losses);
   const shown = showAll ? sorted : sorted.slice(0, 5);
@@ -19087,13 +19421,13 @@ function PlayerPerformanceList({ playerStats, peopleById }) {
   };
   return (
     <div>
-      <SectionHead icon={<User size={16} color={T.green} />} title="สถิติผู้เล่น" sub="ชนะ-แพ้ ใน Tournament นี้" />
+      <SectionHead icon={<User size={16} color={T.green} />} title={tr("playerPerformance.title")} sub={tr("playerPerformance.subtitle")} />
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {sorted.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>ไม่มีข้อมูล</div> : shown.map(Row)}
+        {sorted.length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0" }}>{tr("playerPerformance.noData")}</div> : shown.map(Row)}
       </div>
       {sorted.length > 5 && (
         <button onClick={() => setShowAll((v) => !v)} style={{ width: "100%", textAlign: "center", padding: "9px 0", marginTop: 8, borderRadius: 10, background: "none", border: "none", color: T.green, fontSize: 12.5, fontWeight: 800 }}>
-          {showAll ? "▲ ย่อกลับ" : `▼ ดูทั้งหมด (${sorted.length} คน)`}
+          {showAll ? tr("playerPerformance.collapseButton") : tr("playerPerformance.showAllButton", { count: sorted.length })}
         </button>
       )}
     </div>
@@ -19242,7 +19576,7 @@ function SummaryTab({ players: rosterPlayers, history, current, getP, settings, 
 // same component/logic/state that used to be this entire file, just renamed and unpinched from the outer
 // switcher; zero behavior change. Tournament payment is a NEW sibling reusing the same visual patterns
 // (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
-function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t, tc, fmtDate }) {
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
   // v1.12.1 (Tournament Feature Toggle): hide the [🏸 ก๊วน][🏆 Tournament] sub-tab row entirely (no layout
   // gap) when settings.tournamentEnabled is off, and always render the ก๊วน panel in that case regardless
@@ -19252,11 +19586,14 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
     <div>
       {showTournamentTab && (
         <div style={{ marginBottom: 12 }}>
-          <SegSecondary options={[["quan", "🏸 ก๊วน"], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
+          {/* v1.12.44 (Localization Closure, task 189): "🏆 Tournament" is already English literal text in
+              the live Thai UI -- untouched, per REUSE FIRST and Tournament text being out of this task's
+              scope (task 190). "🏸 ก๊วน" reuses session.title exactly ("ก๊วน"), byte-identical either way. */}
+          <SegSecondary options={[["quan", `🏸 ${t("session.title")}`], ["tournament", "🏆 Tournament"]]} value={payerTab} onChange={setPayerTab} />
         </div>
       )}
       {payerTab === "quan" || !showTournamentTab ? (
-        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory }} />
+        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, t, tc, fmtDate }} />
       ) : (
         <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
       )}
@@ -19338,7 +19675,7 @@ function DiscountAmountInput({ id, discount, setPDiscount }) {
     </span>
   );
 }
-function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory }) {
+function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, t, tc, fmtDate }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -19359,10 +19696,10 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       setEndSessionPending(false);
       // round-3 review (P1): a retry with nothing left to retry is NEVER a success — the session was not ended
       // by this tap. Keep the dialog open and offer the normal "จบก๊วน" (a fresh, revalidated attempt).
-      if (fromRetry) { setEndSessionError({ text: "ยังไม่ได้จบก๊วน — ไม่มีรายการให้ลองซ้ำแล้ว กรุณากด “จบก๊วน” อีกครั้ง", retry: false }); return; }
+      if (fromRetry) { setEndSessionError({ text: t("session.endRetryExhausted"), retry: false }); return; }
       // endSession() returns null only when an End Session for this session is already under way (its own
       // idempotency guard) — this tap did not end anything: keep the dialog open, never report success.
-      setEndSessionError({ text: "กำลังบันทึกการจบก๊วนนี้อยู่ — รอสักครู่ แล้วตรวจสอบอีกครั้ง", retry: false });
+      setEndSessionError({ text: t("session.endAlreadyInProgress"), retry: false });
       return;
     }
     promise.then(
@@ -19371,11 +19708,11 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         setEndSessionPending(false);
         // v1.12.38: a refusal because a match is still live is not a storage failure — say so, and offer the
         // normal "จบก๊วน" button again (not "retry", which re-sends an already-built entry).
-        if (e && e.message === END_SESSION_LIVE_MATCH_ERROR) setEndSessionError({ text: "ยังมีเกมที่กำลังเล่นหรือพักอยู่ — กดจบเกมให้ครบก่อน แล้วค่อยจบก๊วน", retry: false });
+        if (e && e.message === END_SESSION_LIVE_MATCH_ERROR) setEndSessionError({ text: t("session.endLiveMatchBlocked"), retry: false });
         // round-3 review (P1): the old entry no longer fits the current data (conflict) or was superseded
         // (obsolete). Re-sending it is never right; the organizer checks the data and ends the session afresh.
-        else if (e && (e.outcome === "conflict" || e.outcome === "obsolete")) setEndSessionError({ text: "ยังไม่ได้จบก๊วน — ข้อมูลเปลี่ยนไประหว่างรอบันทึก กรุณาตรวจสอบรายการ แล้วกด “จบก๊วน” อีกครั้ง", retry: false, outcome: e.outcome });
-        else setEndSessionError({ text: "บันทึกไม่สำเร็จ กรุณาลองอีกครั้ง", retry: true });
+        else if (e && (e.outcome === "conflict" || e.outcome === "obsolete")) setEndSessionError({ text: t("session.endConflictOrObsolete"), retry: false, outcome: e.outcome });
+        else setEndSessionError({ text: t("session.endSaveFailedRetry"), retry: true });
       }
     );
   };
@@ -19453,11 +19790,11 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   // Owner names their ก๊วน, well before "เริ่มก๊วน" ever creates the first match. No new state, no second
   // financial state — the existing `session` object already IS the group/session record.
   const started = history.length + doneCurrent.length > 0 || current.length > 0 || played.length > 0 || !!(session && session.name && session.name.trim());
-  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มีข้อมูลก๊วน — เริ่มจัดก๊วนในแท็บ "เกม" ก่อน</div>;
+  if (!started) return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>{t("session.noSessionDataYet", { tab: t("nav.gameHub") })}</div>;
 
   return (
     <div>
-      <SectionHead icon={<Wallet size={16} color={T.green} />} title="การชำระเงิน" sub="แตะเพื่อดู/รับเงิน" />
+      <SectionHead icon={<Wallet size={16} color={T.green} />} title={t("finance.payment")} sub={t("finance.paymentSub")} />
 
       {/* FINANCE SETTINGS ENTRY POINT — ค่าคอร์ท/ค่าลูก/ค่าใช้จ่ายอื่น/QR/บัญชี ทั้งหมดย้ายมาที่นี่จาก Today.
           v1.12.1 (spec 7): renamed from "ตั้งค่าค่าก๊วนและรางวัล" -> "💵 การชำระเงินและต้นทุน" (money icon,
@@ -19467,55 +19804,55 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       <button onClick={() => setOpenFinanceSettings(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 12 }}>
         <span style={{ fontSize: 17 }}>💵</span>
         <span style={{ flex: 1, minWidth: 0 }}>
-          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>การชำระเงินและต้นทุน</span>
-          <span style={{ display: "block", fontSize: 12, color: T.muted, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{financeSettingsSummary(settings)}</span>
+          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>{t("finance.paymentAndCostSettings")}</span>
+          <span style={{ display: "block", fontSize: 12, color: T.muted, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{financeSettingsSummary(settings, t)}</span>
         </span>
         <ChevronRight size={18} color={T.muted} />
       </button>
       {openFinanceSettings && (
-        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} mode={mode} sessionHistory={sessionHistory} onClose={() => setOpenFinanceSettings(false)} />
+        <FinanceSettingsSheet settings={settings} setSettings={setSettings} qrRef={qrRef} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} players={players} session={session} setSession={setSession} history={history} current={current} mode={mode} sessionHistory={sessionHistory} t={t} onClose={() => setOpenFinanceSettings(false)} />
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-          <div style={{ fontSize: 11, color: T.muted }}>จ่ายแล้ว</div>
-          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{paidCount}/{payableBill.length} คน</div>
+          <div style={{ fontSize: 11, color: T.muted }}>{t("finance.paidStatusShort")}</div>
+          <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{t("finance.paidOfTotalPeople", { paid: paidCount, total: payableBill.length })}</div>
         </div>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-          <div style={{ fontSize: 11, color: T.muted }}>รับแล้ว</div>
+          <div style={{ fontSize: 11, color: T.muted }}>{t("finance.received")}</div>
           <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{formatCurrency(collected)} <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>/ {formatCurrency(grandTotal)}</span></div>
         </div>
         <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-          <div style={{ fontSize: 11, color: T.muted }}>ค้างรับ</div>
+          <div style={{ fontSize: 11, color: T.muted }}>{t("finance.outstanding")}</div>
           <div style={{ fontSize: 16, fontWeight: 800, color: receivable > 0 ? T.accent : T.green }}>{formatCurrency(receivable)}</div>
         </div>
       </div>
       <div style={{ marginBottom: 8 }}>
-        <Seg options={[["unpaid", "ยังไม่จ่าย"], ["all", "ทั้งหมด"], ["paid", "จ่ายแล้ว"]]} value={payFilter} onChange={setPayFilter} />
+        <Seg options={[["unpaid", t("finance.unpaidStatusShort")], ["all", t("common.all")], ["paid", t("finance.paidStatusShort")]]} value={payFilter} onChange={setPayFilter} />
       </div>
       <div style={{ position: "relative", marginBottom: 10 }}>
         <Search size={15} style={{ position: "absolute", left: 10, top: 9.5, color: T.muted }} />
-        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหาผู้เล่น" style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+        <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t("finance.searchPlayerPlaceholder")} style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
       </div>
 
       {/* v1.11.53 (Live Finance Summary, spec F/G/H/I): ONE compact P&L card — deliberately NOT a second set
           of 3 cards duplicating จ่ายแล้ว/รับแล้ว/ค้างรับ above (spec I). Distinct background+divider so it
           reads as a status summary, not another payment control. */}
       <div style={{ background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px", marginBottom: 14 }}>
-        <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginBottom: 8 }}>📊 สถานะการเงินก๊วน</div>
+        <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginBottom: 8 }}>📊 {t("finance.liveStatusHeading")}</div>
         <div style={{ display: "flex", alignItems: "stretch" }}>
           <div style={{ flex: 1, textAlign: "center" }}>
-            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>รายได้</div>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>{t("finance.revenue")}</div>
             <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>{formatCurrency(liveRevenue)}</div>
           </div>
           <div style={{ width: 1, background: T.border, margin: "1px 8px" }} />
           <div style={{ flex: 1, textAlign: "center" }}>
-            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>ค่าใช้จ่าย</div>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>{t("finance.expenses")}</div>
             <div style={{ fontSize: 14.5, fontWeight: 800, color: T.text }}>{formatCurrency(liveExpenseTotal)}</div>
           </div>
           <div style={{ width: 1, background: T.border, margin: "1px 8px" }} />
           <div style={{ flex: 1, textAlign: "center" }}>
-            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>{liveProfit >= 0 ? "กำไร" : "ขาดทุน"}</div>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 2 }}>{liveProfit >= 0 ? t("finance.profit") : t("finance.loss")}</div>
             <div style={{ fontSize: 14.5, fontWeight: 800, color: liveProfit >= 0 ? T.green : T.accent }}>{formatCurrency(Math.abs(liveProfit))}</div>
           </div>
         </div>
@@ -19530,7 +19867,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         return (
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
         {visibleBill.length === 0 ? (
-          <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{q ? "ไม่พบผู้เล่นที่ค้นหา" : payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีข้อมูลการชำระเงิน"}</div>
+          <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{q ? t("finance.searchNoResults") : payFilter === "unpaid" ? t("finance.allPaidCelebration") : payFilter === "paid" ? t("finance.noOnePaidYet") : t("finance.noPaymentDataYet")}</div>
         ) : visibleBill.map((b) => {
           // v1.11.38: still playing/paused right now (match not finished) -> charging is blocked until the
           // organizer presses "จบเกม", so the games-played count above (and this bill's shuttle charge)
@@ -19542,21 +19879,21 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               <Avatar p={b} size={30} />
               <span style={{ minWidth: 0 }}>
                 <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{b.name} <span style={{ color: levelColor(b.skillIndex), fontWeight: 800, fontSize: 11.5 }}>({b.level})</span></span>
-                <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{b.games || 0} เกม{b.isOwnerExempt ? " · เจ้าของก๊วน ไม่เก็บเงิน" : ` · ${formatCurrency(b.total)}`}</span>
+                <span style={{ display: "block", fontSize: 11.5, color: T.muted }}>{tc("common.gameCount", b.games || 0)}{b.isOwnerExempt ? t("finance.ownerFreeSuffix") : ` · ${formatCurrency(b.total)}`}</span>
               </span>
             </button>
             {/* v1.11.42 (Owner Payment Exemption): Owner gets NO payment action/button — a static free-of-
                 charge badge instead of ยังไม่จ่าย/จ่ายแล้ว, since they were never charged (total is forced
                 to ฿0 in computeBill itself, not just hidden here). */}
             {b.isOwnerExempt ? (
-              <span style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, background: "#efe7fc", color: "#7c3aed" }}>👑 เจ้าของก๊วน · ฟรี</span>
+              <span style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, background: "#efe7fc", color: "#7c3aed" }}>👑 {t("finance.ownerFreeBadge")}</span>
             ) : (
             <button
               onClick={() => { if (isLive) return; togglePaid(b.id); }}
               disabled={isLive}
-              title={isLive ? "กำลังเล่นอยู่ — กดจบเกมก่อนถึงจะคิดตังค์ได้" : undefined}
+              title={isLive ? t("finance.playingNowTooltip") : undefined}
               style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: isLive ? T.surface2 : b.paid ? "#e2f5ec" : "#fdecea", color: isLive ? T.muted : b.paid ? T.green : T.accent, opacity: isLive ? 0.75 : 1, cursor: isLive ? "not-allowed" : "pointer" }}
-            >{isLive ? "⏳ กำลังเล่นอยู่" : b.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+            >{isLive ? `⏳ ${t("finance.playingNowShort")}` : b.paid ? `🟢 ${t("finance.paidStatusShort")}` : `🔴 ${t("finance.unpaidStatusShort")}`}</button>
             )}
           </div>
           );
@@ -19576,7 +19913,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         disabled={!canEndSession}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 0", borderRadius: 13, background: canEndSession ? "none" : T.surface2, border: `1.5px solid ${canEndSession ? T.accent : T.border}`, color: canEndSession ? T.accent : T.muted, fontSize: 13.5, fontWeight: 800, marginBottom: 18, opacity: canEndSession ? 1 : 0.6 }}
       >
-        <LogOut size={15} /> {liveMatchCount > 0 ? `จบก๊วนวันนี้ (ยังมีเกมกำลังเล่น/พักอยู่ ${liveMatchCount} เกม)` : payableBill.length === 0 ? "ยังไม่มีผู้เล่นที่ต้องจ่าย" : allPaid ? "จบก๊วนวันนี้" : `จบก๊วนวันนี้ (รอจ่ายอีก ${payableBill.length - paidCount} คน)`}
+        <LogOut size={15} /> {liveMatchCount > 0 ? t("finance.endTodayLiveBlocked", { games: tc("common.gameCount", liveMatchCount) }) : payableBill.length === 0 ? t("finance.endTodayNoPayers") : allPaid ? t("session.endToday") : t("finance.endTodayWaitingOn", { people: tc("common.personCount", payableBill.length - paidCount) })}
       </button>
 
       {/* PLAYER PAYMENT DETAIL */}
@@ -19584,11 +19921,11 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
         <Overlay onClose={() => setDetail(null)}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
             <Avatar p={detailP} size={44} />
-            <div><div style={{ fontSize: 16, fontWeight: 800 }}>{detailP.name} <span style={{ color: levelColor(detailP.skillIndex), fontSize: 13 }}>({detailP.level})</span></div><div style={{ fontSize: 12, color: T.muted }}>{PSTATUS[detailP.status || "absent"].label}</div></div>
+            <div><div style={{ fontSize: 16, fontWeight: 800 }}>{detailP.name} <span style={{ color: levelColor(detailP.skillIndex), fontSize: 13 }}>({detailP.level})</span></div><div style={{ fontSize: 12, color: T.muted }}>{t(PSTATUS_I18N_KEY[detailP.status || "absent"])}</div></div>
           </div>
           <div style={{ background: T.surface2, borderRadius: 12, padding: 12, marginTop: 6 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 8 }}>รายละเอียดค่าก๊วน</div>
-            <BillRow label="ค่าสนาม" v={detailBill.eCourt} />
+            <div style={{ fontSize: 12.5, fontWeight: 800, marginBottom: 8 }}>{t("finance.billDetailsTitle")}</div>
+            <BillRow label={t("finance.courtCost")} v={detailBill.eCourt} />
             {/* v1.12.25 (Mixed Singles + Doubles): only show the คู่/เดี่ยว game-count breakdown when the
                 player actually has BOTH types this session (per spec — never an ugly empty "0 เกม" line for
                 someone who only ever played one type, and byte-identical to the old single line for every
@@ -19596,19 +19933,19 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
             {!detailBill.isOwnerExempt && detailBill.doublesGames > 0 && detailBill.singlesGames > 0 ? (
               <div style={{ padding: "3px 0" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                  <span>ค่าลูกแบด</span><span>{formatCurrency(detailBill.eShuttle)}</span>
+                  <span>{t("finance.shuttleCost")}</span><span>{formatCurrency(detailBill.eShuttle)}</span>
                 </div>
                 <div style={{ fontSize: 11, color: T.muted, paddingLeft: 8, lineHeight: 1.6 }}>
-                  <div>คู่ {detailBill.doublesGames} เกม × ฿{detailBill.doublesRate} = {formatCurrency(detailBill.doublesGames * detailBill.doublesRate)}</div>
-                  <div>เดี่ยว {detailBill.singlesGames} เกม × ฿{detailBill.singlesRate} = {formatCurrency(detailBill.singlesGames * detailBill.singlesRate)}</div>
+                  <div>{t("finance.doublesBreakdownLine", { games: detailBill.doublesGames, rate: detailBill.doublesRate, total: formatCurrency(detailBill.doublesGames * detailBill.doublesRate) })}</div>
+                  <div>{t("finance.singlesBreakdownLine", { games: detailBill.singlesGames, rate: detailBill.singlesRate, total: formatCurrency(detailBill.singlesGames * detailBill.singlesRate) })}</div>
                 </div>
               </div>
             ) : (
-              <BillRow label="ค่าลูก" v={detailBill.eShuttle} />
+              <BillRow label={t("finance.shuttleCostShort")} v={detailBill.eShuttle} />
             )}
-            <BillRow label="อื่น ๆ" v={Math.round(detailBill.eOther)} />
+            <BillRow label={t("common.miscellaneous")} v={Math.round(detailBill.eOther)} />
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, padding: "3px 0", color: T.green }}>
-              <span>ส่วนลด</span>
+              <span>{t("finance.discount")}</span>
               <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <span>-฿</span>
                 <DiscountAmountInput id={detailP.id} discount={detailP.discount} setPDiscount={setPDiscount} />
@@ -19616,58 +19953,58 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
             </div>
             {detailBill.eCarriedInDiscount > 0 && (
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0", color: T.green }}>
-                <span>ส่วนลดจากรอบที่แล้ว</span>
+                <span>{t("finance.carriedDiscountLabel")}</span>
                 <span>{formatCurrency(-Math.round(detailBill.eCarriedInDiscount))}</span>
               </div>
             )}
             {detailBill.eWheelDiscount - detailBill.eCarriedInDiscount > 0 && (
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, padding: "3px 0", color: T.green }}>
-                <span>🎡 รางวัลวงล้อ</span>
+                <span>🎡 {t("finance.wheelPrizeLabel")}</span>
                 <span>{formatCurrency(-Math.round(detailBill.eWheelDiscount - detailBill.eCarriedInDiscount))}</span>
               </div>
             )}
-            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}><span>รวม</span><span style={{ color: T.green }}>{formatCurrency(detailBill.total)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 800, marginTop: 6, paddingTop: 8, borderTop: `1px solid ${T.border}` }}><span>{t("common.total")}</span><span style={{ color: T.green }}>{formatCurrency(detailBill.total)}</span></div>
             {detailPCredits.length > 0 && (
               <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "9px 11px" }}>
-                <span style={{ flex: 1, fontSize: 12.5, color: "#8a6300", fontWeight: 700 }}>🎁 มีส่วนลดคงเหลือ {formatCurrency(detailPCreditTotal)}</span>
-                <button onClick={() => setOpenCreditFor(detailP.id)} style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 20, border: "none", background: T.green, color: "#fff", fontSize: 12, fontWeight: 800 }}>ใช้กับก๊วนนี้</button>
+                <span style={{ flex: 1, fontSize: 12.5, color: "#8a6300", fontWeight: 700 }}>🎁 {t("finance.remainingCreditBadge", { amount: formatCurrency(detailPCreditTotal) })}</span>
+                <button onClick={() => setOpenCreditFor(detailP.id)} style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 20, border: "none", background: T.green, color: "#fff", fontSize: 12, fontWeight: 800 }}>{t("finance.useForThisSession")}</button>
               </div>
             )}
             {/* v1.11.42 (Owner Payment Exemption): no payment action for Owner — they were never charged. */}
             {detailBill.isOwnerExempt ? (
-              <div style={{ marginTop: 12, textAlign: "center", padding: "11px 0", borderRadius: 11, background: "#efe7fc", color: "#7c3aed", fontSize: 13.5, fontWeight: 800 }}>👑 เจ้าของก๊วน · ไม่มีค่าใช้จ่าย</div>
+              <div style={{ marginTop: 12, textAlign: "center", padding: "11px 0", borderRadius: 11, background: "#efe7fc", color: "#7c3aed", fontSize: 13.5, fontWeight: 800 }}>👑 {t("finance.ownerNoChargeBadge")}</div>
             ) : (
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button
                 onClick={() => { if (detailIsLive) return; togglePaid(detailP.id); }}
                 disabled={detailIsLive}
                 style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", fontSize: 13.5, fontWeight: 800, background: detailIsLive ? T.surface2 : detailBill.paid ? "#e2f5ec" : T.green, color: detailIsLive ? T.muted : detailBill.paid ? T.green : "#fff", opacity: detailIsLive ? 0.75 : 1, cursor: detailIsLive ? "not-allowed" : "pointer" }}
-              >{detailIsLive ? "⏳ กำลังเล่นอยู่ — จบเกมก่อนถึงจะคิดตังค์ได้" : detailBill.paid ? "🟢 จ่ายแล้ว (แตะเพื่อยกเลิก)" : "ทำเครื่องหมายว่าจ่ายแล้ว"}</button>
+              >{detailIsLive ? `⏳ ${t("finance.playingNowFullTooltip")}` : detailBill.paid ? `🟢 ${t("finance.paidTapToUndo")}` : t("finance.markAsPaid")}</button>
             </div>
             )}
 
             {detailP.spun ? (
               <div style={{ marginTop: 10, background: "#fff", border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.text }}>
-                🎉 ผลวงล้อ: <span style={{ fontWeight: 800 }}>{detailP.wheelResult}</span>
+                🎉 {t("finance.wheelResultLabel")} <span style={{ fontWeight: 800 }}>{detailP.wheelResult}</span>
               </div>
             ) : settings.wheelEnabled !== false ? (
               <button onClick={() => setWheelFor(detailP.id)} style={{ marginTop: 10, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: "none", border: `1.5px dashed ${T.green}`, color: T.green, fontSize: 13, fontWeight: 800 }}>
-                🎡 หมุนวงล้อรางวัล (ใช้ได้ 1 ครั้ง)
+                🎡 {t("finance.spinWheelButton")}
               </button>
             ) : null}
 
             {settings.qr && !detailBill.isOwnerExempt && (
               <button onClick={() => setQrFull({ name: detailP.name, amount: detailBill.total })} style={{ marginTop: 12, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", borderRadius: 13, background: T.green, border: "none", color: "#fff", fontSize: 14, fontWeight: 800 }}>
-                <QrCode size={17} /> เปิด QR เพื่อชำระเงิน {formatCurrency(detailBill.total)}
+                <QrCode size={17} /> {t("finance.openQrToPay", { amount: formatCurrency(detailBill.total) })}
               </button>
             )}
             {settings.bank && !detailBill.isOwnerExempt && (
               <div style={{ marginTop: 12, background: "#fff", border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px" }}>
-                <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 3 }}>หรือโอนเข้าบัญชี</div>
+                <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 3 }}>{t("finance.orBankTransfer")}</div>
                 <div style={{ fontSize: 13.5, fontWeight: 700, whiteSpace: "pre-wrap" }}>{settings.bank}</div>
               </div>
             )}
-            {!detailBill.isOwnerExempt && !settings.qr && !settings.bank && <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted, textAlign: "center" }}>เพิ่ม QR / เลขบัญชีได้ที่ 💵 การชำระเงินและต้นทุน ด้านบน</div>}
+            {!detailBill.isOwnerExempt && !settings.qr && !settings.bank && <div style={{ marginTop: 10, fontSize: 11.5, color: T.muted, textAlign: "center" }}>{t("finance.addQrBankHint", { settingsLabel: t("finance.paymentAndCostSettings") })}</div>}
           </div>
         </Overlay>
       )}
@@ -19678,17 +20015,18 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
           credits={(discountCredits || []).filter((c) => c.playerId === openCreditFor && c.status === "available")}
           applyDiscountCredits={applyDiscountCredits}
           onClose={() => setOpenCreditFor(null)}
+          t={t}
         />
       )}
 
       {/* FULLSCREEN QR (no crop/filter) */}
       {qrFull && settings.qr && (
         <div onClick={() => setQrFull(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.92)", zIndex: 50, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(12px + env(safe-area-inset-top)) 12px calc(12px + env(safe-area-inset-bottom))" }}>
-          <div style={{ color: "#fff", fontSize: 18, fontWeight: 800, marginBottom: 4 }}>ยอดชำระ {formatCurrency(qrFull.amount)}</div>
+          <div style={{ color: "#fff", fontSize: 18, fontWeight: 800, marginBottom: 4 }}>{t("finance.amountToPayLabel", { amount: formatCurrency(qrFull.amount) })}</div>
           <div style={{ color: "#cbd5cf", fontSize: 14, marginBottom: 12 }}>{qrFull.name}</div>
           <img src={settings.qr} alt="QR" style={{ width: "min(94vw, 520px)", height: "min(94vw, 520px)", objectFit: "contain", background: "#fff", borderRadius: 14, padding: 8 }} />
           {settings.bank && <div style={{ color: "#e5e7eb", fontSize: 13, marginTop: 14, textAlign: "center", whiteSpace: "pre-wrap", maxWidth: 340 }}>{settings.bank}</div>}
-          <button onClick={() => setQrFull(null)} style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 7, padding: "13px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 15, fontWeight: 800 }}><X size={18} /> ปิด</button>
+          <button onClick={() => setQrFull(null)} style={{ marginTop: 16, display: "flex", alignItems: "center", gap: 7, padding: "13px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 15, fontWeight: 800 }}><X size={18} /> {t("common.close")}</button>
         </div>
       )}
 
@@ -19709,11 +20047,11 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       {confirmDateMismatch && (
         <div onClick={() => setConfirmDateMismatch(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>วันที่ก๊วนไม่ตรงกับวันนี้</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>วันที่ก๊วนของคุณคือวันที่ {fmtThaiDate(session.date)} ไม่ใช่วันนี้ ({fmtThaiDate(todayLocalISO())}) คุณต้องการเปลี่ยนเป็นวันที่ตามปัจจุบันหรือไม่?</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{t("session.dateMismatchTitle")}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{t("session.dateMismatchBody", { sessionDate: fmtDate ? fmtDate(session.date) : fmtThaiDate(session.date), today: fmtDate ? fmtDate(todayLocalISO()) : fmtThaiDate(todayLocalISO()) })}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => { setConfirmDateMismatch(false); setConfirmEnd(true); }} style={btnSecondary}>ไม่เปลี่ยน</button>
-              <button onClick={() => { setSession((s) => ({ ...s, date: todayLocalISO() })); setConfirmDateMismatch(false); setConfirmEnd(true); }} style={{ ...btnPrimary, background: T.accent }}>เปลี่ยน</button>
+              <button onClick={() => { setConfirmDateMismatch(false); setConfirmEnd(true); }} style={btnSecondary}>{t("session.dateMismatchKeep")}</button>
+              <button onClick={() => { setSession((s) => ({ ...s, date: todayLocalISO() })); setConfirmDateMismatch(false); setConfirmEnd(true); }} style={{ ...btnPrimary, background: T.accent }}>{t("session.dateMismatchChange")}</button>
             </div>
           </div>
         </div>
@@ -19722,8 +20060,8 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
       {confirmEnd && (
         <div onClick={() => { if (!endSessionPending) setConfirmEnd(false); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>จบก๊วน "{session.name || "ไม่มีชื่อ"}"?</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>ระบบจะบันทึกข้อมูลก๊วนนี้ไว้ในประวัติก๊วน แล้วเริ่มก๊วนใหม่ให้พร้อมใช้งาน</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{t("session.endConfirmTitle", { name: session.name || t("session.noNameFallback") })}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{t("session.endConfirmBody")}</div>
             {/* v1.12.34 (Codex review finding #5): the dialog stays open and both buttons are disabled while
                 endSessionPending is true (i.e. while commitCriticalMutation's journal write is in flight) —
                 never dismissed just because the button was tapped. On a genuine failure, endSessionError is
@@ -19734,19 +20072,19 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               <div style={{ background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 9, padding: "8px 10px", marginBottom: 12, fontSize: 11.5 }}>{endSessionError.text}</div>
             )}
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmEnd(false)} disabled={endSessionPending} style={{ ...btnSecondary, opacity: endSessionPending ? 0.6 : 1 }}>ยกเลิก</button>
+              <button onClick={() => setConfirmEnd(false)} disabled={endSessionPending} style={{ ...btnSecondary, opacity: endSessionPending ? 0.6 : 1 }}>{t("common.cancel")}</button>
               {endSessionError && endSessionError.retry ? (
                 <button
                   onClick={() => { setEndSessionError(null); setEndSessionPending(true); runEndSessionCommit(retryEndSessionCommit && retryEndSessionCommit(), true); }}
                   disabled={endSessionPending}
                   style={{ ...btnPrimary, background: T.accent, opacity: endSessionPending ? 0.6 : 1 }}
-                >{endSessionPending ? "กำลังลองอีกครั้ง…" : "ลองอีกครั้ง"}</button>
+                >{endSessionPending ? t("session.endRetryingLabel") : t("common.retry")}</button>
               ) : (
                 <button
                   onClick={() => { setEndSessionError(null); setEndSessionPending(true); runEndSessionCommit(endSession()); }}
                   disabled={endSessionPending}
                   style={{ ...btnPrimary, background: T.accent, opacity: endSessionPending ? 0.6 : 1 }}
-                >{endSessionPending ? "กำลังบันทึก…" : "จบก๊วน"}</button>
+                >{endSessionPending ? t("common.saving") : t("session.end")}</button>
               )}
             </div>
           </div>
@@ -19923,7 +20261,11 @@ function MatchTeams({ m, getP, editable, tapSlot, isSel, replaceSlot, bench, big
 
 // v1.11.34: see the "subtle, ONE-TIME-EVER hint" comment inside TeamSide below.
 let _avatarHintClaimed = false;
-function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done, lockPairs = [], players = [], stats, latestMap, warnHighlight }) {
+// v1.12.44: `t` is OPTIONAL here -- TeamSide is called both from MatchRow (Game tab, now passes `t`) and,
+// via MatchTeams, from NextMatchBlock -- confirmed (again, this session) to be DEAD CODE with no JSX call
+// site anywhere, so that path never actually renders. Kept optional rather than required purely as a
+// safety margin: if that dead code were ever reactivated it would render its original Thai text, not throw.
+function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, bench, openSlot, setOpenSlot, big, now, done, lockPairs = [], players = [], stats, latestMap, warnHighlight, t }) {
   const isWide = useIsWide(); // iPad / landscape phone (≥700px) — only the photo scales up further here; text stays the same size on every screen
   // v1.12.25 (P0 Mixed Singles + Doubles): once the WHOLE match resolves to a clean 1-vs-1 (both sides have
   // exactly one filled slot — see inferMatchTypeFromTeams), this side only renders its ONE filled slot —
@@ -20063,19 +20405,19 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
                 single-line format. */}
             <span style={{ minWidth: 0, lineHeight: 1.25 }}>
               <span style={{ display: "block", fontWeight: 700, fontSize: nameFs, whiteSpace: "nowrap" }}>{p.name}</span>
-              <span style={{ display: "block", fontSize: lvlFs, fontWeight: 800, color: levelColor(p.skillIndex) }}>({p.level}) <span style={{ color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color }}>{HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span></span>
+              <span style={{ display: "block", fontSize: lvlFs, fontWeight: 800, color: levelColor(p.skillIndex) }}>({p.level}) <span style={{ color: HAND_BADGE[p.handedness === "left" ? "left" : "right"].color }}>{t ? t(HAND_I18N_KEY[p.handedness === "left" ? "left" : "right"]) : HAND_LABEL[p.handedness === "left" ? "left" : "right"]}</span></span>
             </span>
             {editable && (
-              <button onClick={toggle} title="เปลี่ยนผู้เล่น" style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }} />
+              <button onClick={toggle} title={t ? t("match.changePlayer") : "เปลี่ยนผู้เล่น"} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", padding: 0, cursor: "pointer" }} />
             )}
-            {isOpen && <PlayerPicker bench={rankedBench} allowClear align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
+            {isOpen && <PlayerPicker bench={rankedBench} allowClear align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} t={t} />}
           </div>
         ) : (
           <div key={idx} style={{ flex: 1, minWidth: 0, position: "relative", padding: "7px 8px", borderRadius: 10, border: `1.5px dashed ${editable ? T.green : T.border}`, color: editable ? T.green : T.muted, fontSize: 13, minHeight: 46, display: "flex", alignItems: "center", justifyContent: "center" }}>
             {editable ? (
-              <button onClick={toggle} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", color: T.green, fontSize: 13, fontWeight: 700, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{compact ? "+ เลือก" : "+ เลือกคน"}</button>
-            ) : "ว่าง"}
-            {isOpen && <PlayerPicker bench={rankedBench} align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} />}
+              <button onClick={toggle} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", background: "none", border: "none", color: T.green, fontSize: 13, fontWeight: 700, cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{compact ? (t ? t("match.addPairShort") : "+ เลือก") : (t ? t("match.addPairFull") : "+ เลือกคน")}</button>
+            ) : (t ? t("match.emptyBadge") : "ว่าง")}
+            {isOpen && <PlayerPicker bench={rankedBench} align={team === "A" ? "left" : "right"} onPick={pick} onClose={() => setOpenSlot(null)} now={now} anchorRect={openSlot.rect} t={t} />}
           </div>
         );
       })}
@@ -20091,7 +20433,7 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
         <div style={{ position: "relative", flexShrink: 0 }}>
           <button
             onClick={(e) => setOpenSlot(openSlot && openSlot.team === team && openSlot.idx === emptyIdx ? null : { team, idx: emptyIdx, rect: rectOf(e.currentTarget) })}
-            title="เพิ่มคู่ (เกมคู่)"
+            title={t ? t("match.addPairDoubles") : "เพิ่มคู่ (เกมคู่)"}
             style={{ width: 30, height: 30, borderRadius: "50%", border: `1.5px dashed ${T.green}`, background: "none", color: T.green, fontSize: 16, fontWeight: 800, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}
           >+</button>
           {openSlot && openSlot.team === team && openSlot.idx === emptyIdx && (
@@ -20102,6 +20444,7 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
               onClose={() => setOpenSlot(null)}
               now={now}
               anchorRect={openSlot.rect}
+              t={t}
             />
           )}
         </div>
@@ -20116,14 +20459,14 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
       <div onClick={() => setPreviewPlayer(null)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 210, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom))", boxSizing: "border-box" }}>
         <img src={previewPlayer.photo} alt="" style={{ maxWidth: "100%", maxHeight: "72vh", borderRadius: 14, objectFit: "contain" }} />
         <div style={{ color: "#fff", fontSize: 16, fontWeight: 800, marginTop: 16 }}>{previewPlayer.name}</div>
-        <button onClick={() => setPreviewPlayer(null)} style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 7, padding: "11px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}><X size={18} /> ปิด</button>
+        <button onClick={() => setPreviewPlayer(null)} style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 7, padding: "11px 26px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}><X size={18} /> {t ? t("common.close") : "ปิด"}</button>
       </div>,
       document.body
     )}
     {showHint && ReactDOM.createPortal(
       <div style={{ position: "fixed", left: 12, right: 12, bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 150, display: "flex", justifyContent: "center" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(20,20,20,0.92)", color: "#fff", borderRadius: 20, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, boxShadow: "0 6px 20px rgba(0,0,0,0.3)", maxWidth: 320 }}>
-          <span>💡 กดรูปค้างเพื่อดูรูปใหญ่</span>
+          <span>💡 {t ? t("match.longPressPhotoHint") : "กดรูปค้างเพื่อดูรูปใหญ่"}</span>
           <button onClick={() => setShowHint(false)} style={{ background: "none", border: "none", color: "#fff", opacity: 0.8, display: "flex", flexShrink: 0 }}><X size={14} /></button>
         </div>
       </div>,
@@ -20142,7 +20485,10 @@ function TeamSide({ arr, team, m, getP, editable, tapSlot, isSel, replaceSlot, b
 // its trigger. Fixes the picker getting silently cut off at the bottom of the unified match table (that
 // table scrolls horizontally, which forces the browser to also clip vertically) — same width/maxHeight/
 // look as before, it just can no longer be clipped by any ancestor.
-function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRect }) {
+// v1.12.44: `t` OPTIONAL -- same rationale as TeamSide just above (its only caller, TeamSide, is itself
+// optional-`t`; the existing Tournament-reuse comment above already documents this component receiving
+// no `now` from some callers, and now no `t` either, without changing behavior).
+function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRect, t }) {
   const alignRight = align === "right";
   const panelWidth = Math.max(anchorRect.width, 210);
   // v1.12.14 (P0 responsive fix): the align="left" branch only ever clamped a MINIMUM 6px from the left
@@ -20166,11 +20512,11 @@ function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRe
       <div onClick={(e) => e.stopPropagation()} style={panelStyle}>
         {allowClear && (
           <button onClick={() => onPick(null)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", background: "none", border: "none", borderBottom: `1px solid ${T.border}`, textAlign: "left", color: T.accent, fontSize: 12.5, fontWeight: 700 }}>
-            <X size={15} /> เอาออก (ว่าง)
+            <X size={15} /> {t ? t("match.removeEmptySlot") : "เอาออก (ว่าง)"}
           </button>
         )}
         {bench.length === 0 ? (
-          <div style={{ padding: "12px 11px", fontSize: 12.5, color: T.muted, textAlign: "center" }}>ไม่มีคนรอเปลี่ยน</div>
+          <div style={{ padding: "12px 11px", fontSize: 12.5, color: T.muted, textAlign: "center" }}>{t ? t("match.noOneToSwap") : "ไม่มีคนรอเปลี่ยน"}</div>
         ) : bench.map((b) => (
           // v1.11.75 (Manual Matchmaking Smart Suggestion, spec section 2): a candidate flagged by
           // rankManualSlotCandidates with an "ไม่อยากคู่/ไม่อยากเจอ" conflict against someone already placed
@@ -20201,7 +20547,8 @@ function PlayerPicker({ bench, allowClear, align, onPick, onClose, now, anchorRe
                     </span>
                   ) : typeof now === "number" && (
                     <span style={{ display: "block", fontSize: 10.5, fontWeight: 700, color: isResting ? "#d97706" : T.muted, marginTop: 1 }}>
-                      {isResting ? "ขอพัก · " : ""}รอ {waitMinutesFrom(b.waitingSince, now)} นาที · เล่น {b.games || 0} เกม
+                      {isResting ? (t ? `${t("match.restingHint")} · ` : "ขอพัก · ") : ""}
+                      {t ? t("match.waitGamesHint", { minutes: waitMinutesFrom(b.waitingSince, now), games: b.games || 0 }) : `รอ ${waitMinutesFrom(b.waitingSince, now)} นาที · เล่น ${b.games || 0} เกม`}
                     </span>
                   )}
                 </span>
@@ -20319,7 +20666,21 @@ const HAND_PREF_META = {
   preferLeft: { label: "อยากคู่กับมือซ้าย", short: "อยากคู่มือซ้าย", bg: HAND_BADGE.left.bg, border: "#ddc8fb", color: HAND_BADGE.left.color },
   avoidLeft: { label: "ไม่อยากคู่กับมือซ้าย", short: "ไม่อยากคู่มือซ้าย", bg: "#fdecec", border: "#f5c9c9", color: "#c0392b" },
 };
-function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLockPair, setHandPref, getP }) {
+// v1.12.44 (Localization Closure): translation-key lookups paired with PAIR_RULE_META/HAND_PREF_META above,
+// kept SEPARATE from those objects (which stay exactly as they were — same Thai literals, same .bg/.border/
+// .color styling) so this is a pure additive lookup, never a risk to their existing structure or any other
+// possible reader of them.
+const PAIR_RULE_I18N_KEY = {
+  lock: { label: "constraint.lock.label", short: "constraint.lock.short" },
+  avoidPartner: { label: "constraint.avoidPartner.label", short: "constraint.avoidPartner.short" },
+  avoidOpponent: { label: "constraint.avoidOpponent.label", short: "constraint.avoidOpponent.short" },
+  avoidBoth: { label: "constraint.avoidBoth.label", short: "constraint.avoidBoth.short" },
+};
+const HAND_PREF_I18N_KEY = {
+  preferLeft: { label: "constraint.preferLeft.label", short: "constraint.preferLeft.short" },
+  avoidLeft: { label: "constraint.avoidLeft.label", short: "constraint.avoidLeft.short" },
+};
+function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLockPair, setHandPref, getP, t }) {
   const [a, setA] = useState(""); const [b, setB] = useState(""); const [type, setType] = useState("lock");
   // v1.12.6 (Simplify การเล่น section, spec 5): progressive disclosure — the add-new-constraint controls
   // (Player A/B + relationship type) start collapsed behind a single "+ เพิ่มความต้องการผู้เล่น" button;
@@ -20349,7 +20710,7 @@ function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLock
               <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 10, background: meta.bg, border: `1px solid ${meta.border}` }}>
                 {r.type === "lock" ? <Lock size={13} color={meta.color} /> : <Unlock size={13} color={meta.color} />}
                 <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{getP(r.a)?.name} + {getP(r.b)?.name}</span>
-                <span style={{ fontSize: 10.5, fontWeight: 800, color: meta.color }}>{meta.short}</span>
+                <span style={{ fontSize: 10.5, fontWeight: 800, color: meta.color }}>{t(PAIR_RULE_I18N_KEY[r.type]?.short || PAIR_RULE_I18N_KEY.lock.short)}</span>
                 <button onClick={() => removeLockPair(r.id)} style={{ background: "none", border: "none", color: T.muted, display: "flex" }}><X size={15} /></button>
               </div>
             );
@@ -20360,7 +20721,7 @@ function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLock
               <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 11px", borderRadius: 10, background: meta.bg, border: `1px solid ${meta.border}` }}>
                 <Unlock size={13} color={meta.color} />
                 <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{p.name}</span>
-                <span style={{ fontSize: 10.5, fontWeight: 800, color: meta.color }}>{meta.short}</span>
+                <span style={{ fontSize: 10.5, fontWeight: 800, color: meta.color }}>{t(HAND_PREF_I18N_KEY[p.handPref].short)}</span>
                 <button onClick={() => setHandPref(p.id, null)} style={{ background: "none", border: "none", color: T.muted, display: "flex" }}><X size={15} /></button>
               </div>
             );
@@ -20370,23 +20731,23 @@ function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLock
       {showAddForm ? (
         <>
           <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
-            <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+            <select value={a} onChange={(e) => setA(e.target.value)} style={sty}><option value="">{t("constraint.choosePlayer")}</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
             {!isHandPrefType && <>
               <span style={{ color: T.muted, fontWeight: 800 }}>+</span>
-              <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">เลือกคน</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+              <select value={b} onChange={(e) => setB(e.target.value)} style={sty}><option value="">{t("constraint.choosePlayer")}</option>{pickable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
             </>}
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <select value={type} onChange={(e) => setType(e.target.value)} style={{ ...sty, flex: 1.6, fontWeight: 700 }}>
-              {Object.entries(PAIR_RULE_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
-              {Object.entries(HAND_PREF_META).map(([k, m]) => <option key={k} value={k}>{m.label}</option>)}
+              {Object.entries(PAIR_RULE_META).map(([k]) => <option key={k} value={k}>{t(PAIR_RULE_I18N_KEY[k].label)}</option>)}
+              {Object.entries(HAND_PREF_META).map(([k]) => <option key={k} value={k}>{t(HAND_PREF_I18N_KEY[k].label)}</option>)}
             </select>
             <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center" }}><Plus size={17} /></button>
           </div>
         </>
       ) : (
         <button onClick={() => setShowAddForm(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "10px 0", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12.5, fontWeight: 700 }}>
-          <Plus size={15} /> เพิ่มความต้องการผู้เล่น
+          <Plus size={15} /> {t("constraint.addNew")}
         </button>
       )}
     </div>
@@ -20558,7 +20919,7 @@ function RewardSettingsSheet({ settings, setSettings, onClose }) {
 //  - รางวัล: opens RewardSettingsSheet (the exact JSX/logic moved out of FinanceSettingsSheet above).
 // OFF only hides the corresponding UI — no code path here ever deletes rankingConfigs/wheelPrizes/
 // rewardHistory/tournamentHistory/activeTournament.
-function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, onClose }) {
+function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, onClose, t }) {
   const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false);
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null);
   const [rewardOpen, setRewardOpen] = useState(false);
@@ -20582,7 +20943,7 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
         {sub && <span style={{ display: "block", fontSize: 11.5, color: T.muted, marginTop: 1 }}>{sub}</span>}
       </span>
       {badge != null && (
-        <span style={{ fontSize: 11, fontWeight: 800, color: badge ? T.green : T.muted, background: badge ? "#e2f5ec" : T.surface2, border: `1px solid ${badge ? T.green : T.border}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{badge ? "เปิด" : "ปิด"}</span>
+        <span style={{ fontSize: 11, fontWeight: 800, color: badge ? T.green : T.muted, background: badge ? "#e2f5ec" : T.surface2, border: `1px solid ${badge ? T.green : T.border}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{badge ? (t ? t("common.on") : "เปิด") : (t ? t("common.close") : "ปิด")}</span>
       )}
       <ChevronRight size={17} color={T.muted} style={{ flexShrink: 0 }} />
     </button>
@@ -20590,29 +20951,30 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
 
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🚀 ตั้งค่าขั้นสูง</div>
-      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>ระบบเสริม/ทางเลือก — ปิดไว้ไม่ลบข้อมูลใดๆ เปิดใหม่เมื่อไหร่ก็กลับมาเหมือนเดิม</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🚀 {t ? t("settings.advanced") : "ตั้งค่าขั้นสูง"}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>{t ? t("settings.advancedSubtitle") : "ระบบเสริม/ทางเลือก — ปิดไว้ไม่ลบข้อมูลใดๆ เปิดใหม่เมื่อไหร่ก็กลับมาเหมือนเดิม"}</div>
 
-      <AdvRow icon="🏅" title="Ranking" sub="จัดอันดับผู้เล่นตาม RP แยกรายก๊วน" badge={singleClubRankingEnabled} onClick={openRanking} />
+      <AdvRow icon="🏅" title="Ranking" sub={t ? t("ranking.advancedRowSub") : "จัดอันดับผู้เล่นตาม RP แยกรายก๊วน"} badge={singleClubRankingEnabled} onClick={openRanking} />
 
       <button onClick={() => setSettings((s) => ({ ...s, tournamentEnabled: !s.tournamentEnabled }))} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, cursor: "pointer" }}>
         <span style={{ fontSize: 19, flexShrink: 0 }}>🏆</span>
         <span style={{ flex: 1, minWidth: 0 }}>
           <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>Tournament</span>
-          <span style={{ display: "block", fontSize: 11.5, color: T.muted, marginTop: 1 }}>จัดการแข่งขันแบบแบ่งสาย/พบกันหมด</span>
+          <span style={{ display: "block", fontSize: 11.5, color: T.muted, marginTop: 1 }}>{t ? t("tournament.advancedRowSub") : "จัดการแข่งขันแบบแบ่งสาย/พบกันหมด"}</span>
         </span>
-        <span style={{ fontSize: 11, fontWeight: 800, color: settings.tournamentEnabled ? T.green : T.muted, background: settings.tournamentEnabled ? "#e2f5ec" : T.surface2, border: `1px solid ${settings.tournamentEnabled ? T.green : T.border}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{settings.tournamentEnabled ? "เปิด" : "ปิด"}</span>
+        <span style={{ fontSize: 11, fontWeight: 800, color: settings.tournamentEnabled ? T.green : T.muted, background: settings.tournamentEnabled ? "#e2f5ec" : T.surface2, border: `1px solid ${settings.tournamentEnabled ? T.green : T.border}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>{settings.tournamentEnabled ? (t ? t("common.on") : "เปิด") : (t ? t("common.close") : "ปิด")}</span>
       </button>
 
-      <AdvRow icon="🎁" title="รางวัล" sub="วงล้อรางวัลให้ผู้เล่นหลังจบก๊วน" badge={settings.wheelEnabled !== false} onClick={() => setRewardOpen(true)} />
+      <AdvRow icon="🎁" title={t ? t("reward.title") : "รางวัล"} sub={t ? t("reward.advancedRowSub") : "วงล้อรางวัลให้ผู้เล่นหลังจบก๊วน"} badge={settings.wheelEnabled !== false} onClick={() => setRewardOpen(true)} />
 
-      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>ปิด</button>
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>{t ? t("common.close") : "ปิด"}</button>
 
       {rankingClubPickerOpen && (
         <RankingClubPickerSheet
           sessionHistory={sessionHistory}
           onPick={(name) => { setRankingClubPickerOpen(false); setRankingSettingsClub(name); }}
           onClose={() => setRankingClubPickerOpen(false)}
+          t={t}
         />
       )}
       {rankingSettingsClub && (
@@ -20623,6 +20985,7 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
           players={players}
           sessionHistory={sessionHistory}
           onClose={() => setRankingSettingsClub(null)}
+          t={t}
         />
       )}
       {rewardOpen && <RewardSettingsSheet settings={settings} setSettings={setSettings} onClose={() => setRewardOpen(false)} />}
@@ -20633,7 +20996,7 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
 // preset picker + confirm-before-switch + (when custom is active) the custom level editor.
 // Switching preset only ever rewrites each player's cached DISPLAY label (via changeLevelPreset,
 // defined in App()) — skillIndex (matchmaking source of truth) never changes.
-function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels }) {
+function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels, t }) {
   const currentId = settings.levelPresetId || "badweb-central";
   const [pendingPreset, setPendingPreset] = useState(null); // preset id awaiting confirm, or null
   const [showSkillInfo, setShowSkillInfo] = useState(false);
@@ -20649,7 +21012,7 @@ function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels }) {
           return (
             <button key={preset.id} onClick={() => pick(preset.id)} style={{ textAlign: "left", padding: "10px 12px", borderRadius: 11, border: `1.5px solid ${active ? T.green : T.border}`, background: active ? "#e2f5ec" : T.surface2, display: "flex", flexDirection: "column", gap: 2 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <span style={{ fontWeight: 800, fontSize: 13.5, color: active ? T.green : T.text }}>{preset.name}</span>
+                <span style={{ fontWeight: 800, fontSize: 13.5, color: active ? T.green : T.text }}>{presetDisplayName(preset.id, t)}</span>
                 {active && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.green, background: "#fff", padding: "2px 7px", borderRadius: 10 }}>ใช้อยู่</span>}
               </div>
               <div style={{ fontSize: 11, color: T.muted }}>{preset.description}</div>
@@ -20750,20 +21113,25 @@ function CustomLevelEditor({ customLevels, setCustomLevels }) {
 // unrecognized key) and while busy with no phase set yet (e.g. undo/export, which don't pass onPhase).
 // v1.12.39: what a failed staged restore means for the organizer. Every failure before the promotion
 // transaction commits leaves the previous data exactly as it was.
-function restoreFailureMessage(reason) {
+function restoreFailureMessage(reason, tr) {
   const r = String(reason || "unknown");
   const tail = " (" + r + ")";
-  if (/^committed-but-read-back-mismatch|^exception-after-promotion/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — บันทึกแล้วแต่ตรวจสอบย้อนกลับไม่ตรง กรุณาปิดแล้วเปิดแอปใหม่ (ระบบจะเลือกข้อมูลจากที่บันทึกจริงในเครื่อง)" + tail;
-  const intact = " ข้อมูลเดิมยังอยู่ครบ ไม่มีการเปลี่ยนแปลง";
-  if (/^pending-critical-operation/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — ยังมีการบันทึกผลเกม/จบก๊วนที่รอยืนยันอยู่ กรุณารอให้เสร็จก่อนแล้วลองอีกครั้ง." + intact + tail;
-  if (/^autosave-write-in-flight/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — การบันทึกอัตโนมัติยังไม่เสร็จ กรุณารอสักครู่แล้วลองอีกครั้ง." + intact + tail;
-  if (/open-blocked/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง/แท็บ BadQ อื่น ปิดหน้าต่างอื่นแล้วลองอีกครั้ง." + intact + tail;
-  if (/QuotaExceeded/i.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — พื้นที่เก็บข้อมูลของเครื่องไม่พอ." + intact + tail;
-  if (/^backup-references-missing-images/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — ไฟล์นี้อ้างถึงรูปภาพที่ไม่มีอยู่ในไฟล์และไม่มีในเครื่องนี้ จึงไม่นำเข้า (ป้องกันรูปหาย)." + intact + tail;
-  if (/^update-handoff-in-progress/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — แอปกำลังอัปเดตเวอร์ชัน กรุณาลองอีกครั้งหลังเปิดแอปใหม่." + intact + tail;
-  if (/safety-snapshot/.test(r)) return "นำเข้าข้อมูลไม่สำเร็จ — สำรองข้อมูลเดิมก่อนนำเข้าไม่สำเร็จ จึงยังไม่นำเข้า." + intact + tail;
-  return "นำเข้าข้อมูลไม่สำเร็จ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง." + intact + tail;
+  const L = (key, fallback) => (tr ? tr(key) : fallback);
+  if (/^committed-but-read-back-mismatch|^exception-after-promotion/.test(r)) return L("backup.failureCommittedMismatch", "นำเข้าข้อมูลไม่สำเร็จ — บันทึกแล้วแต่ตรวจสอบย้อนกลับไม่ตรง กรุณาปิดแล้วเปิดแอปใหม่ (ระบบจะเลือกข้อมูลจากที่บันทึกจริงในเครื่อง)") + tail;
+  const intact = L("backup.failureIntactSuffix", " ข้อมูลเดิมยังอยู่ครบ ไม่มีการเปลี่ยนแปลง");
+  if (/^pending-critical-operation/.test(r)) return L("backup.failurePendingCritical", "นำเข้าข้อมูลไม่สำเร็จ — ยังมีการบันทึกผลเกม/จบก๊วนที่รอยืนยันอยู่ กรุณารอให้เสร็จก่อนแล้วลองอีกครั้ง.") + intact + tail;
+  if (/^autosave-write-in-flight/.test(r)) return L("backup.failureAutosaveInFlight", "นำเข้าข้อมูลไม่สำเร็จ — การบันทึกอัตโนมัติยังไม่เสร็จ กรุณารอสักครู่แล้วลองอีกครั้ง.") + intact + tail;
+  if (/open-blocked/.test(r)) return L("backup.failureOpenBlocked", "นำเข้าข้อมูลไม่สำเร็จ — ที่เก็บข้อมูลถูกบล็อกโดยหน้าต่าง/แท็บ BadQ อื่น ปิดหน้าต่างอื่นแล้วลองอีกครั้ง.") + intact + tail;
+  if (/QuotaExceeded/i.test(r)) return L("backup.failureQuotaExceeded", "นำเข้าข้อมูลไม่สำเร็จ — พื้นที่เก็บข้อมูลของเครื่องไม่พอ.") + intact + tail;
+  if (/^backup-references-missing-images/.test(r)) return L("backup.failureMissingImages", "นำเข้าข้อมูลไม่สำเร็จ — ไฟล์นี้อ้างถึงรูปภาพที่ไม่มีอยู่ในไฟล์และไม่มีในเครื่องนี้ จึงไม่นำเข้า (ป้องกันรูปหาย).") + intact + tail;
+  if (/^update-handoff-in-progress/.test(r)) return L("backup.failureUpdateHandoff", "นำเข้าข้อมูลไม่สำเร็จ — แอปกำลังอัปเดตเวอร์ชัน กรุณาลองอีกครั้งหลังเปิดแอปใหม่.") + intact + tail;
+  if (/safety-snapshot/.test(r)) return L("backup.failureSafetySnapshot", "นำเข้าข้อมูลไม่สำเร็จ — สำรองข้อมูลเดิมก่อนนำเข้าไม่สำเร็จ จึงยังไม่นำเข้า.") + intact + tail;
+  return L("backup.failureGeneric", "นำเข้าข้อมูลไม่สำเร็จ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง.") + intact + tail;
 }
+// v1.12.44 (Localization Closure): phase labels now resolved through importPhaseLabel(phase, tr) so both call
+// sites (BackupSettingsEditor's own busy-state labels and AppInner's full-screen restore-gate below) render
+// the same translated text; the object below is kept as the Thai-literal fallback source of truth so a
+// missing/undefined `tr` still renders exactly as before this phase.
 const IMPORT_PHASE_LABELS = {
   "reading-file": "กำลังอ่านไฟล์...",
   parsing: "กำลังอ่านข้อมูลในไฟล์...",
@@ -20781,7 +21149,31 @@ const IMPORT_PHASE_LABELS = {
   done: "นำเข้าข้อมูลสำเร็จ",
   failed: "นำเข้าข้อมูลไม่สำเร็จ",
 };
-function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog }) {
+const IMPORT_PHASE_LABEL_KEYS = {
+  "reading-file": "backup.phaseReadingFile",
+  parsing: "backup.phaseParsing",
+  migrating: "backup.phaseMigrating",
+  "checking-images": "backup.phaseCheckingImages",
+  validating: "backup.phaseValidating",
+  "waiting-pending-saves": "backup.phaseWaitingPendingSaves",
+  "backing-up": "backup.phaseBackingUp",
+  images: "backup.phaseImages",
+  preparing: "backup.phasePreparing",
+  staging: "backup.phaseStaging",
+  saving: "backup.phaseSaving",
+  verifying: "backup.phaseVerifying",
+  publishing: "backup.phasePublishing",
+  done: "backup.phaseDone",
+  failed: "backup.phaseFailed",
+};
+function importPhaseLabel(phase, tr) {
+  const fallback = IMPORT_PHASE_LABELS[phase];
+  if (fallback == null) return null;
+  const key = IMPORT_PHASE_LABEL_KEYS[phase];
+  return tr && key ? tr(key) : fallback;
+}
+function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, t, tc, fmtDateTime }) {
+  const formatDateTime = fmtDateTime || fmtThaiDateTime;
   const [busy, setBusy] = useState(false);
   const [showBootLog, setShowBootLog] = useState(false); // v1.9.18: collapsed by default — diagnostic only
   // v1.11.47 (TEMPORARY DIAGNOSTICS): the diagnostic log lives in raw localStorage (written synchronously,
@@ -20846,14 +21238,14 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
     try {
       let text;
       await yieldToUI(); // v1.12.39: the "reading" label paints before the (possibly large) file read
-      try { text = await f.text(); } catch (err) { setImportError("ไม่สามารถอ่านไฟล์นี้ได้"); return; }
+      try { text = await f.text(); } catch (err) { setImportError(t ? t("backup.fileReadError") : "ไม่สามารถอ่านไฟล์นี้ได้"); return; }
       const __tRead = __now();
       logImportPhase("reading-file", __tRead - __t0, { byteLength: text.length });
       const res = await validateBackupFile(text, (step) => setImportPhase(step));
       text = null; // v1.12.39: drop the raw file text as soon as it is parsed (memory)
       const __t1 = __now();
       logImportPhase("validating", __t1 - __tRead, { ok: res.ok, ...(res.timings || {}), imagesChecked: !!(res.imageCheck && res.imageCheck.checked) });
-      if (!res.ok) { setImportError(res.reason || "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"); return; }
+      if (!res.ok) { setImportError(res.reason || (t ? t("backup.invalidFile") : "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ")); return; }
       setRestoreMode("replace");
       setPreview(res.backup);
     } finally {
@@ -20885,7 +21277,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       // committed and a retry is always safe.
       if (!result || result.ok === false) {
         setSuccessMsg(null);
-        setImportError("__verify_failed__:" + restoreFailureMessage(result && result.reason));
+        setImportError("__verify_failed__:" + restoreFailureMessage(result && result.reason, t));
         return;
       }
       // v1.12.13: ON SUCCESS — clear ALL temporary import state (preview/mode/pending), close the modal,
@@ -20912,24 +21304,24 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
   return (
     <div>
       <input ref={fileRef} type="file" accept="application/json" onChange={onFile} style={{ display: "none" }} />
-      <Label>สำรองและกู้คืนข้อมูล</Label>
+      <Label>{t ? t("backup.sectionLabel") : "สำรองและกู้คืนข้อมูล"}</Label>
       <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 10 }}>
-        {lastBackupAt ? `สำรองล่าสุด: ${fmtThaiDateTime(lastBackupAt)}` : "ยังไม่เคยสำรองข้อมูล"}
+        {lastBackupAt ? (t ? t("backup.lastBackupAtLine", { date: formatDateTime(lastBackupAt) }) : `สำรองล่าสุด: ${formatDateTime(lastBackupAt)}`) : (t ? t("backup.neverBackedUpShort") : "ยังไม่เคยสำรองข้อมูล")}
       </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <button disabled={busy} onClick={doExport} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}><Download size={15} /> สำรองข้อมูล</button>
-        <button disabled={busy} onClick={() => fileRef.current.click()} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}><Upload size={15} /> นำเข้าข้อมูล</button>
+        <button disabled={busy} onClick={doExport} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}><Download size={15} /> {t ? t("backup.export") : "สำรองข้อมูล"}</button>
+        <button disabled={busy} onClick={() => fileRef.current.click()} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}><Upload size={15} /> {t ? t("backup.import") : "นำเข้าข้อมูล"}</button>
       </div>
       {hasPreRestoreBackup && (
         <button disabled={busy} onClick={() => setConfirmUndo(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 6, padding: "9px 0", borderRadius: 11, background: "none", border: `1px dashed ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 8 }}>
-          <RotateCcw size={14} /> ย้อนกลับการนำเข้าครั้งล่าสุด
+          <RotateCcw size={14} /> {t ? t("backup.undoLastImport") : "ย้อนกลับการนำเข้าครั้งล่าสุด"}
         </button>
       )}
       {successMsg && (
         <div style={{ background: "#e2f5ec", border: `1px solid ${T.green}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.green, marginBottom: 8, lineHeight: 1.7 }}>
-          {successMsg.kind === "export" && <>สำรองข้อมูลเรียบร้อย<br />ผู้เล่น {successMsg.stats.playerCount} คน · ประวัติก๊วน {successMsg.stats.sessionHistoryCount} ครั้ง · แมตช์ทั้งหมด {successMsg.stats.matchCount} แมตช์<br /><span style={{ color: T.muted }}>ขนาดไฟล์สำรอง {successMsg.sizeLabel}</span></>}
-          {successMsg.kind === "import" && <>นำเข้าข้อมูลเรียบร้อย<br />ผู้เล่น {successMsg.stats.playerCount} คน · ประวัติก๊วน {successMsg.stats.sessionHistoryCount} ครั้ง</>}
-          {successMsg.kind === "undo" && <>ย้อนกลับข้อมูลก่อนนำเข้าเรียบร้อย</>}
+          {successMsg.kind === "export" && <>{t ? t("backup.exportSuccessTitle") : "สำรองข้อมูลเรียบร้อย"}<br />{t ? t("backup.exportSuccessStats", { playerCount: successMsg.stats.playerCount, sessionHistoryCount: successMsg.stats.sessionHistoryCount, matchCount: successMsg.stats.matchCount }) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง · แมตช์ทั้งหมด ${successMsg.stats.matchCount} แมตช์`}<br /><span style={{ color: T.muted }}>{t ? t("backup.exportSuccessSize", { size: successMsg.sizeLabel }) : `ขนาดไฟล์สำรอง ${successMsg.sizeLabel}`}</span></>}
+          {successMsg.kind === "import" && <>{t ? t("backup.importSuccessTitle") : "นำเข้าข้อมูลเรียบร้อย"}<br />{t ? t("backup.playerAndSessionCountLine", { playerCount: successMsg.stats.playerCount, sessionHistoryCount: successMsg.stats.sessionHistoryCount }) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง`}</>}
+          {successMsg.kind === "undo" && <>{t ? t("backup.undoSuccessTitle") : "ย้อนกลับข้อมูลก่อนนำเข้าเรียบร้อย"}</>}
         </div>
       )}
       {importError && importError.startsWith("__verify_failed__:") && (
@@ -20942,36 +21334,36 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       )}
       {importError && !importError.startsWith("__verify_failed__:") && (
         <div style={{ background: "#fdecea", border: `1px solid ${T.accent}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.accent, marginBottom: 8, lineHeight: 1.7 }}>
-          ไม่สามารถนำเข้าข้อมูลได้<br />{importError || "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ"}{/* v1.12.39: the specific reason (e.g. image manifest mismatch) instead of one fixed sentence */}
+          {t ? t("backup.importErrorTitle") : "ไม่สามารถนำเข้าข้อมูลได้"}<br />{importError || (t ? t("backup.invalidFile") : "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ")}{/* v1.12.39: the specific reason (e.g. image manifest mismatch) instead of one fixed sentence */}
         </div>
       )}
       <div style={{ fontSize: 11, color: T.muted, lineHeight: 1.5 }}>
-        ไฟล์สำรองอาจมีชื่อ รูปผู้เล่น ประวัติการเล่น และข้อมูลการชำระเงิน กรุณาเก็บไฟล์ไว้ในที่ปลอดภัย
+        {t ? t("backup.fileContentsHint") : "ไฟล์สำรองอาจมีชื่อ รูปผู้เล่น ประวัติการเล่น และข้อมูลการชำระเงิน กรุณาเก็บไฟล์ไว้ในที่ปลอดภัย"}
       </div>
 
       {autoBackups && autoBackups.length > 0 && (
         <div style={{ marginTop: 16 }}>
-          <Label>จุดสำรองอัตโนมัติ (ในเครื่องนี้)</Label>
+          <Label>{t ? t("backup.autoBackupSectionLabel") : "จุดสำรองอัตโนมัติ (ในเครื่องนี้)"}</Label>
           <div style={{ fontSize: 11, color: T.muted, marginBottom: 8, lineHeight: 1.5 }}>
-            ระบบบันทึกจุดกู้คืนให้อัตโนมัติทุกครั้งที่จบก๊วนหรือ Tournament — เก็บไว้ {autoBackups.length} จุดล่าสุดในเครื่องนี้เท่านั้น (ไม่ใช่ไฟล์แยกต่างหาก จึงยังควรกด "สำรองข้อมูล" ด้านบนเป็นระยะ เพื่อเก็บไฟล์ไว้นอกเครื่องด้วย)
+            {t ? t("backup.autoBackupHint", { count: autoBackups.length }) : `ระบบบันทึกจุดกู้คืนให้อัตโนมัติทุกครั้งที่จบก๊วนหรือ Tournament — เก็บไว้ ${autoBackups.length} จุดล่าสุดในเครื่องนี้เท่านั้น (ไม่ใช่ไฟล์แยกต่างหาก จึงยังควรกด "สำรองข้อมูล" ด้านบนเป็นระยะ เพื่อเก็บไฟล์ไว้นอกเครื่องด้วย)`}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {(showAllAutoBackups ? autoBackups : autoBackups.slice(0, 1)).map((entry) => (
               <div key={entry.savedAt} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
                 <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, color: T.text }}>{fmtThaiDateTime(entry.savedAt)}</div>
+                  <div style={{ fontWeight: 700, color: T.text }}>{formatDateTime(entry.savedAt)}</div>
                   <div style={{ color: T.muted }}>
-                    ผู้เล่น {entry.stats.playerCount} คน · ประวัติก๊วน {entry.stats.sessionHistoryCount} ครั้ง
-                    {entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน"}
+                    {t ? t("backup.playerAndSessionCountLine", { playerCount: entry.stats.playerCount, sessionHistoryCount: entry.stats.sessionHistoryCount }) : `ผู้เล่น ${entry.stats.playerCount} คน · ประวัติก๊วน ${entry.stats.sessionHistoryCount} ครั้ง`}
+                    {t ? (entry.reason === "tournament" ? t("backup.afterTournamentNote") : t("backup.afterSessionNote")) : (entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน")}
                   </div>
                 </div>
-                <button disabled={busy} onClick={() => { setSuccessMsg(null); setImportError(null); setRestoreMode("replace"); setPreview(entry.payload); }} style={{ ...btnSecondary, padding: "7px 10px", fontSize: 12, flexShrink: 0, opacity: busy ? 0.6 : 1 }}>กู้คืน</button>
+                <button disabled={busy} onClick={() => { setSuccessMsg(null); setImportError(null); setRestoreMode("replace"); setPreview(entry.payload); }} style={{ ...btnSecondary, padding: "7px 10px", fontSize: 12, flexShrink: 0, opacity: busy ? 0.6 : 1 }}>{t ? t("backup.restoreShort") : "กู้คืน"}</button>
               </div>
             ))}
           </div>
           {autoBackups.length > 1 && (
             <button onClick={() => setShowAllAutoBackups((v) => !v)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: "8px 0 0", cursor: "pointer" }}>
-              <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>{showAllAutoBackups ? "ซ่อนจุดสำรองอื่น ๆ" : `ดูจุดสำรองทั้งหมด (${autoBackups.length} จุด)`}</span>
+              <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>{showAllAutoBackups ? (t ? t("backup.hideOtherPoints") : "ซ่อนจุดสำรองอื่น ๆ") : (t ? t("backup.showAllPointsTemplate", { count: autoBackups.length }) : `ดูจุดสำรองทั้งหมด (${autoBackups.length} จุด)`)}</span>
               <ChevronDown size={13} color={T.muted} style={{ transform: showAllAutoBackups ? "rotate(180deg)" : "none" }} />
             </button>
           )}
@@ -20990,9 +21382,9 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
             <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 5 }}>
               {bootLog.map((e, i) => (
                 <div key={e.t + "-" + i} style={{ fontSize: 10.5, fontFamily: "monospace", color: T.muted, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 8, padding: "6px 8px", lineHeight: 1.5, wordBreak: "break-all" }}>
-                  {fmtThaiDateTime(e.t)} · {e.event}
-                  {e.event === "boot" && ` · v${e.appVersion} · ${e.bootStatus || "-"}${e.recoverySource ? " (" + e.recoverySource + ")" : ""} · โหลด savedAt=${e.loadedSavedAt ? fmtThaiDateTime(e.loadedSavedAt) : "ไม่มี"} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount} · reload=${e.viaUpdateReload ? "yes" : "no"}`}
-                  {e.event === "heal" && ` · ${e.fromSavedAt ? fmtThaiDateTime(e.fromSavedAt) : "-"} → ${fmtThaiDateTime(e.toSavedAt)} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount}`}
+                  {formatDateTime(e.t)} · {e.event}
+                  {e.event === "boot" && ` · v${e.appVersion} · ${e.bootStatus || "-"}${e.recoverySource ? " (" + e.recoverySource + ")" : ""} · โหลด savedAt=${e.loadedSavedAt ? formatDateTime(e.loadedSavedAt) : "ไม่มี"} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount} · reload=${e.viaUpdateReload ? "yes" : "no"}`}
+                  {e.event === "heal" && ` · ${e.fromSavedAt ? formatDateTime(e.fromSavedAt) : "-"} → ${formatDateTime(e.toSavedAt)} · ผู้เล่น ${e.playerCount} · ประวัติ ${e.sessionHistoryCount}`}
                 </div>
               ))}
             </div>
@@ -21024,7 +21416,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
               <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 320, overflowY: "auto" }}>
                 {diagLog.map((e, i) => (
                   <div key={e.t + "-" + i} style={{ fontSize: 10, fontFamily: "monospace", color: T.muted, background: T.surface2, border: `1px solid ${T.border}`, borderRadius: 8, padding: "5px 7px", lineHeight: 1.5, wordBreak: "break-all" }}>
-                    {fmtThaiDateTime(e.t)} · {e.event} · pid={e.pid}
+                    {formatDateTime(e.t)} · {e.event} · pid={e.pid}
                     {e.isRestart != null && ` · isRestart=${e.isRestart ? "YES" : "no"}${e.previousPid ? " (prev=" + e.previousPid + ")" : ""}`}
                     {e.gen != null && ` · gen=${e.gen}`}
                     {e.jsonLen != null && ` · jsonLen=${(e.jsonLen / 1024).toFixed(1)}KB`}
@@ -21053,43 +21445,43 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
           {/* v1.12.14 (P0 responsive fix): same 88vh -> dvh reasoning as Overlay above — tracks the real
               visible viewport instead of the browser's large/toolbar-hidden height. */}
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 360, width: "100%", maxHeight: "85dvh", overflowY: "auto", boxSizing: "border-box" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>พบข้อมูลสำรอง</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 2 }}>วันที่สำรอง: {fmtThaiDateTime(preview.exportedAt)}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>{t ? t("backup.found") : "พบข้อมูลสำรอง"}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 2 }}>{t ? t("backup.exportedAtLine", { date: formatDateTime(preview.exportedAt) }) : `วันที่สำรอง: ${formatDateTime(preview.exportedAt)}`}</div>
             <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 12 }}>Version: BadQ v{preview.appVersion}</div>
             <div style={{ background: T.surface2, borderRadius: 11, padding: 12, fontSize: 12.5, marginBottom: 14, lineHeight: 1.9 }}>
               {(() => {
                 const st = backupStats(preview.data);
                 return (
                   <>
-                    ผู้เล่น {st.playerCount} คน<br />
-                    ประวัติก๊วน {st.sessionHistoryCount} ครั้ง<br />
-                    แมตช์ {st.matchCount} แมตช์<br />
-                    {st.hasCurrentSession && <>มีก๊วนที่กำลังใช้งาน 1 ก๊วน<br /></>}
-                    {st.hasPayment && <>มีข้อมูลชำระเงิน<br /></>}
-                    {st.hasQR && <>มี QR รับเงิน<br /></>}
-                    {st.tournamentHistoryCount > 0 && <>ประวัติ Tournament {st.tournamentHistoryCount} รายการ<br /></>}
-                    {st.hasActiveTournament && <>มี Tournament ที่กำลังดำเนินอยู่</>}
+                    {t ? t("backup.statPlayers", { count: st.playerCount }) : `ผู้เล่น ${st.playerCount} คน`}<br />
+                    {t ? t("backup.statSessions", { count: st.sessionHistoryCount }) : `ประวัติก๊วน ${st.sessionHistoryCount} ครั้ง`}<br />
+                    {t ? t("backup.statMatches", { count: st.matchCount }) : `แมตช์ ${st.matchCount} แมตช์`}<br />
+                    {st.hasCurrentSession && <>{t ? t("backup.statActiveSession") : "มีก๊วนที่กำลังใช้งาน 1 ก๊วน"}<br /></>}
+                    {st.hasPayment && <>{t ? t("backup.statHasPayment") : "มีข้อมูลชำระเงิน"}<br /></>}
+                    {st.hasQR && <>{t ? t("backup.statHasQR") : "มี QR รับเงิน"}<br /></>}
+                    {st.tournamentHistoryCount > 0 && <>{t ? t("backup.statTournamentHistory", { count: st.tournamentHistoryCount }) : `ประวัติ Tournament ${st.tournamentHistoryCount} รายการ`}<br /></>}
+                    {st.hasActiveTournament && <>{t ? t("backup.statActiveTournament") : "มี Tournament ที่กำลังดำเนินอยู่"}</>}
                   </>
                 );
               })()}
             </div>
-            <Label>รูปแบบการนำเข้า</Label>
+            <Label>{t ? t("backup.importModeLabel") : "รูปแบบการนำเข้า"}</Label>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
               <button onClick={() => setRestoreMode("replace")} style={{ textAlign: "left", padding: "10px 12px", borderRadius: 11, border: `1.5px solid ${restoreMode === "replace" ? T.green : T.border}`, background: restoreMode === "replace" ? "#e2f5ec" : T.surface }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: restoreMode === "replace" ? T.green : T.text }}>แทนที่ข้อมูลทั้งหมด</div>
-                <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>ข้อมูล BadQ ปัจจุบันจะถูกแทนที่ด้วยข้อมูลจากไฟล์สำรอง</div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: restoreMode === "replace" ? T.green : T.text }}>{t ? t("backup.replaceAllTitle") : "แทนที่ข้อมูลทั้งหมด"}</div>
+                <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{t ? t("backup.replaceAllDesc") : "ข้อมูล BadQ ปัจจุบันจะถูกแทนที่ด้วยข้อมูลจากไฟล์สำรอง"}</div>
               </button>
               <button onClick={() => setRestoreMode("mergeHistory")} style={{ textAlign: "left", padding: "10px 12px", borderRadius: 11, border: `1.5px solid ${restoreMode === "mergeHistory" ? T.green : T.border}`, background: restoreMode === "mergeHistory" ? "#e2f5ec" : T.surface }}>
-                <div style={{ fontSize: 13, fontWeight: 800, color: restoreMode === "mergeHistory" ? T.green : T.text }}>รวมเฉพาะประวัติก๊วน</div>
-                <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>เพิ่มเฉพาะประวัติก๊วนที่ยังไม่มี ไม่แตะผู้เล่น/ก๊วนปัจจุบัน (กันซ้ำอัตโนมัติ)</div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: restoreMode === "mergeHistory" ? T.green : T.text }}>{t ? t("backup.mergeHistoryTitle") : "รวมเฉพาะประวัติก๊วน"}</div>
+                <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{t ? t("backup.mergeHistoryDesc") : "เพิ่มเฉพาะประวัติก๊วนที่ยังไม่มี ไม่แตะผู้เล่น/ก๊วนปัจจุบัน (กันซ้ำอัตโนมัติ)"}</div>
               </button>
             </div>
             {/* v1.12.13: while `busy`, both buttons disable and the confirm button shows an explicit
                 loading label — prevents a duplicate tap and makes the in-flight state unambiguous instead
                 of silently doing nothing (the reported bug's exact "did it succeed, did it fail?" symptom). */}
             <div style={{ display: "flex", gap: 8 }}>
-              <button disabled={busy} onClick={() => setPreview(null)} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}>ยกเลิก</button>
-              <button disabled={busy} onClick={() => setConfirmRestore(true)} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? (IMPORT_PHASE_LABELS[importPhase] || "กำลังนำเข้า...") : "นำเข้าข้อมูล"}</button>
+              <button disabled={busy} onClick={() => setPreview(null)} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+              <button disabled={busy} onClick={() => setConfirmRestore(true)} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? (importPhaseLabel(importPhase, t) || (t ? t("backup.importingEllipsis") : "กำลังนำเข้า...")) : (t ? t("backup.import") : "นำเข้าข้อมูล")}</button>
             </div>
           </div>
         </div>
@@ -21098,13 +21490,13 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       {confirmRestore && (
         <div onClick={() => { if (!busy) setConfirmRestore(false); }} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 71, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>นำเข้าข้อมูลสำรอง?</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 8 }}>{t ? t("backup.confirmRestoreTitle") : "นำเข้าข้อมูลสำรอง?"}</div>
             <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>
-              {restoreMode === "replace" ? "ระบบจะสำรองข้อมูลปัจจุบันไว้ก่อนดำเนินการ" : "จะเพิ่มเฉพาะประวัติก๊วนที่ยังไม่มี ไม่กระทบผู้เล่น/ก๊วนปัจจุบัน"}
+              {restoreMode === "replace" ? (t ? t("backup.confirmRestoreReplaceBody") : "ระบบจะสำรองข้อมูลปัจจุบันไว้ก่อนดำเนินการ") : (t ? t("backup.confirmRestoreMergeBody") : "จะเพิ่มเฉพาะประวัติก๊วนที่ยังไม่มี ไม่กระทบผู้เล่น/ก๊วนปัจจุบัน")}
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button disabled={busy} onClick={() => setConfirmRestore(false)} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}>ยกเลิก</button>
-              <button disabled={busy} onClick={confirmDoRestore} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? (IMPORT_PHASE_LABELS[importPhase] || "กำลังนำเข้า...") : "นำเข้าข้อมูล"}</button>
+              <button disabled={busy} onClick={() => setConfirmRestore(false)} style={{ ...btnSecondary, opacity: busy ? 0.6 : 1 }}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+              <button disabled={busy} onClick={confirmDoRestore} style={{ ...btnPrimary, opacity: busy ? 0.6 : 1 }}>{busy ? (importPhaseLabel(importPhase, t) || (t ? t("backup.importingEllipsis") : "กำลังนำเข้า...")) : (t ? t("backup.import") : "นำเข้าข้อมูล")}</button>
             </div>
           </div>
         </div>
@@ -21113,10 +21505,10 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       {confirmUndo && (
         <div onClick={() => setConfirmUndo(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 71, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 340, width: "100%" }}>
-            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 16 }}>ย้อนกลับการนำเข้าครั้งล่าสุด?</div>
+            <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 16 }}>{t ? t("backup.confirmUndoTitle") : "ย้อนกลับการนำเข้าครั้งล่าสุด?"}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setConfirmUndo(false)} style={btnSecondary}>ยกเลิก</button>
-              <button onClick={doUndo} style={btnPrimary}>ย้อนกลับ</button>
+              <button onClick={() => setConfirmUndo(false)} style={btnSecondary}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+              <button onClick={doUndo} style={btnPrimary}>{t ? t("backup.undoConfirmButton") : "ย้อนกลับ"}</button>
             </div>
           </div>
         </div>
