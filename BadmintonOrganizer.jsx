@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.46";
+const APP_VERSION = "1.12.47";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -13332,46 +13332,47 @@ function deriveOnlineStatus({ available, authUser, isOffline, workspace, deviceI
   if (workspace.activeDeviceId && deviceId && workspace.activeDeviceId !== deviceId) return ONLINE_STATUS.REVOKED;
   return ONLINE_STATUS.ACTIVE;
 }
-// Firebase Auth error codes -> Thai messages. Falls back to the raw message for anything unmapped, never
-// throws, never shows a blank error.
-function cloudErrorMessage(e) {
+// Firebase/Auth/Cloud error codes -> localized display copy. The error code remains the sole input to this
+// presentation helper; Auth, Workspace, device-authority and Cloud state-machine behavior stay untouched.
+// Unknown errors deliberately use a localized generic message rather than leaking SDK copy into the UI.
+function cloudErrorMessage(e, tr) {
   const code = e && e.code;
   const MAP = {
-    "auth/email-already-in-use": "อีเมลนี้มีบัญชีอยู่แล้ว",
-    "auth/weak-password": "รหัสผ่านสั้นเกินไป (อย่างน้อย 6 ตัวอักษร)",
-    "auth/invalid-email": "รูปแบบอีเมลไม่ถูกต้อง",
-    "auth/missing-email": "กรุณากรอกอีเมล",
-    "auth/user-not-found": "ไม่พบบัญชีนี้",
-    "auth/wrong-password": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
-    "auth/invalid-credential": "อีเมลหรือรหัสผ่านไม่ถูกต้อง",
-    "auth/too-many-requests": "ลองหลายครั้งเกินไป กรุณารอสักครู่แล้วลองใหม่",
-    "auth/network-request-failed": "ไม่มีการเชื่อมต่ออินเทอร์เน็ต",
-    DEVICE_CONFLICT: "มีอุปกรณ์อื่นกำลังใช้งานอยู่",
+    "auth/email-already-in-use": "online.error.emailInUse",
+    "auth/weak-password": "online.error.weakPassword",
+    "auth/invalid-email": "online.error.invalidEmail",
+    "auth/missing-email": "online.error.missingEmail",
+    "auth/user-not-found": "online.error.accountNotFound",
+    "auth/wrong-password": "online.error.invalidCredential",
+    "auth/invalid-credential": "online.error.invalidCredential",
+    "auth/too-many-requests": "online.error.tooManyRequests",
+    "auth/network-request-failed": "online.error.network",
+    DEVICE_CONFLICT: "online.error.deviceConflict",
     // v1.12.9 — Cloud Function (functions/index.js) error markers, normalized by firebase-sync.js so
     // e.code always carries the exact literal below regardless of the Functions SDK's own error shape.
-    STALE_SESSION: "อุปกรณ์นี้ไม่มีสิทธิ์ใช้งาน BadQ Online แล้ว (สิทธิ์ถูกย้ายไปยังอุปกรณ์อื่น)",
+    STALE_SESSION: "online.error.staleDevice",
     // v1.12.10 — pingDeviceHeartbeat now also rejects a caller presenting a deviceId that no longer matches
     // the Workspace's current activeDeviceId (even with an otherwise-valid session capability). Treated the
     // same as STALE_SESSION from the UI's point of view: this device no longer holds Online authority.
-    STALE_DEVICE: "อุปกรณ์นี้ไม่มีสิทธิ์ใช้งาน BadQ Online แล้ว (สิทธิ์ถูกย้ายไปยังอุปกรณ์อื่น)",
-    EMAIL_NOT_VERIFIED: "กรุณายืนยันอีเมลก่อนใช้งาน BadQ Online",
-    WORKSPACE_NOT_FOUND: "ไม่พบ Workspace กรุณาลองเข้าสู่ระบบใหม่อีกครั้ง",
-    NOT_WORKSPACE_OWNER: "บัญชีนี้ไม่มีสิทธิ์เข้าถึง Workspace นี้",
+    STALE_DEVICE: "online.error.staleDevice",
+    EMAIL_NOT_VERIFIED: "online.error.emailNotVerified",
+    WORKSPACE_NOT_FOUND: "online.error.workspaceNotFound",
+    NOT_WORKSPACE_OWNER: "online.error.notWorkspaceOwner",
     // v1.12.28 — BUG-2 fix (see project doc badq-v11227-review-p22-initial-cloud-data-safety.md): these 4
     // P2.2 Cloud Function markers (functions/index.js, normalized by firebase-sync.js's KNOWN_MARKERS) had no
     // Thai copy here and fell through to line ~9804's raw-message fallback, showing the bare English marker
     // string to the Owner. Not reachable from any call site today (doConfirmInitialCloudData always creates
     // with confirmedInitialData:true and no clubId; upsertSession is never called yet) — added now so this
     // stays correct the moment either is extended.
-    CLOUD_INIT_CONFIRMATION_REQUIRED: "ต้องยืนยันก่อนสร้างข้อมูลก๊วนแรกบน Cloud",
-    VERSION_CONFLICT: "ข้อมูลนี้ถูกแก้ไขจากที่อื่นแล้ว กรุณาโหลดข้อมูลใหม่แล้วลองอีกครั้ง",
-    CLUB_NOT_FOUND: "ไม่พบก๊วนนี้บน Cloud",
-    TOO_MANY_OPEN_SESSIONS: "ก๊วนนี้มีรอบที่เปิดอยู่ครบจำนวนสูงสุดแล้ว (สูงสุด 3 รอบ)",
-    unauthenticated: "กรุณาเข้าสู่ระบบใหม่อีกครั้ง",
-    "functions/unavailable": "ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์ได้ในขณะนี้ กรุณาลองใหม่อีกครั้ง",
+    CLOUD_INIT_CONFIRMATION_REQUIRED: "online.error.cloudInitConfirmationRequired",
+    VERSION_CONFLICT: "online.error.versionConflict",
+    CLUB_NOT_FOUND: "online.error.groupNotFound",
+    TOO_MANY_OPEN_SESSIONS: "online.error.tooManyOpenSessions",
+    unauthenticated: "online.error.unauthenticated",
+    "functions/unavailable": "online.error.serverUnavailable",
   };
-  if (code && MAP[code]) return MAP[code];
-  return (e && e.message) || "เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง";
+  if (tr && code && MAP[code]) return tr(MAP[code]);
+  return tr ? tr("online.error.generic") : ((e && e.message) || "เกิดข้อผิดพลาด กรุณาลองใหม่อีกครั้ง");
 }
 // Firestore Timestamp (or a still-pending serverTimestamp() write, which briefly reads back as null) -> JS
 // Date, or null. Never throws on an unexpected shape.
@@ -13447,7 +13448,7 @@ function BadQOnlineNavRow({ deviceId, onOpen, tr }) {
 // Workspace resolution (create-once, idempotent) + Single Active Device (auto-register when none exists,
 // explicit-confirm takeover when one already exists, live revoked-state detection via a real-time Firestore
 // listener). Does not read or write ANY BadQ business data — see the file-level comment block above.
-function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroupName, onClose }) {
+function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroupName, t, fmtDateTime, onClose }) {
   const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
   const available = !!(cloud && cloud.available);
   const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
@@ -13600,7 +13601,7 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
     setCloudClubsLoading(true); setCloudClubsErr("");
     cloud.listClubs(workspace.id)
       .then((clubs) => { if (!cancelled) setCloudClubs(Array.isArray(clubs) ? clubs : []); })
-      .catch((e) => { if (!cancelled) { setCloudClubs(null); setCloudClubsErr((e && e.message) || "โหลดรายชื่อก๊วนไม่สำเร็จ"); } })
+      .catch((e) => { if (!cancelled) { setCloudClubs(null); setCloudClubsErr((e && e.code) || "unknown"); } })
       .finally(() => { if (!cancelled) setCloudClubsLoading(false); });
     return () => { cancelled = true; };
   }, [workspace && workspace.id, cloudInitState && cloudInitState.clubsInitialized]);
@@ -13637,31 +13638,31 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
       await cloud.upsertClub(deviceId, activeSessionId, { club: { name: cloudInitGroupName }, confirmedInitialData: true });
       setInitConfirmOpen(false); setInitDone(true);
       setCloudInitState({ clubsInitialized: true });
-    } catch (e) { setInitErr(cloudErrorMessage(e)); }
+    } catch (e) { setInitErr(cloudErrorMessage(e, t)); }
     finally { setInitBusy(false); }
   };
 
   const doRegister = async () => {
-    if (password !== confirmPassword) { setErr("รหัสผ่านไม่ตรงกัน"); return; }
-    if (password.length < 6) { setErr("รหัสผ่านต้องมีอย่างน้อย 6 ตัวอักษร"); return; }
+    if (password !== confirmPassword) { setErr(t("online.auth.passwordMismatch")); return; }
+    if (password.length < 6) { setErr(t("online.auth.passwordMin")); return; }
     setBusy(true); setErr(""); setNotice("");
     try {
       await cloud.registerOwner(email.trim(), password);
       if (cloud.sendVerificationEmail) await cloud.sendVerificationEmail().catch(() => {});
       setPassword(""); setConfirmPassword("");
-    } catch (e) { setErr(cloudErrorMessage(e)); }
+    } catch (e) { setErr(cloudErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   const doSignIn = async () => {
     setBusy(true); setErr(""); setNotice("");
     try { await cloud.signInOwner(email.trim(), password); setPassword(""); }
-    catch (e) { setErr(cloudErrorMessage(e)); }
+    catch (e) { setErr(cloudErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   const doResendVerification = async () => {
     setBusy(true); setErr(""); setNotice("");
-    try { await cloud.sendVerificationEmail(); setNotice("ส่งอีเมลยืนยันอีกครั้งแล้ว กรุณาตรวจสอบกล่องจดหมาย"); }
-    catch (e) { setErr(cloudErrorMessage(e)); }
+    try { await cloud.sendVerificationEmail(); setNotice(t("online.auth.verificationSent")); }
+    catch (e) { setErr(cloudErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   const doRecheckVerification = async () => {
@@ -13669,15 +13670,15 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
     try {
       const u = await cloud.reloadCurrentUser();
       setAuthUser(u || null);
-      if (!u || !u.emailVerified) setErr("ยังไม่พบการยืนยันอีเมล กรุณายืนยันก่อนแล้วลองใหม่");
-    } catch (e) { setErr(cloudErrorMessage(e)); }
+      if (!u || !u.emailVerified) setErr(t("online.auth.verificationNotFound"));
+    } catch (e) { setErr(cloudErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   const doPasswordReset = async () => {
-    if (!email.trim()) { setErr("กรุณากรอกอีเมลก่อน"); return; }
+    if (!email.trim()) { setErr(t("online.auth.emailRequired")); return; }
     setBusy(true); setErr(""); setNotice("");
-    try { await cloud.sendPasswordReset(email.trim()); setNotice("ส่งอีเมลรีเซ็ตรหัสผ่านแล้ว กรุณาตรวจสอบกล่องจดหมาย"); }
-    catch (e) { setErr(cloudErrorMessage(e)); }
+    try { await cloud.sendPasswordReset(email.trim()); setNotice(t("online.auth.resetSent")); }
+    catch (e) { setErr(cloudErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   const doLogout = async () => {
@@ -13686,7 +13687,7 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
     // separate concept from this browser's login session and stays exactly as it was.
     setBusy(true); setErr("");
     try { await cloud.signOutOwner(); setWorkspace(null); }
-    catch (e) { setErr(cloudErrorMessage(e)); }
+    catch (e) { setErr(cloudErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
   const doTakeover = async () => {
@@ -13699,7 +13700,7 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
       const res = await cloud.claimActiveDevice(workspace.id, deviceId, APP_VERSION, { isTakeover: true, currentActiveSessionId: activeSessionId });
       if (res && res.activeSessionId) await persistSessionId(res.activeSessionId);
       setTakeoverDismissed(false);
-    } catch (e) { setErr(cloudErrorMessage(e)); }
+    } catch (e) { setErr(cloudErrorMessage(e, t)); }
     finally { setBusy(false); }
   };
 
@@ -13714,31 +13715,31 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>☁️ BadQ Online (Beta)</div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
         <span style={{ fontSize: 13 }}>{meta.icon}</span>
-        <span style={{ fontSize: 12.5, fontWeight: 700, color: meta.color }}>{meta.label}</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: meta.color }}>{t(ONLINE_STATUS_LABEL_KEY[status])}</span>
       </div>
 
       {/* NOT CONNECTED (section B) */}
       {!authUser && (
         <div>
-          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 2, lineHeight: 1.6 }}>เชื่อมต่อ BadQ Online เพื่อเปิดใช้งานระบบออนไลน์และ Member Portal</div>
-          <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14, lineHeight: 1.6, fontStyle: "italic" }}>ฟีเจอร์ออนไลน์กำลังอยู่ระหว่างพัฒนา (Beta) — การใช้งานออฟไลน์ปกติไม่ได้รับผลกระทบ</div>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 2, lineHeight: 1.6 }}>{t("online.intro")}</div>
+          <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14, lineHeight: 1.6, fontStyle: "italic" }}>{t("online.betaNotice")}</div>
           {!available && (
-            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12.5, color: T.muted, lineHeight: 1.7, marginBottom: 10 }}>ไม่สามารถเชื่อมต่อ Firebase ได้ในขณะนี้ (อาจเป็นเพราะไม่มีอินเทอร์เน็ต หรือ SDK โหลดไม่สำเร็จ) — แอปยังใช้งานได้ตามปกติแบบออฟไลน์ทุกประการ</div>
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12.5, color: T.muted, lineHeight: 1.7, marginBottom: 10 }}>{t("online.firebaseUnavailable")}</div>
           )}
           <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-            <button onClick={() => { setAuthMode("signin"); setErr(""); setNotice(""); }} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "signin" ? T.green : T.surface, color: authMode === "signin" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>เข้าสู่ระบบ</button>
-            <button onClick={() => { setAuthMode("register"); setErr(""); setNotice(""); }} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "register" ? T.green : T.surface, color: authMode === "register" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>สร้างบัญชี Owner</button>
+            <button onClick={() => { setAuthMode("signin"); setErr(""); setNotice(""); }} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "signin" ? T.green : T.surface, color: authMode === "signin" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>{t("online.auth.signIn")}</button>
+            <button onClick={() => { setAuthMode("register"); setErr(""); setNotice(""); }} style={{ flex: 1, padding: "8px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: authMode === "register" ? T.green : T.surface, color: authMode === "register" ? "#fff" : T.text, fontSize: 12.5, fontWeight: 700 }}>{t("online.auth.createOwner")}</button>
           </div>
-          <input type="email" placeholder="อีเมล" value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
-          <input type="password" placeholder="รหัสผ่าน" value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+          <input type="email" placeholder={t("online.auth.email")} value={email} onChange={(e) => setEmail(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+          <input type="password" placeholder={t("online.auth.password")} value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
           {authMode === "register" && (
-            <input type="password" placeholder="ยืนยันรหัสผ่าน" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
+            <input type="password" placeholder={t("online.auth.confirmPassword")} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 8 }} />
           )}
           {err && <div style={{ marginBottom: 8, fontSize: 12, color: T.accent }}>{err}</div>}
           {notice && <div style={{ marginBottom: 8, fontSize: 12, color: T.green }}>{notice}</div>}
-          <button disabled={busy || !available || !email || !password || (authMode === "register" && !confirmPassword)} onClick={authMode === "register" ? doRegister : doSignIn} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, opacity: busy || !available ? 0.6 : 1, marginBottom: 8 }}>{busy ? "กำลังดำเนินการ..." : authMode === "register" ? "สร้างบัญชี Owner" : "เข้าสู่ระบบ"}</button>
+          <button disabled={busy || !available || !email || !password || (authMode === "register" && !confirmPassword)} onClick={authMode === "register" ? doRegister : doSignIn} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, opacity: busy || !available ? 0.6 : 1, marginBottom: 8 }}>{busy ? t("online.auth.working") : authMode === "register" ? t("online.auth.createOwner") : t("online.auth.signIn")}</button>
           {authMode === "signin" && (
-            <button disabled={busy || !available} onClick={doPasswordReset} style={{ width: "100%", padding: "8px 0", background: "none", border: "none", color: T.muted, fontSize: 12, fontWeight: 700, textDecoration: "underline" }}>ลืมรหัสผ่าน</button>
+            <button disabled={busy || !available} onClick={doPasswordReset} style={{ width: "100%", padding: "8px 0", background: "none", border: "none", color: T.muted, fontSize: 12, fontWeight: 700, textDecoration: "underline" }}>{t("online.auth.forgotPassword")}</button>
           )}
         </div>
       )}
@@ -13746,10 +13747,10 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
       {/* AUTHENTICATED BUT NOT VERIFIED (section C) */}
       {authUser && !authUser.emailVerified && (
         <div>
-          <div style={{ padding: 12, borderRadius: 11, background: "#fef3c7", border: "1px solid #fde68a", fontSize: 12.5, color: "#92400e", lineHeight: 1.7, marginBottom: 12 }}>กรุณายืนยันอีเมลก่อนใช้งาน BadQ Online ({authUser.email})</div>
-          <button disabled={busy} onClick={doResendVerification} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>ส่งอีเมลยืนยันอีกครั้ง</button>
-          <button disabled={busy} onClick={doRecheckVerification} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, marginBottom: 8, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังตรวจสอบ..." : "ตรวจสอบอีกครั้ง"}</button>
-          <button disabled={busy} onClick={doLogout} style={btnSecondary}>ออกจากระบบ</button>
+          <div style={{ padding: 12, borderRadius: 11, background: "#fef3c7", border: "1px solid #fde68a", fontSize: 12.5, color: "#92400e", lineHeight: 1.7, marginBottom: 12 }}>{t("online.auth.verifyPrompt", { email: authUser.email })}</div>
+          <button disabled={busy} onClick={doResendVerification} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 8 }}>{t("online.auth.resendVerification")}</button>
+          <button disabled={busy} onClick={doRecheckVerification} style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 13, fontWeight: 800, marginBottom: 8, opacity: busy ? 0.6 : 1 }}>{busy ? t("online.auth.checking") : t("online.auth.checkAgain")}</button>
+          <button disabled={busy} onClick={doLogout} style={btnSecondary}>{t("online.auth.signOut")}</button>
         </div>
       )}
 
@@ -13758,17 +13759,17 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
         <div>
           <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
             <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{authUser.email}</div>
-            <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ยืนยันอีเมลแล้ว</div>
+            <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t("online.auth.verified")}</div>
           </div>
 
           {cloudError && (
-            <div style={{ padding: 12, borderRadius: 11, background: "#fdeae7", border: `1px solid ${T.accent}`, fontSize: 12, color: T.accent, marginBottom: 10 }}>เกิดข้อผิดพลาดในการเชื่อมต่อ Cloud — {cloudErrorMessage(cloudError)}</div>
+            <div style={{ padding: 12, borderRadius: 11, background: "#fdeae7", border: `1px solid ${T.accent}`, fontSize: 12, color: T.accent, marginBottom: 10 }}>{t("online.cloud.connectionError", { error: cloudErrorMessage(cloudError, t) })}</div>
           )}
           {isOffline && !cloudError && (
-            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>ออฟไลน์อยู่ — จะเชื่อมต่อสถานะอุปกรณ์อีกครั้งเมื่อกลับมามีอินเทอร์เน็ต</div>
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>{t("online.cloud.offlineReconnect")}</div>
           )}
           {!workspace && !cloudError && !isOffline && (
-            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>กำลังเชื่อมต่อ Workspace...</div>
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>{t("online.cloud.connectingWorkspace")}</div>
           )}
 
           {/* DEVICE CONFLICT — another device is (or was) the active one. Shown for BOTH the fresh
@@ -13777,24 +13778,24 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
           {hasConflict && !takeoverDismissed && (
             <div style={{ padding: 12, borderRadius: 11, background: "#fdeae7", border: `1px solid ${T.accent}`, marginBottom: 10 }}>
               <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text, marginBottom: 4 }}>
-                {everActiveHere ? "BadQ Online ถูกย้ายไปอุปกรณ์อื่นแล้ว" : "บัญชี BadQ นี้กำลังใช้งานบนอุปกรณ์อื่น"}
+                {everActiveHere ? t("online.device.movedTitle") : t("online.device.activeElsewhereTitle")}
               </div>
-              <div style={{ fontSize: 11.5, color: "#7a2e22", lineHeight: 1.6, marginBottom: 10 }}>หากย้ายการใช้งานมายังอุปกรณ์นี้ อุปกรณ์เดิมจะไม่สามารถแก้ไขหรือ Sync ข้อมูล Online ได้</div>
+              <div style={{ fontSize: 11.5, color: "#7a2e22", lineHeight: 1.6, marginBottom: 10 }}>{t("online.device.takeoverBody")}</div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button disabled={busy} onClick={() => setTakeoverDismissed(true)} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 12.5, fontWeight: 700 }}>ยกเลิก</button>
-                <button disabled={busy} onClick={doTakeover} style={{ flex: 1.4, padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: busy ? 0.6 : 1 }}>{busy ? "กำลังย้าย..." : "ย้ายการใช้งานมายังเครื่องนี้"}</button>
+                <button disabled={busy} onClick={() => setTakeoverDismissed(true)} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: `1px solid ${T.border}`, background: T.surface, color: T.text, fontSize: 12.5, fontWeight: 700 }}>{t("common.cancel")}</button>
+                <button disabled={busy} onClick={doTakeover} style={{ flex: 1.4, padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: busy ? 0.6 : 1 }}>{busy ? t("online.device.moving") : t("online.device.moveHere")}</button>
               </div>
             </div>
           )}
           {hasConflict && takeoverDismissed && (
-            <button onClick={() => setTakeoverDismissed(false)} style={{ width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>🔒 {everActiveHere ? "ย้ายไปอุปกรณ์อื่นแล้ว" : "อุปกรณ์อื่นกำลังใช้งานอยู่"} — แตะเพื่อดูตัวเลือก</button>
+            <button onClick={() => setTakeoverDismissed(false)} style={{ width: "100%", textAlign: "left", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>🔒 {t("online.device.collapsed", { state: everActiveHere ? t("online.status.moved") : t("online.device.activeElsewhereShort") })}</button>
           )}
 
           {/* ACTIVE — this IS the active device */}
           {status === ONLINE_STATUS.ACTIVE && (
             <div style={{ padding: 12, borderRadius: 11, background: "#e2f5ec", border: `1px solid ${T.green}`, marginBottom: 10 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.green }}>อุปกรณ์นี้เป็นอุปกรณ์หลักที่ใช้งาน BadQ Online อยู่</div>
-              {activeSinceDate && <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>ตั้งแต่ {activeSinceDate.toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}</div>}
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.green }}>{t("online.device.activeThis")}</div>
+              {activeSinceDate && <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t("online.device.since", { when: fmtDateTime ? fmtDateTime(activeSinceDate.getTime()) : activeSinceDate.toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" }) })}</div>}
             </div>
           )}
 
@@ -13804,13 +13805,13 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
               merely becoming the Active Device. */}
           {status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === false && !initDone && (
             <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
-              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text, marginBottom: 4 }}>ยังไม่มีข้อมูลก๊วนบน Cloud</div>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text, marginBottom: 4 }}>{t("online.cloud.emptyTitle")}</div>
               {/* v1.12.29 — item 1: this offer card previously said "ใช้ข้อมูลจากอุปกรณ์นี้เป็นข้อมูลตั้งต้น" (use
                   this device's data as the starting data), the same vague framing the v1.12.28 BUG-1 fix
                   already corrected one screen later (the confirm dialog). Worded precisely here too now — see
                   project doc badq-v11228-review-p22-followup.md's "residual finding". */}
-              <div style={{ fontSize: 11, color: T.muted, marginBottom: 8, lineHeight: 1.6 }}>ยังไม่เคยสร้างก๊วน (Club) บน Cloud สำหรับบัญชีนี้ — เลือกก๊วนหนึ่งก๊วนจากเครื่องนี้เพื่อสร้างเป็นก๊วนแรกบน Cloud (อัปโหลดเฉพาะชื่อก๊วนเท่านั้น ไม่ใช่ข้อมูลทั้งหมดในเครื่อง)</div>
-              <button disabled={initBusy} onClick={() => setInitConfirmOpen(true)} style={{ width: "100%", padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: initBusy ? 0.6 : 1 }}>สร้างก๊วนแรกบน Cloud</button>
+              <div style={{ fontSize: 11, color: T.muted, marginBottom: 8, lineHeight: 1.6 }}>{t("online.cloud.emptyBody")}</div>
+              <button disabled={initBusy} onClick={() => setInitConfirmOpen(true)} style={{ width: "100%", padding: "9px 0", borderRadius: 9, border: "none", background: T.accent, color: "#fff", fontSize: 12.5, fontWeight: 800, opacity: initBusy ? 0.6 : 1 }}>{t("online.cloud.createFirst")}</button>
             </div>
           )}
           {/* Cloud ALREADY has Club data — safe state only, per spec NEVER silently overwritten just because
@@ -13820,18 +13821,18 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
               line, via a read-only Firestore query (cloud.listClubs) — see the effect above. */}
           {status === ONLINE_STATUS.ACTIVE && cloudInitState && cloudInitState.clubsInitialized === true && (
             <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, fontSize: 11.5, color: T.muted }}>
-              <div>มีข้อมูลก๊วน (Club) บน Cloud อยู่แล้วสำหรับบัญชีนี้</div>
-              {cloudClubsLoading && <div style={{ marginTop: 6 }}>กำลังโหลดรายชื่อก๊วน...</div>}
-              {!cloudClubsLoading && cloudClubsErr && <div style={{ marginTop: 6, color: T.accent }}>โหลดรายชื่อก๊วนไม่สำเร็จ — {cloudClubsErr}</div>}
-              {!cloudClubsLoading && !cloudClubsErr && cloudClubs && cloudClubs.length === 0 && <div style={{ marginTop: 6 }}>ยังไม่พบรายชื่อก๊วน (อาจกำลังซิงก์อยู่)</div>}
+              <div>{t("online.cloud.existing")}</div>
+              {cloudClubsLoading && <div style={{ marginTop: 6 }}>{t("online.cloud.loadingGroups")}</div>}
+              {!cloudClubsLoading && cloudClubsErr && <div style={{ marginTop: 6, color: T.accent }}>{t("online.cloud.clubListLoadError")}</div>}
+              {!cloudClubsLoading && !cloudClubsErr && cloudClubs && cloudClubs.length === 0 && <div style={{ marginTop: 6 }}>{t("online.cloud.noGroupsYet")}</div>}
               {!cloudClubsLoading && !cloudClubsErr && cloudClubs && cloudClubs.length > 0 && (
-                <div style={{ marginTop: 6, color: T.text, fontWeight: 700 }}>{cloudClubs.map((c) => (c && c.name) || "(ไม่มีชื่อ)").join(", ")}</div>
+                <div style={{ marginTop: 6, color: T.text, fontWeight: 700 }}>{cloudClubs.map((c) => (c && c.name) || t("online.cloud.unnamed")).join(", ")}</div>
               )}
             </div>
           )}
           {initConfirmOpen && (
             <Overlay onClose={() => { if (!initBusy) setInitConfirmOpen(false); }}>
-              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>สร้างก๊วนแรกบน Cloud?</div>
+              <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 8 }}>{t("online.cloud.createFirstConfirm")}</div>
               {/* v1.12.29 — UX-1: let the Owner pick which local group seeds the Cloud Club, defaulting to the
                   group they're currently using (or the first saved group when that one isn't saved). v1.12.28's
                   BUG-1 fix is preserved and extended: whichever name shows here, in the "will upload" line
@@ -13839,41 +13840,41 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
                   value the payload sends, never restated independently. */}
               {localGroupNames.length > 0 ? (
                 <div style={{ marginBottom: 8 }}>
-                  <div style={{ fontSize: 11, color: T.muted, marginBottom: 4 }}>เลือกก๊วนจากเครื่องนี้เพื่อใช้เป็นชื่อก๊วนแรกบน Cloud:</div>
+                  <div style={{ fontSize: 11, color: T.muted, marginBottom: 4 }}>{t("online.cloud.selectFirst")}</div>
                   <select value={cloudInitGroupName} onChange={(e) => setSelectedGroupName(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, background: T.surface, color: T.text }}>
                     {localGroupNames.map((name) => <option key={name} value={name}>{name}</option>)}
                   </select>
                 </div>
               ) : (
-                <div style={{ fontSize: 12, color: T.text, marginBottom: 8, lineHeight: 1.7 }}>ยังไม่มีก๊วนที่บันทึกไว้ในเครื่องนี้ — จะใช้ชื่อ "{cloudInitGroupName}" แทน</div>
+                <div style={{ fontSize: 12, color: T.text, marginBottom: 8, lineHeight: 1.7 }}>{t("online.cloud.noLocalGroupsFallback", { name: cloudInitGroupName })}</div>
               )}
               <div style={{ fontSize: 12, color: T.text, marginBottom: 8, lineHeight: 1.7 }}>
-                จะอัปโหลดเฉพาะ <b>ชื่อก๊วน "{cloudInitGroupName}"</b> ขึ้น Cloud เท่านั้น
+                {t("online.cloud.uploadNameOnly", { name: cloudInitGroupName })}
               </div>
               <div style={{ fontSize: 11.5, color: T.accent, marginBottom: 10, lineHeight: 1.7, background: "#fdeae7", borderRadius: 8, padding: "8px 10px" }}>
-                ยังไม่อัปโหลด: {otherLocalGroupCount > 0 ? `ก๊วนอื่นอีก ${otherLocalGroupCount} ก๊วน, ` : ""}ประวัติก๊วนที่ผ่านมา ({localSessionCount} ครั้ง) และรายละเอียด/การเงินอื่นๆ ของก๊วน — ฟีเจอร์นี้ยังไม่รองรับในเวอร์ชันนี้
+                {t("online.cloud.notUploading", { otherGroups: otherLocalGroupCount > 0 ? t("online.cloud.otherGroups", { count: otherLocalGroupCount }) : "", sessionCount: localSessionCount })}
               </div>
               <div style={{ fontSize: 11, color: T.muted, marginBottom: 14, lineHeight: 1.6 }}>
-                ข้อมูลจากอุปกรณ์นี้ ({navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? "มือถือ" : "เดสก์ท็อป/แท็บเล็ต"}) — จำนวนก๊วนทั้งหมดที่บันทึกไว้ในเครื่อง: {localGroupCount}
-                {localMostRecentAt > 0 && <div>อัปเดตล่าสุดในเครื่องนี้: {new Date(localMostRecentAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })}</div>}
+                {t("online.cloud.deviceSummary", { deviceType: navigator && navigator.userAgent && /iPhone|Android|Mobile/i.test(navigator.userAgent) ? t("online.device.mobile") : t("online.device.desktopTablet"), count: localGroupCount })}
+                {localMostRecentAt > 0 && <div>{t("online.cloud.updatedAt", { when: fmtDateTime ? fmtDateTime(localMostRecentAt) : new Date(localMostRecentAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" }) })}</div>}
               </div>
               {initErr && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{initErr}</div>}
               <div style={{ display: "flex", gap: 8 }}>
-                <button disabled={initBusy} onClick={() => setInitConfirmOpen(false)} style={btnSecondary}>ยกเลิก</button>
-                <button disabled={initBusy} onClick={doConfirmInitialCloudData} style={{ ...btnPrimary, opacity: initBusy ? 0.6 : 1 }}>{initBusy ? "กำลังบันทึก..." : "ยืนยัน"}</button>
+                <button disabled={initBusy} onClick={() => setInitConfirmOpen(false)} style={btnSecondary}>{t("common.cancel")}</button>
+                <button disabled={initBusy} onClick={doConfirmInitialCloudData} style={{ ...btnPrimary, opacity: initBusy ? 0.6 : 1 }}>{initBusy ? t("common.saving") : t("common.confirm")}</button>
               </div>
             </Overlay>
           )}
           {initDone && (
             // v1.12.29: still names the exact club created (now Owner-selectable via UX-1) and restates the
             // scope limit, same discipline as the v1.12.28 BUG-1 fix.
-            <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>สร้างก๊วน "{cloudInitGroupName}" บน Cloud แล้ว (เฉพาะชื่อก๊วน — ยังไม่รวมก๊วนอื่นหรือประวัติ)</div>
+            <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>{t("online.cloud.created", { name: cloudInitGroupName })}</div>
           )}
 
           {err && <div style={{ marginBottom: 10, fontSize: 12, color: T.accent }}>{err}</div>}
           {notice && <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>{notice}</div>}
 
-          <button disabled={busy} onClick={doLogout} style={btnSecondary}>ออกจากระบบ</button>
+          <button disabled={busy} onClick={doLogout} style={btnSecondary}>{t("online.auth.signOut")}</button>
         </div>
       )}
     </Overlay>
@@ -17883,7 +17884,7 @@ function SettingsTab({
           BadQOnlineNavRow/BadQOnlineSheet components P2.1 already shipped — only where they're mounted from
           has changed, nothing about their own behavior/authority logic. */}
       {view === "online" && (
-        <BadQOnlineSheet deviceId={deviceId} groupDefaults={groupDefaults} sessionHistory={sessionHistory} currentGroupName={session && session.name} onClose={() => setView(null)} />
+        <BadQOnlineSheet deviceId={deviceId} groupDefaults={groupDefaults} sessionHistory={sessionHistory} currentGroupName={session && session.name} t={t} fmtDateTime={fmtDateTime} onClose={() => setView(null)} />
       )}
       {view === "backup" && (
         <Overlay onClose={() => setView(null)}>
