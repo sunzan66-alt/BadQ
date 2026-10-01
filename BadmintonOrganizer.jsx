@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.48";
+const APP_VERSION = "1.12.49";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -321,15 +321,16 @@ function useIsExtraWide() {
   }, []);
   return isExtraWide;
 }
-// v1.12.41 (Localization Phase 1): the app's single UI-language access point. `uiLocale` is a pure display
-// preference — "th" | "en" — read/written ONLY through the plain localStorage key below, deliberately
+// v1.12.41/1.12.49: the app's UI locale and IANA time zone are pure display preferences, read/written ONLY
+// through the two plain localStorage keys below, deliberately
 // outside `settings` (which is journaled and included in every backup/restore payload). This is intentional
-// per the approved integration plan: switching language must never alter, migrate, or touch business data,
+// per the approved integration plan: switching either preference must never alter, migrate, or touch business data,
 // the Journal, Restore, or the IndexedDB schema, and a backup restored on a device with a different language
 // preference must keep that device's own preference. See src/i18n/index.mjs for the engine this wraps
 // (window.BadQI18n, generated into the build by tools/gen_i18n_bundle.js — see its header comment for why a
 // browser-global rather than an ESM import).
 const BADQ_UI_LOCALE_KEY = "badq_uiLocale";
+const BADQ_UI_TIME_ZONE_KEY = "badq_uiTimeZone";
 function useBadQI18n() {
   const [locale, setLocaleState] = useState(() => {
     try {
@@ -345,15 +346,26 @@ function useBadQI18n() {
     setLocaleState(normalized);
     try { localStorage.setItem(BADQ_UI_LOCALE_KEY, normalized); } catch (e) { /* private mode / storage unavailable -> in-memory only for this session */ }
   }, []);
+  const [timeZone, setTimeZoneState] = useState(() => {
+    try {
+      const saved = localStorage.getItem(BADQ_UI_TIME_ZONE_KEY);
+      return window.BadQI18n ? window.BadQI18n.normalizeTimeZone(saved) : "Asia/Bangkok";
+    } catch (e) { return "Asia/Bangkok"; }
+  });
+  const setTimeZone = useCallback((next) => {
+    const normalized = window.BadQI18n ? window.BadQI18n.normalizeTimeZone(next) : "Asia/Bangkok";
+    setTimeZoneState(normalized);
+    try { localStorage.setItem(BADQ_UI_TIME_ZONE_KEY, normalized); } catch (e) { /* private mode / storage unavailable -> in-memory only for this session */ }
+  }, []);
   // Defensive fallback (should never trigger in a real build — gen_i18n_bundle.js fails the build itself if
   // window.BadQI18n's expected exports are missing): if the localization bundle somehow didn't load, every
   // UI surface that already calls t()/tc() below still renders its literal key instead of throwing, so a
   // broken bundle degrades to visible-but-functional rather than a blank screen.
   const i18n = useMemo(() => {
-    if (window.BadQI18n) return window.BadQI18n.createI18n(locale);
-    return { locale, t: (key) => key, tc: (key) => key, currency: (v) => String(v), number: (v) => String(v) };
-  }, [locale]);
-  return { locale, setLocale, i18n };
+    if (window.BadQI18n) return window.BadQI18n.createI18n(locale, { timeZone });
+    return { locale, timeZone, t: (key) => key, tc: (key) => key, currency: (v) => String(v), number: (v) => String(v) };
+  }, [locale, timeZone]);
+  return { locale, setLocale, timeZone, setTimeZone, i18n };
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -6773,7 +6785,7 @@ function AppInner() {
   // has no React Context anywhere, so that's the existing convention, not a new one. Only the surfaces this
   // phase covers (main nav here, General Settings and its own shared buttons) actually call t()/tc() below;
   // everywhere else keeps its Thai literals untouched (see the phase report for the exact scope).
-  const { locale: uiLocale, setLocale: setUiLocale, i18n } = useBadQI18n();
+  const { locale: uiLocale, setLocale: setUiLocale, timeZone: uiTimeZone, setTimeZone: setUiTimeZone, i18n } = useBadQI18n();
   const t = i18n.t;
   // v1.12.44 (Localization Closure): count-aware translation (.one/.other catalog variants — see
   // src/i18n/index.mjs's translateCount), threaded the same way as `t` above, only into the surfaces this
@@ -6810,13 +6822,12 @@ function AppInner() {
     if (!iso) return "-";
     try { return i18n.calendarDate(iso, { year: undefined, month: "short", day: "numeric" }); } catch (e) { return fmtThaiMonthDay(iso); }
   };
-  // Same idea for a full date+time value (epoch ms) — e.g. GroupSessionHeader's "saved defaults at" stamp,
-  // previously hardcoded to toLocaleString("th-TH", ...) regardless of uiLocale (a gap explicitly flagged
-  // in that component's own code comment when it was translated earlier this phase). Same options object
-  // as before (dateStyle/timeStyle "medium"/"short"), only the locale tag now follows uiLocale.
+  // Full date+time values here are true instants (epoch ms). Locale controls presentation and the selected
+  // IANA zone controls the displayed local time. Calendar dates and stored HH:mm strings use separate
+  // wrappers above and therefore remain intentionally time-zone-independent.
   const fmtDateTime = (ms) => {
     if (!ms) return "-";
-    try { return new Date(ms).toLocaleString(i18n.locale === "en" ? "en-US" : "th-TH", { dateStyle: "medium", timeStyle: "short" }); } catch (e) { return String(ms); }
+    try { return new Date(ms).toLocaleString(i18n.locale === "en" ? "en-US" : "th-TH", { dateStyle: "medium", timeStyle: "short", timeZone: i18n.timeZone }); } catch (e) { return String(ms); }
   };
   // v1.12.1 (UX restructure): ข้อมูลและการสำรอง moved from ประวัติ to ตั้งค่า (spec 12) — the corrupted-data
   // recovery banner below used to jump straight to ประวัติ where Backup lived inline; it now needs to jump
@@ -11472,7 +11483,7 @@ function AppInner() {
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
           summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory, t, tc }}
         />}
-        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, t, tc, fmtDate, fmtDateFull, fmtDateTime }} />}
+        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDate, fmtDateFull, fmtDateTime }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
       </div>
 
@@ -12789,6 +12800,44 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, t, o
   );
 }
 
+function timeZoneOffsetDisplay(timeZone) {
+  try {
+    return window.BadQI18n.timeZoneOffsetName(timeZone, new Date(), "en-US");
+  } catch (e) { return timeZone; }
+}
+
+function TimeZoneSettingsSheet({ timeZone, setTimeZone, t, onClose }) {
+  const options = (window.BadQI18n && window.BadQI18n.TIME_ZONE_OPTIONS) || [];
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>🕒 {t("settings.timeZone")}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, lineHeight: 1.55, marginBottom: 4 }}>{t("settings.timeZoneHelp")}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, lineHeight: 1.55 }}>{t("settings.timeZoneDstHelp")}</div>
+      <div style={{ fontSize: 11, color: T.muted, margin: "3px 0 12px" }}>{t("settings.timeZoneDefault")}</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: "58vh", overflowY: "auto", paddingRight: 2 }}>
+        {options.map((option) => {
+          const selected = option.id === timeZone;
+          return (
+            <button
+              key={option.id}
+              data-testid={`time-zone-option-${option.id}`}
+              onClick={() => setTimeZone(option.id)}
+              style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "10px 11px", borderRadius: 11, textAlign: "left", background: selected ? "#e2f5ec" : T.surface, border: `1.5px solid ${selected ? T.green : T.border}`, color: T.text }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 800 }}>{t(option.labelKey)}</div>
+                <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{option.id} · {timeZoneOffsetDisplay(option.id)}</div>
+              </div>
+              {selected && <Check size={16} color={T.green} style={{ flexShrink: 0 }} />}
+            </button>
+          );
+        })}
+      </div>
+      <button data-testid="time-zone-close" onClick={onClose} style={{ ...btnSecondary, marginTop: 14 }}>{t("common.close")}</button>
+    </Overlay>
+  );
+}
+
 // v1.11.5: the new GENERAL app settings sheet — replaces the old skill-only ⚙️ ตั้งค่า trigger on the
 // Members tab. "ระดับฝีมือ" here opens the EXISTING LevelSettingsSheet (unmodified, same
 // preset-switch/description logic) and "การสำรอง / นำเข้า / ส่งออกข้อมูล" opens the EXISTING
@@ -12798,20 +12847,21 @@ function LevelSettingsSheet({ settings, changeLevelPreset, setCustomLevels, t, o
 // longer accepted here — they existed ONLY to feed the removed BadQ Online row (moved to SettingsTab, see
 // its own comment) and the removed legacy Member Portal (Beta) sheet. Nothing else in this component ever
 // read them; dropping them here is pure dead-prop cleanup, not a behavior change.
-function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, uiLocale, setUiLocale, t, fmtDateTime, onClose }) {
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, fmtDateTime, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false); // v1.11.68: section 9 club-picker-first flow
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
+  const [timeZoneSheetOpen, setTimeZoneSheetOpen] = useState(false);
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
   const [wipedNotice, setWipedNotice] = useState(false);
   const currentPresetId = settings.levelPresetId || "badweb-central";
 
-  const NavRow = ({ children, onClick }) => (
-    <button onClick={onClick} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer" }}>{children}</button>
+  const NavRow = ({ children, onClick, testId }) => (
+    <button data-testid={testId} onClick={onClick} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, cursor: "pointer" }}>{children}</button>
   );
   const ExpandRow = ({ title, id, children }) => (
     <div style={{ marginBottom: 8, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, overflow: "hidden" }}>
@@ -12848,6 +12898,18 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           </button>
         ))}
       </div>
+
+      {/* v1.12.49: presentation-only IANA time-zone preference. Like language, this value lives outside
+          `settings`; changing it cannot enter Journal, IndexedDB business state, Backup, or Restore. */}
+      <Label>🕒 {t("settings.timeZone")}</Label>
+      <NavRow testId="time-zone-row" onClick={() => setTimeZoneSheetOpen(true)}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{t(((window.BadQI18n && window.BadQI18n.TIME_ZONE_OPTIONS) || []).find((option) => option.id === uiTimeZone)?.labelKey || "settings.timeZone.option.bangkok")}</div>
+          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{timeZoneOffsetDisplay(uiTimeZone)}</div>
+        </div>
+        <ChevronRight size={15} color={T.muted} />
+      </NavRow>
+      {timeZoneSheetOpen && <TimeZoneSettingsSheet timeZone={uiTimeZone} setTimeZone={setUiTimeZone} t={t} onClose={() => setTimeZoneSheetOpen(false)} />}
 
       <Label>🏸 {t("settings.skillLevels")}</Label>
       <NavRow onClick={() => setLevelSheetOpen(true)}>
@@ -17816,7 +17878,7 @@ function SettingsTab({
   openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint,
   exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog,
   autoOpen, onAutoOpenConsumed,
-  uiLocale, setUiLocale, t, // v1.12.41 (Localization Phase 1)
+  uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, // v1.12.41/1.12.49 display preferences
   tc, // v1.12.44 (Localization Closure)
   fmtDate, fmtDateFull, fmtDateTime,
 }) {
@@ -17890,7 +17952,7 @@ function SettingsTab({
           archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
           players={players}
           sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
-          uiLocale={uiLocale} setUiLocale={setUiLocale} t={t} fmtDateTime={fmtDateTime}
+          uiLocale={uiLocale} setUiLocale={setUiLocale} uiTimeZone={uiTimeZone} setUiTimeZone={setUiTimeZone} t={t} fmtDateTime={fmtDateTime}
           onClose={() => setView(null)}
         />
       )}

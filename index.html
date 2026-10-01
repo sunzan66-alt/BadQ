@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.48";
+      var CURRENT_VERSION = "1.12.49";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -4621,7 +4621,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
   });
 })();
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.48";
+const APP_VERSION = "1.12.49";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -5115,15 +5115,16 @@ function useIsExtraWide() {
   }, []);
   return isExtraWide;
 }
-// v1.12.41 (Localization Phase 1): the app's single UI-language access point. `uiLocale` is a pure display
-// preference — "th" | "en" — read/written ONLY through the plain localStorage key below, deliberately
+// v1.12.41/1.12.49: the app's UI locale and IANA time zone are pure display preferences, read/written ONLY
+// through the two plain localStorage keys below, deliberately
 // outside `settings` (which is journaled and included in every backup/restore payload). This is intentional
-// per the approved integration plan: switching language must never alter, migrate, or touch business data,
+// per the approved integration plan: switching either preference must never alter, migrate, or touch business data,
 // the Journal, Restore, or the IndexedDB schema, and a backup restored on a device with a different language
 // preference must keep that device's own preference. See src/i18n/index.mjs for the engine this wraps
 // (window.BadQI18n, generated into the build by tools/gen_i18n_bundle.js — see its header comment for why a
 // browser-global rather than an ESM import).
 const BADQ_UI_LOCALE_KEY = "badq_uiLocale";
+const BADQ_UI_TIME_ZONE_KEY = "badq_uiTimeZone";
 function useBadQI18n() {
   const [locale, setLocaleState] = useState(() => {
     try {
@@ -5145,23 +5146,43 @@ function useBadQI18n() {
       localStorage.setItem(BADQ_UI_LOCALE_KEY, normalized);
     } catch (e) {/* private mode / storage unavailable -> in-memory only for this session */}
   }, []);
+  const [timeZone, setTimeZoneState] = useState(() => {
+    try {
+      const saved = localStorage.getItem(BADQ_UI_TIME_ZONE_KEY);
+      return window.BadQI18n ? window.BadQI18n.normalizeTimeZone(saved) : "Asia/Bangkok";
+    } catch (e) {
+      return "Asia/Bangkok";
+    }
+  });
+  const setTimeZone = useCallback(next => {
+    const normalized = window.BadQI18n ? window.BadQI18n.normalizeTimeZone(next) : "Asia/Bangkok";
+    setTimeZoneState(normalized);
+    try {
+      localStorage.setItem(BADQ_UI_TIME_ZONE_KEY, normalized);
+    } catch (e) {/* private mode / storage unavailable -> in-memory only for this session */}
+  }, []);
   // Defensive fallback (should never trigger in a real build — gen_i18n_bundle.js fails the build itself if
   // window.BadQI18n's expected exports are missing): if the localization bundle somehow didn't load, every
   // UI surface that already calls t()/tc() below still renders its literal key instead of throwing, so a
   // broken bundle degrades to visible-but-functional rather than a blank screen.
   const i18n = useMemo(() => {
-    if (window.BadQI18n) return window.BadQI18n.createI18n(locale);
+    if (window.BadQI18n) return window.BadQI18n.createI18n(locale, {
+      timeZone
+    });
     return {
       locale,
+      timeZone,
       t: key => key,
       tc: key => key,
       currency: v => String(v),
       number: v => String(v)
     };
-  }, [locale]);
+  }, [locale, timeZone]);
   return {
     locale,
     setLocale,
+    timeZone,
+    setTimeZone,
     i18n
   };
 }
@@ -14338,6 +14359,8 @@ function AppInner() {
   const {
     locale: uiLocale,
     setLocale: setUiLocale,
+    timeZone: uiTimeZone,
+    setTimeZone: setUiTimeZone,
     i18n
   } = useBadQI18n();
   const t = i18n.t;
@@ -14410,16 +14433,16 @@ function AppInner() {
       return fmtThaiMonthDay(iso);
     }
   };
-  // Same idea for a full date+time value (epoch ms) — e.g. GroupSessionHeader's "saved defaults at" stamp,
-  // previously hardcoded to toLocaleString("th-TH", ...) regardless of uiLocale (a gap explicitly flagged
-  // in that component's own code comment when it was translated earlier this phase). Same options object
-  // as before (dateStyle/timeStyle "medium"/"short"), only the locale tag now follows uiLocale.
+  // Full date+time values here are true instants (epoch ms). Locale controls presentation and the selected
+  // IANA zone controls the displayed local time. Calendar dates and stored HH:mm strings use separate
+  // wrappers above and therefore remain intentionally time-zone-independent.
   const fmtDateTime = ms => {
     if (!ms) return "-";
     try {
       return new Date(ms).toLocaleString(i18n.locale === "en" ? "en-US" : "th-TH", {
         dateStyle: "medium",
-        timeStyle: "short"
+        timeStyle: "short",
+        timeZone: i18n.timeZone
       });
     } catch (e) {
       return String(ms);
@@ -22167,6 +22190,8 @@ function AppInner() {
       onAutoOpenConsumed: () => setSettingsAutoOpen(null),
       uiLocale,
       setUiLocale,
+      uiTimeZone,
+      setUiTimeZone,
       t,
       tc,
       fmtDate,
@@ -25501,6 +25526,106 @@ function LevelSettingsSheet({
     t: t
   }));
 }
+function timeZoneOffsetDisplay(timeZone) {
+  try {
+    return window.BadQI18n.timeZoneOffsetName(timeZone, new Date(), "en-US");
+  } catch (e) {
+    return timeZone;
+  }
+}
+function TimeZoneSettingsSheet({
+  timeZone,
+  setTimeZone,
+  t,
+  onClose
+}) {
+  const options = window.BadQI18n && window.BadQI18n.TIME_ZONE_OPTIONS || [];
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 6
+    }
+  }, "\uD83D\uDD52 ", t("settings.timeZone")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      lineHeight: 1.55,
+      marginBottom: 4
+    }
+  }, t("settings.timeZoneHelp")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      lineHeight: 1.55
+    }
+  }, t("settings.timeZoneDstHelp")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      margin: "3px 0 12px"
+    }
+  }, t("settings.timeZoneDefault")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6,
+      maxHeight: "58vh",
+      overflowY: "auto",
+      paddingRight: 2
+    }
+  }, options.map(option => {
+    const selected = option.id === timeZone;
+    return /*#__PURE__*/React.createElement("button", {
+      key: option.id,
+      "data-testid": `time-zone-option-${option.id}`,
+      onClick: () => setTimeZone(option.id),
+      style: {
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        padding: "10px 11px",
+        borderRadius: 11,
+        textAlign: "left",
+        background: selected ? "#e2f5ec" : T.surface,
+        border: `1.5px solid ${selected ? T.green : T.border}`,
+        color: T.text
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        fontWeight: 800
+      }
+    }, t(option.labelKey)), /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 10.5,
+        color: T.muted,
+        marginTop: 2
+      }
+    }, option.id, " \xB7 ", timeZoneOffsetDisplay(option.id))), selected && /*#__PURE__*/React.createElement(Check, {
+      size: 16,
+      color: T.green,
+      style: {
+        flexShrink: 0
+      }
+    }));
+  })), /*#__PURE__*/React.createElement("button", {
+    "data-testid": "time-zone-close",
+    onClick: onClose,
+    style: {
+      ...btnSecondary,
+      marginTop: 14
+    }
+  }, t("common.close")));
+}
 
 // v1.11.5: the new GENERAL app settings sheet — replaces the old skill-only ⚙️ ตั้งค่า trigger on the
 // Members tab. "ระดับฝีมือ" here opens the EXISTING LevelSettingsSheet (unmodified, same
@@ -25534,6 +25659,8 @@ function GeneralSettingsSheet({
   updateRankingConfig,
   uiLocale,
   setUiLocale,
+  uiTimeZone,
+  setUiTimeZone,
   t,
   fmtDateTime,
   onClose
@@ -25543,6 +25670,7 @@ function GeneralSettingsSheet({
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
+  const [timeZoneSheetOpen, setTimeZoneSheetOpen] = useState(false);
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
@@ -25550,8 +25678,10 @@ function GeneralSettingsSheet({
   const currentPresetId = settings.levelPresetId || "badweb-central";
   const NavRow = ({
     children,
-    onClick
+    onClick,
+    testId
   }) => /*#__PURE__*/React.createElement("button", {
+    "data-testid": testId,
     onClick: onClick,
     style: {
       width: "100%",
@@ -25641,7 +25771,35 @@ function GeneralSettingsSheet({
       fontSize: 13,
       fontWeight: 800
     }
-  }, t(`settings.language.${code}`)))), /*#__PURE__*/React.createElement(Label, null, "\uD83C\uDFF8 ", t("settings.skillLevels")), /*#__PURE__*/React.createElement(NavRow, {
+  }, t(`settings.language.${code}`)))), /*#__PURE__*/React.createElement(Label, null, "\uD83D\uDD52 ", t("settings.timeZone")), /*#__PURE__*/React.createElement(NavRow, {
+    testId: "time-zone-row",
+    onClick: () => setTimeZoneSheetOpen(true)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      fontWeight: 800,
+      color: T.text
+    }
+  }, t((window.BadQI18n && window.BadQI18n.TIME_ZONE_OPTIONS || []).find(option => option.id === uiTimeZone)?.labelKey || "settings.timeZone.option.bangkok")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginTop: 2
+    }
+  }, timeZoneOffsetDisplay(uiTimeZone))), /*#__PURE__*/React.createElement(ChevronRight, {
+    size: 15,
+    color: T.muted
+  })), timeZoneSheetOpen && /*#__PURE__*/React.createElement(TimeZoneSettingsSheet, {
+    timeZone: uiTimeZone,
+    setTimeZone: setUiTimeZone,
+    t: t,
+    onClose: () => setTimeZoneSheetOpen(false)
+  }), /*#__PURE__*/React.createElement(Label, null, "\uD83C\uDFF8 ", t("settings.skillLevels")), /*#__PURE__*/React.createElement(NavRow, {
     onClick: () => setLevelSheetOpen(true)
   }, /*#__PURE__*/React.createElement("span", {
     style: {
@@ -38301,8 +38459,10 @@ function SettingsTab({
   onAutoOpenConsumed,
   uiLocale,
   setUiLocale,
+  uiTimeZone,
+  setUiTimeZone,
   t,
-  // v1.12.41 (Localization Phase 1)
+  // v1.12.41/1.12.49 display preferences
   tc,
   // v1.12.44 (Localization Closure)
   fmtDate,
@@ -38480,6 +38640,8 @@ function SettingsTab({
     updateRankingConfig: updateRankingConfig,
     uiLocale: uiLocale,
     setUiLocale: setUiLocale,
+    uiTimeZone: uiTimeZone,
+    setUiTimeZone: setUiTimeZone,
     t: t,
     fmtDateTime: fmtDateTime,
     onClose: () => setView(null)
