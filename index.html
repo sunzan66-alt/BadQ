@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.47";
+      var CURRENT_VERSION = "1.12.48";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -2660,6 +2660,8 @@ const th = defineMessages("th", [
   ["settings.presetCustom", "กำหนดเอง"],
   ["settings.presetOrder", "ใช้ลำดับ: {levels}"],
   ["settings.presetCustomDescription", "Organizer กำหนดระดับฝีมือเองได้ โดย map เข้ากับ Skill Index 1–11"],
+  ["settings.skillLabel.north.novice", "มือหัดตี"],
+  ["settings.skillLabel.north.rally", "ตีโต้"],
   ["settings.presetInUse", "ใช้อยู่"],
   ["settings.viewLevelDescriptions", "ดูคำอธิบายระดับ"],
   ["settings.hideLevelDescriptions", "ซ่อนคำอธิบายระดับ"],
@@ -2690,6 +2692,7 @@ const th = defineMessages("th", [
   ["finance.category.tournamentPrizes", "ค่ารางวัลการแข่งขัน"],
   ["finance.category.travel", "ค่าเดินทาง"],
   ["finance.category.other", "ค่าใช้จ่ายอื่น ๆ"],
+  ["finance.category.badmintonGroup", "ก๊วนแบด"],
   ["summary.empty", "ยังไม่มีเกมที่จบแล้ว"],
   ["summary.totalMatches", "แมตช์"],
   ["summary.totalGames", "เกม"],
@@ -4148,6 +4151,8 @@ const en = defineMessages("en", [
   ["settings.presetCustom", "Custom"],
   ["settings.presetOrder", "Order: {levels}"],
   ["settings.presetCustomDescription", "Define your own level names and map them to Skill Index 1–11"],
+  ["settings.skillLabel.north.novice", "Novice"],
+  ["settings.skillLabel.north.rally", "Rally"],
   ["settings.presetInUse", "In use"],
   ["settings.viewLevelDescriptions", "View level descriptions"],
   ["settings.hideLevelDescriptions", "Hide level descriptions"],
@@ -4178,6 +4183,7 @@ const en = defineMessages("en", [
   ["finance.category.tournamentPrizes", "Tournament prizes"],
   ["finance.category.travel", "Travel"],
   ["finance.category.other", "Other expenses"],
+  ["finance.category.badmintonGroup", "Badminton group"],
   ["summary.empty", "No completed games yet"],
   ["summary.totalMatches", "Matches"],
   ["summary.totalGames", "Games"],
@@ -4615,7 +4621,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
   });
 })();
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.47";
+const APP_VERSION = "1.12.48";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -4711,8 +4717,18 @@ function presetDisplayDescription(id, t) {
   if (!t) return preset.description;
   if (id === "custom") return t("settings.presetCustomDescription");
   return t("settings.presetOrder", {
-    levels: (preset.levels || []).join(" → ")
+    levels: (preset.levels || []).map(label => presetLevelDisplayLabel(id, label, t)).join(" → ")
   });
+}
+// Display-only localization for the two Thai labels that are canonical stored values in the Chiang Mai
+// preset. The preset id, level array, ordering and numeric Skill Index mapping remain byte-identical.
+function presetLevelDisplayLabel(presetId, label, t) {
+  if (!t || presetId !== "north") return label;
+  const key = {
+    "มือหัดตี": "settings.skillLabel.north.novice",
+    "ตีโต้": "settings.skillLabel.north.rally"
+  }[label];
+  return key ? t(key) : label;
 }
 function skillDescription(skillIndex, t) {
   return t ? t(`settings.skillDescription.${skillIndex}`) : SKILL_DESC[skillIndex];
@@ -4734,7 +4750,7 @@ function displayLevelFor(skillIndex, settings) {
   return preset.levels[idx - 1] || "Skill " + idx;
 }
 // { skillIndex, label } options for level <select> dropdowns, reflecting the active preset
-function activeLevelOptions(settings) {
+function activeLevelOptions(settings, t) {
   const presetId = settings && settings.levelPresetId || "badweb-central"; // v1.12.7 (fix 2): see displayLevelFor's comment above
   if (presetId === "custom") {
     return (settings && settings.customLevels || []).slice().sort((a, b) => a.skillIndex - b.skillIndex).map(l => ({
@@ -4745,7 +4761,7 @@ function activeLevelOptions(settings) {
   const preset = LEVEL_PRESETS.find(p => p.id === presetId) || LEVEL_PRESETS[0];
   return preset.levels.map((label, i) => ({
     skillIndex: i + 1,
-    label
+    label: presetLevelDisplayLabel(preset.id, label, t)
   }));
 }
 const T = {
@@ -8140,6 +8156,11 @@ function financeCategoryDisplayLabel(label, t) {
   const key = FINANCE_CATEGORY_I18N_KEY[parts[0]];
   if (!key) return label;
   parts[0] = t(key);
+  // Both spellings exist in historical/system-generated report keys. Translate only this exact system
+  // suffix on a known finance category; all other suffixes (including owner-entered names) pass through.
+  if (parts.length === 2 && (parts[1] === "ก๊วนแบด" || parts[1] === "ก๊วนแบต")) {
+    parts[1] = t("finance.category.badmintonGroup");
+  }
   return parts.join(" - ");
 }
 // v1.11.20: fixed display order for the P&L expense breakdown (computeFinanceForRange) — ก๊วนแบต
@@ -22389,7 +22410,7 @@ function MembersTab({
   const [manageSheetOpen, setManageSheetOpen] = useState(false); // "จัดการ ▾"
   const [memberTypeFilters, setMemberTypeFilters] = useState(() => new Set()); // subset of {member,guest,owner}; empty = no filter
   const [handFilters, setHandFilters] = useState(() => new Set()); // subset of {left,right}; empty = no filter
-  const levelOptions = activeLevelOptions(settings);
+  const levelOptions = activeLevelOptions(settings, t);
   const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
   const [name, setName] = useState("");
   const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
@@ -31076,7 +31097,7 @@ function TournamentWizard({
         color: T.muted,
         marginLeft: "auto"
       }
-    }, p.id.startsWith("guest-") ? "Guest" : displayLevelFor(p.skillIndex, settings)));
+    }, p.id.startsWith("guest-") ? "Guest" : presetLevelDisplayLabel(settings?.levelPresetId || "badweb-central", displayLevelFor(p.skillIndex, settings), tr)));
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -31108,7 +31129,7 @@ function TournamentWizard({
       fontSize: 13,
       fontWeight: 700
     }
-  }, activeLevelOptions(settings).map(o => /*#__PURE__*/React.createElement("option", {
+  }, activeLevelOptions(settings, tr).map(o => /*#__PURE__*/React.createElement("option", {
     key: o.skillIndex,
     value: o.skillIndex
   }, o.label))), /*#__PURE__*/React.createElement("button", {
@@ -46655,7 +46676,7 @@ function LevelPresetEditor({
   const [pendingPreset, setPendingPreset] = useState(null); // preset id awaiting confirm, or null
   const [showSkillInfo, setShowSkillInfo] = useState(false);
   const allPresets = [...LEVEL_PRESETS, getPresetMeta("custom")];
-  const levelOptions = activeLevelOptions(settings); // preset-specific labels (R/BG1/... for อีสาน, etc.) for the skill-index legend below
+  const levelOptions = activeLevelOptions(settings, t); // preset-specific display labels; stored preset values are unchanged
   const pick = id => {
     if (id !== currentId) setPendingPreset(id);
   };

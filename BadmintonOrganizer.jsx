@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.47";
+const APP_VERSION = "1.12.48";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -59,7 +59,17 @@ function presetDisplayDescription(id, t) {
   const preset = getPresetMeta(id);
   if (!t) return preset.description;
   if (id === "custom") return t("settings.presetCustomDescription");
-  return t("settings.presetOrder", { levels: (preset.levels || []).join(" → ") });
+  return t("settings.presetOrder", { levels: (preset.levels || []).map((label) => presetLevelDisplayLabel(id, label, t)).join(" → ") });
+}
+// Display-only localization for the two Thai labels that are canonical stored values in the Chiang Mai
+// preset. The preset id, level array, ordering and numeric Skill Index mapping remain byte-identical.
+function presetLevelDisplayLabel(presetId, label, t) {
+  if (!t || presetId !== "north") return label;
+  const key = {
+    "มือหัดตี": "settings.skillLabel.north.novice",
+    "ตีโต้": "settings.skillLabel.north.rally",
+  }[label];
+  return key ? t(key) : label;
 }
 function skillDescription(skillIndex, t) {
   return t ? t(`settings.skillDescription.${skillIndex}`) : SKILL_DESC[skillIndex];
@@ -81,13 +91,13 @@ function displayLevelFor(skillIndex, settings) {
   return preset.levels[idx - 1] || ("Skill " + idx);
 }
 // { skillIndex, label } options for level <select> dropdowns, reflecting the active preset
-function activeLevelOptions(settings) {
+function activeLevelOptions(settings, t) {
   const presetId = (settings && settings.levelPresetId) || "badweb-central"; // v1.12.7 (fix 2): see displayLevelFor's comment above
   if (presetId === "custom") {
     return ((settings && settings.customLevels) || []).slice().sort((a, b) => a.skillIndex - b.skillIndex).map((l) => ({ skillIndex: l.skillIndex, label: l.name }));
   }
   const preset = LEVEL_PRESETS.find((p) => p.id === presetId) || LEVEL_PRESETS[0];
-  return preset.levels.map((label, i) => ({ skillIndex: i + 1, label }));
+  return preset.levels.map((label, i) => ({ skillIndex: i + 1, label: presetLevelDisplayLabel(preset.id, label, t) }));
 }
 const T = {
   bg: "#f3f6f4", surface: "#ffffff", surface2: "#eef2f0", border: "#dde5e1",
@@ -2565,6 +2575,11 @@ function financeCategoryDisplayLabel(label, t) {
   const key = FINANCE_CATEGORY_I18N_KEY[parts[0]];
   if (!key) return label;
   parts[0] = t(key);
+  // Both spellings exist in historical/system-generated report keys. Translate only this exact system
+  // suffix on a known finance category; all other suffixes (including owner-entered names) pass through.
+  if (parts.length === 2 && (parts[1] === "ก๊วนแบด" || parts[1] === "ก๊วนแบต")) {
+    parts[1] = t("finance.category.badmintonGroup");
+  }
   return parts.join(" - ");
 }
 // v1.11.20: fixed display order for the P&L expense breakdown (computeFinanceForRange) — ก๊วนแบต
@@ -11534,7 +11549,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   const [manageSheetOpen, setManageSheetOpen] = useState(false); // "จัดการ ▾"
   const [memberTypeFilters, setMemberTypeFilters] = useState(() => new Set()); // subset of {member,guest,owner}; empty = no filter
   const [handFilters, setHandFilters] = useState(() => new Set()); // subset of {left,right}; empty = no filter
-  const levelOptions = activeLevelOptions(settings);
+  const levelOptions = activeLevelOptions(settings, t);
   const defaultSkillIndex = levelOptions[Math.min(6, levelOptions.length - 1)]?.skillIndex || levelOptions[0]?.skillIndex || 1;
   const [name, setName] = useState(""); const [skillIndex, setSkillIndex] = useState(defaultSkillIndex);
   const [confirmResetAll, setConfirmResetAll] = useState(false);
@@ -15110,14 +15125,14 @@ function TournamentWizard({ players, playersById, settings, tournamentHistory, a
                 <div key={p.id} className="tap-press" onClick={() => (teamEntryMode === "fixedTeam" ? (sel && tapForPair(p.id)) : toggleSelect(p.id))} style={{ display: "flex", alignItems: "center", gap: 8, padding: "9px 11px", borderBottom: `1px solid ${T.border}`, cursor: "pointer", opacity: inFixed ? 0.4 : 1, background: pendingPick === p.id ? "#e2f5ec" : "none" }}>
                   <input type="checkbox" checked={sel || inFixed} disabled={inFixed} onChange={() => toggleSelect(p.id)} onClick={(e) => e.stopPropagation()} />
                   <span style={{ fontSize: 13.5, fontWeight: 700 }}>{p.name}</span>
-                  <span style={{ fontSize: 11, color: T.muted, marginLeft: "auto" }}>{p.id.startsWith("guest-") ? "Guest" : displayLevelFor(p.skillIndex, settings)}</span>
+                  <span style={{ fontSize: 11, color: T.muted, marginLeft: "auto" }}>{p.id.startsWith("guest-") ? "Guest" : presetLevelDisplayLabel(settings?.levelPresetId || "badweb-central", displayLevelFor(p.skillIndex, settings), tr)}</span>
                 </div>
               );
             })}
           </div>
           <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
             <input value={guestName} onChange={(e) => setGuestName(e.target.value)} placeholder="+ Guest Player" style={{ flex: 1, padding: "9px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none" }} />
-            <select value={guestSkill} onChange={(e) => setGuestSkill(Number(e.target.value))} style={{ padding: "0 8px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700 }}>{activeLevelOptions(settings).map((o) => <option key={o.skillIndex} value={o.skillIndex}>{o.label}</option>)}</select>
+            <select value={guestSkill} onChange={(e) => setGuestSkill(Number(e.target.value))} style={{ padding: "0 8px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 13, fontWeight: 700 }}>{activeLevelOptions(settings, tr).map((o) => <option key={o.skillIndex} value={o.skillIndex}>{o.label}</option>)}</select>
             <button onClick={addGuest} style={{ padding: "0 12px", borderRadius: 10, background: T.accent, border: "none", color: "#fff" }}><Plus size={16} /></button>
           </div>
           {guestPlayers.length > 0 && <div style={{ fontSize: 11, color: T.muted, marginBottom: 10 }}>{tr("tournamentWizard.guestNotSavedHint")}</div>}
@@ -21056,7 +21071,7 @@ function LevelPresetEditor({ settings, changeLevelPreset, setCustomLevels, t }) 
   const [pendingPreset, setPendingPreset] = useState(null); // preset id awaiting confirm, or null
   const [showSkillInfo, setShowSkillInfo] = useState(false);
   const allPresets = [...LEVEL_PRESETS, getPresetMeta("custom")];
-  const levelOptions = activeLevelOptions(settings); // preset-specific labels (R/BG1/... for อีสาน, etc.) for the skill-index legend below
+  const levelOptions = activeLevelOptions(settings, t); // preset-specific display labels; stored preset values are unchanged
   const pick = (id) => { if (id !== currentId) setPendingPreset(id); };
   const confirm = () => { changeLevelPreset(pendingPreset); setPendingPreset(null); };
   return (
