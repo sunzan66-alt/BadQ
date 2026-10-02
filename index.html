@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.49";
+      var CURRENT_VERSION = "1.12.50";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -3040,6 +3040,22 @@ const th = defineMessages("th", [
   ["player.filterHandRight", "มือขวา"],
   ["player.manage", "จัดการ"],
   ["common.all", "ทั้งหมด"],
+  // v1.12.50 (P0 Payment Guard — unstarted assigned game): new keys for the hard payment block on an
+  // unresolved (assigned-but-unstarted, or still playing/paused) game, the "Mark as played" recovery
+  // action, and the paid-bill-is-frozen messaging for discount credits / wheel prizes.
+  ["match.notStartedWarning", "ยังไม่ได้กดเริ่มเกม"],
+  ["match.markAsPlayedAction", "บันทึกว่าเล่นแล้ว"],
+  ["match.markAsPlayedHint", "ทำเครื่องหมายว่าเกมนี้เล่นจบแล้ว"],
+  ["match.markAsPlayedConfirm", "ยืนยันว่าเกมนี้เล่นจบแล้วจริง ระบบจะไม่สร้างคะแนนหรือผู้ชนะให้อัตโนมัติ"],
+  ["finance.unresolvedMatchWarningTitle", "ผู้เล่นยังมีเกมที่จัดไว้แต่ยังไม่ได้สรุป"],
+  ["finance.unresolvedMatchWarningBody", "กรุณาเริ่มเกม บันทึกว่าเล่นแล้ว หรือยกเลิกเกมก่อนชำระเงิน"],
+  ["finance.unresolvedMatchCountSuffix", " (ทั้งหมด {count} เกม)"],
+  ["finance.goToPendingGame", "ไปยังเกมที่ค้าง"],
+  ["finance.unstartedGameShort", "ยังไม่เริ่ม"],
+  ["finance.unstartedGameTooltip", "ผู้เล่นยังมีเกมที่จัดไว้แต่ยังไม่ได้เริ่ม กรุณาเริ่มเกม บันทึกว่าเล่นแล้ว หรือยกเลิกเกมก่อน"],
+  ["finance.unstartedGameFullTooltip", "มีเกมค้างให้สรุปก่อน"],
+  ["finance.unresolvedMatchActionDisabledHint", "ปิดใช้งานจนกว่าจะสรุปเกมที่ค้างอยู่ก่อน"],
+  ["finance.paidBillFrozenHint", "ชำระแล้ว ต้องยกเลิกการชำระก่อนจึงจะแก้ไขได้"],
 ]);
 
 
@@ -4531,6 +4547,20 @@ const en = defineMessages("en", [
   ["player.filterHandRight", "Right-handed"],
   ["player.manage", "Manage"],
   ["common.all", "All"],
+  // v1.12.50 (P0 Payment Guard — unstarted assigned game): see matching comment in the th catalog above.
+  ["match.notStartedWarning", "Game has not been started"],
+  ["match.markAsPlayedAction", "Mark as played"],
+  ["match.markAsPlayedHint", "Mark this game as completed"],
+  ["match.markAsPlayedConfirm", "Confirm this game was actually played and finished. No score or winner will be auto-generated."],
+  ["finance.unresolvedMatchWarningTitle", "This player still has an unresolved assigned game."],
+  ["finance.unresolvedMatchWarningBody", "Please start the game, mark it as played, or cancel it before taking payment."],
+  ["finance.unresolvedMatchCountSuffix", " ({count} games)"],
+  ["finance.goToPendingGame", "Go to pending game"],
+  ["finance.unstartedGameShort", "Not started"],
+  ["finance.unstartedGameTooltip", "This player has an assigned game that hasn't started yet. Please start it, mark it as played, or cancel it first."],
+  ["finance.unstartedGameFullTooltip", "Resolve the pending game first"],
+  ["finance.unresolvedMatchActionDisabledHint", "Disabled until the pending game is resolved."],
+  ["finance.paidBillFrozenHint", "Paid — undo payment first to make changes"],
 ]);
 
 
@@ -4621,7 +4651,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
   });
 })();
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.49";
+const APP_VERSION = "1.12.50";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -7399,6 +7429,21 @@ function computeBill(players, settings, finishedMatches) {
 function playerHasLiveMatch(playerId, current) {
   return (current || []).some(m => (m.status === "playing" || m.status === "paused") && [...(m.teamA || []), ...(m.teamB || [])].includes(playerId));
 }
+// v1.12.50 (P0 Payment Guard — unstarted assigned game): see BadmintonOrganizer.jsx for the full rationale.
+// ADDITIVE ONLY — playerHasLiveMatch above is untouched. A match is "unresolved" until explicitly resolved
+// (finished "done", or cancelled/removed from `current`); "next" (assigned, Start never pressed) now blocks
+// payment too, closing the real incident where an organizer forgot to press Start.
+function playerUnresolvedMatches(playerId, current) {
+  return (current || []).filter(m => m && (m.status === "next" || m.status === "playing" || m.status === "paused") && [...(m.teamA || []), ...(m.teamB || [])].includes(playerId));
+}
+function playerUnresolvedMatchKind(playerId, current) {
+  const ms = playerUnresolvedMatches(playerId, current);
+  if (!ms.length) return null;
+  return ms.some(m => m.status === "playing" || m.status === "paused") ? "live" : "unstarted";
+}
+function playerHasUnresolvedMatch(playerId, current) {
+  return playerUnresolvedMatches(playerId, current).length > 0;
+}
 // v1.12.38: completed-match ledger counts — the number of distinct completed matches each player appears in
 // (a player listed twice in one match counts once). The authoritative "games played" for billing/archive;
 // player.games stays as the backward-compatible matchmaking cache (it can be reset by "รีเซ็ตจำนวนเกม").
@@ -7424,9 +7469,10 @@ function togglePaidTransition(players, playerId, ctx) {
   };
   const c = ctx || {};
   const willBePaid = !target.paid;
-  if (willBePaid && playerHasLiveMatch(playerId, c.current)) return {
+  // v1.12.50: widened to "unresolved-match" (also covers an assigned-but-never-started "next" game).
+  if (willBePaid && playerHasUnresolvedMatch(playerId, c.current)) return {
     players: list,
-    blocked: "live-match"
+    blocked: "unresolved-match"
   };
   let snapshot = null;
   if (willBePaid) {
@@ -17368,7 +17414,9 @@ function AppInner() {
     departureTime: null,
     waitlistedAt: null
   })));
-  const setPDiscount = (id, v) => setPlayers(prev => prev.map(p => p.id === id ? {
+  // v1.12.50 (P0 Payment Integrity): `!p.paid` added — a paid bill is frozen, see BadmintonOrganizer.jsx's
+  // comment on this exact line for the full rationale.
+  const setPDiscount = (id, v) => setPlayers(prev => prev.map(p => p.id === id && !p.paid ? {
     ...p,
     discount: Math.max(0, Number(v) || 0)
   } : p));
@@ -17381,6 +17429,10 @@ function AppInner() {
   // "ห้ามบันทึก Expense ตอนแค่ตั้ง Reward... Expense เกิดเมื่อแจกจริง"). "no prize" is marked on the
   // player exactly like a real result, but per spec 5 explicitly gets NO Reward History entry.
   const applyWheelPrize = (id, prize) => {
+    // v1.12.50 (P0 Payment Integrity): a paid bill is frozen — refuse the whole spin for an already-paid
+    // player. See BadmintonOrganizer.jsx's comment on this exact line for the full rationale.
+    const target = players.find(p => p.id === id);
+    if (!target || target.paid) return;
     const rewardId = uid();
     const resultLabel = prize ? prize.label : "ไม่ได้รางวัล";
     setPlayers(prev => prev.map(p => {
@@ -17444,7 +17496,10 @@ function AppInner() {
   const applyDiscountCredits = creditIds => {
     flushDiscountDrafts(); // v1.12.39 (review F7): a typed-but-uncommitted discount is committed BEFORE the credit is added
     const ids = Array.isArray(creditIds) ? creditIds : [creditIds];
-    const targets = discountCredits.filter(c => ids.includes(c.id) && c.status === "available");
+    // v1.12.50 (P0 Payment Integrity): a credit targeting an already-paid player is skipped (stays
+    // "available") — see BadmintonOrganizer.jsx's comment on this exact line for the full rationale.
+    const paidPlayerIds = new Set(players.filter(p => p.paid).map(p => p.id));
+    const targets = discountCredits.filter(c => ids.includes(c.id) && c.status === "available" && !paidPlayerIds.has(c.playerId));
     if (!targets.length) return;
     const byPlayer = {};
     targets.forEach(c => {
@@ -17456,7 +17511,8 @@ function AppInner() {
         discount: (Number(p.discount) || 0) + byPlayer[p.id]
       } : p));
     }
-    setDiscountCredits(prev => prev.map(c => ids.includes(c.id) && c.status === "available" ? {
+    const targetIds = new Set(targets.map(c => c.id));
+    setDiscountCredits(prev => prev.map(c => targetIds.has(c.id) ? {
       ...c,
       status: "used",
       usedAt: Date.now(),
@@ -18180,7 +18236,9 @@ function AppInner() {
         courtLabels
       };
       const m = base.current.find(x => x.id === mid);
-      if (!m || m.status !== "playing" && m.status !== "paused" && m.status !== "done") {
+      // v1.12.50 (P0 Payment Guard — "Mark as played" recovery): widened to also accept "next" (assigned but
+      // never started) — see BadmintonOrganizer.jsx's comment on this exact line for the full rationale.
+      if (!m || m.status !== "playing" && m.status !== "paused" && m.status !== "done" && m.status !== "next") {
         release();
         return Promise.resolve();
       }
@@ -18383,6 +18441,16 @@ function AppInner() {
     }).catch(() => {
       release(); /* v1.12.39: also covers an op refused before it ran (restore fence). Failure is already surfaced via criticalSaveStatus ("failed"); the match correctly stays visibly unfinished since applyFn never ran. */
     });
+  };
+  // v1.12.50 (P0 Payment Guard — "Mark as played" recovery): organizer-confirmed recovery for an assigned
+  // game whose Start was simply forgotten. Never auto-assumes; reuses finishAndAdvance 100% unchanged (see
+  // BadmintonOrganizer.jsx for the full rationale) rather than duplicating its durable completion logic.
+  const markAssignedMatchAsPlayed = mid => {
+    const m = current.find(x => x.id === mid);
+    if (!m || m.status !== "next") return;
+    const ok = typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(t ? t("match.markAsPlayedConfirm") : "ยืนยันว่าเกมนี้เล่นจบแล้วจริง ระบบจะไม่สร้างคะแนนหรือผู้ชนะให้อัตโนมัติ") : true;
+    if (!ok) return;
+    finishAndAdvance(mid);
   };
   // v1.11.24: genuine mid-game pause (NOT a finish) — "พักเกม" in the status dropdown. Freezes the court
   // exactly as-is (teams/scores/round/court untouched) so it keeps occupying its court and its players stay
@@ -22066,6 +22134,7 @@ function AppInner() {
         startGame,
         endGame,
         finishAndAdvance,
+        markAssignedMatchAsPlayed,
         undoFinish,
         nextCourt,
         regenCourt,
@@ -22239,6 +22308,7 @@ function AppInner() {
       tTogglePlayerPaid,
       tToggleHistoricalPlayerPaid,
       uiLocale,
+      onGoToGames: () => setTab("session"),
       t,
       tc,
       fmtDate,
@@ -29021,6 +29091,7 @@ function MatchRow({
   toggleCurrentLock,
   regenCourt,
   deleteMatch,
+  markAssignedMatchAsPlayed,
   COLW,
   TABLE_MIN_WIDTH,
   t,
@@ -29367,7 +29438,7 @@ function MatchRow({
   React.createElement("button", {
     onClick: () => setMatchStatus(m.id, "playing"),
     disabled: !canStart,
-    title: !startReadyMatch(m) ? t("match.fillPlayersBeforeStartGame") : noCourt ? t("match.chooseCourtBeforeStartGame") : t("match.tapToStartGame"),
+    title: !startReadyMatch(m) ? t("match.fillPlayersBeforeStartGame") : noCourt ? t("match.chooseCourtBeforeStartGame") : `${t("match.notStartedWarning")} — ${t("match.tapToStartGame")}`,
     style: {
       width: COLW.status,
       flexShrink: 0,
@@ -29488,6 +29559,18 @@ function MatchRow({
     }
   }, /*#__PURE__*/React.createElement(Trash2, {
     size: 14
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: () => markAssignedMatchAsPlayed(m.id),
+    title: t("match.markAsPlayedHint"),
+    "aria-label": t("match.markAsPlayedAction"),
+    style: {
+      background: "none",
+      border: "none",
+      padding: 3,
+      color: T.green
+    }
+  }, /*#__PURE__*/React.createElement(Check, {
+    size: 14
   }))))), slotMismatch &&
   /*#__PURE__*/
   // v1.12.25 (P0 Mixed Singles + Doubles): unlike the constraint/recent-pair warnings below (advisory
@@ -29571,6 +29654,7 @@ function SessionTab(props) {
     startGame,
     endGame,
     finishAndAdvance,
+    markAssignedMatchAsPlayed,
     undoFinish,
     nextCourt,
     regenCourt,
@@ -30240,6 +30324,7 @@ function SessionTab(props) {
       toggleCurrentLock,
       regenCourt,
       deleteMatch,
+      markAssignedMatchAsPlayed,
       COLW,
       TABLE_MIN_WIDTH,
       t,
@@ -39417,6 +39502,7 @@ function FinanceTab({
   tTogglePlayerPaid,
   tToggleHistoricalPlayerPaid,
   uiLocale,
+  onGoToGames,
   t,
   tc,
   fmtDate,
@@ -39562,6 +39648,7 @@ function FinanceTab({
     playersById: playersById,
     tTogglePlayerPaid: tTogglePlayerPaid,
     tToggleHistoricalPlayerPaid: tToggleHistoricalPlayerPaid,
+    onGoToGames: onGoToGames,
     t: t,
     tc: tc,
     fmtDate: fmtDate
@@ -42129,6 +42216,8 @@ function DiscountCreditDetail({
   const [confirmCancel, setConfirmCancel] = useState(false);
   const livePlayer = players ? players.find(p => p.id === credit.playerId) : null;
   const alreadyHasManualDiscount = !!(livePlayer && Number(livePlayer.discount) > 0);
+  // v1.12.50 (P0 Payment Integrity): see BadmintonOrganizer.jsx for the full rationale.
+  const livePlayerPaid = !!(livePlayer && livePlayer.paid);
   if (credit.status !== "available") {
     return /*#__PURE__*/React.createElement(Overlay, {
       onClose: onClose
@@ -42193,7 +42282,17 @@ function DiscountCreditDetail({
     }
   }, t("finance.creditReceivedFromLabel", {
     source: resolveSessionLabel(credit.sourceSessionId, session, sessionHistory, fmtDate || fmtThaiDate) || t("finance.creditSourceFallback")
-  })), alreadyHasManualDiscount && !confirmUse && /*#__PURE__*/React.createElement("div", {
+  })), livePlayerPaid && !confirmUse && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#fff8e6",
+      border: `1px solid #f5d98a`,
+      borderRadius: 11,
+      padding: "10px 12px",
+      marginBottom: 12,
+      fontSize: 12.5,
+      color: "#8a6300"
+    }
+  }, "\u26A0\uFE0F ", t("finance.paidBillFrozenHint")), !livePlayerPaid && alreadyHasManualDiscount && !confirmUse && /*#__PURE__*/React.createElement("div", {
     style: {
       background: "#fff8e6",
       border: `1px solid #f5d98a`,
@@ -42213,15 +42312,18 @@ function DiscountCreditDetail({
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setConfirmUse(true),
+    disabled: livePlayerPaid,
     style: {
       width: "100%",
       padding: "12px 0",
       borderRadius: 11,
       border: "none",
-      background: T.green,
-      color: "#fff",
+      background: livePlayerPaid ? T.surface2 : T.green,
+      color: livePlayerPaid ? T.muted : "#fff",
       fontSize: 13.5,
-      fontWeight: 800
+      fontWeight: 800,
+      opacity: livePlayerPaid ? 0.7 : 1,
+      cursor: livePlayerPaid ? "not-allowed" : "pointer"
     }
   }, t("finance.useDiscountNowButton")), /*#__PURE__*/React.createElement("button", {
     onClick: () => setConfirmCancel(true),
@@ -42242,7 +42344,13 @@ function DiscountCreditDetail({
     }
   }, t("finance.useDiscountConfirmTitle", {
     amount: formatCurrency(credit.amount)
-  })), alreadyHasManualDiscount && /*#__PURE__*/React.createElement("div", {
+  })), livePlayerPaid ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "#8a6300",
+      marginBottom: 10
+    }
+  }, t("finance.paidBillFrozenHint")) : alreadyHasManualDiscount && /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 12,
       color: T.accent,
@@ -42273,15 +42381,18 @@ function DiscountCreditDetail({
       applyDiscountCredits(credit.id);
       onClose();
     },
+    disabled: livePlayerPaid,
     style: {
       flex: 1,
       padding: "11px 0",
       borderRadius: 11,
       border: "none",
-      background: T.green,
-      color: "#fff",
+      background: livePlayerPaid ? T.surface2 : T.green,
+      color: livePlayerPaid ? T.muted : "#fff",
       fontSize: 13,
-      fontWeight: 800
+      fontWeight: 800,
+      opacity: livePlayerPaid ? 0.7 : 1,
+      cursor: livePlayerPaid ? "not-allowed" : "pointer"
     }
   }, t("finance.useDiscountButton")))), confirmCancel && /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -42347,6 +42458,8 @@ function ApplyCreditsConfirm({
   if (!player || !credits.length) return null;
   const total = credits.reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const alreadyHasManualDiscount = Number(player.discount) > 0;
+  // v1.12.50 (P0 Payment Integrity): see BadmintonOrganizer.jsx for the full rationale.
+  const playerPaid = !!player.paid;
   return /*#__PURE__*/React.createElement(Overlay, {
     onClose: onClose
   }, /*#__PURE__*/React.createElement("div", {
@@ -42362,7 +42475,17 @@ function ApplyCreditsConfirm({
     }
   }, t("finance.useDiscountConfirmTitle", {
     amount: formatCurrency(total)
-  })), alreadyHasManualDiscount && /*#__PURE__*/React.createElement("div", {
+  })), playerPaid ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#fff8e6",
+      border: `1px solid #f5d98a`,
+      borderRadius: 11,
+      padding: "10px 12px",
+      margin: "10px 0",
+      fontSize: 12.5,
+      color: "#8a6300"
+    }
+  }, "\u26A0\uFE0F ", t("finance.paidBillFrozenHint")) : alreadyHasManualDiscount && /*#__PURE__*/React.createElement("div", {
     style: {
       background: "#fff8e6",
       border: `1px solid #f5d98a`,
@@ -42397,15 +42520,18 @@ function ApplyCreditsConfirm({
       applyDiscountCredits(credits.map(c => c.id));
       onClose();
     },
+    disabled: playerPaid,
     style: {
       flex: 1,
       padding: "11px 0",
       borderRadius: 11,
       border: "none",
-      background: T.green,
-      color: "#fff",
+      background: playerPaid ? T.surface2 : T.green,
+      color: playerPaid ? T.muted : "#fff",
       fontSize: 13,
-      fontWeight: 800
+      fontWeight: 800,
+      opacity: playerPaid ? 0.7 : 1,
+      cursor: playerPaid ? "not-allowed" : "pointer"
     }
   }, t("finance.useDiscountButton"))));
 }
@@ -43331,6 +43457,7 @@ function PaymentTab({
   playersById,
   tTogglePlayerPaid,
   tToggleHistoricalPlayerPaid,
+  onGoToGames,
   t,
   tc,
   fmtDate
@@ -43370,6 +43497,7 @@ function PaymentTab({
     mode,
     rewardHistory,
     sessionHistory,
+    onGoToGames,
     t,
     tc,
     fmtDate
@@ -43409,7 +43537,8 @@ function flushDiscountDrafts() {
 function DiscountAmountInput({
   id,
   discount,
-  setPDiscount
+  setPDiscount,
+  disabled
 }) {
   // v1.12.39 (Codex P2 — discount races; behaviour now DEFINED):
   //  * a draft always belongs to the player it was typed for (draftIdRef) and is committed to THAT player —
@@ -43427,9 +43556,13 @@ function DiscountAmountInput({
   const draftIdRef = useRef(id);
   const setPDiscountRef = useRef(setPDiscount);
   setPDiscountRef.current = setPDiscount;
+  // v1.12.50 (P0 Payment Integrity): discard rather than commit a draft typed while already paid/frozen.
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
   const commitPending = () => {
     if (!dirtyRef.current) return;
     dirtyRef.current = false;
+    if (disabledRef.current) return;
     const v = draftRef.current;
     setPDiscountRef.current(draftIdRef.current, v === "" ? 0 : v);
   };
@@ -43469,6 +43602,7 @@ function DiscountAmountInput({
     type: "number",
     min: 0,
     value: draft,
+    disabled: disabled,
     "data-testid": "discount-input",
     onChange: e => {
       dirtyRef.current = true;
@@ -43492,7 +43626,8 @@ function DiscountAmountInput({
       fontSize: 13,
       fontWeight: 700,
       color: T.green,
-      outline: "none"
+      outline: "none",
+      opacity: disabled ? 0.6 : 1
     }
   }), externalWhileEditing != null && /*#__PURE__*/React.createElement("span", {
     "data-testid": "discount-external-note",
@@ -43525,6 +43660,7 @@ function QuanPaymentPanel({
   mode,
   rewardHistory,
   sessionHistory,
+  onGoToGames,
   t,
   tc,
   fmtDate
@@ -43643,7 +43779,14 @@ function QuanPaymentPanel({
   const detailPCredits = detailP ? (discountCredits || []).filter(c => c.playerId === detailP.id && c.status === "available") : [];
   const detailPCreditTotal = detailPCredits.reduce((s, c) => s + (Number(c.amount) || 0), 0);
   // v1.11.38: same "must finish the match first" guard as the list row above, for the detail overlay's own payment button.
-  const detailIsLive = !!(detailP && detailBill && !detailBill.paid && playerHasLiveMatch(detailP.id, current));
+  // v1.12.50 (P0 Payment Guard): see BadmintonOrganizer.jsx for the full rationale. `detailIsLive` keeps its
+  // exact original name/semantics (true only for "live"); the rest are new additions for the "unstarted"
+  // case + the QR/amount-to-pay blocking.
+  const detailUnresolvedKind = detailP && detailBill && !detailBill.paid ? playerUnresolvedMatchKind(detailP.id, current) : null;
+  const detailIsLive = detailUnresolvedKind === "live";
+  const detailUnstarted = detailUnresolvedKind === "unstarted";
+  const detailPayBlocked = detailIsLive || detailUnstarted;
+  const detailUnresolvedCount = detailUnresolvedKind ? playerUnresolvedMatches(detailP.id, current).length : 0;
 
   // v1.11.63 (Finance Available Before Game Start): Finance > ก๊วน represents the GROUP/SESSION's
   // financial setup — it must never depend on a game having started, played, or finished. The OLD
@@ -43953,7 +44096,11 @@ function QuanPaymentPanel({
       // v1.11.38: still playing/paused right now (match not finished) -> charging is blocked until the
       // organizer presses "จบเกม", so the games-played count above (and this bill's shuttle charge)
       // definitely includes their current game before any money changes hands.
-      const isLive = !b.paid && playerHasLiveMatch(b.id, current);
+      // v1.12.50: widened — see BadmintonOrganizer.jsx. `isLive` keeps its exact original meaning/text.
+      const rowUnresolvedKind = !b.paid ? playerUnresolvedMatchKind(b.id, current) : null;
+      const isLive = rowUnresolvedKind === "live";
+      const isUnstarted = rowUnresolvedKind === "unstarted";
+      const payBlocked = isLive || isUnstarted;
       return /*#__PURE__*/React.createElement("div", {
         key: b.id,
         style: {
@@ -44017,23 +44164,23 @@ function QuanPaymentPanel({
         }
       }, "\uD83D\uDC51 ", t("finance.ownerFreeBadge")) : /*#__PURE__*/React.createElement("button", {
         onClick: () => {
-          if (isLive) return;
+          if (payBlocked) return;
           togglePaid(b.id);
         },
-        disabled: isLive,
-        title: isLive ? t("finance.playingNowTooltip") : undefined,
+        disabled: payBlocked,
+        title: isLive ? t("finance.playingNowTooltip") : isUnstarted ? t("finance.unstartedGameTooltip") : undefined,
         style: {
           padding: "6px 11px",
           borderRadius: 20,
           fontSize: 12,
           fontWeight: 800,
           border: "none",
-          background: isLive ? T.surface2 : b.paid ? "#e2f5ec" : "#fdecea",
-          color: isLive ? T.muted : b.paid ? T.green : T.accent,
-          opacity: isLive ? 0.75 : 1,
-          cursor: isLive ? "not-allowed" : "pointer"
+          background: payBlocked ? T.surface2 : b.paid ? "#e2f5ec" : "#fdecea",
+          color: payBlocked ? T.muted : b.paid ? T.green : T.accent,
+          opacity: payBlocked ? 0.75 : 1,
+          cursor: payBlocked ? "not-allowed" : "pointer"
         }
-      }, isLive ? `⏳ ${t("finance.playingNowShort")}` : b.paid ? `🟢 ${t("finance.paidStatusShort")}` : `🔴 ${t("finance.unpaidStatusShort")}`));
+      }, isLive ? `⏳ ${t("finance.playingNowShort")}` : isUnstarted ? `⏳ ${t("finance.unstartedGameShort")}` : b.paid ? `🟢 ${t("finance.paidStatusShort")}` : `🔴 ${t("finance.unpaidStatusShort")}`));
     }));
   })(), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
@@ -44157,7 +44304,8 @@ function QuanPaymentPanel({
   }, /*#__PURE__*/React.createElement("span", null, "-\u0E3F"), /*#__PURE__*/React.createElement(DiscountAmountInput, {
     id: detailP.id,
     discount: detailP.discount,
-    setPDiscount: setPDiscount
+    setPDiscount: setPDiscount,
+    disabled: detailBill.paid
   }))), detailBill.eCarriedInDiscount > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -44208,7 +44356,15 @@ function QuanPaymentPanel({
     }
   }, "\uD83C\uDF81 ", t("finance.remainingCreditBadge", {
     amount: formatCurrency(detailPCreditTotal)
-  })), /*#__PURE__*/React.createElement("button", {
+  })), detailBill.paid ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      flexShrink: 0,
+      fontSize: 11,
+      color: "#8a6300",
+      fontWeight: 700,
+      textAlign: "right"
+    }
+  }, t("finance.paidBillFrozenHint")) : /*#__PURE__*/React.createElement("button", {
     onClick: () => setOpenCreditFor(detailP.id),
     style: {
       flexShrink: 0,
@@ -44239,10 +44395,10 @@ function QuanPaymentPanel({
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      if (detailIsLive) return;
+      if (detailPayBlocked) return;
       togglePaid(detailP.id);
     },
-    disabled: detailIsLive,
+    disabled: detailPayBlocked,
     style: {
       flex: 1,
       padding: "11px 0",
@@ -44250,12 +44406,47 @@ function QuanPaymentPanel({
       border: "none",
       fontSize: 13.5,
       fontWeight: 800,
-      background: detailIsLive ? T.surface2 : detailBill.paid ? "#e2f5ec" : T.green,
-      color: detailIsLive ? T.muted : detailBill.paid ? T.green : "#fff",
-      opacity: detailIsLive ? 0.75 : 1,
-      cursor: detailIsLive ? "not-allowed" : "pointer"
+      background: detailPayBlocked ? T.surface2 : detailBill.paid ? "#e2f5ec" : T.green,
+      color: detailPayBlocked ? T.muted : detailBill.paid ? T.green : "#fff",
+      opacity: detailPayBlocked ? 0.75 : 1,
+      cursor: detailPayBlocked ? "not-allowed" : "pointer"
     }
-  }, detailIsLive ? `⏳ ${t("finance.playingNowFullTooltip")}` : detailBill.paid ? `🟢 ${t("finance.paidTapToUndo")}` : t("finance.markAsPaid"))), detailP.spun ? /*#__PURE__*/React.createElement("div", {
+  }, detailIsLive ? `⏳ ${t("finance.playingNowFullTooltip")}` : detailUnstarted ? `⏳ ${t("finance.unstartedGameFullTooltip")}` : detailBill.paid ? `🟢 ${t("finance.paidTapToUndo")}` : t("finance.markAsPaid"))), detailUnstarted && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      background: "#fff8e6",
+      border: `1px solid #f5d98a`,
+      borderRadius: 11,
+      padding: "10px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      fontWeight: 800,
+      color: "#8a6300"
+    }
+  }, "⚠️ ", t("finance.unresolvedMatchWarningTitle"), detailUnresolvedCount > 1 ? t("finance.unresolvedMatchCountSuffix", {
+    count: detailUnresolvedCount
+  }) : ""), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      color: "#8a6300",
+      marginTop: 4
+    }
+  }, t("finance.unresolvedMatchWarningBody")), onGoToGames && /*#__PURE__*/React.createElement("button", {
+    onClick: onGoToGames,
+    style: {
+      marginTop: 8,
+      width: "100%",
+      padding: "9px 0",
+      borderRadius: 10,
+      border: "none",
+      background: "#8a6300",
+      color: "#fff",
+      fontSize: 12.5,
+      fontWeight: 800
+    }
+  }, t("finance.goToPendingGame"))), detailP.spun ? /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 10,
       background: "#fff",
@@ -44269,7 +44460,14 @@ function QuanPaymentPanel({
     style: {
       fontWeight: 800
     }
-  }, detailP.wheelResult)) : settings.wheelEnabled !== false ? /*#__PURE__*/React.createElement("button", {
+  }, detailP.wheelResult)) : detailBill.paid ? /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      textAlign: "center",
+      fontSize: 11.5,
+      color: T.muted
+    }
+  }, t("finance.paidBillFrozenHint")) : settings.wheelEnabled !== false ? /*#__PURE__*/React.createElement("button", {
     onClick: () => setWheelFor(detailP.id),
     style: {
       marginTop: 10,
@@ -44287,10 +44485,15 @@ function QuanPaymentPanel({
       fontWeight: 800
     }
   }, "\uD83C\uDFA1 ", t("finance.spinWheelButton")) : null, settings.qr && !detailBill.isOwnerExempt && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setQrFull({
-      name: detailP.name,
-      amount: detailBill.total
-    }),
+    onClick: () => {
+      if (detailPayBlocked) return;
+      setQrFull({
+        name: detailP.name,
+        amount: detailBill.total
+      });
+    },
+    disabled: detailPayBlocked,
+    title: detailPayBlocked ? t("finance.unresolvedMatchActionDisabledHint") : undefined,
     style: {
       marginTop: 12,
       width: "100%",
@@ -44300,11 +44503,13 @@ function QuanPaymentPanel({
       gap: 8,
       padding: "13px 0",
       borderRadius: 13,
-      background: T.green,
+      background: detailPayBlocked ? T.surface2 : T.green,
       border: "none",
-      color: "#fff",
+      color: detailPayBlocked ? T.muted : "#fff",
       fontSize: 14,
-      fontWeight: 800
+      fontWeight: 800,
+      opacity: detailPayBlocked ? 0.6 : 1,
+      cursor: detailPayBlocked ? "not-allowed" : "pointer"
     }
   }, /*#__PURE__*/React.createElement(QrCode, {
     size: 17

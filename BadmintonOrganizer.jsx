@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.49";
+const APP_VERSION = "1.12.50";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1998,6 +1998,26 @@ function computeBill(players, settings, finishedMatches) {
 function playerHasLiveMatch(playerId, current) {
   return (current || []).some((m) => (m.status === "playing" || m.status === "paused") && [...(m.teamA || []), ...(m.teamB || [])].includes(playerId));
 }
+// v1.12.50 (P0 Payment Guard — unstarted assigned game): real-world incident — organizer assigns a player
+// into a game, forgets to press Start, players actually play, organizer later opens Payment and the app
+// allowed paying as if the game never happened (wrong completed-game count, wrong charge, wrong
+// payment/history). Root cause was `playerHasLiveMatch` above only ever checking "playing"/"paused",
+// never "next" (assigned/committed but Start never pressed). These three functions are the widened rule —
+// ADDITIVE ONLY: `playerHasLiveMatch` above is left byte-identical so nothing already depending on its
+// exact "currently live" semantics changes. A match is "unresolved" until it is explicitly resolved:
+// finished ("done") or cancelled (removed from `current` entirely by the existing deleteMatch flow).
+function playerUnresolvedMatches(playerId, current) {
+  return (current || []).filter((m) => m && (m.status === "next" || m.status === "playing" || m.status === "paused") && [...(m.teamA || []), ...(m.teamB || [])].includes(playerId));
+}
+// null = fully resolved/no block; "live" = currently playing/paused (the original v1.11.38 case — every
+// pre-existing UI string/behavior for this case is kept exactly as-is); "unstarted" = assigned but Start
+// was never pressed (the new case this patch adds a hard payment block + recovery action for).
+function playerUnresolvedMatchKind(playerId, current) {
+  const ms = playerUnresolvedMatches(playerId, current);
+  if (!ms.length) return null;
+  return ms.some((m) => m.status === "playing" || m.status === "paused") ? "live" : "unstarted";
+}
+function playerHasUnresolvedMatch(playerId, current) { return playerUnresolvedMatches(playerId, current).length > 0; }
 // v1.12.38: completed-match ledger counts — the number of distinct completed matches each player appears in
 // (a player listed twice in one match counts once). The authoritative "games played" for billing/archive;
 // player.games stays as the backward-compatible matchmaking cache (it can be reset by "รีเซ็ตจำนวนเกม").
@@ -2012,7 +2032,8 @@ function completedGamesByPlayer(finishedMatches) {
 // v1.12.38 (Codex targeted inspection): the payment rule "a player whose match is still playing/paused cannot
 // be marked paid" as a pure domain transition, used by togglePaid itself (not only by the disabled button), so
 // no caller, stale render or recovered state can bypass it. `ctx.current` must be the LATEST live matches.
-// Returns { players, blocked } with blocked = null | "no-player" | "live-match". Un-marking is never blocked.
+// Returns { players, blocked } with blocked = null | "no-player" | "unresolved-match" (v1.12.50; was
+// "live-match" before the rule widened to also cover an assigned-but-unstarted game). Un-marking is never blocked.
 // The paid snapshot is computed exactly as v1.12.31 did (computeBill over history + done rows of current).
 function togglePaidTransition(players, playerId, ctx) {
   const list = Array.isArray(players) ? players : [];
@@ -2020,7 +2041,9 @@ function togglePaidTransition(players, playerId, ctx) {
   if (!target) return { players: list, blocked: "no-player" };
   const c = ctx || {};
   const willBePaid = !target.paid;
-  if (willBePaid && playerHasLiveMatch(playerId, c.current)) return { players: list, blocked: "live-match" };
+  // v1.12.50: widened from the old "live-match" (playing/paused only) rule to "unresolved-match", which also
+  // covers an assigned-but-never-started ("next") game — see playerUnresolvedMatches's comment above.
+  if (willBePaid && playerHasUnresolvedMatch(playerId, c.current)) return { players: list, blocked: "unresolved-match" };
   let snapshot = null;
   if (willBePaid) {
     const doneCurrent = (c.current || []).filter((m) => m && m.status === "done");
@@ -8899,7 +8922,14 @@ function AppInner() {
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
   // status, leaving games/stats/paid/discount untouched so it's safe to use mid-session too.
   const resetAllToAbsent = () => setPlayers((prev) => prev.map((p) => ({ ...p, status: "absent", arrivalTime: null, departureTime: null, waitlistedAt: null })));
-  const setPDiscount = (id, v) => setPlayers((prev) => prev.map((p) => (p.id === id ? { ...p, discount: Math.max(0, Number(v) || 0) } : p)));
+  // v1.12.50 (P0 Payment Integrity): a paid bill is financially closed/frozen — `!p.paid` added so an edit
+  // typed into (or raced against) an already-paid player's discount field is silently refused here too, not
+  // only hidden/disabled in the UI (DiscountAmountInput's own `disabled` prop). The organizer must undo
+  // payment (togglePaid) first, edit, then mark paid again — this never changes the already-frozen
+  // paidAmount/paidBreakdown snapshot computeBill() returns for a paid player (see its hasFrozenPayment
+  // comment), it only stops a NEW discount value from quietly sitting underneath that snapshot and then
+  // resurfacing unexpectedly if the organizer later undoes payment.
+  const setPDiscount = (id, v) => setPlayers((prev) => prev.map((p) => (p.id === id && !p.paid ? { ...p, discount: Math.max(0, Number(v) || 0) } : p)));
   // v1.11.34: REDESIGNED reward architecture (spec section 6) — `prize` is now the pure-probability
   // outcome from pickWheelOutcome (a real reward object with type "now"/"next"/"item"/"cash", or null for
   // "no prize" — never a synthetic "none"-type array entry anymore, see SpinWheel/pickWheelOutcome). "now"
@@ -8909,6 +8939,13 @@ function AppInner() {
   // "ห้ามบันทึก Expense ตอนแค่ตั้ง Reward... Expense เกิดเมื่อแจกจริง"). "no prize" is marked on the
   // player exactly like a real result, but per spec 5 explicitly gets NO Reward History entry.
   const applyWheelPrize = (id, prize) => {
+    // v1.12.50 (P0 Payment Integrity): a paid bill is financially closed/frozen — a "now" wheel discount must
+    // never land on it after the fact (nor should the spin even be consumed/recorded for an already-paid
+    // player). The UI's own Spin Wheel button is separately hidden once paid (see QuanPaymentPanel), but this
+    // is the single domain-level guard every entry point ultimately goes through, same principle as the
+    // match-payment hard guard above.
+    const target = players.find((p) => p.id === id);
+    if (!target || target.paid) return;
     const rewardId = uid();
     const resultLabel = prize ? prize.label : "ไม่ได้รางวัล";
     setPlayers((prev) => prev.map((p) => {
@@ -8951,14 +8988,22 @@ function AppInner() {
   const applyDiscountCredits = (creditIds) => {
     flushDiscountDrafts(); // v1.12.39 (review F7): a typed-but-uncommitted discount is committed BEFORE the credit is added
     const ids = Array.isArray(creditIds) ? creditIds : [creditIds];
-    const targets = discountCredits.filter((c) => ids.includes(c.id) && c.status === "available");
+    // v1.12.50 (P0 Payment Integrity): a paid bill is financially closed/frozen — a credit targeting an
+    // already-paid player is skipped entirely here (not applied, not consumed/marked "used") so it stays
+    // "available" and can still be applied later, after the organizer explicitly undoes payment (togglePaid),
+    // edits the bill, and marks paid again. This is the single domain rule behind every UI entry point that
+    // can trigger this function (the Payment detail overlay's "ใช้กับก๊วนนี้" AND the separate Discount
+    // Credits management sheet's "ใช้ส่วนลดตอนนี้") — so a stale render of either one can never bypass it.
+    const paidPlayerIds = new Set(players.filter((p) => p.paid).map((p) => p.id));
+    const targets = discountCredits.filter((c) => ids.includes(c.id) && c.status === "available" && !paidPlayerIds.has(c.playerId));
     if (!targets.length) return;
     const byPlayer = {};
     targets.forEach((c) => { if (c.playerId) byPlayer[c.playerId] = (byPlayer[c.playerId] || 0) + (Number(c.amount) || 0); });
     if (Object.keys(byPlayer).length) {
       setPlayers((prev) => prev.map((p) => (byPlayer[p.id] ? { ...p, discount: (Number(p.discount) || 0) + byPlayer[p.id] } : p)));
     }
-    setDiscountCredits((prev) => prev.map((c) => (ids.includes(c.id) && c.status === "available" ? { ...c, status: "used", usedAt: Date.now(), usedSessionId: session.id } : c)));
+    const targetIds = new Set(targets.map((c) => c.id));
+    setDiscountCredits((prev) => prev.map((c) => (targetIds.has(c.id) ? { ...c, status: "used", usedAt: Date.now(), usedSessionId: session.id } : c)));
   };
   // revokes a credit WITHOUT touching Reward History / Wheel History or any historical session — it only
   // flips this ledger entry to "cancelled" so it can never be applied later; no Finance effect either way.
@@ -9362,7 +9407,16 @@ function AppInner() {
       // be stale by the time a queued turn actually runs.
       const base = criticalBaselineRef.current || { players, history, current, future, roundNo, session, settings, discountCredits, rewardHistory, mode, lockPairs, sessionHistory, courtCount, courtLabels };
       const m = base.current.find((x) => x.id === mid);
-      if (!m || (m.status !== "playing" && m.status !== "paused" && m.status !== "done")) { release(); return Promise.resolve(); }
+      // v1.12.50 (P0 Payment Guard — "Mark as played" recovery): widened to also accept "next" (assigned to a
+      // court/teams but Start was never pressed) — the organizer-confirmed recovery path for the exact
+      // incident this patch fixes (players actually played; Start was simply forgotten). Every line below
+      // already tolerates a never-started match: `court`/`teamA`/`teamB` are set the moment a match is
+      // assigned (not when it starts), `doneM` spreads `m` so a missing/null `startedAt` just stays missing
+      // (the same "no timing data" shape the average-match-duration helper and casualMatchHistoryForPlayer's
+      // scoreless "noScore" result already handle safely), and matchIdentity/matchCompletePreconditionsV3's
+      // replay validation is identity-based (teams/court/status/lifecycleRev), not hardcoded to any specific
+      // starting status — so a "next"→"done" transition replays exactly as safely as "playing"→"done".
+      if (!m || (m.status !== "playing" && m.status !== "paused" && m.status !== "done" && m.status !== "next")) { release(); return Promise.resolve(); }
       const finIds = [...m.teamA, ...m.teamB].filter(Boolean);
       const court = m.court, t = Date.now();
       const doneM = { ...m, status: "done", finishedAt: t, lifecycleRev: matchLifecycleRev(m) + 1 }; // v1.11.7 (Part L); v1.12.38: Finish is lifecycle revision +1
@@ -9493,6 +9547,23 @@ function AppInner() {
         criticalBaselineRef.current = { ...(criticalBaselineRef.current || base), roundNo: matchCompleteNextRoundNo((criticalBaselineRef.current || base).roundNo, patch) };
       }).then(release, (e) => { release(); throw e; });
     }).catch(() => { release(); /* v1.12.39: also covers an op refused before it ran (restore fence). Failure is already surfaced via criticalSaveStatus ("failed"); the match correctly stays visibly unfinished since applyFn never ran. */ });
+  };
+  // v1.12.50 (P0 Payment Guard — "Mark as played" recovery action): the organizer-confirmed recovery for an
+  // assigned game whose Start button was simply forgotten even though the players actually played. This
+  // NEVER auto-assumes an unstarted game was played — it only runs after the organizer explicitly confirms
+  // via this exact action, and it reuses `finishAndAdvance` 100% unchanged (widened above to accept "next")
+  // rather than duplicating any of its durable critical-journal completion logic. Originally assigned
+  // players/teams/court are untouched (finishAndAdvance spreads the live match as-is), the game counts for
+  // payment exactly once (the same single `finishAndAdvance` call path every other "จบเกม" uses), and no
+  // score/winner/ranking is ever fabricated (no `scores` field is set here, so hasScore()/matchWinner() stay
+  // exactly as honest as they already are for any other scoreless match — see casualMatchHistoryForPlayer's
+  // pre-existing "noScore" result, unchanged by this patch).
+  const markAssignedMatchAsPlayed = (mid) => {
+    const m = current.find((x) => x.id === mid);
+    if (!m || m.status !== "next") return;
+    const ok = typeof window !== "undefined" && typeof window.confirm === "function" ? window.confirm(t ? t("match.markAsPlayedConfirm") : "ยืนยันว่าเกมนี้เล่นจบแล้วจริง ระบบจะไม่สร้างคะแนนหรือผู้ชนะให้อัตโนมัติ") : true;
+    if (!ok) return;
+    finishAndAdvance(mid);
   };
   // v1.11.24: genuine mid-game pause (NOT a finish) — "พักเกม" in the status dropdown. Freezes the court
   // exactly as-is (teams/scores/round/court untouched) so it keeps occupying its court and its players stay
@@ -11480,11 +11551,11 @@ function AppInner() {
         {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, t, tc, fmtDate, fmtDateTime }} />}
         {tab === "session" && <GameTab
           t={t}
-          sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
+          sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
           summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory, t, tc }}
         />}
         {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDate, fmtDateFull, fmtDateTime }} />}
-        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
+        {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, onGoToGames: () => setTab("session"), t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
       </div>
 
       <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: T.surface, borderTop: `1px solid ${T.border}`, paddingBottom: "env(safe-area-inset-bottom)" }}>
@@ -14213,6 +14284,7 @@ function MatchRow({
   manualBenchPool, openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, encounterIndex, mode,
   courtLabels, getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin,
   clearScore, settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
+  markAssignedMatchAsPlayed,
   COLW, TABLE_MIN_WIDTH, t, tc,
 }) {
   // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
@@ -14440,7 +14512,7 @@ function MatchRow({
           <button
             onClick={() => setMatchStatus(m.id, "playing")}
             disabled={!canStart}
-            title={!startReadyMatch(m) ? t("match.fillPlayersBeforeStartGame") : noCourt ? t("match.chooseCourtBeforeStartGame") : t("match.tapToStartGame")}
+            title={!startReadyMatch(m) ? t("match.fillPlayersBeforeStartGame") : noCourt ? t("match.chooseCourtBeforeStartGame") : `${t("match.notStartedWarning")} — ${t("match.tapToStartGame")}`}
             style={{ width: COLW.status, flexShrink: 0, fontSize: 11.5, fontWeight: 800, padding: "7px 4px", borderRadius: 8, border: "none", display: "flex", alignItems: "center", justifyContent: "center", gap: 4, color: canStart ? STATUS.playing.color : T.muted, background: canStart ? STATUS.playing.bg : T.surface2, opacity: canStart ? 1 : 0.6 }}
           >
             <Play size={12} /> {t("match.startGameLabel")}
@@ -14490,6 +14562,15 @@ function MatchRow({
               <button onClick={() => deleteMatch(m.id)} disabled={m.locked} title={t("match.deleteGameHint")} style={{ background: "none", border: "none", padding: 3, color: m.locked ? T.border : T.accent, opacity: m.locked ? 0.5 : 1 }}>
                 <Trash2 size={14} />
               </button>
+              {/* v1.12.50 (P0 Payment Guard — "Mark as played" recovery): explicit, organizer-confirmed action
+                  for the real incident this patch fixes — players actually played but Start was never pressed.
+                  Deliberately a SEPARATE icon from เริ่มเกม/Lock/จัดใหม่/ลบ — never auto-inferred, never
+                  triggered by a timeout. Reuses the exact same durable finishAndAdvance completion path as
+                  every other "จบเกม" (via markAssignedMatchAsPlayed), so it counts for payment exactly once
+                  and never fabricates a score/winner. */}
+              <button onClick={() => markAssignedMatchAsPlayed(m.id)} title={t("match.markAsPlayedHint")} aria-label={t("match.markAsPlayedAction")} style={{ background: "none", border: "none", padding: 3, color: T.green }}>
+                <Check size={14} />
+              </button>
             </>
           )}
         </div>
@@ -14535,7 +14616,7 @@ function MatchRow({
 }
 
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint, onGoToMembers,
     t, tc, fmtDate } = props;
   // v1.12.1: openQuanSettings/showNameDropdown/pastQuans (the editable group-card's own local state) moved
@@ -14804,6 +14885,7 @@ function SessionTab(props) {
             openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, encounterIndex, mode, courtLabels,
             getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin, clearScore,
             settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
+            markAssignedMatchAsPlayed,
             COLW, TABLE_MIN_WIDTH, t, tc,
           };
           return (
@@ -18206,7 +18288,7 @@ function SessionFinancialDetail({ s, addHistExpense, updateHistExpense, removeHi
 // ภาพรวม (year/lifetime) → รายเดือน (one month) → รายวัน (one date) → existing group detail (SessionFinancialDetail).
 // All figures come from the computeFinanceForRange family above — this component only picks a period and
 // renders; it never re-sums anything itself (IMPLEMENTATION PRINCIPLE: one calculation source).
-function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }) {
+function FinanceTab({ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, gameMode, rewardHistory, onOpenFinancePrint, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, onGoToGames, t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }) {
   // v1.11.53: this component's OWN local `mode` state (below) is the finance period view toggle
   // (day/month/overview) — unrelated to and pre-dating the doubles/singles game format, hence the `gameMode`
   // prop name here specifically (every other component in this file still just calls it `mode`, matching
@@ -18273,7 +18355,7 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
           sees every player regardless of archive status, and a member who played earlier today keeps
           showing up in their own unpaid bill even if archived mid-session. No change needed here. */}
       {payTab === "payment" ? (
-        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} retryEndSessionCommit={retryEndSessionCommit} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} sessionHistory={sessionHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} t={t} tc={tc} fmtDate={fmtDate} />
+        <PaymentTab players={players} history={history} current={current} settings={settings} setSettings={setSettings} togglePaid={togglePaid} session={session} setSession={setSession} setPDiscount={setPDiscount} applyWheelPrize={applyWheelPrize} endSession={endSession} retryEndSessionCommit={retryEndSessionCommit} qrRef={qrRef} discountCredits={discountCredits} applyDiscountCredits={applyDiscountCredits} courtCount={courtCount} setCourtCount={setCourtCount} courtLabels={courtLabels} mode={gameMode} rewardHistory={rewardHistory} sessionHistory={sessionHistory} activeTournament={activeTournament} tournamentHistory={tournamentHistory} playersById={playersById} tTogglePlayerPaid={tTogglePlayerPaid} tToggleHistoricalPlayerPaid={tToggleHistoricalPlayerPaid} onGoToGames={onGoToGames} t={t} tc={tc} fmtDate={fmtDate} />
       ) : (
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -19291,6 +19373,12 @@ function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCr
   const [confirmCancel, setConfirmCancel] = useState(false);
   const livePlayer = players ? players.find((p) => p.id === credit.playerId) : null;
   const alreadyHasManualDiscount = !!(livePlayer && Number(livePlayer.discount) > 0);
+  // v1.12.50 (P0 Payment Integrity): this is the OTHER entry point (besides the Payment detail overlay's
+  // own "ใช้กับก๊วนนี้") that can reach applyDiscountCredits — the standalone Discount Credits management
+  // sheet. The domain function itself refuses to apply a credit to an already-paid player (single source of
+  // truth), but the button here is also disabled/relabelled so the organizer isn't left tapping something
+  // that silently does nothing.
+  const livePlayerPaid = !!(livePlayer && livePlayer.paid);
   if (credit.status !== "available") {
     return (
       <Overlay onClose={onClose}>
@@ -19308,7 +19396,12 @@ function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCr
       <div style={{ fontSize: 20, fontWeight: 800, color: T.green, marginBottom: 10 }}>{formatCurrency(credit.amount)}</div>
       <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16 }}>{t("finance.creditReceivedFromLabel", { source: resolveSessionLabel(credit.sourceSessionId, session, sessionHistory, fmtDate || fmtThaiDate) || t("finance.creditSourceFallback") })}</div>
 
-      {alreadyHasManualDiscount && !confirmUse && (
+      {livePlayerPaid && !confirmUse && (
+        <div style={{ background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "#8a6300" }}>
+          ⚠️ {t("finance.paidBillFrozenHint")}
+        </div>
+      )}
+      {!livePlayerPaid && alreadyHasManualDiscount && !confirmUse && (
         <div style={{ background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "#8a6300" }}>
           ⚠️ {t("finance.existingDiscountWarningShort", { amount: formatCurrency(livePlayer.discount) })}
         </div>
@@ -19316,7 +19409,7 @@ function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCr
 
       {!confirmUse && !confirmCancel && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-          <button onClick={() => setConfirmUse(true)} style={{ width: "100%", padding: "12px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13.5, fontWeight: 800 }}>{t("finance.useDiscountNowButton")}</button>
+          <button onClick={() => setConfirmUse(true)} disabled={livePlayerPaid} style={{ width: "100%", padding: "12px 0", borderRadius: 11, border: "none", background: livePlayerPaid ? T.surface2 : T.green, color: livePlayerPaid ? T.muted : "#fff", fontSize: 13.5, fontWeight: 800, opacity: livePlayerPaid ? 0.7 : 1, cursor: livePlayerPaid ? "not-allowed" : "pointer" }}>{t("finance.useDiscountNowButton")}</button>
           <button onClick={() => setConfirmCancel(true)} style={{ width: "100%", padding: "12px 0", borderRadius: 11, border: `1.5px solid ${T.accent}`, background: "none", color: T.accent, fontSize: 13.5, fontWeight: 800 }}>{t("finance.cancelNextDiscountButton")}</button>
         </div>
       )}
@@ -19324,10 +19417,12 @@ function DiscountCreditDetail({ credit, session, sessionHistory, applyDiscountCr
       {confirmUse && (
         <div>
           <div style={{ fontSize: 13.5, marginBottom: 4 }}>{t("finance.useDiscountConfirmTitle", { amount: formatCurrency(credit.amount) })}</div>
-          {alreadyHasManualDiscount && <div style={{ fontSize: 12, color: T.accent, marginBottom: 10 }}>{t("finance.existingDiscountWarningDetail", { amount: formatCurrency(livePlayer.discount) })}</div>}
+          {livePlayerPaid ? (
+            <div style={{ fontSize: 12, color: "#8a6300", marginBottom: 10 }}>{t("finance.paidBillFrozenHint")}</div>
+          ) : alreadyHasManualDiscount && <div style={{ fontSize: 12, color: T.accent, marginBottom: 10 }}>{t("finance.existingDiscountWarningDetail", { amount: formatCurrency(livePlayer.discount) })}</div>}
           <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
             <button onClick={() => setConfirmUse(false)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>{t("common.cancel")}</button>
-            <button onClick={() => { applyDiscountCredits(credit.id); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>{t("finance.useDiscountButton")}</button>
+            <button onClick={() => { applyDiscountCredits(credit.id); onClose(); }} disabled={livePlayerPaid} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: livePlayerPaid ? T.surface2 : T.green, color: livePlayerPaid ? T.muted : "#fff", fontSize: 13, fontWeight: 800, opacity: livePlayerPaid ? 0.7 : 1, cursor: livePlayerPaid ? "not-allowed" : "pointer" }}>{t("finance.useDiscountButton")}</button>
           </div>
         </div>
       )}
@@ -19354,18 +19449,25 @@ function ApplyCreditsConfirm({ player, credits, applyDiscountCredits, onClose, t
   if (!player || !credits.length) return null;
   const total = credits.reduce((s, c) => s + (Number(c.amount) || 0), 0);
   const alreadyHasManualDiscount = Number(player.discount) > 0;
+  // v1.12.50 (P0 Payment Integrity): same frozen-bill guard as DiscountCreditDetail — applyDiscountCredits
+  // itself refuses an already-paid player regardless, this is just the matching UI feedback for this entry point.
+  const playerPaid = !!player.paid;
   return (
     <Overlay onClose={onClose}>
       <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>{player.name}</div>
       <div style={{ fontSize: 13.5, marginBottom: 4 }}>{t("finance.useDiscountConfirmTitle", { amount: formatCurrency(total) })}</div>
-      {alreadyHasManualDiscount && (
+      {playerPaid ? (
+        <div style={{ background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "10px 12px", margin: "10px 0", fontSize: 12.5, color: "#8a6300" }}>
+          ⚠️ {t("finance.paidBillFrozenHint")}
+        </div>
+      ) : alreadyHasManualDiscount && (
         <div style={{ background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "10px 12px", margin: "10px 0", fontSize: 12.5, color: "#8a6300" }}>
           ⚠️ {t("finance.existingDiscountWarningFull", { amount: formatCurrency(player.discount) })}
         </div>
       )}
       <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
         <button onClick={onClose} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: `1px solid ${T.border}`, background: "none", color: T.text, fontSize: 13, fontWeight: 700 }}>{t("common.cancel")}</button>
-        <button onClick={() => { applyDiscountCredits(credits.map((c) => c.id)); onClose(); }} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: T.green, color: "#fff", fontSize: 13, fontWeight: 800 }}>{t("finance.useDiscountButton")}</button>
+        <button onClick={() => { applyDiscountCredits(credits.map((c) => c.id)); onClose(); }} disabled={playerPaid} style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", background: playerPaid ? T.surface2 : T.green, color: playerPaid ? T.muted : "#fff", fontSize: 13, fontWeight: 800, opacity: playerPaid ? 0.7 : 1, cursor: playerPaid ? "not-allowed" : "pointer" }}>{t("finance.useDiscountButton")}</button>
       </div>
     </Overlay>
   );
@@ -19708,7 +19810,7 @@ function SummaryTab({ players: rosterPlayers, history, current, getP, settings, 
 // same component/logic/state that used to be this entire file, just renamed and unpinched from the outer
 // switcher; zero behavior change. Tournament payment is a NEW sibling reusing the same visual patterns
 // (Avatar, payment-status pill, summary stat cards) rather than a second independent payment system.
-function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t, tc, fmtDate }) {
+function PaymentTab({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, onGoToGames, t, tc, fmtDate }) {
   const [payerTab, setPayerTab] = useState("quan"); // "quan" | "tournament"
   // v1.12.1 (Tournament Feature Toggle): hide the [🏸 ก๊วน][🏆 Tournament] sub-tab row entirely (no layout
   // gap) when settings.tournamentEnabled is off, and always render the ก๊วน panel in that case regardless
@@ -19725,7 +19827,7 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
         </div>
       )}
       {payerTab === "quan" || !showTournamentTab ? (
-        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, t, tc, fmtDate }} />
+        <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, onGoToGames, t, tc, fmtDate }} />
       ) : (
         <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
       )}
@@ -19751,7 +19853,7 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
 // commit of a draft typed before it (on iPad, tapping the credit button does not blur the field).
 const __discountDraftFlushers = new Set();
 function flushDiscountDrafts() { for (const f of Array.from(__discountDraftFlushers)) { try { f(); } catch (e) {} } }
-function DiscountAmountInput({ id, discount, setPDiscount }) {
+function DiscountAmountInput({ id, discount, setPDiscount, disabled }) {
   // v1.12.39 (Codex P2 — discount races; behaviour now DEFINED):
   //  * a draft always belongs to the player it was typed for (draftIdRef) and is committed to THAT player —
   //    never to whichever player the (reused) input shows next;
@@ -19768,9 +19870,16 @@ function DiscountAmountInput({ id, discount, setPDiscount }) {
   const draftIdRef = useRef(id);
   const setPDiscountRef = useRef(setPDiscount);
   setPDiscountRef.current = setPDiscount;
+  // v1.12.50 (P0 Payment Integrity): `disabled` (true once this player's bill is paid/frozen) is read via a
+  // ref so a draft typed just before the bill became paid is discarded, never committed late — setPDiscount
+  // itself also refuses a paid player as a second line of defense (see its own comment), so this is belt and
+  // braces, not the only guard.
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
   const commitPending = () => {
     if (!dirtyRef.current) return;
     dirtyRef.current = false;
+    if (disabledRef.current) return;
     const v = draftRef.current;
     setPDiscountRef.current(draftIdRef.current, v === "" ? 0 : v);
   };
@@ -19796,18 +19905,19 @@ function DiscountAmountInput({ id, discount, setPDiscount }) {
         type="number"
         min={0}
         value={draft}
+        disabled={disabled}
         data-testid="discount-input"
         onChange={(e) => { dirtyRef.current = true; draftRef.current = e.target.value; setDraft(e.target.value); }}
         onFocus={(e) => e.target.select()}
         onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
         onBlur={() => { commitPending(); setExternalWhileEditing(null); }}
-        style={{ width: 64, padding: "4px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 700, color: T.green, outline: "none" }}
+        style={{ width: 64, padding: "4px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 13, fontWeight: 700, color: T.green, outline: "none", opacity: disabled ? 0.6 : 1 }}
       />
       {externalWhileEditing != null && <span data-testid="discount-external-note" style={{ fontSize: 10, color: T.muted, marginTop: 2 }}>ระหว่างพิมพ์ ส่วนลดถูกเปลี่ยนเป็น ฿{externalWhileEditing} — จะใช้ค่าที่พิมพ์</span>}
     </span>
   );
 }
-function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, t, tc, fmtDate }) {
+function QuanPaymentPanel({ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, onGoToGames, t, tc, fmtDate }) {
   const [openCreditFor, setOpenCreditFor] = useState(null); // playerId whose "available" credit detail/apply sheet is open
   const [detail, setDetail] = useState(null); // player id for detail
   const [qrFull, setQrFull] = useState(null); // {name, amount}
@@ -19903,7 +20013,17 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
   const detailPCredits = detailP ? (discountCredits || []).filter((c) => c.playerId === detailP.id && c.status === "available") : [];
   const detailPCreditTotal = detailPCredits.reduce((s, c) => s + (Number(c.amount) || 0), 0);
   // v1.11.38: same "must finish the match first" guard as the list row above, for the detail overlay's own payment button.
-  const detailIsLive = !!(detailP && detailBill && !detailBill.paid && playerHasLiveMatch(detailP.id, current));
+  // v1.12.50 (P0 Payment Guard): widened from "live" (playing/paused) only to also recognize "unstarted"
+  // (assigned, Start never pressed) — see playerUnresolvedMatchKind's comment. `detailIsLive` keeps its
+  // exact original name/semantics (true only for the "live" kind) so every existing branch below that reads
+  // it is completely unchanged; `detailUnresolvedKind`/`detailUnstarted`/`detailPayBlocked`/
+  // `detailUnresolvedCount` are the new additions used for the new "unstarted" messaging + QR/amount-to-pay
+  // blocking (requirement: Payment must be hard-blocked from EVERY entry point, not only "Mark as paid").
+  const detailUnresolvedKind = detailP && detailBill && !detailBill.paid ? playerUnresolvedMatchKind(detailP.id, current) : null;
+  const detailIsLive = detailUnresolvedKind === "live";
+  const detailUnstarted = detailUnresolvedKind === "unstarted";
+  const detailPayBlocked = detailIsLive || detailUnstarted;
+  const detailUnresolvedCount = detailUnresolvedKind ? playerUnresolvedMatches(detailP.id, current).length : 0;
 
   // v1.11.63 (Finance Available Before Game Start): Finance > ก๊วน represents the GROUP/SESSION's
   // financial setup — it must never depend on a game having started, played, or finished. The OLD
@@ -20004,7 +20124,13 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
           // v1.11.38: still playing/paused right now (match not finished) -> charging is blocked until the
           // organizer presses "จบเกม", so the games-played count above (and this bill's shuttle charge)
           // definitely includes their current game before any money changes hands.
-          const isLive = !b.paid && playerHasLiveMatch(b.id, current);
+          // v1.12.50: widened to also catch "unstarted" (assigned, Start never pressed) — `isLive` keeps its
+          // exact original meaning/text ("live" kind only); `isUnstarted` is the new addition, and
+          // `payBlocked` (either kind) is what actually gates the button now — see playerUnresolvedMatchKind.
+          const rowUnresolvedKind = !b.paid ? playerUnresolvedMatchKind(b.id, current) : null;
+          const isLive = rowUnresolvedKind === "live";
+          const isUnstarted = rowUnresolvedKind === "unstarted";
+          const payBlocked = isLive || isUnstarted;
           return (
           <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
             <button onClick={() => setDetail(b.id)} style={{ flex: 1, display: "flex", alignItems: "center", gap: 10, background: "none", border: "none", textAlign: "left", padding: 0 }}>
@@ -20021,11 +20147,11 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               <span style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, background: "#efe7fc", color: "#7c3aed" }}>👑 {t("finance.ownerFreeBadge")}</span>
             ) : (
             <button
-              onClick={() => { if (isLive) return; togglePaid(b.id); }}
-              disabled={isLive}
-              title={isLive ? t("finance.playingNowTooltip") : undefined}
-              style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: isLive ? T.surface2 : b.paid ? "#e2f5ec" : "#fdecea", color: isLive ? T.muted : b.paid ? T.green : T.accent, opacity: isLive ? 0.75 : 1, cursor: isLive ? "not-allowed" : "pointer" }}
-            >{isLive ? `⏳ ${t("finance.playingNowShort")}` : b.paid ? `🟢 ${t("finance.paidStatusShort")}` : `🔴 ${t("finance.unpaidStatusShort")}`}</button>
+              onClick={() => { if (payBlocked) return; togglePaid(b.id); }}
+              disabled={payBlocked}
+              title={isLive ? t("finance.playingNowTooltip") : isUnstarted ? t("finance.unstartedGameTooltip") : undefined}
+              style={{ padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: payBlocked ? T.surface2 : b.paid ? "#e2f5ec" : "#fdecea", color: payBlocked ? T.muted : b.paid ? T.green : T.accent, opacity: payBlocked ? 0.75 : 1, cursor: payBlocked ? "not-allowed" : "pointer" }}
+            >{isLive ? `⏳ ${t("finance.playingNowShort")}` : isUnstarted ? `⏳ ${t("finance.unstartedGameShort")}` : b.paid ? `🟢 ${t("finance.paidStatusShort")}` : `🔴 ${t("finance.unpaidStatusShort")}`}</button>
             )}
           </div>
           );
@@ -20080,7 +20206,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
               <span>{t("finance.discount")}</span>
               <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
                 <span>-฿</span>
-                <DiscountAmountInput id={detailP.id} discount={detailP.discount} setPDiscount={setPDiscount} />
+                <DiscountAmountInput id={detailP.id} discount={detailP.discount} setPDiscount={setPDiscount} disabled={detailBill.paid} />
               </span>
             </div>
             {detailBill.eCarriedInDiscount > 0 && (
@@ -20099,7 +20225,16 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
             {detailPCredits.length > 0 && (
               <div style={{ marginTop: 10, display: "flex", alignItems: "center", gap: 8, background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "9px 11px" }}>
                 <span style={{ flex: 1, fontSize: 12.5, color: "#8a6300", fontWeight: 700 }}>🎁 {t("finance.remainingCreditBadge", { amount: formatCurrency(detailPCreditTotal) })}</span>
-                <button onClick={() => setOpenCreditFor(detailP.id)} style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 20, border: "none", background: T.green, color: "#fff", fontSize: 12, fontWeight: 800 }}>{t("finance.useForThisSession")}</button>
+                {/* v1.12.50 (P0 Payment Integrity): a paid bill is financially closed/frozen — applying a
+                    discount credit on top of it must not be possible from here; the organizer must undo
+                    payment first (see togglePaid), then apply the credit, then mark paid again. The
+                    `applyDiscountCredits` domain function itself also refuses this for a paid player (see its
+                    own comment) — this UI change is the second, visible half of that same single rule. */}
+                {detailBill.paid ? (
+                  <span style={{ flexShrink: 0, fontSize: 11, color: "#8a6300", fontWeight: 700, textAlign: "right" }}>{t("finance.paidBillFrozenHint")}</span>
+                ) : (
+                  <button onClick={() => setOpenCreditFor(detailP.id)} style={{ flexShrink: 0, padding: "7px 12px", borderRadius: 20, border: "none", background: T.green, color: "#fff", fontSize: 12, fontWeight: 800 }}>{t("finance.useForThisSession")}</button>
+                )}
               </div>
             )}
             {/* v1.11.42 (Owner Payment Exemption): no payment action for Owner — they were never charged. */}
@@ -20108,17 +20243,37 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
             ) : (
             <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
               <button
-                onClick={() => { if (detailIsLive) return; togglePaid(detailP.id); }}
-                disabled={detailIsLive}
-                style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", fontSize: 13.5, fontWeight: 800, background: detailIsLive ? T.surface2 : detailBill.paid ? "#e2f5ec" : T.green, color: detailIsLive ? T.muted : detailBill.paid ? T.green : "#fff", opacity: detailIsLive ? 0.75 : 1, cursor: detailIsLive ? "not-allowed" : "pointer" }}
-              >{detailIsLive ? `⏳ ${t("finance.playingNowFullTooltip")}` : detailBill.paid ? `🟢 ${t("finance.paidTapToUndo")}` : t("finance.markAsPaid")}</button>
+                onClick={() => { if (detailPayBlocked) return; togglePaid(detailP.id); }}
+                disabled={detailPayBlocked}
+                style={{ flex: 1, padding: "11px 0", borderRadius: 11, border: "none", fontSize: 13.5, fontWeight: 800, background: detailPayBlocked ? T.surface2 : detailBill.paid ? "#e2f5ec" : T.green, color: detailPayBlocked ? T.muted : detailBill.paid ? T.green : "#fff", opacity: detailPayBlocked ? 0.75 : 1, cursor: detailPayBlocked ? "not-allowed" : "pointer" }}
+              >{detailIsLive ? `⏳ ${t("finance.playingNowFullTooltip")}` : detailUnstarted ? `⏳ ${t("finance.unstartedGameFullTooltip")}` : detailBill.paid ? `🟢 ${t("finance.paidTapToUndo")}` : t("finance.markAsPaid")}</button>
             </div>
+            )}
+
+            {/* v1.12.50 (P0 Payment Guard — unstarted assigned game): the required organizer-facing
+                explanation + convenient "Go to pending game" navigation. Deliberately only shown for the NEW
+                "unstarted" case — the pre-existing "live" (playing/paused) case already had its own
+                established UI/text (playingNow*) before this patch, which is left completely unchanged. */}
+            {detailUnstarted && (
+              <div style={{ marginTop: 10, background: "#fff8e6", border: `1px solid #f5d98a`, borderRadius: 11, padding: "10px 12px" }}>
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: "#8a6300" }}>
+                  ⚠️ {t("finance.unresolvedMatchWarningTitle")}{detailUnresolvedCount > 1 ? t("finance.unresolvedMatchCountSuffix", { count: detailUnresolvedCount }) : ""}
+                </div>
+                <div style={{ fontSize: 12, color: "#8a6300", marginTop: 4 }}>{t("finance.unresolvedMatchWarningBody")}</div>
+                {onGoToGames && (
+                  <button onClick={onGoToGames} style={{ marginTop: 8, width: "100%", padding: "9px 0", borderRadius: 10, border: "none", background: "#8a6300", color: "#fff", fontSize: 12.5, fontWeight: 800 }}>{t("finance.goToPendingGame")}</button>
+                )}
+              </div>
             )}
 
             {detailP.spun ? (
               <div style={{ marginTop: 10, background: "#fff", border: `1px solid ${T.border}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.text }}>
                 🎉 {t("finance.wheelResultLabel")} <span style={{ fontWeight: 800 }}>{detailP.wheelResult}</span>
               </div>
+            ) : detailBill.paid ? (
+              // v1.12.50 (P0 Payment Integrity): a paid bill is frozen — a "now" wheel discount must never
+              // land on it after the fact. Same reinforcement as the discount-credit block above.
+              <div style={{ marginTop: 10, textAlign: "center", fontSize: 11.5, color: T.muted }}>{t("finance.paidBillFrozenHint")}</div>
             ) : settings.wheelEnabled !== false ? (
               <button onClick={() => setWheelFor(detailP.id)} style={{ marginTop: 10, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: "none", border: `1.5px dashed ${T.green}`, color: T.green, fontSize: 13, fontWeight: 800 }}>
                 🎡 {t("finance.spinWheelButton")}
@@ -20126,7 +20281,16 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
             ) : null}
 
             {settings.qr && !detailBill.isOwnerExempt && (
-              <button onClick={() => setQrFull({ name: detailP.name, amount: detailBill.total })} style={{ marginTop: 12, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", borderRadius: 13, background: T.green, border: "none", color: "#fff", fontSize: 14, fontWeight: 800 }}>
+              // v1.12.50 (P0 Payment Integrity, requirement #1 — "protect ALL payment entry points, not only
+              // Mark as paid"): the QR/amount-to-pay action is now gated by the exact same `detailPayBlocked`
+              // rule as the Mark-as-paid button above (covers BOTH the "live" and "unstarted" unresolved
+              // kinds) — previously this button was NOT gated at all, a real gap this patch closes.
+              <button
+                onClick={() => { if (detailPayBlocked) return; setQrFull({ name: detailP.name, amount: detailBill.total }); }}
+                disabled={detailPayBlocked}
+                title={detailPayBlocked ? t("finance.unresolvedMatchActionDisabledHint") : undefined}
+                style={{ marginTop: 12, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "13px 0", borderRadius: 13, background: detailPayBlocked ? T.surface2 : T.green, border: "none", color: detailPayBlocked ? T.muted : "#fff", fontSize: 14, fontWeight: 800, opacity: detailPayBlocked ? 0.6 : 1, cursor: detailPayBlocked ? "not-allowed" : "pointer" }}
+              >
                 <QrCode size={17} /> {t("finance.openQrToPay", { amount: formatCurrency(detailBill.total) })}
               </button>
             )}
