@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.12.50";
+      var CURRENT_VERSION = "1.12.51";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -3056,6 +3056,52 @@ const th = defineMessages("th", [
   ["finance.unstartedGameFullTooltip", "มีเกมค้างให้สรุปก่อน"],
   ["finance.unresolvedMatchActionDisabledHint", "ปิดใช้งานจนกว่าจะสรุปเกมที่ค้างอยู่ก่อน"],
   ["finance.paidBillFrozenHint", "ชำระแล้ว ต้องยกเลิกการชำระก่อนจึงจะแก้ไขได้"],
+  // v1.12.51 (Promotion & Loyalty Foundation): new keys for the Advanced Settings campaign CRUD screen and
+  // the compact Player Profile promotion section. User-entered campaign/reward names are never translated.
+  ["promotion.title", "โปรโมชั่นและสิทธิพิเศษ"],
+  ["promotion.advancedRowSub", "รางวัลสะสม/ต่อเนื่องจากประวัติการเล่นจริง"],
+  ["promotion.subtitle", "รางวัลตามจำนวนครั้ง/ความต่อเนื่องของการมาเล่นจริง"],
+  ["promotion.empty", "ยังไม่มีโปรโมชั่น"],
+  ["promotion.untitled", "โปรโมชั่นไม่มีชื่อ"],
+  ["promotion.active", "ใช้งานอยู่"],
+  ["promotion.pause", "หยุดชั่วคราว"],
+  ["promotion.resume", "เปิดใช้งาน"],
+  ["promotion.createAction", "สร้างโปรโมชั่น"],
+  ["promotion.eligibility.all", "ทุกคน"],
+  ["promotion.eligibility.member", "สมาชิก"],
+  ["promotion.eligibility.guest", "รับเชิญ"],
+  ["promotion.reward.discount", "ส่วนลด"],
+  ["promotion.reward.cash", "เงินสด"],
+  ["promotion.reward.physical", "ของรางวัล"],
+  ["promotion.maxRewardsLabel", "จำกัด"],
+  ["promotion.unlimited", "ไม่จำกัด"],
+  ["promotion.field.name", "ชื่อโปรโมชั่น"],
+  ["promotion.field.namePlaceholder", "เช่น เล่นต่อเนื่อง 10 ครั้ง"],
+  ["promotion.field.eligibility", "ผู้เล่นที่เข้าร่วม"],
+  ["promotion.field.condition", "เงื่อนไข"],
+  ["promotion.condition.count", "จำนวนครั้งที่มาเล่น"],
+  ["promotion.condition.streak", "มาต่อเนื่อง"],
+  ["promotion.field.target", "จำนวนครั้งเป้าหมาย"],
+  ["promotion.field.repeat", "การให้ซ้ำ"],
+  ["promotion.repeat.once", "ครั้งเดียว"],
+  ["promotion.repeat.every", "ทุกๆ {target} ครั้ง"],
+  ["promotion.field.period", "ช่วงเวลา"],
+  ["promotion.field.startDate", "เริ่ม (ไม่บังคับ)"],
+  ["promotion.field.endDate", "สิ้นสุด (ไม่บังคับ)"],
+  ["promotion.field.rewardType", "ประเภทรางวัล"],
+  ["promotion.field.rewardName", "ชื่อรางวัล"],
+  ["promotion.field.rewardNamePlaceholder", "เช่น Grip 1 ชิ้น"],
+  ["promotion.field.amount", "จำนวนเงิน (฿)"],
+  ["promotion.field.displayValue", "มูลค่าที่แสดง (฿)"],
+  ["promotion.field.costAmount", "ต้นทุนจริง (฿)"],
+  ["promotion.field.maxRewards", "จำนวนสิทธิ์สูงสุด"],
+  ["promotion.rewardReady", "พร้อมรับรางวัล"],
+  ["promotion.awardAction", "มอบรางวัล"],
+  ["promotion.fullyRedeemed", "สิทธิ์ครบแล้ว"],
+  ["promotion.alreadyAwarded", "มอบรางวัลแล้ว"],
+  ["promotion.sessionsUnit", "ครั้ง"],
+  ["promotion.remainingPrefix", "อีก"],
+  ["promotion.remainingRewardPrefix", "รับ"],
 ]);
 
 
@@ -4561,6 +4607,51 @@ const en = defineMessages("en", [
   ["finance.unstartedGameFullTooltip", "Resolve the pending game first"],
   ["finance.unresolvedMatchActionDisabledHint", "Disabled until the pending game is resolved."],
   ["finance.paidBillFrozenHint", "Paid — undo payment first to make changes"],
+  // v1.12.51 (Promotion & Loyalty Foundation): see matching comment in the th catalog above.
+  ["promotion.title", "Promotion & Loyalty"],
+  ["promotion.advancedRowSub", "Rewards from real attendance history"],
+  ["promotion.subtitle", "Rewards based on real attendance count/streak"],
+  ["promotion.empty", "No promotions yet"],
+  ["promotion.untitled", "Untitled promotion"],
+  ["promotion.active", "Active"],
+  ["promotion.pause", "Pause"],
+  ["promotion.resume", "Resume"],
+  ["promotion.createAction", "Create promotion"],
+  ["promotion.eligibility.all", "All players"],
+  ["promotion.eligibility.member", "Member"],
+  ["promotion.eligibility.guest", "Guest"],
+  ["promotion.reward.discount", "Discount"],
+  ["promotion.reward.cash", "Cash"],
+  ["promotion.reward.physical", "Physical reward"],
+  ["promotion.maxRewardsLabel", "Limited"],
+  ["promotion.unlimited", "Unlimited"],
+  ["promotion.field.name", "Promotion name"],
+  ["promotion.field.namePlaceholder", "e.g. Play 10 sessions in a row"],
+  ["promotion.field.eligibility", "Eligible players"],
+  ["promotion.field.condition", "Condition"],
+  ["promotion.condition.count", "Attendance count"],
+  ["promotion.condition.streak", "Consecutive attendance"],
+  ["promotion.field.target", "Target sessions"],
+  ["promotion.field.repeat", "Repeat"],
+  ["promotion.repeat.once", "Once"],
+  ["promotion.repeat.every", "Every {target} sessions"],
+  ["promotion.field.period", "Period"],
+  ["promotion.field.startDate", "Start (optional)"],
+  ["promotion.field.endDate", "End (optional)"],
+  ["promotion.field.rewardType", "Reward type"],
+  ["promotion.field.rewardName", "Reward name"],
+  ["promotion.field.rewardNamePlaceholder", "e.g. 1 grip"],
+  ["promotion.field.amount", "Amount (฿)"],
+  ["promotion.field.displayValue", "Display value (฿)"],
+  ["promotion.field.costAmount", "Actual cost (฿)"],
+  ["promotion.field.maxRewards", "Maximum rewards"],
+  ["promotion.rewardReady", "Reward ready"],
+  ["promotion.awardAction", "Award reward"],
+  ["promotion.fullyRedeemed", "Promotion fully redeemed"],
+  ["promotion.alreadyAwarded", "Reward given"],
+  ["promotion.sessionsUnit", "sessions"],
+  ["promotion.remainingPrefix", "another"],
+  ["promotion.remainingRewardPrefix", "to receive"],
 ]);
 
 
@@ -4651,7 +4742,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
   });
 })();
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.12.50";
+const APP_VERSION = "1.12.51";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -8123,7 +8214,12 @@ function computeRewardExpenses(rewardHistory, sessionId, dateStr) {
       amount: 0
     };
     byName[key].count += 1;
-    byName[key].amount += Number(r.rewardValue) || 0;
+    // v1.12.51 (Promotion & Loyalty Foundation, spec section 9): prefer the explicit Finance cost
+    // (costAmount) when a record carries one - Promotion physical/cash rewards always set it, so the
+    // member-facing Display Value is never used as a Finance expense. Every pre-existing (wheel) record has
+    // no costAmount field at all, so != null is false and the exact original rewardValue fallback below
+    // keeps computing Finance exactly as before - zero behavior change for legacy history.
+    byName[key].amount += (r.costAmount != null ? Number(r.costAmount) : Number(r.rewardValue)) || 0;
   });
   return Object.entries(byName).map(([name, v]) => ({
     id: uid(),
@@ -8134,6 +8230,181 @@ function computeRewardExpenses(rewardHistory, sessionId, dateStr) {
     auto: true,
     sourceType: "wheel"
   }));
+}
+
+// ===================== PROMOTION & LOYALTY (v1.12.51) - PURE DERIVATION =====================
+// Spec section 18: progress is derived on demand from Session History, never a stored mutable counter.
+function promotionPlayerAttendedSession(playerId, sessionSnapshot) {
+  return ((sessionSnapshot && sessionSnapshot.matches) || []).some(m => {
+    if (!m || m.status !== "done") return false;
+    const A = (m.teamA || []).filter(Boolean),
+      B = (m.teamB || []).filter(Boolean);
+    return A.includes(playerId) || B.includes(playerId);
+  });
+}
+function promotionGroupSessionsChronological(sessionHistory, groupName) {
+  const name = groupName || "ก๊วนไม่มีชื่อ";
+  return (sessionHistory || []).filter(s => (s && (s.name || "ก๊วนไม่มีชื่อ")) === name).slice().sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
+}
+function promotionSessionInCampaignWindow(sessionSnapshot, campaign) {
+  const endedAt = (sessionSnapshot && sessionSnapshot.endedAt) || 0;
+  if (campaign.startDate) {
+    const startMs = Date.parse(campaign.startDate + "T00:00:00");
+    if (!isNaN(startMs) && endedAt < startMs) return false;
+  }
+  if (campaign.endDate) {
+    const endMs = Date.parse(campaign.endDate + "T23:59:59");
+    if (!isNaN(endMs) && endedAt > endMs) return false;
+  }
+  return true;
+}
+function promotionMemberTypeOf(player) {
+  return player && player.memberType === "guest" ? "guest" : player && player.memberType === "owner" ? "owner" : "member";
+}
+function promotionPlayerEligible(player, campaign) {
+  if (!player) return false;
+  if (campaign.eligibility === "member") return promotionMemberTypeOf(player) === "member";
+  if (campaign.eligibility === "guest") return promotionMemberTypeOf(player) === "guest";
+  return true;
+}
+function promotionAttendanceCountProgress(playerId, sessionHistory, groupName, campaign) {
+  const sessions = promotionGroupSessionsChronological(sessionHistory, groupName).filter(s => promotionSessionInCampaignWindow(s, campaign));
+  const target = Math.max(1, Number(campaign.trigger.target) || 1);
+  let count = 0;
+  const milestones = [];
+  for (const s of sessions) {
+    if (!promotionPlayerAttendedSession(playerId, s)) continue;
+    count++;
+    if (campaign.repeatMode === "every_target") {
+      if (count % target === 0) milestones.push({
+        milestone: count,
+        qualifyingSessionId: s.id
+      });
+    } else if (count === target) milestones.push({
+      milestone: target,
+      qualifyingSessionId: s.id
+    });
+  }
+  return {
+    attendedCount: count,
+    milestones
+  };
+}
+function promotionStreakProgress(playerId, sessionHistory, groupName, campaign) {
+  const sessions = promotionGroupSessionsChronological(sessionHistory, groupName).filter(s => promotionSessionInCampaignWindow(s, campaign));
+  const target = Math.max(1, Number(campaign.trigger.target) || 1);
+  let streak = 0,
+    onceFired = false;
+  const milestones = [];
+  for (const s of sessions) {
+    if (promotionPlayerAttendedSession(playerId, s)) {
+      streak++;
+      if (campaign.repeatMode === "every_target") {
+        if (streak % target === 0) milestones.push({
+          milestone: streak,
+          qualifyingSessionId: s.id
+        });
+      } else if (!onceFired && streak === target) {
+        milestones.push({
+          milestone: target,
+          qualifyingSessionId: s.id
+        });
+        onceFired = true;
+      }
+    } else {
+      streak = 0;
+    }
+  }
+  return {
+    currentStreak: streak,
+    milestones
+  };
+}
+function promotionProgressFor(playerId, sessionHistory, groupName, campaign) {
+  if (campaign.trigger.kind === "attendanceStreak") {
+    const r = promotionStreakProgress(playerId, sessionHistory, groupName, campaign);
+    return {
+      current: r.currentStreak,
+      milestones: r.milestones
+    };
+  }
+  const r = promotionAttendanceCountProgress(playerId, sessionHistory, groupName, campaign);
+  return {
+    current: r.attendedCount,
+    milestones: r.milestones
+  };
+}
+function promotionMilestoneAwarded(rewardHistory, campaignId, playerId, milestone) {
+  return (rewardHistory || []).some(r => r.sourceType === "promotion" && r.campaignId === campaignId && r.playerId === playerId && r.milestone === milestone);
+}
+function promotionCampaignAwardCount(rewardHistory, campaignId) {
+  return (rewardHistory || []).filter(r => r.sourceType === "promotion" && r.campaignId === campaignId).length;
+}
+// Spec section 7 - the only mutation in this feature; only ever runs from the organizer's explicit "Award
+// reward" tap. Re-checks every guard itself so a stale render/double-tap/reload can never double-issue.
+function awardPromotionReward({
+  campaign,
+  playerId,
+  milestone,
+  qualifyingSessionId,
+  players,
+  session,
+  rewardHistory,
+  setRewardHistory,
+  addDiscountCredit
+}) {
+  if (!campaign || campaign.enabled === false || campaign.archived) return {
+    ok: false,
+    reason: "campaign-inactive"
+  };
+  if (promotionMilestoneAwarded(rewardHistory, campaign.campaignId, playerId, milestone)) return {
+    ok: false,
+    reason: "already-awarded"
+  };
+  if (campaign.maxRewards != null && promotionCampaignAwardCount(rewardHistory, campaign.campaignId) >= campaign.maxRewards) return {
+    ok: false,
+    reason: "max-rewards-reached"
+  };
+  const player = (players || []).find(p => p.id === playerId);
+  if (!player) return {
+    ok: false,
+    reason: "player-not-found"
+  };
+  const r = campaign.reward || {};
+  const rewardType = r.type === "discount" ? "discount" : r.type === "cash" ? "cash" : "physical";
+  const rewardValue = rewardType === "physical" ? Number(r.displayValue) || 0 : Number(r.amount) || 0;
+  const costAmount = rewardType === "physical" ? Number(r.costAmount) || 0 : rewardType === "cash" ? Number(r.amount) || 0 : null;
+  const rewardId = uid();
+  setRewardHistory(prev => [...prev, {
+    id: rewardId,
+    playerId,
+    playerNameSnapshot: player.name || "ผู้เล่น",
+    rewardId: campaign.campaignId,
+    rewardNameSnapshot: r.name || campaign.name || "โปรโมชั่น",
+    rewardType,
+    rewardValue,
+    sessionId: session.id,
+    groupNameSnapshot: session.name || "ก๊วนไม่มีชื่อ",
+    date: session.date,
+    timestamp: Date.now(),
+    displayValue: rewardType === "physical" ? Number(r.displayValue) || 0 : null,
+    costAmount,
+    sourceType: "promotion",
+    campaignId: campaign.campaignId,
+    qualifyingSessionId: qualifyingSessionId || null,
+    milestone
+  }]);
+  if (rewardType === "discount") {
+    addDiscountCredit(playerId, Number(r.amount) || 0, session.id, rewardId, {
+      sourceType: "promotion",
+      campaignId: campaign.campaignId,
+      qualifyingSessionId: qualifyingSessionId || null,
+      milestone
+    });
+  }
+  return {
+    ok: true
+  };
 }
 // ===================== FINANCIAL ESTIMATE & LIVE P/L (v1.11.53) =====================
 // spec B: player-slots-per-match uses the SAME doubles/singles definition buildMatch already uses
@@ -9118,7 +9389,13 @@ function normDiscountCredit(c) {
     usedAt: c.usedAt || null,
     usedSessionId: c.usedSessionId || null,
     cancelledAt: c.cancelledAt || null,
-    note: c.note || null
+    note: c.note || null,
+    // v1.12.51 (Promotion & Loyalty Foundation, spec section 8/11): optional provenance - absent/null for
+    // every pre-existing credit, so nothing before this version is affected.
+    sourceType: c.sourceType || null,
+    campaignId: c.campaignId || null,
+    qualifyingSessionId: c.qualifyingSessionId || null,
+    milestone: c.milestone != null && !isNaN(Number(c.milestone)) ? Number(c.milestone) : null
   };
 }
 // resolves a credit's sourceSessionId/usedSessionId to a display label ("ก๊วน AAA · 19 ส.ค. 2569") —
@@ -10335,6 +10612,10 @@ function ImageCropper({
 // (and mutates) the same wheelPrizes array reference.
 function getDefaultSettings() {
   return {
+    // v1.12.51 (Promotion & Loyalty Foundation): GROUP-SPECIFIC campaign storage, additive inside this same
+    // existing `settings` object - travels for free through Group Default/Backup/Restore/boot-load. Brand
+    // new groups default to [].
+    promotions: [],
     // v1.11.32: default pairingMode changed auto -> manual (explicit request) — only affects BRAND NEW
     // quans/settings built from scratch here; existing saved settings (which already have a stored
     // pairingMode, "auto" or "manual") are untouched, and every `settings.pairingMode === "manual"` check
@@ -10651,8 +10932,45 @@ function normSettings(s) {
         annualFee: Math.max(0, Number(bMembership.recurring && bMembership.recurring.annualFee) || 0)
       },
       expiryWarningDays: Number(base.membership && base.membership.expiryWarningDays) > 0 ? Number(base.membership.expiryWarningDays) : 7
-    }
+    },
+    // v1.12.51 (Promotion & Loyalty Foundation, spec section 1): field-by-field normalization - a missing
+    // field (any pre-v1.12.51 backup) -> [].
+    promotions: normalizePromotions(base.promotions)
   };
+}
+// v1.12.51 (Promotion & Loyalty Foundation): one opaque, stable campaignId per campaign; every other field is
+// defensively coerced so a hand-edited/corrupted backup can never produce NaN/crash downstream.
+function normalizePromotionCampaign(c) {
+  const base = c && typeof c === "object" ? c : {};
+  const trig = base.trigger && typeof base.trigger === "object" ? base.trigger : {};
+  const rew = base.reward && typeof base.reward === "object" ? base.reward : {};
+  const mr = Number(base.maxRewards);
+  return {
+    campaignId: base.campaignId || uid(),
+    name: String(base.name || "").trim(),
+    enabled: base.enabled !== false,
+    archived: !!base.archived,
+    eligibility: ["all", "member", "guest"].includes(base.eligibility) ? base.eligibility : "all",
+    trigger: {
+      kind: trig.kind === "attendanceStreak" ? "attendanceStreak" : "attendanceCount",
+      target: Math.max(1, Math.round(Number(trig.target)) || 1)
+    },
+    repeatMode: base.repeatMode === "every_target" ? "every_target" : "once",
+    startDate: base.startDate || null,
+    endDate: base.endDate || null,
+    reward: {
+      type: ["discount", "physical", "cash"].includes(rew.type) ? rew.type : "physical",
+      name: String(rew.name || "").trim(),
+      amount: Math.max(0, Number(rew.amount) || 0),
+      displayValue: Math.max(0, Number(rew.displayValue) || 0),
+      costAmount: Math.max(0, Number(rew.costAmount) || 0)
+    },
+    maxRewards: mr > 0 ? Math.round(mr) : null,
+    createdAt: base.createdAt || Date.now()
+  };
+}
+function normalizePromotions(arr) {
+  return (Array.isArray(arr) ? arr : []).filter(c => c && typeof c === "object").map(normalizePromotionCampaign);
 }
 // v1.11.34: migrates settings.wheelPrizes into the new reward model — decouples Probability from
 // Quantity/Player-count entirely (spec section 6: "จำนวน Player ≠ จำนวน Reward ≠ Probability"). Old saved
@@ -17477,7 +17795,8 @@ function AppInner() {
     }]);
   };
   // ===================== DISCOUNT CREDIT CRUD (v1.9.1) =====================
-  const addDiscountCredit = (playerId, amount, sourceSessionId, sourceRewardId) => {
+  // v1.12.51 (Promotion & Loyalty Foundation): optional 5th `extra` param carries Promotion provenance.
+  const addDiscountCredit = (playerId, amount, sourceSessionId, sourceRewardId, extra) => {
     const p = players.find(pl => pl.id === playerId);
     setDiscountCredits(prev => [...prev, normDiscountCredit({
       playerId,
@@ -17486,7 +17805,8 @@ function AppInner() {
       sourceSessionId,
       sourceRewardId,
       createdAt: Date.now(),
-      status: "available"
+      status: "available",
+      ...(extra || {})
     })]);
   };
   // applies one or more "available" credits onto the player's ordinary `discount` field (the same field
@@ -17529,6 +17849,19 @@ function AppInner() {
       note: note || c.note
     } : c));
   };
+  // v1.12.51 (Promotion & Loyalty Foundation): the ONE bridge between the pure awardPromotionReward() domain
+  // function and this component's live state setters.
+  const onAwardPromotionReward = (campaign, playerId, milestone, qualifyingSessionId) => awardPromotionReward({
+    campaign,
+    playerId,
+    milestone,
+    qualifyingSessionId,
+    players,
+    session,
+    rewardHistory,
+    setRewardHistory,
+    addDiscountCredit
+  });
   // v1.11.7 (Part D): the moment a player is first marked as coming this session (absent -> registered/
   // ready), default their attendance window to the FULL session (arrivalTime/departureTime = null, which
   // every consumer treats as sessionStartTime/sessionEndTime) — so the common case needs zero extra taps.
@@ -22099,6 +22432,8 @@ function AppInner() {
       setHandPref,
       resetGames,
       qrRef,
+      rewardHistory,
+      onAwardPromotionReward,
       t,
       tc,
       fmtDate,
@@ -22464,6 +22799,8 @@ function MembersTab({
   setHandPref,
   resetGames,
   qrRef,
+  rewardHistory,
+  onAwardPromotionReward,
   t,
   tc,
   fmtDate,
@@ -23672,6 +24009,8 @@ function MembersTab({
     payEntranceFee: payEntranceFee,
     payMembership: payMembership,
     rankingConfigs: rankingConfigs,
+    rewardHistory: rewardHistory,
+    onAwardPromotionReward: onAwardPromotionReward,
     t: t,
     fmtDate: fmtDate,
     onEdit: () => {
@@ -24801,6 +25140,8 @@ function PlayerProfileSheet({
   payEntranceFee,
   payMembership,
   rankingConfigs,
+  rewardHistory,
+  onAwardPromotionReward,
   t,
   fmtDate,
   onEdit,
@@ -24890,6 +25231,32 @@ function PlayerProfileSheet({
     ...c,
     result: computeClubRanking(c.name, players || [p], sessionHistory, c.config)
   })), [rankingClubNames, rankingConfigs, players, sessionHistory, p]);
+  // v1.12.51 (Promotion & Loyalty Foundation, spec sections 13/15): one card per ACTIVE, ELIGIBLE campaign
+  // that has anything relevant to show for THIS player. All progress is derived fresh here, every render.
+  const promotionGroupName = (session && session.name) || "ก๊วนไม่มีชื่อ";
+  const promotionCards = useMemo(() => {
+    const campaigns = ((settings && settings.promotions) || []).filter(c => c.enabled !== false && !c.archived && promotionPlayerEligible(p, c));
+    return campaigns.map(c => {
+      const target = Math.max(1, Number(c.trigger.target) || 1);
+      const prog = promotionProgressFor(p.id, sessionHistory, promotionGroupName, c);
+      const current = prog.current,
+        milestones = prog.milestones;
+      const awardedMilestones = milestones.filter(m => promotionMilestoneAwarded(rewardHistory, c.campaignId, p.id, m.milestone));
+      const pendingMilestone = milestones.find(m => !promotionMilestoneAwarded(rewardHistory, c.campaignId, p.id, m.milestone)) || null;
+      const capReached = c.maxRewards != null && promotionCampaignAwardCount(rewardHistory, c.campaignId) >= c.maxRewards;
+      const lastAwardedMilestone = awardedMilestones.reduce((mx, m) => Math.max(mx, m.milestone), 0);
+      const progressInCycle = c.repeatMode === "every_target" ? Math.max(0, current - lastAwardedMilestone) : Math.min(current, target);
+      return {
+        campaign: c,
+        current,
+        target,
+        pendingMilestone,
+        awardedCount: awardedMilestones.length,
+        capReached,
+        progressInCycle
+      };
+    }).filter(card => card.current > 0 || card.pendingMilestone || card.awardedCount > 0);
+  }, [settings, sessionHistory, rewardHistory, p, promotionGroupName]);
   return /*#__PURE__*/React.createElement(Overlay, {
     onClose: onClose
   }, /*#__PURE__*/React.createElement("div", {
@@ -24972,7 +25339,82 @@ function PlayerProfileSheet({
       fontSize: 12,
       fontWeight: 700
     }
-  }, "\u270E ", t("common.edit"))), membershipTrackingOn && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionHead, {
+  }, "\u270E ", t("common.edit"))), promotionCards.length > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionHead, {
+    icon: /*#__PURE__*/React.createElement(Gift, {
+      size: 15
+    }),
+    title: t ? t("promotion.title") : "\u0E42\u0E1B\u0E23\u0E42\u0E21\u0E0A\u0E31\u0E48\u0E19\u0E41\u0E25\u0E30\u0E2A\u0E34\u0E17\u0E18\u0E34\u0E1E\u0E34\u0E40\u0E28\u0E29"
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginBottom: 14,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, promotionCards.map(card => {
+    const c = card.campaign,
+      target = card.target,
+      pendingMilestone = card.pendingMilestone,
+      awardedCount = card.awardedCount,
+      capReached = card.capReached,
+      progressInCycle = card.progressInCycle;
+    const rewardLabel = (c.reward && c.reward.name) || c.name;
+    const ready = !!pendingMilestone && !capReached;
+    const blockedByCap = !!pendingMilestone && capReached;
+    const alreadyDoneForNow = !pendingMilestone && c.repeatMode === "once" && awardedCount > 0;
+    return /*#__PURE__*/React.createElement("div", {
+      key: c.campaignId,
+      style: {
+        background: ready ? "#fff8e1" : T.surface2,
+        border: `1px solid ${ready ? "#f0c955" : T.border}`,
+        borderRadius: 12,
+        padding: 12
+      }
+    }, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 13,
+        fontWeight: 800,
+        color: T.text,
+        marginBottom: 4
+      }
+    }, c.trigger.kind === "attendanceStreak" ? "\uD83D\uDD25 " : "\uD83D\uDCC5 ", c.name), ready && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12.5,
+        fontWeight: 800,
+        color: "#92650a",
+        marginBottom: 8
+      }
+    }, "\uD83C\uDF89 ", t ? t("promotion.rewardReady") : "\u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E23\u0E31\u0E1A\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25", " \u2014 ", rewardLabel), /*#__PURE__*/React.createElement("button", {
+      onClick: () => onAwardPromotionReward && onAwardPromotionReward(c, p.id, pendingMilestone.milestone, pendingMilestone.qualifyingSessionId),
+      style: {
+        width: "100%",
+        padding: "9px 0",
+        borderRadius: 10,
+        background: T.green,
+        border: "none",
+        color: "#fff",
+        fontSize: 12.5,
+        fontWeight: 800
+      }
+    }, t ? t("promotion.awardAction") : "\u0E21\u0E2D\u0E1A\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25")), blockedByCap && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        fontWeight: 700,
+        color: T.muted
+      }
+    }, "\u26D4 ", t ? t("promotion.fullyRedeemed") : "\u0E2A\u0E34\u0E17\u0E18\u0E34\u0E4C\u0E04\u0E23\u0E1A\u0E41\u0E25\u0E49\u0E27"), alreadyDoneForNow && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        fontWeight: 700,
+        color: T.green
+      }
+    }, "\u2705 ", t ? t("promotion.alreadyAwarded") : "\u0E21\u0E2D\u0E1A\u0E23\u0E32\u0E07\u0E27\u0E31\u0E25\u0E41\u0E25\u0E49\u0E27"), !ready && !blockedByCap && !alreadyDoneForNow && /*#__PURE__*/React.createElement("div", {
+      style: {
+        fontSize: 12,
+        color: T.muted
+      }
+    }, `${progressInCycle}/${target} `, t ? t("promotion.sessionsUnit") : "\u0E04\u0E23\u0E31\u0E49\u0E07", " \u00B7 ", t ? t("promotion.remainingPrefix") : "\u0E2D\u0E35\u0E01", ` ${Math.max(0, target - progressInCycle)} `, t ? t("promotion.sessionsUnit") : "\u0E04\u0E23\u0E31\u0E49\u0E07", " ", t ? t("promotion.remainingRewardPrefix") : "\u0E23\u0E31\u0E1A", " ", rewardLabel));
+  }))), membershipTrackingOn && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement("span", {
       style: {
         fontSize: 15
@@ -46842,6 +47284,7 @@ function AdvancedSettingsSheet({
   const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false);
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null);
   const [rewardOpen, setRewardOpen] = useState(false);
+  const [promotionOpen, setPromotionOpen] = useState(false); // v1.12.51 (Promotion & Loyalty Foundation)
   const rankingClubs = useMemo(() => {
     const seen = new Set(),
       out = [];
@@ -47001,6 +47444,12 @@ function AdvancedSettingsSheet({
     sub: t ? t("reward.advancedRowSub") : "วงล้อรางวัลให้ผู้เล่นหลังจบก๊วน",
     badge: settings.wheelEnabled !== false,
     onClick: () => setRewardOpen(true)
+  }), /*#__PURE__*/React.createElement(AdvRow, {
+    icon: "🎯",
+    title: t ? t("promotion.title") : "โปรโมชั่นและสิทธิพิเศษ",
+    sub: t ? t("promotion.advancedRowSub") : "รางวัลสะสม/ต่อเนื่องจากประวัติการเล่นจริง",
+    badge: (settings.promotions || []).some(c => c.enabled !== false && !c.archived),
+    onClick: () => setPromotionOpen(true)
   }), /*#__PURE__*/React.createElement("button", {
     onClick: onClose,
     style: {
@@ -47027,7 +47476,455 @@ function AdvancedSettingsSheet({
     settings: settings,
     setSettings: setSettings,
     onClose: () => setRewardOpen(false)
+  }), promotionOpen && /*#__PURE__*/React.createElement(PromotionSettingsSheet, {
+    settings: settings,
+    setSettings: setSettings,
+    sessionHistory: sessionHistory,
+    onClose: () => setPromotionOpen(false),
+    t: t
   }));
+}
+
+// ===================== PROMOTION & LOYALTY SETTINGS UI (v1.12.51) =====================
+function promotionEligibilityLabel(eligibility, t) {
+  if (eligibility === "member") return t ? t("promotion.eligibility.member") : "สมาชิก";
+  if (eligibility === "guest") return t ? t("promotion.eligibility.guest") : "รับเชิญ";
+  return t ? t("promotion.eligibility.all") : "ทุกคน";
+}
+function promotionRewardSummary(campaign, t) {
+  const r = campaign.reward || {};
+  if (r.type === "discount") return `${t ? t("promotion.reward.discount") : "ส่วนลด"} ฿${Math.round(r.amount || 0)}`;
+  if (r.type === "cash") return `${t ? t("promotion.reward.cash") : "เงินสด"} ฿${Math.round(r.amount || 0)}`;
+  return `${r.name || (t ? t("promotion.reward.physical") : "ของรางวัล")} (฿${Math.round(r.displayValue || 0)})`;
+}
+function PromotionSettingsSheet({
+  settings,
+  setSettings,
+  sessionHistory,
+  onClose,
+  t
+}) {
+  const [editingId, setEditingId] = useState(null);
+  const campaigns = settings.promotions || [];
+  const visibleCampaigns = campaigns.filter(c => !c.archived);
+  const editingCampaign = editingId && editingId !== "__new__" ? campaigns.find(c => c.campaignId === editingId) : null;
+  const saveCampaign = patch => {
+    setSettings(s => {
+      const list = s.promotions || [];
+      const exists = list.some(c => c.campaignId === patch.campaignId);
+      return {
+        ...s,
+        promotions: exists ? list.map(c => c.campaignId === patch.campaignId ? normalizePromotionCampaign(patch) : c) : [...list, normalizePromotionCampaign(patch)]
+      };
+    });
+    setEditingId(null);
+  };
+  const togglePause = campaignId => setSettings(s => ({
+    ...s,
+    promotions: (s.promotions || []).map(c => c.campaignId === campaignId ? {
+      ...c,
+      enabled: !c.enabled
+    } : c)
+  }));
+  // spec section 13: never hard-delete from this screen - always archive, so provenance can never be lost.
+  const archiveCampaign = campaignId => setSettings(s => ({
+    ...s,
+    promotions: (s.promotions || []).map(c => c.campaignId === campaignId ? {
+      ...c,
+      enabled: false,
+      archived: true
+    } : c)
+  }));
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 16,
+      fontWeight: 800,
+      marginBottom: 2
+    }
+  }, "🎯 ", t ? t("promotion.title") : "โปรโมชั่นและสิทธิพิเศษ"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      marginBottom: 14
+    }
+  }, t ? t("promotion.subtitle") : "รางวัลตามจำนวนครั้ง/ความต่อเนื่องของการมาเล่นจริง"), visibleCampaigns.length === 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12.5,
+      color: T.muted,
+      marginBottom: 14
+    }
+  }, t ? t("promotion.empty") : "ยังไม่มีโปรโมชั่น"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      marginBottom: 14
+    }
+  }, visibleCampaigns.map(c => /*#__PURE__*/React.createElement("div", {
+    key: c.campaignId,
+    style: {
+      background: T.surface,
+      border: `1px solid ${T.border}`,
+      borderRadius: 12,
+      padding: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "flex-start",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 800
+    }
+  }, c.trigger.kind === "attendanceStreak" ? "🔥" : "📅", " ", c.name || (t ? t("promotion.untitled") : "โปรโมชั่นไม่มีชื่อ")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: T.muted,
+      marginTop: 2
+    }
+  }, promotionEligibilityLabel(c.eligibility, t), " · ", promotionRewardSummary(c, t), " · ", c.maxRewards != null ? `${t ? t("promotion.maxRewardsLabel") : "จำกัด"} ${c.maxRewards}` : t ? t("promotion.unlimited") : "ไม่จำกัด")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 10.5,
+      fontWeight: 800,
+      color: c.enabled ? T.green : T.muted,
+      background: c.enabled ? "#e2f5ec" : T.surface2,
+      border: `1px solid ${c.enabled ? T.green : T.border}`,
+      borderRadius: 20,
+      padding: "3px 9px",
+      flexShrink: 0
+    }
+  }, c.enabled ? t ? t("promotion.active") : "ใช้งานอยู่" : t ? t("common.close") : "หยุดชั่วคราว")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingId(c.campaignId),
+    style: {
+      flex: 1,
+      padding: "7px 0",
+      borderRadius: 9,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: T.text
+    }
+  }, t ? t("common.edit") : "แก้ไข"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => togglePause(c.campaignId),
+    style: {
+      flex: 1,
+      padding: "7px 0",
+      borderRadius: 9,
+      background: T.surface2,
+      border: `1px solid ${T.border}`,
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: T.text
+    }
+  }, c.enabled ? t ? t("promotion.pause") : "หยุดชั่วคราว" : t ? t("promotion.resume") : "เปิดใช้งาน"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => archiveCampaign(c.campaignId),
+    style: {
+      flex: 1,
+      padding: "7px 0",
+      borderRadius: 9,
+      background: "#fdeceb",
+      border: "1px solid #f3b5ae",
+      fontSize: 11.5,
+      fontWeight: 700,
+      color: T.accent
+    }
+  }, t ? t("common.delete") : "ลบ"))))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingId("__new__"),
+    style: {
+      ...btnPrimary,
+      marginBottom: 8
+    }
+  }, "+ ", t ? t("promotion.createAction") : "สร้างโปรโมชั่น"), /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: btnSecondary
+  }, t ? t("common.close") : "ปิด"), editingId && /*#__PURE__*/React.createElement(PromotionCampaignEditor, {
+    campaign: editingCampaign,
+    onSave: saveCampaign,
+    onClose: () => setEditingId(null),
+    t: t
+  }));
+}
+function PromotionCampaignEditor({
+  campaign,
+  onSave,
+  onClose,
+  t
+}) {
+  const base = useMemo(() => normalizePromotionCampaign(campaign || {}), [campaign]);
+  const [name, setName] = useState(base.name);
+  const [eligibility, setEligibility] = useState(base.eligibility);
+  const [kind, setKind] = useState(base.trigger.kind);
+  const [target, setTarget] = useState(String(base.trigger.target));
+  const [repeatMode, setRepeatMode] = useState(base.repeatMode);
+  const [startDate, setStartDate] = useState(base.startDate || "");
+  const [endDate, setEndDate] = useState(base.endDate || "");
+  const [rewardType, setRewardType] = useState(base.reward.type);
+  const [rewardName, setRewardName] = useState(base.reward.name);
+  const [amount, setAmount] = useState(String(base.reward.amount || ""));
+  const [displayValue, setDisplayValue] = useState(String(base.reward.displayValue || ""));
+  const [costAmount, setCostAmount] = useState(String(base.reward.costAmount || ""));
+  const [maxRewards, setMaxRewards] = useState(base.maxRewards != null ? String(base.maxRewards) : "");
+  const [unlimited, setUnlimited] = useState(base.maxRewards == null);
+  const inputStyle = {
+    width: "100%",
+    padding: "9px 10px",
+    borderRadius: 9,
+    border: `1px solid ${T.border}`,
+    fontSize: 13,
+    marginBottom: 10,
+    boxSizing: "border-box"
+  };
+  const segStyle = active => ({
+    flex: 1,
+    padding: "8px 0",
+    borderRadius: 9,
+    border: `1.5px solid ${active ? T.green : T.border}`,
+    background: active ? "#e2f5ec" : T.surface,
+    color: active ? T.green : T.text,
+    fontSize: 12,
+    fontWeight: 800
+  });
+  const submit = () => {
+    if (!name.trim()) return;
+    onSave({
+      ...base,
+      name: name.trim(),
+      eligibility,
+      trigger: {
+        kind,
+        target: Number(target) || 1
+      },
+      repeatMode,
+      startDate: startDate || null,
+      endDate: endDate || null,
+      reward: {
+        type: rewardType,
+        name: rewardName.trim(),
+        amount: Number(amount) || 0,
+        displayValue: Number(displayValue) || 0,
+        costAmount: Number(costAmount) || 0
+      },
+      maxRewards: unlimited ? null : Number(maxRewards) || null
+    });
+  };
+  return /*#__PURE__*/React.createElement(Overlay, {
+    onClose: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      marginBottom: 14
+    }
+  }, campaign ? t ? t("common.edit") : "แก้ไข" : t ? t("promotion.createAction") : "สร้างโปรโมชั่น"), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.name") : "ชื่อโปรโมชั่น"), /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => setName(e.target.value),
+    style: inputStyle,
+    placeholder: t ? t("promotion.field.namePlaceholder") : "เช่น เล่นต่อเนื่อง 10 ครั้ง"
+  }), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.eligibility") : "ผู้เล่นที่เข้าร่วม"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, ["all", "member", "guest"].map(v => /*#__PURE__*/React.createElement("button", {
+    key: v,
+    onClick: () => setEligibility(v),
+    style: segStyle(eligibility === v)
+  }, promotionEligibilityLabel(v, t)))), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.condition") : "เงื่อนไข"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setKind("attendanceCount"),
+    style: segStyle(kind === "attendanceCount")
+  }, t ? t("promotion.condition.count") : "จำนวนครั้งที่มาเล่น"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setKind("attendanceStreak"),
+    style: segStyle(kind === "attendanceStreak")
+  }, t ? t("promotion.condition.streak") : "มาต่อเนื่อง")), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.target") : "จำนวนครั้งเป้าหมาย"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "1",
+    value: target,
+    onChange: e => setTarget(e.target.value),
+    style: inputStyle
+  }), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.repeat") : "การให้ซ้ำ"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRepeatMode("once"),
+    style: segStyle(repeatMode === "once")
+  }, t ? t("promotion.repeat.once") : "ครั้งเดียว"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRepeatMode("every_target"),
+    style: segStyle(repeatMode === "every_target")
+  }, t ? t("promotion.repeat.every", { target: target || "X" }) : `ทุกๆ ${target || "X"} ครั้ง`)), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.period") : "ช่วงเวลา"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginBottom: 3
+    }
+  }, t ? t("promotion.field.startDate") : "เริ่ม (ไม่บังคับ)"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: startDate,
+    onChange: e => setStartDate(e.target.value),
+    style: {
+      ...inputStyle,
+      marginBottom: 0
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginBottom: 3
+    }
+  }, t ? t("promotion.field.endDate") : "สิ้นสุด (ไม่บังคับ)"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: endDate,
+    onChange: e => setEndDate(e.target.value),
+    style: {
+      ...inputStyle,
+      marginBottom: 0
+    }
+  }))), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.rewardType") : "ประเภทรางวัล"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRewardType("physical"),
+    style: segStyle(rewardType === "physical")
+  }, t ? t("promotion.reward.physical") : "ของรางวัล"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRewardType("discount"),
+    style: segStyle(rewardType === "discount")
+  }, t ? t("promotion.reward.discount") : "ส่วนลด"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRewardType("cash"),
+    style: segStyle(rewardType === "cash")
+  }, t ? t("promotion.reward.cash") : "เงินสด")), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.rewardName") : "ชื่อรางวัล"), /*#__PURE__*/React.createElement("input", {
+    value: rewardName,
+    onChange: e => setRewardName(e.target.value),
+    style: inputStyle,
+    placeholder: t ? t("promotion.field.rewardNamePlaceholder") : "เช่น Grip 1 ชิ้น"
+  }), rewardType !== "physical" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.amount") : "จำนวนเงิน (฿)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: amount,
+    onChange: e => setAmount(e.target.value),
+    style: inputStyle
+  })), rewardType === "physical" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginBottom: 3
+    }
+  }, t ? t("promotion.field.displayValue") : "มูลค่าที่แสดง (฿)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: displayValue,
+    onChange: e => setDisplayValue(e.target.value),
+    style: {
+      ...inputStyle,
+      marginBottom: 0
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 10.5,
+      color: T.muted,
+      marginBottom: 3
+    }
+  }, t ? t("promotion.field.costAmount") : "ต้นทุนจริง (฿)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "0",
+    value: costAmount,
+    onChange: e => setCostAmount(e.target.value),
+    style: {
+      ...inputStyle,
+      marginBottom: 0
+    }
+  }))), /*#__PURE__*/React.createElement(Label, null, t ? t("promotion.field.maxRewards") : "จำนวนสิทธิ์สูงสุด"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "center",
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setUnlimited(true),
+    style: segStyle(unlimited)
+  }, t ? t("promotion.unlimited") : "ไม่จำกัด"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setUnlimited(false),
+    style: segStyle(!unlimited)
+  }, t ? t("promotion.maxRewardsLabel") : "จำกัด"), !unlimited && /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    min: "1",
+    value: maxRewards,
+    onChange: e => setMaxRewards(e.target.value),
+    style: {
+      ...inputStyle,
+      marginBottom: 0,
+      width: 80,
+      flex: "none"
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: onClose,
+    style: btnSecondary
+  }, t ? t("common.cancel") : "ยกเลิก"), /*#__PURE__*/React.createElement("button", {
+    onClick: submit,
+    style: btnPrimary
+  }, t ? t("common.save") : "บันทึก")));
 }
 
 // preset picker + confirm-before-switch + (when custom is active) the custom level editor.

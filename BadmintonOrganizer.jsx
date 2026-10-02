@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.50";
+const APP_VERSION = "1.12.51";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -2519,9 +2519,182 @@ function computeRewardExpenses(rewardHistory, sessionId, dateStr) {
     const key = r.rewardNameSnapshot || "รางวัล";
     if (!byName[key]) byName[key] = { count: 0, amount: 0 };
     byName[key].count += 1;
-    byName[key].amount += Number(r.rewardValue) || 0;
+    // v1.12.51 (Promotion & Loyalty Foundation, spec section 9): prefer the explicit Finance cost
+    // (`costAmount`) when a record carries one — Promotion physical/cash rewards always set it, so the
+    // member-facing Display Value is never used as a Finance expense. Every pre-existing (wheel) record has
+    // no `costAmount` field at all, so `!= null` is false and the exact original `rewardValue` fallback below
+    // keeps computing Finance exactly as before — zero behavior change for legacy history.
+    byName[key].amount += (r.costAmount != null ? Number(r.costAmount) : Number(r.rewardValue)) || 0;
   });
   return Object.entries(byName).map(([name, v]) => ({ id: uid(), category: "ค่ารางวัล", description: `${name} ×${v.count}`, amount: v.amount, date: dateStr, auto: true, sourceType: "wheel" }));
+}
+
+// ===================== PROMOTION & LOYALTY (v1.12.51) — PURE DERIVATION =====================
+// Spec section 18: "7/10 sessions" is campaign progress derived on demand from Session History, NEVER a
+// stored mutable points/counter. Every function below is pure (reads sessionHistory/rewardHistory, never
+// writes anything) and is recomputed fresh every render — no new persisted counter exists anywhere.
+
+// Spec section 3 — ATTENDANCE DEFINITION: a player counts as attending a session only when that session is
+// already FINALIZED (i.e. it is an entry of `sessionHistory` — this function is only ever called with an
+// archived snapshot, never the live session) AND the player appears in at least one match that actually
+// reached "done" status in that session. Deliberately STRICTER than the existing cosmetic `sessionsAttended`
+// stat shown in PlayerProfileSheet (which uses playerStats()'s win/loss/draw/noScore buckets and does not
+// check match status at all) — because endSession()'s own live-match guard (liveMatchesIn/isLiveMatchStatus)
+// only ever blocks "playing"/"paused" before archiving, an assigned-but-never-started ("next") match CAN end
+// up frozen into a session's `matches[]` with no score. playerStats() would count that as a scoreless
+// "noScore" appearance; since Promotion grants real money/items, this function never does. This is additive
+// — playerStats()/sessionsAttended are completely untouched, exactly as they were before this feature.
+function promotionPlayerAttendedSession(playerId, sessionSnapshot) {
+  return (((sessionSnapshot && sessionSnapshot.matches) || [])).some((m) => {
+    if (!m || m.status !== "done") return false;
+    const A = (m.teamA || []).filter(Boolean), B = (m.teamB || []).filter(Boolean);
+    return A.includes(playerId) || B.includes(playerId);
+  });
+}
+// Group identity for Promotion purposes is `session.name` — the SAME existing identity this codebase already
+// uses everywhere a "group"/"ก๊วน" must be recognized across archived sessions (groupDefaults keying,
+// carryForwardShuttleOpeningFor, computeClubRanking/RankingClubPickerSheet all key by name, never a stable
+// id — there is no separate stable group id anywhere in this data model). Reusing it here is the safest
+// deterministic choice available, per spec section 5's "use the safest deterministic existing order" — not a
+// new risk introduced by this feature. Ordering: sessionHistory is always PREPENDED (newest first) by
+// endSession() (see its own `setSessionHistory((prev) => [snapshot, ...prev])`), so sorting by `endedAt`
+// (always present, set once at archive time and never changed later) reconstructs the true chronological
+// order deterministically without fabricating any new timestamp.
+function promotionGroupSessionsChronological(sessionHistory, groupName) {
+  const name = groupName || "ก๊วนไม่มีชื่อ";
+  return (sessionHistory || [])
+    .filter((s) => (s && (s.name || "ก๊วนไม่มีชื่อ")) === name)
+    .slice()
+    .sort((a, b) => (a.endedAt || 0) - (b.endedAt || 0));
+}
+// Spec sections 4/5 — campaign date window: a session counts only if it ended on/after startDate (when set)
+// and on/before endDate (when set), compared against the session's own frozen `endedAt` — never the live
+// session's current date — so a campaign's historical qualification can never change after the fact.
+function promotionSessionInCampaignWindow(sessionSnapshot, campaign) {
+  const endedAt = (sessionSnapshot && sessionSnapshot.endedAt) || 0;
+  if (campaign.startDate) {
+    const startMs = Date.parse(campaign.startDate + "T00:00:00");
+    if (!isNaN(startMs) && endedAt < startMs) return false;
+  }
+  if (campaign.endDate) {
+    const endMs = Date.parse(campaign.endDate + "T23:59:59");
+    if (!isNaN(endMs) && endedAt > endMs) return false;
+  }
+  return true;
+}
+// Spec section 2 — ELIGIBILITY: reuses the existing player.memberType attribute and the SAME 3-way
+// member/guest/owner partition already used by MembersTab's memberTypeFilters/MEMBER_TYPE_META elsewhere in
+// this file (never a copy of player identities into campaign config). "All players" is explicit: every
+// memberType INCLUDING Owner — Owner is a real, distinct memberType value in this app (see v1.11.34), not a
+// silently-invented special case, and is excluded only when the organizer explicitly picks "Member" or
+// "Guest" (exact match), matching how the existing memberType filter chips already partition players.
+function promotionMemberTypeOf(player) {
+  return player && player.memberType === "guest" ? "guest" : player && player.memberType === "owner" ? "owner" : "member";
+}
+function promotionPlayerEligible(player, campaign) {
+  if (!player) return false;
+  if (campaign.eligibility === "member") return promotionMemberTypeOf(player) === "member";
+  if (campaign.eligibility === "guest") return promotionMemberTypeOf(player) === "guest";
+  return true; // "all"
+}
+// Spec section 4 — Attendance Count progress: counts attended sessions (in window, same group) in
+// chronological order; a "milestone" fires the session a required count is actually reached. `repeatMode`
+// "once" fires exactly once (count is monotonic non-decreasing, so count===target can only ever be true on
+// one pass); "every_target" fires again every further multiple (10, 20, 30, ...).
+function promotionAttendanceCountProgress(playerId, sessionHistory, groupName, campaign) {
+  const sessions = promotionGroupSessionsChronological(sessionHistory, groupName).filter((s) => promotionSessionInCampaignWindow(s, campaign));
+  const target = Math.max(1, Number(campaign.trigger.target) || 1);
+  let count = 0; const milestones = [];
+  for (const s of sessions) {
+    if (!promotionPlayerAttendedSession(playerId, s)) continue;
+    count++;
+    if (campaign.repeatMode === "every_target") { if (count % target === 0) milestones.push({ milestone: count, qualifyingSessionId: s.id }); }
+    else if (count === target) milestones.push({ milestone: target, qualifyingSessionId: s.id });
+  }
+  return { attendedCount: count, milestones };
+}
+// Spec section 5 — Attendance Streak progress: CURRENT streak resets to 0 on any missed (in-window) session
+// and otherwise increments; e.g. ✓✓✓✓✓✗✓✓ -> current streak 2, matching the worked example exactly. For
+// `repeatMode: "once"`, an `onceFired` guard stops a later re-formed streak from re-firing the SAME numeric
+// target again (the campaign has already paid its one-time reward); "every_target" has no such guard, so a
+// broken-then-reformed streak CAN earn again once it reaches a fresh multiple, per spec section 5's own
+// 10/20-consecutive example.
+function promotionStreakProgress(playerId, sessionHistory, groupName, campaign) {
+  const sessions = promotionGroupSessionsChronological(sessionHistory, groupName).filter((s) => promotionSessionInCampaignWindow(s, campaign));
+  const target = Math.max(1, Number(campaign.trigger.target) || 1);
+  let streak = 0, onceFired = false; const milestones = [];
+  for (const s of sessions) {
+    if (promotionPlayerAttendedSession(playerId, s)) {
+      streak++;
+      if (campaign.repeatMode === "every_target") { if (streak % target === 0) milestones.push({ milestone: streak, qualifyingSessionId: s.id }); }
+      else if (!onceFired && streak === target) { milestones.push({ milestone: target, qualifyingSessionId: s.id }); onceFired = true; }
+    } else {
+      streak = 0;
+    }
+  }
+  return { currentStreak: streak, milestones };
+}
+// Single entry point used by the UI to get one campaign's progress for one player, regardless of trigger kind.
+function promotionProgressFor(playerId, sessionHistory, groupName, campaign) {
+  if (campaign.trigger.kind === "attendanceStreak") {
+    const r = promotionStreakProgress(playerId, sessionHistory, groupName, campaign);
+    return { current: r.currentStreak, milestones: r.milestones };
+  }
+  const r = promotionAttendanceCountProgress(playerId, sessionHistory, groupName, campaign);
+  return { current: r.attendedCount, milestones: r.milestones };
+}
+// Spec section 11 — IDEMPOTENCY: reuses Reward History as the durable award ledger, exactly like every other
+// reward this app issues (see applyWheelPrize's own setRewardHistory call) — no second ledger is created. A
+// promotion milestone is uniquely identified by (campaignId, playerId, milestone); both derivation functions
+// above only ever advance monotonically (attendance count never decreases, and a streak's "once" milestone
+// can only fire once via `onceFired`), so this single key can never legitimately need to be issued twice. A
+// reload/rerender/force-close/restore/double-tap of "Award reward" can therefore never create a duplicate —
+// this check is enforced in awardPromotionReward() below, never only by disabling a button in the UI.
+function promotionMilestoneAwarded(rewardHistory, campaignId, playerId, milestone) {
+  return (rewardHistory || []).some((r) => r.sourceType === "promotion" && r.campaignId === campaignId && r.playerId === playerId && r.milestone === milestone);
+}
+// Spec section 12 — MAX REWARDS: counts actual fulfilled promotion awards (ledger entries), never merely
+//-eligible players, so historical eligibility/awards already given are never silently removed once a
+// campaign's cap is reached — the cap only blocks NEW awards from this point on.
+function promotionCampaignAwardCount(rewardHistory, campaignId) {
+  return (rewardHistory || []).filter((r) => r.sourceType === "promotion" && r.campaignId === campaignId).length;
+}
+// Spec section 7 — EARNING VS FULFILLING: the only mutation in this whole feature, and only ever runs in
+// direct response to the organizer's explicit "มอบรางวัล / Award reward" tap (never automatic, never run
+// inside match-completion/endSession critical mutations). Re-checks every guard itself (campaign active,
+// not already awarded, under maxRewards, player exists) so a stale render/double-tap/reload can never
+// double-issue — defense in depth, not reliant on the UI having already disabled the button. Never touches
+// `player.paid` and never mutates an already-frozen paid bill: a discount reward is issued as a normal
+// "available" Discount Credit (see addDiscountCredit's `extra` param above) through the EXISTING v1.12.50
+// paid-bill guards in applyDiscountCredits — if the player is already paid, the credit simply stays
+// available for a later eligible bill, exactly per spec section 8/19.
+function awardPromotionReward({ campaign, playerId, milestone, qualifyingSessionId, players, session, rewardHistory, setRewardHistory, addDiscountCredit }) {
+  if (!campaign || campaign.enabled === false || campaign.archived) return { ok: false, reason: "campaign-inactive" };
+  if (promotionMilestoneAwarded(rewardHistory, campaign.campaignId, playerId, milestone)) return { ok: false, reason: "already-awarded" };
+  if (campaign.maxRewards != null && promotionCampaignAwardCount(rewardHistory, campaign.campaignId) >= campaign.maxRewards) return { ok: false, reason: "max-rewards-reached" };
+  const player = (players || []).find((p) => p.id === playerId);
+  if (!player) return { ok: false, reason: "player-not-found" };
+  const r = campaign.reward || {};
+  const rewardType = r.type === "discount" ? "discount" : r.type === "cash" ? "cash" : "physical";
+  const rewardValue = rewardType === "physical" ? (Number(r.displayValue) || 0) : (Number(r.amount) || 0);
+  // spec section 9/10: physical reward Finance cost is `costAmount` (never Display Value); cash reward's
+  // cost normally equals the amount the member receives; discount rewards have no separate Finance expense
+  // line (computeRewardExpenses already excludes rewardType:"discount" — it reduces Revenue directly instead).
+  const costAmount = rewardType === "physical" ? (Number(r.costAmount) || 0) : rewardType === "cash" ? (Number(r.amount) || 0) : null;
+  const rewardId = uid();
+  setRewardHistory((prev) => [...prev, {
+    id: rewardId, playerId, playerNameSnapshot: player.name || "ผู้เล่น",
+    rewardId: campaign.campaignId, rewardNameSnapshot: r.name || campaign.name || "โปรโมชั่น", rewardType, rewardValue,
+    sessionId: session.id, groupNameSnapshot: session.name || "ก๊วนไม่มีชื่อ", date: session.date, timestamp: Date.now(),
+    displayValue: rewardType === "physical" ? (Number(r.displayValue) || 0) : null, costAmount,
+    sourceType: "promotion", campaignId: campaign.campaignId, qualifyingSessionId: qualifyingSessionId || null, milestone,
+  }]);
+  if (rewardType === "discount") {
+    addDiscountCredit(playerId, Number(r.amount) || 0, session.id, rewardId, {
+      sourceType: "promotion", campaignId: campaign.campaignId, qualifyingSessionId: qualifyingSessionId || null, milestone,
+    });
+  }
+  return { ok: true };
 }
 // ===================== FINANCIAL ESTIMATE & LIVE P/L (v1.11.53) =====================
 // spec B: player-slots-per-match uses the SAME doubles/singles definition buildMatch already uses
@@ -3223,6 +3396,12 @@ function normDiscountCredit(c) {
     amount: Number(c.amount) || 0, sourceSessionId: c.sourceSessionId || null, sourceRewardId: c.sourceRewardId || null,
     createdAt: c.createdAt || Date.now(), status: ["available", "used", "cancelled"].includes(c.status) ? c.status : "available",
     usedAt: c.usedAt || null, usedSessionId: c.usedSessionId || null, cancelledAt: c.cancelledAt || null, note: c.note || null,
+    // v1.12.51 (Promotion & Loyalty Foundation, spec section 8/11): optional provenance — absent/null for
+    // every pre-existing credit (wheel-issued "ส่วนลดครั้งหน้า" or manual), so nothing before this version is
+    // affected. Normalized here (not just at creation) so these fields round-trip through every existing
+    // `.map(normDiscountCredit)` call site — boot load, Backup/Restore, merge-import — with zero extra code.
+    sourceType: c.sourceType || null, campaignId: c.campaignId || null, qualifyingSessionId: c.qualifyingSessionId || null,
+    milestone: c.milestone != null && !isNaN(Number(c.milestone)) ? Number(c.milestone) : null,
   };
 }
 // resolves a credit's sourceSessionId/usedSessionId to a display label ("ก๊วน AAA · 19 ส.ค. 2569") —
@@ -4003,6 +4182,12 @@ function ImageCropper({ src, circleGuide, title, onCancel, onConfirm, maxSize })
 // (and mutates) the same wheelPrizes array reference.
 function getDefaultSettings() {
   return {
+    // v1.12.51 (Promotion & Loyalty Foundation): GROUP-SPECIFIC campaign storage, additive inside this same
+    // existing `settings` object per spec section 1 — travels for free through the existing Group Default
+    // (groupDefaults[session.name]), Backup/Restore, and boot-load plumbing, exactly like every other
+    // settings field here. Brand-new/never-upgraded groups default to [] — no group suddenly gets an active
+    // promotion after upgrading. See normSettings() for the normalization of a loaded/restored value.
+    promotions: [],
     // v1.11.32: default pairingMode changed auto -> manual (explicit request) — only affects BRAND NEW
     // quans/settings built from scratch here; existing saved settings (which already have a stored
     // pairingMode, "auto" or "manual") are untouched, and every `settings.pairingMode === "manual"` check
@@ -4227,7 +4412,47 @@ function normSettings(s) {
       },
       expiryWarningDays: Number(base.membership && base.membership.expiryWarningDays) > 0 ? Number(base.membership.expiryWarningDays) : 7,
     },
+    // v1.12.51 (Promotion & Loyalty Foundation, spec section 1): field-by-field normalization, same
+    // discipline as shuttleEco/courtCost/otherExpenses above — a missing field (any pre-v1.12.51 backup) ->
+    // [] (no existing group suddenly receives an active promotion after upgrading); a corrupt/partial entry
+    // is sanitized rather than allowed to crash a later render.
+    promotions: normalizePromotions(base.promotions),
   };
+}
+// v1.12.51 (Promotion & Loyalty Foundation): one opaque, stable campaignId per campaign; every other field is
+// defensively coerced so a hand-edited/corrupted backup can never produce NaN/crash downstream. Unknown
+// legacy shapes simply fall back to safe defaults — this is additive normalization, never destructive.
+function normalizePromotionCampaign(c) {
+  const base = c && typeof c === "object" ? c : {};
+  const trig = base.trigger && typeof base.trigger === "object" ? base.trigger : {};
+  const rew = base.reward && typeof base.reward === "object" ? base.reward : {};
+  const mr = Number(base.maxRewards);
+  return {
+    campaignId: base.campaignId || uid(),
+    name: String(base.name || "").trim(), // user-entered, never auto-translated/altered beyond trimming
+    enabled: base.enabled !== false, // default ON for a freshly-created campaign; explicit false only from Pause
+    archived: !!base.archived, // spec section 13: soft-delete only, once a campaign has prior awards
+    eligibility: ["all", "member", "guest"].includes(base.eligibility) ? base.eligibility : "all",
+    trigger: {
+      kind: trig.kind === "attendanceStreak" ? "attendanceStreak" : "attendanceCount", // future kinds (registrationOrder/registrationBefore) extend this union only — see promotionFutureTriggerKinds note below
+      target: Math.max(1, Math.round(Number(trig.target)) || 1),
+    },
+    repeatMode: base.repeatMode === "every_target" ? "every_target" : "once",
+    startDate: base.startDate || null, // ISO date string ("YYYY-MM-DD") or null = no lower bound
+    endDate: base.endDate || null,
+    reward: {
+      type: ["discount", "physical", "cash"].includes(rew.type) ? rew.type : "physical",
+      name: String(rew.name || "").trim(), // user-entered, never auto-translated
+      amount: Math.max(0, Number(rew.amount) || 0), // discount ฿ or cash ฿
+      displayValue: Math.max(0, Number(rew.displayValue) || 0), // physical reward, member-facing (spec section 9)
+      costAmount: Math.max(0, Number(rew.costAmount) || 0), // physical reward, organizer's real cost / Finance expense
+    },
+    maxRewards: mr > 0 ? Math.round(mr) : null, // null = unlimited
+    createdAt: base.createdAt || Date.now(),
+  };
+}
+function normalizePromotions(arr) {
+  return (Array.isArray(arr) ? arr : []).filter((c) => c && typeof c === "object").map(normalizePromotionCampaign);
 }
 // v1.11.34: migrates settings.wheelPrizes into the new reward model — decouples Probability from
 // Quantity/Player-count entirely (spec section 6: "จำนวน Player ≠ จำนวน Reward ≠ Probability"). Old saved
@@ -8975,10 +9200,14 @@ function AppInner() {
     }]);
   };
   // ===================== DISCOUNT CREDIT CRUD (v1.9.1) =====================
-  const addDiscountCredit = (playerId, amount, sourceSessionId, sourceRewardId) => {
+  // v1.12.51 (Promotion & Loyalty Foundation): optional 5th `extra` param carries Promotion provenance
+  // (sourceType/campaignId/qualifyingSessionId/milestone) straight into normDiscountCredit — every existing
+  // call site (the wheel's "next" prize, just below) omits it and is completely unaffected.
+  const addDiscountCredit = (playerId, amount, sourceSessionId, sourceRewardId, extra) => {
     const p = players.find((pl) => pl.id === playerId);
     setDiscountCredits((prev) => [...prev, normDiscountCredit({
       playerId, playerNameSnapshot: p?.name || "ผู้เล่น", amount, sourceSessionId, sourceRewardId, createdAt: Date.now(), status: "available",
+      ...(extra || {}),
     })]);
   };
   // applies one or more "available" credits onto the player's ordinary `discount` field (the same field
@@ -9010,6 +9239,11 @@ function AppInner() {
   const cancelDiscountCredit = (creditId, note) => {
     setDiscountCredits((prev) => prev.map((c) => (c.id === creditId && c.status === "available" ? { ...c, status: "cancelled", cancelledAt: Date.now(), note: note || c.note } : c)));
   };
+  // v1.12.51 (Promotion & Loyalty Foundation): the ONE bridge between the pure awardPromotionReward() domain
+  // function and this component's live state setters — kept here (not inlined in the UI) so PlayerProfileSheet
+  // only ever receives one bound callback, never raw setRewardHistory/addDiscountCredit access.
+  const onAwardPromotionReward = (campaign, playerId, milestone, qualifyingSessionId) =>
+    awardPromotionReward({ campaign, playerId, milestone, qualifyingSessionId, players, session, rewardHistory, setRewardHistory, addDiscountCredit });
   // v1.11.7 (Part D): the moment a player is first marked as coming this session (absent -> registered/
   // ready), default their attendance window to the FULL session (arrivalTime/departureTime = null, which
   // every consumer treats as sessionStartTime/sessionEndTime) — so the common case needs zero extra taps.
@@ -11548,7 +11782,7 @@ function AppInner() {
           </div>
         )}
 
-        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, t, tc, fmtDate, fmtDateTime }} />}
+        {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, rewardHistory, onAwardPromotionReward, t, tc, fmtDate, fmtDateTime }} />}
         {tab === "session" && <GameTab
           t={t}
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
@@ -11595,7 +11829,7 @@ function TabBtn({ active, onClick, label, children }) {
 }
 
 /* ============ MEMBERS ============ */
-function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, t, tc, fmtDate, fmtDateTime }) {
+function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, rewardHistory, onAwardPromotionReward, t, tc, fmtDate, fmtDateTime }) {
   // v1.11.7 (Part B): Group vs Tournament registration are now separate workflows/tabs on this same
   // page (no new bottom-nav item, no new main page) — this local tab choice is purely a view toggle, it
   // never touches p.status (Group) or activeTournament.registrations (Tournament).
@@ -12119,6 +12353,8 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           payEntranceFee={payEntranceFee}
           payMembership={payMembership}
           rankingConfigs={rankingConfigs}
+          rewardHistory={rewardHistory}
+          onAwardPromotionReward={onAwardPromotionReward}
           t={t}
           fmtDate={fmtDate}
           onEdit={() => { setEditPlayerId(profilePlayerId); setProfilePlayerId(null); }}
@@ -12514,7 +12750,7 @@ function MembershipSettingsSheet({ settings, setSettings, players, payEntranceFe
 // reuses the existing playerStats/tournamentStatsForPlayer functions rather than reinventing counting
 // logic, so the "no-result matches never distort Win Rate" rule already built into playerStats (decided
 // = win+loss, noScore/draw excluded) is inherited for free.
-function PlayerProfileSheet({ player: p, getP, players, history, current, sessionHistory, tournamentHistory, session, settings, otherIncome, payEntranceFee, payMembership, rankingConfigs, t, fmtDate, onEdit, onClose }) {
+function PlayerProfileSheet({ player: p, getP, players, history, current, sessionHistory, tournamentHistory, session, settings, otherIncome, payEntranceFee, payMembership, rankingConfigs, rewardHistory, onAwardPromotionReward, t, fmtDate, onEdit, onClose }) {
   const [showPhoto, setShowPhoto] = useState(false);
   const [showHistory, setShowHistory] = useState(false); // v1.11.8: "ดูประวัติการเล่น" drill-down sheet
   // all-time casual matches this player could appear in: today's completed matches (history + any
@@ -12589,6 +12825,24 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
     .filter((c) => c.config.enabled)
     .map((c) => ({ ...c, result: computeClubRanking(c.name, players || [p], sessionHistory, c.config) })),
     [rankingClubNames, rankingConfigs, players, sessionHistory, p]);
+  // v1.12.51 (Promotion & Loyalty Foundation, spec sections 13/15): one card per ACTIVE, ELIGIBLE campaign
+  // that has anything relevant to show for THIS player (never an inactive/irrelevant campaign — keeps the
+  // profile compact per spec section 15). All progress is derived fresh here, every render, from
+  // sessionHistory/rewardHistory — nothing here is a stored counter.
+  const promotionGroupName = session?.name || "ก๊วนไม่มีชื่อ";
+  const promotionCards = useMemo(() => {
+    const campaigns = (settings?.promotions || []).filter((c) => c.enabled !== false && !c.archived && promotionPlayerEligible(p, c));
+    return campaigns.map((c) => {
+      const target = Math.max(1, Number(c.trigger.target) || 1);
+      const { current, milestones } = promotionProgressFor(p.id, sessionHistory, promotionGroupName, c);
+      const awardedMilestones = milestones.filter((m) => promotionMilestoneAwarded(rewardHistory, c.campaignId, p.id, m.milestone));
+      const pendingMilestone = milestones.find((m) => !promotionMilestoneAwarded(rewardHistory, c.campaignId, p.id, m.milestone)) || null;
+      const capReached = c.maxRewards != null && promotionCampaignAwardCount(rewardHistory, c.campaignId) >= c.maxRewards;
+      const lastAwardedMilestone = awardedMilestones.reduce((mx, m) => Math.max(mx, m.milestone), 0);
+      const progressInCycle = c.repeatMode === "every_target" ? Math.max(0, current - lastAwardedMilestone) : Math.min(current, target);
+      return { campaign: c, current, target, pendingMilestone, awardedCount: awardedMilestones.length, capReached, progressInCycle };
+    }).filter((card) => card.current > 0 || card.pendingMilestone || card.awardedCount > 0);
+  }, [settings, sessionHistory, rewardHistory, p, promotionGroupName]);
   return (
     <Overlay onClose={onClose}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 18 }}>
@@ -12608,6 +12862,51 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
         </div>
         <button onClick={onEdit} title={t("player.edit")} style={{ flexShrink: 0, padding: "7px 10px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 12, fontWeight: 700 }}>✎ {t("common.edit")}</button>
       </div>
+
+      {promotionCards.length > 0 && (
+        <>
+          <SectionHead icon={<Gift size={15} />} title={t ? t("promotion.title") : "โปรโมชั่นและสิทธิพิเศษ"} />
+          <div style={{ marginBottom: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+            {promotionCards.map(({ campaign: c, target, pendingMilestone, awardedCount, capReached, progressInCycle }) => {
+              const rewardLabel = (c.reward && c.reward.name) || c.name;
+              const ready = !!pendingMilestone && !capReached;
+              const blockedByCap = !!pendingMilestone && capReached;
+              const alreadyDoneForNow = !pendingMilestone && c.repeatMode === "once" && awardedCount > 0;
+              return (
+                <div key={c.campaignId} style={{ background: ready ? "#fff8e1" : T.surface2, border: `1px solid ${ready ? "#f0c955" : T.border}`, borderRadius: 12, padding: 12 }}>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 4 }}>
+                    {c.trigger.kind === "attendanceStreak" ? "🔥 " : "📅 "}{c.name}
+                  </div>
+                  {ready && (
+                    <>
+                      <div style={{ fontSize: 12.5, fontWeight: 800, color: "#92650a", marginBottom: 8 }}>
+                        🎉 {t ? t("promotion.rewardReady") : "พร้อมรับรางวัล"} — {rewardLabel}
+                      </div>
+                      <button
+                        onClick={() => onAwardPromotionReward && onAwardPromotionReward(c, p.id, pendingMilestone.milestone, pendingMilestone.qualifyingSessionId)}
+                        style={{ width: "100%", padding: "9px 0", borderRadius: 10, background: T.green, border: "none", color: "#fff", fontSize: 12.5, fontWeight: 800 }}
+                      >
+                        {t ? t("promotion.awardAction") : "มอบรางวัล"}
+                      </button>
+                    </>
+                  )}
+                  {blockedByCap && (
+                    <div style={{ fontSize: 12, fontWeight: 700, color: T.muted }}>⛔ {t ? t("promotion.fullyRedeemed") : "สิทธิ์ครบแล้ว"}</div>
+                  )}
+                  {alreadyDoneForNow && (
+                    <div style={{ fontSize: 12, fontWeight: 700, color: T.green }}>✅ {t ? t("promotion.alreadyAwarded") : "มอบรางวัลแล้ว"}</div>
+                  )}
+                  {!ready && !blockedByCap && !alreadyDoneForNow && (
+                    <div style={{ fontSize: 12, color: T.muted }}>
+                      {progressInCycle}/{target} {t ? t("promotion.sessionsUnit") : "ครั้ง"} · {t ? t("promotion.remainingPrefix") : "อีก"} {Math.max(0, target - progressInCycle)} {t ? t("promotion.sessionsUnit") : "ครั้ง"} {t ? t("promotion.remainingRewardPrefix") : "รับ"} {rewardLabel}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
 
       {membershipTrackingOn && (
         <>
@@ -21219,6 +21518,7 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
   const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false);
   const [rankingSettingsClub, setRankingSettingsClub] = useState(null);
   const [rewardOpen, setRewardOpen] = useState(false);
+  const [promotionOpen, setPromotionOpen] = useState(false); // v1.12.51 (Promotion & Loyalty Foundation)
   const rankingClubs = useMemo(() => {
     const seen = new Set(), out = [];
     (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push(s.name); } });
@@ -21263,6 +21563,17 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
 
       <AdvRow icon="🎁" title={t ? t("reward.title") : "รางวัล"} sub={t ? t("reward.advancedRowSub") : "วงล้อรางวัลให้ผู้เล่นหลังจบก๊วน"} badge={settings.wheelEnabled !== false} onClick={() => setRewardOpen(true)} />
 
+      {/* v1.12.51 (Promotion & Loyalty Foundation, spec section 13): new Advanced Feature entry, same AdvRow
+          pattern as Ranking/Tournament/รางวัล above — opens campaign CRUD; OFF (no campaigns, or every
+          campaign paused) has zero effect on existing app behavior, per spec. */}
+      <AdvRow
+        icon="🎯"
+        title={t ? t("promotion.title") : "โปรโมชั่นและสิทธิพิเศษ"}
+        sub={t ? t("promotion.advancedRowSub") : "รางวัลสะสม/ต่อเนื่องจากประวัติการเล่นจริง"}
+        badge={(settings.promotions || []).some((c) => c.enabled !== false && !c.archived)}
+        onClick={() => setPromotionOpen(true)}
+      />
+
       <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>{t ? t("common.close") : "ปิด"}</button>
 
       {rankingClubPickerOpen && (
@@ -21285,6 +21596,203 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
         />
       )}
       {rewardOpen && <RewardSettingsSheet settings={settings} setSettings={setSettings} onClose={() => setRewardOpen(false)} />}
+      {promotionOpen && <PromotionSettingsSheet settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} onClose={() => setPromotionOpen(false)} t={t} />}
+    </Overlay>
+  );
+}
+
+// ===================== PROMOTION & LOYALTY SETTINGS UI (v1.12.51) =====================
+// Spec section 13: campaign list (name/eligibility/reward summary/cost/active state) + Create/Edit/
+// Pause-Resume/Delete-or-archive. Reuses the exact Overlay/Label/btnPrimary/btnSecondary/T primitives every
+// other settings sheet in this file already uses — no new visual system.
+function promotionEligibilityLabel(eligibility, t) {
+  if (eligibility === "member") return t ? t("promotion.eligibility.member") : "สมาชิก";
+  if (eligibility === "guest") return t ? t("promotion.eligibility.guest") : "รับเชิญ";
+  return t ? t("promotion.eligibility.all") : "ทุกคน";
+}
+function promotionRewardSummary(campaign, t) {
+  const r = campaign.reward || {};
+  if (r.type === "discount") return `${t ? t("promotion.reward.discount") : "ส่วนลด"} ฿${Math.round(r.amount || 0)}`;
+  if (r.type === "cash") return `${t ? t("promotion.reward.cash") : "เงินสด"} ฿${Math.round(r.amount || 0)}`;
+  return `${r.name || (t ? t("promotion.reward.physical") : "ของรางวัล")} (฿${Math.round(r.displayValue || 0)})`;
+}
+function PromotionSettingsSheet({ settings, setSettings, sessionHistory, onClose, t }) {
+  const [editingId, setEditingId] = useState(null); // campaignId being edited, "__new__" for create, or null
+  const campaigns = settings.promotions || [];
+  const visibleCampaigns = campaigns.filter((c) => !c.archived); // spec 13: archived campaigns are never shown in the normal list, only kept for provenance
+  const editingCampaign = editingId && editingId !== "__new__" ? campaigns.find((c) => c.campaignId === editingId) : null;
+  const saveCampaign = (patch) => {
+    setSettings((s) => {
+      const list = s.promotions || [];
+      const exists = list.some((c) => c.campaignId === patch.campaignId);
+      return { ...s, promotions: exists ? list.map((c) => (c.campaignId === patch.campaignId ? normalizePromotionCampaign(patch) : c)) : [...list, normalizePromotionCampaign(patch)] };
+    });
+    setEditingId(null);
+  };
+  const togglePause = (campaignId) => setSettings((s) => ({ ...s, promotions: (s.promotions || []).map((c) => (c.campaignId === campaignId ? { ...c, enabled: !c.enabled } : c)) }));
+  // spec section 13: "If deleting a campaign with prior awards would destroy provenance, do not hard-delete
+  // it. Prefer inactive/archive semantics." awardedRewardIds is NOT tracked here directly (that would need
+  // rewardHistory, not threaded into this settings-only sheet) — the safe, conservative choice is to always
+  // soft-delete (archive), never hard-remove, so provenance can never be destroyed by this screen. A campaign
+  // that was truly never used still simply disappears from the visible list either way.
+  const archiveCampaign = (campaignId) => setSettings((s) => ({ ...s, promotions: (s.promotions || []).map((c) => (c.campaignId === campaignId ? { ...c, enabled: false, archived: true } : c)) }));
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>🎯 {t ? t("promotion.title") : "โปรโมชั่นและสิทธิพิเศษ"}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>{t ? t("promotion.subtitle") : "รางวัลตามจำนวนครั้ง/ความต่อเนื่องของการมาเล่นจริง"}</div>
+
+      {visibleCampaigns.length === 0 && (
+        <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 14 }}>{t ? t("promotion.empty") : "ยังไม่มีโปรโมชั่น"}</div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
+        {visibleCampaigns.map((c) => (
+          <div key={c.campaignId} style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: 12 }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 800 }}>{c.trigger.kind === "attendanceStreak" ? "🔥" : "📅"} {c.name || (t ? t("promotion.untitled") : "โปรโมชั่นไม่มีชื่อ")}</div>
+                <div style={{ fontSize: 11.5, color: T.muted, marginTop: 2 }}>
+                  {promotionEligibilityLabel(c.eligibility, t)} · {promotionRewardSummary(c, t)} · {c.maxRewards != null ? `${t ? t("promotion.maxRewardsLabel") : "จำกัด"} ${c.maxRewards}` : (t ? t("promotion.unlimited") : "ไม่จำกัด")}
+                </div>
+              </div>
+              <span style={{ fontSize: 10.5, fontWeight: 800, color: c.enabled ? T.green : T.muted, background: c.enabled ? "#e2f5ec" : T.surface2, border: `1px solid ${c.enabled ? T.green : T.border}`, borderRadius: 20, padding: "3px 9px", flexShrink: 0 }}>
+                {c.enabled ? (t ? t("promotion.active") : "ใช้งานอยู่") : (t ? t("common.close") : "หยุดชั่วคราว")}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+              <button onClick={() => setEditingId(c.campaignId)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 700, color: T.text }}>{t ? t("common.edit") : "แก้ไข"}</button>
+              <button onClick={() => togglePause(c.campaignId)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 11.5, fontWeight: 700, color: T.text }}>{c.enabled ? (t ? t("promotion.pause") : "หยุดชั่วคราว") : (t ? t("promotion.resume") : "เปิดใช้งาน")}</button>
+              <button onClick={() => archiveCampaign(c.campaignId)} style={{ flex: 1, padding: "7px 0", borderRadius: 9, background: "#fdeceb", border: "1px solid #f3b5ae", fontSize: 11.5, fontWeight: 700, color: T.accent }}>{t ? t("common.delete") : "ลบ"}</button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <button onClick={() => setEditingId("__new__")} style={{ ...btnPrimary, marginBottom: 8 }}>+ {t ? t("promotion.createAction") : "สร้างโปรโมชั่น"}</button>
+      <button onClick={onClose} style={btnSecondary}>{t ? t("common.close") : "ปิด"}</button>
+
+      {editingId && (
+        <PromotionCampaignEditor
+          campaign={editingCampaign}
+          onSave={saveCampaign}
+          onClose={() => setEditingId(null)}
+          t={t}
+        />
+      )}
+    </Overlay>
+  );
+}
+// Spec section 14 — compact create/edit fields. A brand-new campaign starts from normalizePromotionCampaign's
+// own defaults (passed no input), so every field already has a safe value before the organizer touches
+// anything.
+function PromotionCampaignEditor({ campaign, onSave, onClose, t }) {
+  const base = useMemo(() => normalizePromotionCampaign(campaign || {}), [campaign]);
+  const [name, setName] = useState(base.name);
+  const [eligibility, setEligibility] = useState(base.eligibility);
+  const [kind, setKind] = useState(base.trigger.kind);
+  const [target, setTarget] = useState(String(base.trigger.target));
+  const [repeatMode, setRepeatMode] = useState(base.repeatMode);
+  const [startDate, setStartDate] = useState(base.startDate || "");
+  const [endDate, setEndDate] = useState(base.endDate || "");
+  const [rewardType, setRewardType] = useState(base.reward.type);
+  const [rewardName, setRewardName] = useState(base.reward.name);
+  const [amount, setAmount] = useState(String(base.reward.amount || ""));
+  const [displayValue, setDisplayValue] = useState(String(base.reward.displayValue || ""));
+  const [costAmount, setCostAmount] = useState(String(base.reward.costAmount || ""));
+  const [maxRewards, setMaxRewards] = useState(base.maxRewards != null ? String(base.maxRewards) : "");
+  const [unlimited, setUnlimited] = useState(base.maxRewards == null);
+  const inputStyle = { width: "100%", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 10, boxSizing: "border-box" };
+  const segStyle = (active) => ({ flex: 1, padding: "8px 0", borderRadius: 9, border: `1.5px solid ${active ? T.green : T.border}`, background: active ? "#e2f5ec" : T.surface, color: active ? T.green : T.text, fontSize: 12, fontWeight: 800 });
+  const submit = () => {
+    if (!name.trim()) return;
+    onSave({
+      ...base,
+      name: name.trim(), eligibility, trigger: { kind, target: Number(target) || 1 }, repeatMode,
+      startDate: startDate || null, endDate: endDate || null,
+      reward: { type: rewardType, name: rewardName.trim(), amount: Number(amount) || 0, displayValue: Number(displayValue) || 0, costAmount: Number(costAmount) || 0 },
+      maxRewards: unlimited ? null : (Number(maxRewards) || null),
+    });
+  };
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 14 }}>{campaign ? (t ? t("common.edit") : "แก้ไข") : (t ? t("promotion.createAction") : "สร้างโปรโมชั่น")}</div>
+
+      <Label>{t ? t("promotion.field.name") : "ชื่อโปรโมชั่น"}</Label>
+      <input value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} placeholder={t ? t("promotion.field.namePlaceholder") : "เช่น เล่นต่อเนื่อง 10 ครั้ง"} />
+
+      <Label>{t ? t("promotion.field.eligibility") : "ผู้เล่นที่เข้าร่วม"}</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {["all", "member", "guest"].map((v) => (
+          <button key={v} onClick={() => setEligibility(v)} style={segStyle(eligibility === v)}>{promotionEligibilityLabel(v, t)}</button>
+        ))}
+      </div>
+
+      <Label>{t ? t("promotion.field.condition") : "เงื่อนไข"}</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <button onClick={() => setKind("attendanceCount")} style={segStyle(kind === "attendanceCount")}>{t ? t("promotion.condition.count") : "จำนวนครั้งที่มาเล่น"}</button>
+        <button onClick={() => setKind("attendanceStreak")} style={segStyle(kind === "attendanceStreak")}>{t ? t("promotion.condition.streak") : "มาต่อเนื่อง"}</button>
+      </div>
+
+      <Label>{t ? t("promotion.field.target") : "จำนวนครั้งเป้าหมาย"}</Label>
+      <input type="number" min="1" value={target} onChange={(e) => setTarget(e.target.value)} style={inputStyle} />
+
+      <Label>{t ? t("promotion.field.repeat") : "การให้ซ้ำ"}</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <button onClick={() => setRepeatMode("once")} style={segStyle(repeatMode === "once")}>{t ? t("promotion.repeat.once") : "ครั้งเดียว"}</button>
+        <button onClick={() => setRepeatMode("every_target")} style={segStyle(repeatMode === "every_target")}>{t ? t("promotion.repeat.every", { target: target || "X" }) : `ทุกๆ ${target || "X"} ครั้ง`}</button>
+      </div>
+
+      <Label>{t ? t("promotion.field.period") : "ช่วงเวลา"}</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 3 }}>{t ? t("promotion.field.startDate") : "เริ่ม (ไม่บังคับ)"}</div>
+          <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 3 }}>{t ? t("promotion.field.endDate") : "สิ้นสุด (ไม่บังคับ)"}</div>
+          <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+        </div>
+      </div>
+
+      <Label>{t ? t("promotion.field.rewardType") : "ประเภทรางวัล"}</Label>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        <button onClick={() => setRewardType("physical")} style={segStyle(rewardType === "physical")}>{t ? t("promotion.reward.physical") : "ของรางวัล"}</button>
+        <button onClick={() => setRewardType("discount")} style={segStyle(rewardType === "discount")}>{t ? t("promotion.reward.discount") : "ส่วนลด"}</button>
+        <button onClick={() => setRewardType("cash")} style={segStyle(rewardType === "cash")}>{t ? t("promotion.reward.cash") : "เงินสด"}</button>
+      </div>
+
+      <Label>{t ? t("promotion.field.rewardName") : "ชื่อรางวัล"}</Label>
+      <input value={rewardName} onChange={(e) => setRewardName(e.target.value)} style={inputStyle} placeholder={t ? t("promotion.field.rewardNamePlaceholder") : "เช่น Grip 1 ชิ้น"} />
+
+      {rewardType !== "physical" && (
+        <>
+          <Label>{t ? t("promotion.field.amount") : "จำนวนเงิน (฿)"}</Label>
+          <input type="number" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} style={inputStyle} />
+        </>
+      )}
+      {rewardType === "physical" && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 3 }}>{t ? t("promotion.field.displayValue") : "มูลค่าที่แสดง (฿)"}</div>
+            <input type="number" min="0" value={displayValue} onChange={(e) => setDisplayValue(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 3 }}>{t ? t("promotion.field.costAmount") : "ต้นทุนจริง (฿)"}</div>
+            <input type="number" min="0" value={costAmount} onChange={(e) => setCostAmount(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+          </div>
+        </div>
+      )}
+
+      <Label>{t ? t("promotion.field.maxRewards") : "จำนวนสิทธิ์สูงสุด"}</Label>
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 14 }}>
+        <button onClick={() => setUnlimited(true)} style={segStyle(unlimited)}>{t ? t("promotion.unlimited") : "ไม่จำกัด"}</button>
+        <button onClick={() => setUnlimited(false)} style={segStyle(!unlimited)}>{t ? t("promotion.maxRewardsLabel") : "จำกัด"}</button>
+        {!unlimited && <input type="number" min="1" value={maxRewards} onChange={(e) => setMaxRewards(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: 80, flex: "none" }} />}
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onClose} style={btnSecondary}>{t ? t("common.cancel") : "ยกเลิก"}</button>
+        <button onClick={submit} style={btnPrimary}>{t ? t("common.save") : "บันทึก"}</button>
+      </div>
     </Overlay>
   );
 }
