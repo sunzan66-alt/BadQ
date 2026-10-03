@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.1";
+const APP_VERSION = "1.14.2";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -7707,8 +7707,10 @@ function useTutorialEngine(tab, setTab) {
       });
       return curId;
     });
-    // closing (once the last step's Finish is tapped) is handled by the caller checking isLast — see
-    // TutorialOverlay's onNext wiring in AppInner, which calls closeGuide() itself after markCompleted.
+    // Closing (once the last step's Finish is tapped) is handled by the CALLER, not here — see AppInner's
+    // onNext wiring passed into TutorialOverlay, which checks isLast itself and calls closeGuide() right
+    // after this next() call returns. (v1.14.2: that wiring was previously missing — this comment used to
+    // claim it existed when it didn't; see that call site's own comment for the full P0 fix history.)
   }, [markCompleted]);
 
   const back = useCallback(() => { setStepIndex((i) => Math.max(0, i - 1)); }, []);
@@ -12760,7 +12762,22 @@ function AppInner() {
           guide={tutorialEngine.activeGuide}
           step={tutorialEngine.activeStep}
           stepIndex={tutorialEngine.stepIndex}
-          onNext={tutorialEngine.next}
+          onNext={() => {
+            // v1.14.2 (P0 Tutorial-completion fix): useTutorialEngine.next()'s own comment claimed "closing
+            // (once the last step's Finish is tapped) is handled by the caller checking isLast... which
+            // calls closeGuide() itself after markCompleted" — but this call site simply passed
+            // tutorialEngine.next directly, with no such wrapper, so that claim was never actually true.
+            // Tapping Finish on ANY guide's last step (every guide, not just Quick Start) called next()
+            // (which only marks the guide completed internally) and nothing ever cleared activeGuideId, so
+            // the full-screen overlay/spotlight stayed on screen forever — confirmed exactly matching the
+            // Owner's report (pressed "เริ่มใช้งาน" on Quick Start's step 8/8, overlay never closed). This
+            // is the minimal fix matching the pre-existing comment's own stated intent: compute isLast here
+            // (the same way TutorialOverlay itself already does, for its own Finish-vs-Next label), call
+            // next() first (still marks completed exactly as before), then explicitly close the guide.
+            const isLastStep = !!(tutorialEngine.activeGuide && tutorialEngine.stepIndex + 1 >= tutorialEngine.activeGuide.steps.length);
+            tutorialEngine.next();
+            if (isLastStep) tutorialEngine.closeGuide();
+          }}
           onBack={tutorialEngine.back}
           onSkip={tutorialEngine.skip}
           t={t}
