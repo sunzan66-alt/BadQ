@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.14.0";
+      var CURRENT_VERSION = "1.14.1";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -5128,7 +5128,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
     timeZoneOffsetName: timeZoneOffsetName,
   });
 })();
-const APP_VERSION="1.14.0";const LEVELS=["R","BG1","BG2","BG3","S-","S","N-","N","P-","P","C"];const WEIGHT={R:1,BG1:2,BG2:3,BG3:4,"S-":5,S:6,"N-":7,N:8,"P-":9,P:10,C:11};const LEVEL_COLOR={R:"#64748b",BG1:"#0284c7",BG2:"#0891b2",BG3:"#0d9488","S-":"#16a34a",S:"#65a30d","N-":"#ca8a04",N:"#d97706","P-":"#ea580c",P:"#dc2626",C:"#b91c1c"};/* ============ LEVEL PRESET SYSTEM ============
+const APP_VERSION="1.14.1";const LEVELS=["R","BG1","BG2","BG3","S-","S","N-","N","P-","P","C"];const WEIGHT={R:1,BG1:2,BG2:3,BG3:4,"S-":5,S:6,"N-":7,N:8,"P-":9,P:10,C:11};const LEVEL_COLOR={R:"#64748b",BG1:"#0284c7",BG2:"#0891b2",BG3:"#0d9488","S-":"#16a34a",S:"#65a30d","N-":"#ca8a04",N:"#d97706","P-":"#ea580c",P:"#dc2626",C:"#b91c1c"};/* ============ LEVEL PRESET SYSTEM ============
    Canonical source of truth for matchmaking is the numeric skillIndex (1–11), stored per player.
    A "preset" only controls the DISPLAY label shown for each skillIndex — swapping presets never
    changes skillIndex, so matchmaking / fairness / queue priority are unaffected. */const LEVEL_COLORS_BY_INDEX=["#64748b","#0284c7","#0891b2","#0d9488","#16a34a","#65a30d","#ca8a04","#d97706","#ea580c","#dc2626","#b91c1c"];function levelColor(skillIndex){return LEVEL_COLORS_BY_INDEX[Math.max(1,Math.min(11,skillIndex||1))-1];}const SKILL_DESC={1:"เริ่มต้น — เพิ่งเริ่มจับไม้ ยังไม่คุ้นการตีโต้",2:"เริ่มตี — เริ่มตีโต้ได้บ้าง ยังไม่นิ่ง",3:"พื้นฐาน — ตีโต้ได้พอสมควร เริ่มคุมลูก และเล่นเกมได้ในระดับพื้นฐาน",4:"เล่นเป็นเกม — เริ่มเข้าใจแทคติก เล่นเป็นเกมได้",5:"กลางล่าง — ตีได้หลากหลายลูก คุมเกมได้ระดับหนึ่ง",6:"กลาง — เล่นได้คล่อง มีจังหวะ คุมเกมได้ดี",7:"กลางสูง — ตีแม่นขึ้น มีกลยุทธ์ชัดเจน",8:"มือดี — ควบคุมเกมได้ดี ตีได้หลากหลายจังหวะ",9:"มือแข็ง — ฝีมือสูง แข่งขันได้ในระดับก๊วน",10:"แข่งขัน — ระดับแข่งขันจริงจัง",11:"ระดับสูง — ฝีมือสูงสุด เล่นแข่งขันระดับสูง"};// v1.12.7 (fix 2): reordered so "Bad Web / กลาง" is first — it is now the true default preset (see
@@ -5148,7 +5148,29 @@ function displayLevelFor(skillIndex,settings){const idx=Math.max(1,Math.min(11,s
 // what happens when the field is truly absent.
 const presetId=settings&&settings.levelPresetId||"badweb-central";if(presetId==="custom"){const found=(settings&&settings.customLevels||[]).find(l=>l.skillIndex===idx);return found?found.name:"Skill "+idx;}const preset=LEVEL_PRESETS.find(p=>p.id===presetId)||LEVEL_PRESETS[0];return preset.levels[idx-1]||"Skill "+idx;}// { skillIndex, label } options for level <select> dropdowns, reflecting the active preset
 function activeLevelOptions(settings,t){const presetId=settings&&settings.levelPresetId||"badweb-central";// v1.12.7 (fix 2): see displayLevelFor's comment above
-if(presetId==="custom"){return(settings&&settings.customLevels||[]).slice().sort((a,b)=>a.skillIndex-b.skillIndex).map(l=>({skillIndex:l.skillIndex,label:l.name}));}const preset=LEVEL_PRESETS.find(p=>p.id===presetId)||LEVEL_PRESETS[0];return preset.levels.map((label,i)=>({skillIndex:i+1,label:presetLevelDisplayLabel(preset.id,label,t)}));}const T={bg:"#f3f6f4",surface:"#ffffff",surface2:"#eef2f0",border:"#dde5e1",text:"#16241d",muted:"#6b7d74",accent:"#ef5a44",green:"#12986a",blue:"#2563eb",amber:"#d97706"};// v1.11.40: subtle Team A/B background tint for player cards (see TeamSide) — explicit request so
+if(presetId==="custom"){return(settings&&settings.customLevels||[]).slice().sort((a,b)=>a.skillIndex-b.skillIndex).map(l=>({skillIndex:l.skillIndex,label:l.name}));}const preset=LEVEL_PRESETS.find(p=>p.id===presetId)||LEVEL_PRESETS[0];return preset.levels.map((label,i)=>({skillIndex:i+1,label:presetLevelDisplayLabel(preset.id,label,t)}));}const T={bg:"#f3f6f4",surface:"#ffffff",surface2:"#eef2f0",border:"#dde5e1",text:"#16241d",muted:"#6b7d74",accent:"#ef5a44",green:"#12986a",blue:"#2563eb",amber:"#d97706"};// v1.14.0 (Post-Tutorial Core Fix Pass — P0 app-boot crash fix): MOVED up from much further down in this
+// file (originally right after LevelPresetEditor, ~line 23780) to right here, immediately after T. This is
+// a pure relocation — neither value changed by a single character — forced by a real, production-breaking
+// bug confirmed via actual headless-Chromium execution (not caught by any prior Babel/vm-based static or
+// logic-level test, since those never execute the whole module top-to-bottom the way a real browser does):
+// the v1.12.55 Tutorial section declares `const sandboxBtn = { ...btnPrimary, ... }` / `sandboxBtnSecondary`
+// as TOP-LEVEL statements (not inside any function/component — they run immediately as the script
+// evaluates), textually BEFORE btnPrimary/btnSecondary's own declaration later in the same file. That is a
+// textbook temporal-dead-zone violation: `ReferenceError: Cannot access 'btnPrimary' before initialization`
+// was thrown the instant the compiled script ran, which aborted the ENTIRE script before
+// ReactDOM.createRoot(...).render(...) at the very end ever executed — so the app never got past the
+// static "BadQ Loading..." boot placeholder in div#boot, in EVERY real browser, on EVERY load, since
+// v1.12.55 shipped. Confirmed via headless Chromium (Playwright) that this same crash reproduces
+// byte-for-byte on the original v1.12.55 build, so this is a pre-existing regression from that release,
+// not something introduced by this version's two intended fixes — but it makes the entire app unusable, so
+// it is fixed here rather than left unaddressed. Moving these two declarations earlier (their only
+// dependency, T, is already defined above) makes them available before ANY later top-level statement in
+// the file can reference them, which is the simplest possible fix with zero behavior change anywhere else
+// that already uses btnPrimary/btnSecondary (module-scope const is accessible from anywhere in the module
+// once initialized, regardless of lexical declaration order relative to its *usage* — only ANOTHER
+// top-level, immediately-evaluated statement reading it before this line would still break, and there is
+// no such statement above this point).
+const btnPrimary={flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,padding:"11px 0",borderRadius:11,background:T.green,border:"none",color:"#fff",fontSize:13.5,fontWeight:800};const btnSecondary={flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,padding:"11px 0",borderRadius:11,background:T.surface2,border:`1px solid ${T.border}`,color:T.text,fontSize:13.5,fontWeight:700};// v1.11.40: subtle Team A/B background tint for player cards (see TeamSide) — explicit request so
 // teammates stay visually identifiable even after scrolling past the ทีม A/ทีม B table header on mobile.
 // Deliberately faint (~5-10% tint over T.surface2, the flat color these replace) so it never competes with
 // the existing skill-level colors, handedness colors, or the "selected" highlight (#e2f5ec) — those are
@@ -11513,7 +11535,9 @@ const fontSize=label.length<=6?11:label.length<=10?9.5:8.2;return/*#__PURE__*/Re
 // setting (which persists + triggers recalculation through the existing setSettings pipeline), and let the
 // field re-sync to whatever the caller's own clamp settled on.
 const[draft,setDraft]=useState(()=>value==null?"":String(value));const focusedRef=useRef(false);useEffect(()=>{if(!focusedRef.current)setDraft(value==null?"":String(value));},[value]);const commit=()=>{const trimmed=draft.trim();const n=Number(trimmed);if(trimmed===""||!Number.isFinite(n)){setDraft(value==null?"":String(value));return;}// blank/invalid reverts to last committed value, never forces 0/NaN
-onChange(n);};return/*#__PURE__*/React.createElement("div",{style:{flex:1}},/*#__PURE__*/React.createElement("div",{style:{fontSize:11.5,color:T.muted,marginBottom:5}},label),/*#__PURE__*/React.createElement("input",{type:"number",value:draft,onChange:e=>setDraft(e.target.value),onFocus:e=>{focusedRef.current=true;e.target.select();},onBlur:()=>{focusedRef.current=false;commit();},onKeyDown:e=>{if(e.key==="Enter")e.target.blur();},style:{width:"100%",padding:"11px 12px",borderRadius:11,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:15,fontWeight:700,outline:"none",boxSizing:"border-box"}}));}const btnPrimary={flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,padding:"11px 0",borderRadius:11,background:T.green,border:"none",color:"#fff",fontSize:13.5,fontWeight:800};const btnSecondary={flex:1,display:"flex",alignItems:"center",justifyContent:"center",gap:5,padding:"11px 0",borderRadius:11,background:T.surface2,border:`1px solid ${T.border}`,color:T.text,fontSize:13.5,fontWeight:700};
+onChange(n);};return/*#__PURE__*/React.createElement("div",{style:{flex:1}},/*#__PURE__*/React.createElement("div",{style:{fontSize:11.5,color:T.muted,marginBottom:5}},label),/*#__PURE__*/React.createElement("input",{type:"number",value:draft,onChange:e=>setDraft(e.target.value),onFocus:e=>{focusedRef.current=true;e.target.select();},onBlur:()=>{focusedRef.current=false;commit();},onKeyDown:e=>{if(e.key==="Enter")e.target.blur();},style:{width:"100%",padding:"11px 12px",borderRadius:11,background:T.surface,border:`1px solid ${T.border}`,color:T.text,fontSize:15,fontWeight:700,outline:"none",boxSizing:"border-box"}}));}// v1.14.0: btnPrimary/btnSecondary MOVED to right after the T definition near the top of this file — see
+// that location's comment for the full P0 app-boot-crash reason. Left here only as a marker so a future
+// diff doesn't look like these two constants vanished.
 ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
 </script>
 </body>

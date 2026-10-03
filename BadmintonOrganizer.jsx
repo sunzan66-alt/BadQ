@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.0";
+const APP_VERSION = "1.14.1";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -103,6 +103,30 @@ const T = {
   bg: "#f3f6f4", surface: "#ffffff", surface2: "#eef2f0", border: "#dde5e1",
   text: "#16241d", muted: "#6b7d74", accent: "#ef5a44", green: "#12986a", blue: "#2563eb", amber: "#d97706",
 };
+// v1.14.0 (Post-Tutorial Core Fix Pass — P0 app-boot crash fix): MOVED up from much further down in this
+// file (originally right after LevelPresetEditor, ~line 23780) to right here, immediately after T. This is
+// a pure relocation — neither value changed by a single character — forced by a real, production-breaking
+// bug confirmed via actual headless-Chromium execution (not caught by any prior Babel/vm-based static or
+// logic-level test, since those never execute the whole module top-to-bottom the way a real browser does):
+// the v1.12.55 Tutorial section declares `const sandboxBtn = { ...btnPrimary, ... }` / `sandboxBtnSecondary`
+// as TOP-LEVEL statements (not inside any function/component — they run immediately as the script
+// evaluates), textually BEFORE btnPrimary/btnSecondary's own declaration later in the same file. That is a
+// textbook temporal-dead-zone violation: `ReferenceError: Cannot access 'btnPrimary' before initialization`
+// was thrown the instant the compiled script ran, which aborted the ENTIRE script before
+// ReactDOM.createRoot(...).render(...) at the very end ever executed — so the app never got past the
+// static "BadQ Loading..." boot placeholder in div#boot, in EVERY real browser, on EVERY load, since
+// v1.12.55 shipped. Confirmed via headless Chromium (Playwright) that this same crash reproduces
+// byte-for-byte on the original v1.12.55 build, so this is a pre-existing regression from that release,
+// not something introduced by this version's two intended fixes — but it makes the entire app unusable, so
+// it is fixed here rather than left unaddressed. Moving these two declarations earlier (their only
+// dependency, T, is already defined above) makes them available before ANY later top-level statement in
+// the file can reference them, which is the simplest possible fix with zero behavior change anywhere else
+// that already uses btnPrimary/btnSecondary (module-scope const is accessible from anywhere in the module
+// once initialized, regardless of lexical declaration order relative to its *usage* — only ANOTHER
+// top-level, immediately-evaluated statement reading it before this line would still break, and there is
+// no such statement above this point).
+const btnPrimary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 800 };
+const btnSecondary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700 };
 // v1.11.40: subtle Team A/B background tint for player cards (see TeamSide) — explicit request so
 // teammates stay visually identifiable even after scrolling past the ทีม A/ทีม B table header on mobile.
 // Deliberately faint (~5-10% tint over T.surface2, the flat color these replace) so it never competes with
@@ -23777,5 +23801,6 @@ function NumField({ label, value, onChange }) {
     </div>
   );
 }
-const btnPrimary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13.5, fontWeight: 800 };
-const btnSecondary = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700 };
+// v1.14.0: btnPrimary/btnSecondary MOVED to right after the T definition near the top of this file — see
+// that location's comment for the full P0 app-boot-crash reason. Left here only as a marker so a future
+// diff doesn't look like these two constants vanished.
