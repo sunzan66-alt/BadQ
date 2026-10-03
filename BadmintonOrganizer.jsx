@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.51";
+const APP_VERSION = "1.12.53";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -366,6 +366,28 @@ function useBadQI18n() {
     return { locale, timeZone, t: (key) => key, tc: (key) => key, currency: (v) => String(v), number: (v) => String(v) };
   }, [locale, timeZone]);
   return { locale, setLocale, timeZone, setTimeZone, i18n };
+}
+// v1.12.53 (Tutorial & Guide): tutorial UI state is a pure, local UI preference — same principle as
+// BADQ_UI_LOCALE_KEY/BADQ_UI_TIME_ZONE_KEY above. It lives in its OWN localStorage key, completely
+// outside `settings`/bg-v11/the Critical Journal/Backup-Restore payload, so it can never be journaled,
+// backed up, restored, or synced as business data. It only ever remembers: (a) whether the one-time
+// "Start Quick Start?" first-use offer has already been shown (so it is never shown again, whether the
+// organizer started it, skipped it, or ignored it), and (b) which Tutorial Library guide ids have been
+// completed (purely cosmetic "Completed" badges in the Library — never required for using the app).
+const TUTORIAL_STATE_KEY = "badq_tutorialState";
+function loadTutorialState() {
+  try {
+    const raw = localStorage.getItem(TUTORIAL_STATE_KEY);
+    if (!raw) return { quickStartOffered: false, completedGuides: [] };
+    const parsed = JSON.parse(raw);
+    return {
+      quickStartOffered: !!(parsed && parsed.quickStartOffered),
+      completedGuides: Array.isArray(parsed && parsed.completedGuides) ? parsed.completedGuides.filter((id) => typeof id === "string") : [],
+    };
+  } catch (e) { return { quickStartOffered: false, completedGuides: [] }; }
+}
+function saveTutorialState(state) {
+  try { localStorage.setItem(TUTORIAL_STATE_KEY, JSON.stringify(state)); } catch (e) { /* private mode / storage unavailable -> in-memory only for this session, same fallback as locale/time-zone above */ }
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -6975,6 +6997,313 @@ if (typeof window !== "undefined" && !window.__badqGlobalErrorHooksInstalled) {
   } catch (e) {}
 }
 
+// ===================== TUTORIAL & GUIDE (v1.12.53) =====================
+// A single, reusable, declarative tutorial engine shared by two experiences: the auto-offered (on genuine
+// first use only), skippable "Quick Start" overview, and the manually-opened "Tutorial Library" of 8
+// topic guides (Settings -> Tutorial & Guide). Both experiences play through the exact same engine below
+// (TutorialOverlay + useTutorialEngine) — there is no per-tutorial hardcoded component.
+//
+// SAFETY (spec-critical, re-stated here since this is the one place all guide content is declared):
+// a guide step may only (a) ask the engine to switch the app's existing top-level tab, and (b) visually
+// highlight an existing, already-rendered, already-safe UI element via a stable `data-tutorial-id`
+// attribute placed directly on that real element elsewhere in this file. A step NEVER opens a sheet,
+// NEVER calls a business-mutation handler, and NEVER fabricates data. Where a precise target would
+// require forcing open a nested settings sheet (e.g. a specific Advanced Settings row) this engine
+// deliberately targets the stable OUTER entry point instead (e.g. the "Advanced Settings" row itself) and
+// explains the rest in the step's own body text — exactly the documented fallback for when a UI "cannot
+// safely be demonstrated without changing data."
+//
+// Tutorial state (which guides have been completed, whether the first-use offer has already been shown)
+// is NOT business data — see TUTORIAL_STATE_KEY / loadTutorialState / saveTutorialState above, which this
+// engine is the only caller of.
+const TUTORIAL_GUIDES = [
+  {
+    id: "quickstart", icon: "🚀",
+    titleKey: "tutorial.guide.quickstart.title", descKey: "tutorial.guide.quickstart.desc",
+    finishLabelKey: "tutorial.quickstart.finishButton",
+    steps: [
+      { id: "qs1", tab: "members", target: "add-player-btn", titleKey: "tutorial.qs.step1.title", bodyKey: "tutorial.qs.step1.body" },
+      { id: "qs2", tab: "members", target: "add-player-btn", titleKey: "tutorial.qs.step2.title", bodyKey: "tutorial.qs.step2.body" },
+      { id: "qs3", tab: "members", target: "member-status-row", titleKey: "tutorial.qs.step3.title", bodyKey: "tutorial.qs.step3.body" },
+      { id: "qs4", tab: "members", target: "group-settings-btn", titleKey: "tutorial.qs.step4.title", bodyKey: "tutorial.qs.step4.body" },
+      { id: "qs5", tab: "session", target: null, titleKey: "tutorial.qs.step5.title", bodyKey: "tutorial.qs.step5.body" },
+      { id: "qs6", tab: "session", target: null, titleKey: "tutorial.qs.step6.title", bodyKey: "tutorial.qs.step6.body" },
+      { id: "qs7", tab: "finance", target: "finance-seg", titleKey: "tutorial.qs.step7.title", bodyKey: "tutorial.qs.step7.body" },
+      { id: "qs8", tab: "settings", target: "settings-tutorial-row", titleKey: "tutorial.qs.step8.title", bodyKey: "tutorial.qs.step8.body" },
+    ],
+  },
+  {
+    id: "players", icon: "👥",
+    titleKey: "tutorial.guide.players.title", descKey: "tutorial.guide.players.desc",
+    steps: [
+      { id: "pl1", tab: "members", target: "add-player-btn", titleKey: "tutorial.players.step1.title", bodyKey: "tutorial.players.step1.body" },
+      { id: "pl2", tab: "members", target: "member-status-row", titleKey: "tutorial.players.step2.title", bodyKey: "tutorial.players.step2.body" },
+      { id: "pl3", tab: "settings", target: "settings-advanced-row", titleKey: "tutorial.players.step3.title", bodyKey: "tutorial.players.step3.body" },
+    ],
+  },
+  {
+    id: "groups", icon: "🏸",
+    titleKey: "tutorial.guide.groups.title", descKey: "tutorial.guide.groups.desc",
+    steps: [
+      { id: "gr1", tab: "members", target: "group-settings-btn", titleKey: "tutorial.groups.step1.title", bodyKey: "tutorial.groups.step1.body" },
+      { id: "gr2", tab: "session", target: null, titleKey: "tutorial.groups.step2.title", bodyKey: "tutorial.groups.step2.body" },
+      { id: "gr3", tab: "session", target: null, titleKey: "tutorial.groups.step3.title", bodyKey: "tutorial.groups.step3.body" },
+      { id: "gr4", tab: "session", target: null, titleKey: "tutorial.groups.step4.title", bodyKey: "tutorial.groups.step4.body" },
+    ],
+  },
+  {
+    id: "tournament", icon: "🏆",
+    titleKey: "tutorial.guide.tournament.title", descKey: "tutorial.guide.tournament.desc",
+    steps: [
+      { id: "tn1", tab: "members", target: "members-tournament-toggle", titleKey: "tutorial.tournament.step1.title", bodyKey: "tutorial.tournament.step1.body" },
+      { id: "tn2", tab: "members", target: null, titleKey: "tutorial.tournament.step2.title", bodyKey: "tutorial.tournament.step2.body" },
+      { id: "tn3", tab: "session", target: null, titleKey: "tutorial.tournament.step3.title", bodyKey: "tutorial.tournament.step3.body" },
+      { id: "tn4", tab: "finance", target: null, titleKey: "tutorial.tournament.step4.title", bodyKey: "tutorial.tournament.step4.body" },
+    ],
+  },
+  {
+    id: "payment", icon: "💰",
+    titleKey: "tutorial.guide.payment.title", descKey: "tutorial.guide.payment.desc",
+    steps: [
+      { id: "pm1", tab: "members", target: "group-settings-btn", titleKey: "tutorial.payment.step1.title", bodyKey: "tutorial.payment.step1.body" },
+      { id: "pm2", tab: "finance", target: "finance-seg", titleKey: "tutorial.payment.step2.title", bodyKey: "tutorial.payment.step2.body" },
+      { id: "pm3", tab: "settings", target: "settings-advanced-row", titleKey: "tutorial.payment.step3.title", bodyKey: "tutorial.payment.step3.body" },
+      { id: "pm4", tab: "finance", target: "finance-seg", titleKey: "tutorial.payment.step4.title", bodyKey: "tutorial.payment.step4.body" },
+    ],
+  },
+  {
+    id: "finance", icon: "📊",
+    titleKey: "tutorial.guide.finance.title", descKey: "tutorial.guide.finance.desc",
+    steps: [
+      { id: "fn1", tab: "finance", target: "finance-seg", titleKey: "tutorial.finance.step1.title", bodyKey: "tutorial.finance.step1.body" },
+      { id: "fn2", tab: "finance", target: null, titleKey: "tutorial.finance.step2.title", bodyKey: "tutorial.finance.step2.body" },
+      { id: "fn3", tab: "finance", target: "finance-export-btn", titleKey: "tutorial.finance.step3.title", bodyKey: "tutorial.finance.step3.body" },
+    ],
+  },
+  {
+    id: "backup", icon: "💾",
+    titleKey: "tutorial.guide.backup.title", descKey: "tutorial.guide.backup.desc",
+    steps: [
+      { id: "bk1", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.backup.step1.title", bodyKey: "tutorial.backup.step1.body" },
+      { id: "bk2", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.backup.step2.title", bodyKey: "tutorial.backup.step2.body" },
+      { id: "bk3", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.backup.step3.title", bodyKey: "tutorial.backup.step3.body" },
+    ],
+  },
+  {
+    id: "movedata", icon: "📱",
+    titleKey: "tutorial.guide.movedata.title", descKey: "tutorial.guide.movedata.desc",
+    steps: [
+      { id: "md1", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.movedata.step1.title", bodyKey: "tutorial.movedata.step1.body" },
+      { id: "md2", tab: "settings", target: null, titleKey: "tutorial.movedata.step2.title", bodyKey: "tutorial.movedata.step2.body" },
+      { id: "md3", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.movedata.step3.title", bodyKey: "tutorial.movedata.step3.body" },
+      { id: "md4", tab: "settings", target: null, titleKey: "tutorial.movedata.step4.title", bodyKey: "tutorial.movedata.step4.body" },
+    ],
+  },
+];
+
+// useTutorialEngine: all tutorial RUNTIME state lives here (which guide/step is active, the one-time
+// first-use offer) — persisted guide-completion/offer-shown flags are the ONLY part written to
+// badq_tutorialState (via loadTutorialState/saveTutorialState), everything else is in-memory only.
+// `tab`/`setTab` are the app's own existing top-level bottom-nav state (AppInner) — this hook only ever
+// calls the existing setTab with one of the existing tab values, it never introduces new app state.
+function useTutorialEngine(tab, setTab) {
+  const [tutorialState, setTutorialState] = useState(() => loadTutorialState());
+  const [activeGuideId, setActiveGuideId] = useState(null);
+  const [stepIndex, setStepIndex] = useState(0);
+  const [offerQuickStart, setOfferQuickStart] = useState(false);
+
+  const activeGuide = activeGuideId ? (TUTORIAL_GUIDES.find((g) => g.id === activeGuideId) || null) : null;
+  const activeStep = activeGuide ? activeGuide.steps[stepIndex] : null;
+
+  // Whenever the active step changes, navigate to whatever top-level tab that step needs — UI navigation
+  // only, identical to the user tapping the bottom nav themselves; never touches business data.
+  useEffect(() => {
+    if (activeStep && activeStep.tab && activeStep.tab !== tab) setTab(activeStep.tab);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeGuideId, stepIndex]);
+
+  const persist = useCallback((next) => { setTutorialState(next); saveTutorialState(next); }, []);
+
+  // Fresh-install first-use offer: call this ONLY once bootStatus has resolved to "new-install" (see the
+  // AppInner effect that calls it). Marks quickStartOffered=true the instant it is shown — whether the
+  // organizer then starts it, skips it, or just ignores the banner, it is never shown again.
+  const offerQuickStartOnce = useCallback(() => {
+    setTutorialState((prevState) => {
+      if (prevState.quickStartOffered) return prevState;
+      const next = { ...prevState, quickStartOffered: true };
+      saveTutorialState(next);
+      setOfferQuickStart(true);
+      return next;
+    });
+  }, []);
+
+  const startGuide = useCallback((id) => {
+    const g = TUTORIAL_GUIDES.find((x) => x.id === id);
+    if (!g || !g.steps.length) return;
+    setOfferQuickStart(false);
+    setActiveGuideId(id);
+    setStepIndex(0);
+  }, []);
+
+  const closeGuide = useCallback(() => { setActiveGuideId(null); setStepIndex(0); }, []);
+
+  const markCompleted = useCallback((id) => {
+    setTutorialState((prevState) => {
+      if (prevState.completedGuides.indexOf(id) !== -1) return prevState;
+      const next = { ...prevState, completedGuides: [...prevState.completedGuides, id] };
+      saveTutorialState(next);
+      return next;
+    });
+  }, []);
+
+  const next = useCallback(() => {
+    setActiveGuideId((curId) => {
+      const g = TUTORIAL_GUIDES.find((x) => x.id === curId);
+      if (!g) return curId;
+      setStepIndex((i) => {
+        if (i + 1 < g.steps.length) return i + 1;
+        markCompleted(curId);
+        return i;
+      });
+      return curId;
+    });
+    // closing (once the last step's Finish is tapped) is handled by the caller checking isLast — see
+    // TutorialOverlay's onNext wiring in AppInner, which calls closeGuide() itself after markCompleted.
+  }, [markCompleted]);
+
+  const back = useCallback(() => { setStepIndex((i) => Math.max(0, i - 1)); }, []);
+  const skip = useCallback(() => { closeGuide(); }, [closeGuide]);
+  const dismissOffer = useCallback(() => setOfferQuickStart(false), []);
+
+  return {
+    tutorialState, activeGuide, activeStep, stepIndex,
+    offerQuickStart, offerQuickStartOnce, dismissOffer,
+    startGuide, closeGuide, markCompleted, next, back, skip,
+    isCompleted: (id) => tutorialState.completedGuides.indexOf(id) !== -1,
+  };
+}
+
+// TutorialOverlay: the one shared visual engine for every guide — dim background, spotlight outline that
+// follows the real target element (re-measured on scroll/resize/orientation change, auto-scrolled into
+// view first), a floating card placed above/below the target (or safely centered when there is no target
+// for this step), progress dots + "N / total", and Skip/Back/Next/Finish. A full-screen layer with no
+// onClick handler sits over the whole app while a guide is active, so an accidental tap anywhere outside
+// the card's own buttons can never reach — and therefore can never mutate — any real control underneath.
+function TutorialOverlay({ guide, step, stepIndex, onNext, onBack, onSkip, t }) {
+  const [rect, setRect] = useState(null);
+  useEffect(() => {
+    if (!step) { setRect(null); return; }
+    let cancelled = false;
+    const measure = () => {
+      if (cancelled) return;
+      const el = step.target ? document.querySelector('[data-tutorial-id="' + step.target + '"]') : null;
+      setRect(el && el.getBoundingClientRect ? el.getBoundingClientRect() : null);
+    };
+    const el0 = step.target ? document.querySelector('[data-tutorial-id="' + step.target + '"]') : null;
+    if (el0 && el0.scrollIntoView) { try { el0.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {} }
+    measure();
+    const settleTimer = setTimeout(measure, 280);
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    window.addEventListener("orientationchange", measure);
+    return () => {
+      cancelled = true;
+      clearTimeout(settleTimer);
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+      window.removeEventListener("orientationchange", measure);
+    };
+  }, [step]);
+
+  if (!guide || !step) return null;
+  const isLast = stepIndex + 1 >= guide.steps.length;
+  const pad = 8;
+  const spot = rect ? { top: Math.max(0, rect.top - pad), left: Math.max(0, rect.left - pad), width: rect.width + pad * 2, height: rect.height + pad * 2 } : null;
+  const vw = typeof window !== "undefined" ? window.innerWidth : 360;
+  const vh = typeof window !== "undefined" ? window.innerHeight : 640;
+  const cardWidth = Math.min(340, vw - 32);
+  let cardTop = null, cardLeft = Math.max(16, (vw - cardWidth) / 2);
+  if (spot) {
+    cardLeft = Math.max(16, Math.min(spot.left, vw - cardWidth - 16));
+    const spaceBelow = vh - (spot.top + spot.height);
+    const spaceAbove = spot.top;
+    cardTop = spaceBelow >= 200 || spaceBelow >= spaceAbove
+      ? Math.min(spot.top + spot.height + 14, vh - 220)
+      : Math.max(16, spot.top - 14 - 210);
+  }
+  const cardStyle = spot
+    ? { position: "fixed", top: cardTop, left: cardLeft, width: cardWidth }
+    : { position: "fixed", top: "50%", left: "50%", width: cardWidth, transform: "translate(-50%, -50%)" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999 }}>
+      {spot ? (
+        <div style={{ position: "fixed", top: spot.top, left: spot.left, width: spot.width, height: spot.height, borderRadius: 14, border: `2px solid ${T.accent}`, boxShadow: "0 0 0 9999px rgba(10,14,20,0.62)", pointerEvents: "none", transition: "top 0.22s ease, left 0.22s ease, width 0.22s ease, height 0.22s ease" }} />
+      ) : (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(10,14,20,0.62)" }} />
+      )}
+      <div style={{ ...cardStyle, maxWidth: cardWidth, maxHeight: vh - 32, overflowY: "auto", boxSizing: "border-box", background: T.surface, borderRadius: 16, padding: "16px 16px 14px", boxShadow: "0 12px 32px rgba(0,0,0,0.28)", paddingBottom: "calc(14px + env(safe-area-inset-bottom))" }}>
+        <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+          {guide.steps.map((s, i) => (<div key={s.id} style={{ flex: 1, height: 4, borderRadius: 2, background: i <= stepIndex ? T.accent : T.border }} />))}
+        </div>
+        <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginBottom: 4 }}>{stepIndex + 1} / {guide.steps.length}</div>
+        <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>{t ? t(step.titleKey) : step.titleKey}</div>
+        <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, marginBottom: 14, whiteSpace: "pre-line" }}>{t ? t(step.bodyKey) : step.bodyKey}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button onClick={onSkip} style={{ background: "none", border: "none", color: T.muted, fontSize: 12.5, fontWeight: 700, padding: "8px 4px", cursor: "pointer" }}>{t ? t("common.skip") : "common.skip"}</button>
+          <div style={{ flex: 1 }} />
+          {stepIndex > 0 && (<button onClick={onBack} style={{ ...btnSecondary, flex: "none", padding: "8px 14px" }}>{t ? t("common.back") : "common.back"}</button>)}
+          <button onClick={onNext} style={{ ...btnPrimary, flex: "none", padding: "8px 16px" }}>
+            {isLast ? (t ? t(guide.finishLabelKey || "tutorial.finish") : "tutorial.finish") : (t ? t("common.next") : "common.next")}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// TutorialLibrarySheet: manually opened only (Settings -> Tutorial & Guide), never auto-opens. Lists all
+// 8 guides (Quick Start included, so it stays permanently replayable here too, per spec). "Completed" is
+// a purely cosmetic badge — nothing in the app ever requires or checks it.
+function TutorialLibrarySheet({ onStart, isCompleted, onClose, t }) {
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 2 }}>📚 {t ? t("tutorial.library.title") : "tutorial.library.title"}</div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 14 }}>{t ? t("tutorial.library.subtitle") : "tutorial.library.subtitle"}</div>
+      {TUTORIAL_GUIDES.map((g) => (
+        <button key={g.id} onClick={() => onStart(g.id)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10, cursor: "pointer" }}>
+          <span style={{ fontSize: 19, flexShrink: 0 }}>{g.icon}</span>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>{t ? t(g.titleKey) : g.titleKey}</span>
+            <span style={{ display: "block", fontSize: 11.5, color: T.muted, marginTop: 1 }}>{t ? t(g.descKey) : g.descKey}</span>
+          </span>
+          {isCompleted(g.id) && (<span style={{ fontSize: 10.5, fontWeight: 800, color: T.green, background: "#e2f5ec", border: `1px solid ${T.green}`, borderRadius: 20, padding: "3px 8px", flexShrink: 0 }}>{t ? t("tutorial.completed") : "tutorial.completed"}</span>)}
+          <span style={{ fontSize: 11.5, fontWeight: 800, color: T.accent, flexShrink: 0 }}>{isCompleted(g.id) ? (t ? t("tutorial.replay") : "tutorial.replay") : (t ? t("tutorial.start") : "tutorial.start")}</span>
+        </button>
+      ))}
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>{t ? t("common.close") : "ปิด"}</button>
+    </Overlay>
+  );
+}
+
+// TutorialQuickStartOffer: the one-time, non-blocking "Start Quick Start?" banner for a genuinely fresh
+// install only (see the bootStatus === "new-install" effect in AppInner). Purely a banner — ignoring it,
+// same as explicitly tapping Skip, never shows it again (offerQuickStartOnce already recorded that the
+// instant it appeared) and Quick Start always remains available afterwards from the Tutorial Library.
+function TutorialQuickStartOffer({ onStart, onDismiss, t }) {
+  return (
+    <div style={{ position: "fixed", left: 16, right: 16, bottom: "calc(66px + env(safe-area-inset-bottom))", zIndex: 500, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "12px 14px", boxShadow: "0 8px 24px rgba(0,0,0,0.18)", display: "flex", alignItems: "center", gap: 10 }}>
+      <span style={{ fontSize: 20, flexShrink: 0 }}>🚀</span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{t ? t("tutorial.offer.title") : "tutorial.offer.title"}</div>
+        <div style={{ fontSize: 11.5, color: T.muted }}>{t ? t("tutorial.offer.body") : "tutorial.offer.body"}</div>
+      </div>
+      <button onClick={onDismiss} style={{ background: "none", border: "none", color: T.muted, fontSize: 12, fontWeight: 700, padding: 6, flexShrink: 0 }}>{t ? t("common.skip") : "common.skip"}</button>
+      <button onClick={onStart} style={{ ...btnPrimary, flex: "none", padding: "8px 12px" }}>{t ? t("tutorial.offer.start") : "tutorial.offer.start"}</button>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <AppErrorBoundary>
@@ -7473,6 +7802,18 @@ function AppInner() {
   // ANYTHING except while bootStatus is "restored" or "new-install" — this is the boot barrier that
   // makes "primary missing -> defaults to [] -> saves [] over recoverable data" structurally impossible.
   const [bootStatus, setBootStatus] = useState("loading");
+  // v1.12.53 (Tutorial & Guide): the tutorial engine is instantiated once, here, so it can drive the
+  // existing top-level `tab` state (UI navigation only — see useTutorialEngine's own header comment for
+  // why this is always safe) and so its overlay can be rendered above everything else further down.
+  const tutorialEngine = useTutorialEngine(tab, setTab);
+  // Fresh-install first-use offer: fires at most once per install, only once the boot waterfall has fully
+  // resolved to the "new-install" signal (see TUTORIAL_GUIDES' header comment for why this exact,
+  // already-tested signal — and no naive "bg-v11 missing" heuristic — is used). An existing user upgrading
+  // to v1.12.53 resolves to "restored" instead and is never shown this offer.
+  useEffect(() => {
+    if (loaded && bootStatus === "new-install") tutorialEngine.offerQuickStartOnce();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, bootStatus]);
   // Small non-blocking toast shown after an automatic recovery from Last-Known-Good or Auto-Backup (an
   // actual "your data was restored for you" event, distinct from the ordinary same-tab boot case) — per
   // spec, this must never force the user into the manual restore screen. Auto-dismisses; purely informational.
@@ -11788,7 +12129,7 @@ function AppInner() {
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
           summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory, t, tc }}
         />}
-        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDate, fmtDateFull, fmtDateTime }} />}
+        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDate, fmtDateFull, fmtDateTime, tutorialIsCompleted: tutorialEngine.isCompleted, onStartTutorialGuide: tutorialEngine.startGuide }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, onGoToGames: () => setTab("session"), t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
       </div>
 
@@ -11796,7 +12137,7 @@ function AppInner() {
         <div style={{ maxWidth: gameShellMaxWidth, margin: "0 auto", display: "flex" }}>
           {/* v1.12.1 (UX restructure, spec 1): icon switched from the lucide User glyph to the 👥 emoji to
               match the new nav's exact spec (👥 ผู้เล่น | 🏸 เกม | 💰 การเงิน | ⚙️ ตั้งค่า) — label/behavior unchanged. */}
-          <TabBtn active={tab === "members"} onClick={() => setTab("members")} label={t("nav.players")}><span style={{ fontSize: 19, lineHeight: "20px" }}>👥</span></TabBtn>
+          <TabBtn tutorialId="nav-members" active={tab === "members"} onClick={() => setTab("members")} label={t("nav.players")}><span style={{ fontSize: 19, lineHeight: "20px" }}>👥</span></TabBtn>
           {/* v1.11.61: bottom nav simplified from 5 items to 4 — "วันนี้" renamed to "เกม" (same 🏸 icon,
               already badminton-appropriate, no change needed there) and the old standalone "สรุป" item is
               retired; Summary now lives INSIDE this "เกม" page as a compact เกม/สรุป sub-tab (see GameTab
@@ -11809,20 +12150,41 @@ function AppInner() {
               v1.12.42 (Localization Phase 2): resolved per Owner instruction — a new, dedicated key
               (nav.gameHub, TH "เกม" / EN "Game") was added specifically for this tab, leaving nav.games
               untouched for its own future Matches-list context. No terminology conflict remains. */}
-          <TabBtn active={tab === "session"} onClick={() => setTab("session")} label={t("nav.gameHub")}><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
-          <TabBtn active={tab === "finance"} onClick={() => setTab("finance")} label={t("nav.finance")}><span style={{ fontSize: 19, lineHeight: "20px" }}>💰</span></TabBtn>
+          <TabBtn tutorialId="nav-session" active={tab === "session"} onClick={() => setTab("session")} label={t("nav.gameHub")}><span style={{ fontSize: 19, lineHeight: "20px" }}>🏸</span></TabBtn>
+          <TabBtn tutorialId="nav-finance" active={tab === "finance"} onClick={() => setTab("finance")} label={t("nav.finance")}><span style={{ fontSize: 19, lineHeight: "20px" }}>💰</span></TabBtn>
           {/* v1.12.1 (UX restructure, spec 1): "ประวัติ" removed from the bottom nav — History itself is NOT
               deleted, it moves under ⚙️ ตั้งค่า → ประวัติ (see SettingsTab) along with Backup/Advanced/General. */}
-          <TabBtn active={tab === "settings"} onClick={() => setTab("settings")} label={t("nav.settings")}><span style={{ fontSize: 19, lineHeight: "20px" }}>⚙️</span></TabBtn>
+          <TabBtn tutorialId="nav-settings" active={tab === "settings"} onClick={() => setTab("settings")} label={t("nav.settings")}><span style={{ fontSize: 19, lineHeight: "20px" }}>⚙️</span></TabBtn>
         </div>
       </div>
+      {/* v1.12.53 (Tutorial & Guide): mounted last so it visually sits above the bottom nav and every tab's
+          content. offerQuickStart is the one-time fresh-install banner; activeGuide/activeStep drive the
+          full-screen overlay for whichever guide (Quick Start or a Library guide) is currently running. */}
+      {tutorialEngine.offerQuickStart && !tutorialEngine.activeGuide && (
+        <TutorialQuickStartOffer
+          onStart={() => tutorialEngine.startGuide("quickstart")}
+          onDismiss={tutorialEngine.dismissOffer}
+          t={t}
+        />
+      )}
+      {tutorialEngine.activeGuide && (
+        <TutorialOverlay
+          guide={tutorialEngine.activeGuide}
+          step={tutorialEngine.activeStep}
+          stepIndex={tutorialEngine.stepIndex}
+          onNext={tutorialEngine.next}
+          onBack={tutorialEngine.back}
+          onSkip={tutorialEngine.skip}
+          t={t}
+        />
+      )}
     </div>
   );
 }
 
-function TabBtn({ active, onClick, label, children }) {
+function TabBtn({ active, onClick, label, children, tutorialId }) {
   return (
-    <button onClick={onClick} style={{ flex: 1, padding: "9px 0 11px", background: "none", border: "none", color: active ? T.green : T.muted, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
+    <button data-tutorial-id={tutorialId} onClick={onClick} style={{ flex: 1, padding: "9px 0 11px", background: "none", border: "none", color: active ? T.green : T.muted, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}>
       {children}<span style={{ fontSize: 11.5, fontWeight: active ? 700 : 500 }}>{label}</span>
     </button>
   );
@@ -12043,7 +12405,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
           (same addPlayer/draftPhoto/cropJob logic as before, just relocated behind a button instead of an
           always-visible inline row), then search, then the new ทั้งหมด/มา/กำลังมา/ไม่มา quick filter with
           live counts, then ตัวกรอง ▾ (secondary filters/sorting) and จัดการ ▾ (bulk/membership actions). */}
-      <button onClick={() => setAddPlayerOpen(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 0", borderRadius: 12, background: T.accent, border: "none", color: "#fff", fontSize: 14, fontWeight: 800, marginBottom: 10 }}>
+      <button data-tutorial-id="add-player-btn" onClick={() => setAddPlayerOpen(true)} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "12px 0", borderRadius: 12, background: T.accent, border: "none", color: "#fff", fontSize: 14, fontWeight: 800, marginBottom: 10 }}>
         <Plus size={18} /> {t("player.add")}
       </button>
       {addPlayerOpen && (
@@ -12187,7 +12549,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
       {settings.tournamentEnabled && (
       <div style={{ display: "flex", gap: 6, background: T.surface2, borderRadius: 12, padding: 4, marginBottom: 12 }}>
         <button onClick={() => setRegTab("group")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "group" ? T.surface : "none", color: regTab === "group" ? T.text : T.muted, boxShadow: regTab === "group" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏸 {t("session.title")}</button>
-        <button onClick={() => setRegTab("tournament")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "tournament" ? T.surface : "none", color: regTab === "tournament" ? T.text : T.muted, boxShadow: regTab === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 {t("tournament.title")}</button>
+        <button data-tutorial-id="members-tournament-toggle" onClick={() => setRegTab("tournament")} style={{ flex: 1, padding: "9px 0", borderRadius: 9, border: "none", fontSize: 13, fontWeight: 800, background: regTab === "tournament" ? T.surface : "none", color: regTab === "tournament" ? T.text : T.muted, boxShadow: regTab === "tournament" ? "0 1px 3px rgba(0,0,0,0.08)" : "none" }}>🏆 {t("tournament.title")}</button>
       </div>
       )}
 
@@ -12196,7 +12558,7 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
       {/* v1.12.5 (Simplify Player Status UI, spec 4): the old inline "ลงทะเบียน N · พร้อมเล่น N · รอคิว N"
           text summary is removed here — the filter chip row right above already shows every one of those
           counts live, per status. "สมาชิก N คน" and "ไม่มาทั้งหมด" are unchanged/kept. */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.muted, marginBottom: 8 }}>
+      <div data-tutorial-id="member-status-row" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12, color: T.muted, marginBottom: 8 }}>
         <span>{t(players.length === 1 ? "player.memberCount.one" : "player.memberCount.other", { count: players.length })}</span>
         {players.length > 0 && <button onClick={() => setConfirmResetAll(true)} title={t("attendance.resetAll")} style={{ padding: "5px 9px", borderRadius: 8, background: T.surface, border: `1px solid ${T.border}`, color: T.muted, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", gap: 4 }}><RotateCcw size={12} /> {t("attendance.markAllAbsent")}</button>}
       </div>
@@ -14521,7 +14883,7 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
       {/* SETTINGS ENTRY POINT — the 4 separate accordions that used to live here (เกม/จ่ายเงิน/รางวัล/
           ระดับฝีมือ) now live inside one "ตั้งค่าก๊วน" sheet. Same fields, same state, same logic — just moved
           (first to this sheet in an earlier release, now to the top of ผู้เล่น per this release's spec 2.1). */}
-      <button onClick={() => setOpenQuanSettings(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}` }}>
+      <button data-tutorial-id="group-settings-btn" onClick={() => setOpenQuanSettings(true)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", borderRadius: 12, background: T.surface, border: `1px solid ${T.border}` }}>
         <span style={{ fontSize: 17 }}>🏸</span>
         <span style={{ flex: 1, minWidth: 0 }}>
           <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: T.text }}>{t("session.settings")}</span>
@@ -18262,8 +18624,9 @@ function SettingsTab({
   uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, // v1.12.41/1.12.49 display preferences
   tc, // v1.12.44 (Localization Closure)
   fmtDate, fmtDateFull, fmtDateTime,
+  tutorialIsCompleted, onStartTutorialGuide, // v1.12.53 (Tutorial & Guide)
 }) {
-  const [view, setView] = useState(null); // null | "online" | "advanced" | "general" | "history" | "backup"
+  const [view, setView] = useState(null); // null | "online" | "advanced" | "general" | "history" | "backup" | "tutorial"
 
   // v1.12.1: one-shot deep-link support for the corrupted-data recovery banner (App(), spec 12) — jumps
   // straight to "💾 ข้อมูลและการสำรอง" the instant this page mounts with autoOpen="backup" set, then
@@ -18288,8 +18651,8 @@ function SettingsTab({
     );
   }
 
-  const Row = ({ icon, title, sub, onClick }) => (
-    <button onClick={onClick} style={{ width: "100%", display: "flex", alignItems: "center", gap: 11, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "13px 14px", marginBottom: 8, textAlign: "left" }}>
+  const Row = ({ icon, title, sub, onClick, tutorialId }) => (
+    <button data-tutorial-id={tutorialId} onClick={onClick} style={{ width: "100%", display: "flex", alignItems: "center", gap: 11, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 13, padding: "13px 14px", marginBottom: 8, textAlign: "left" }}>
       <span style={{ fontSize: 19, flexShrink: 0, width: 24, textAlign: "center" }}>{icon}</span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 13.5, fontWeight: 800 }}>{title}</div>
@@ -18314,12 +18677,18 @@ function SettingsTab({
       <SectionLabel>☁️ BadQ Online (Beta)</SectionLabel>
       <BadQOnlineNavRow deviceId={deviceId} onOpen={() => setView("online")} tr={t} />
       <SectionLabel>{t("settings.sectionLabel")}</SectionLabel>
-      <Row icon="🚀" title={t("settings.advanced")} sub={t("settings.advancedRowSub")} onClick={() => setView("advanced")} />
+      <Row tutorialId="settings-advanced-row" icon="🚀" title={t("settings.advanced")} sub={t("settings.advancedRowSub")} onClick={() => setView("advanced")} />
       <Row icon="⚙️" title={t("settings.general")} sub={t("settings.generalRowSub")} onClick={() => setView("general")} />
       <SectionLabel>{t("history.title")}</SectionLabel>
       <Row icon="🕘" title={t("history.title")} sub={t("settings.historyRowSub")} onClick={() => setView("history")} />
       <SectionLabel>{t("settings.dataSectionLabel")}</SectionLabel>
-      <Row icon="💾" title={t("settings.backup")} sub={t("settings.backupRowSub")} onClick={() => setView("backup")} />
+      <Row tutorialId="settings-backup-row" icon="💾" title={t("settings.backup")} sub={t("settings.backupRowSub")} onClick={() => setView("backup")} />
+
+      {/* v1.12.53 (Tutorial & Guide, spec: "new tutorial section at the VERY BOTTOM of Settings, below the
+          existing Data/backup-related section"): deliberately placed last, after dataSectionLabel/backup —
+          no existing Settings section above this was moved or reordered. */}
+      <SectionLabel>{t ? t("tutorial.sectionLabel") : "tutorial.sectionLabel"}</SectionLabel>
+      <Row tutorialId="settings-tutorial-row" icon="📚" title={t ? t("tutorial.settingsRowTitle") : "tutorial.settingsRowTitle"} sub={t ? t("tutorial.settingsRowSub") : "tutorial.settingsRowSub"} onClick={() => setView("tutorial")} />
 
       {view === "advanced" && (
         <AdvancedSettingsSheet settings={settings} setSettings={setSettings} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig} players={players} sessionHistory={sessionHistory} onClose={() => setView(null)} t={t} />
@@ -18354,6 +18723,14 @@ function SettingsTab({
           />
           <button onClick={() => setView(null)} style={{ ...btnSecondary, marginTop: 14 }}>{t("common.close")}</button>
         </Overlay>
+      )}
+      {view === "tutorial" && (
+        <TutorialLibrarySheet
+          isCompleted={tutorialIsCompleted}
+          onStart={(guideId) => { setView(null); onStartTutorialGuide(guideId); }}
+          onClose={() => setView(null)}
+          t={t}
+        />
       )}
     </div>
   );
@@ -18659,10 +19036,10 @@ function FinanceTab({ sessionHistory, session, setSession, generalExpenses, othe
       <>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <SectionHead icon={<span style={{ fontSize: 16 }}>💰</span>} title={t("finance.title")} sub={t("finance.tabSubtitle")} />
-        <button onClick={() => setExportSheetOpen(true)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 11px", borderRadius: 20, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 800, color: T.text, flexShrink: 0, marginBottom: 10 }}>📤 {t("common.export")}</button>
+        <button data-tutorial-id="finance-export-btn" onClick={() => setExportSheetOpen(true)} style={{ display: "flex", alignItems: "center", gap: 5, padding: "6px 11px", borderRadius: 20, background: T.surface2, border: `1px solid ${T.border}`, fontSize: 12.5, fontWeight: 800, color: T.text, flexShrink: 0, marginBottom: 10 }}>📤 {t("common.export")}</button>
       </div>
 
-      <div style={{ marginBottom: 16 }}>
+      <div data-tutorial-id="finance-seg" style={{ marginBottom: 16 }}>
         <Seg options={[["day", t("finance.periodDay")], ["month", t("finance.periodMonth")], ["overview", t("finance.periodOverview")]]} value={mode} onChange={setMode} />
       </div>
 
@@ -20632,6 +21009,7 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
           showSoldOut={!!settings.wheelShowSoldOut}
           onFinish={(prize) => applyWheelPrize(wheelFor, prize)}
           onClose={() => setWheelFor(null)}
+          t={t}
         />
       )}
 
@@ -21350,6 +21728,12 @@ function LockPairEditor({ players, attendees, lockPairs, addLockPair, removeLock
 }
 
 const WHEEL_TYPE_LABEL = { now: "ใช้ทันที", next: "ครั้งถัดไป", item: "ของรางวัล", cash: "เงินสด", none: "ไม่ได้รางวัล" };
+// v1.12.52 (localization closure): t-aware wrapper around WHEEL_TYPE_LABEL — falls back to the raw Thai
+// map (unchanged) when t is unavailable, exactly like every other defensive `t ? t(...) : ...` call site.
+function wheelTypeLabel(type, t) {
+  if (t) return t("reward.typeLabel." + type) || WHEEL_TYPE_LABEL[type] || type;
+  return WHEEL_TYPE_LABEL[type] || type;
+}
 // how many of this prize are left on the wheel. New prizes store this directly as `qty`; prizes saved
 // by an older version only have `weight` (a relative-odds number) — reused as-is for the initial stock
 // so upgrading never silently empties/changes anyone's existing wheel.
@@ -21370,7 +21754,7 @@ function prizeQty(p) {
 // entered directly, and the "none" prize type itself is retired from the creation form (normWheelPrizes
 // strips any leftover "none" rows from old saves on load). `value` (มูลค่าต่อชิ้น) is new: internal-only,
 // never rendered on the wheel, used solely to cost a "ค่ารางวัล" Finance expense at endSession — see spec 6.4/6.5.
-function WheelPrizeEditor({ prizes, setPrizes }) {
+function WheelPrizeEditor({ prizes, setPrizes, t }) {
   const [label, setLabel] = useState("");
   const [qty, setQty] = useState(5);
   const [type, setType] = useState("now");
@@ -21422,7 +21806,7 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
               <div key={p.id} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "8px 11px", borderRadius: 10, background: T.surface2, opacity: remaining === 0 ? 0.55 : 1 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.label}</span>
-                  <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>{WHEEL_TYPE_LABEL[p.type] || p.type}</span>
+                  <span style={{ fontSize: 10.5, color: T.muted, fontWeight: 700, flexShrink: 0 }}>{wheelTypeLabel(p.type, t)}</span>
                   <span style={{ display: "flex", flexDirection: "column", flexShrink: 0 }}>
                     <button onClick={() => move(p.id, -1)} disabled={i === 0} style={{ background: "none", border: "none", color: i === 0 ? T.border : T.muted, padding: 0, lineHeight: 1 }}><ChevronUp size={13} /></button>
                     <button onClick={() => move(p.id, 1)} disabled={i === sorted.length - 1} style={{ background: "none", border: "none", color: i === sorted.length - 1 ? T.border : T.muted, padding: 0, lineHeight: 1 }}><ChevronDown size={13} /></button>
@@ -21431,17 +21815,17 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <span style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-                    <input type="number" value={remaining} onChange={(e) => editQty(p.id, e.target.value)} onFocus={(e) => e.target.select()} title="จำนวนคงเหลือ — แก้เพื่อเติมสต็อก" style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", color: remaining === 0 ? T.accent : T.text, fontWeight: 800 }} />
-                    <span style={{ fontSize: 10.5, color: T.muted }}>{remaining === 0 ? "หมด" : "จำนวน"}</span>
+                    <input type="number" value={remaining} onChange={(e) => editQty(p.id, e.target.value)} onFocus={(e) => e.target.select()} title={t ? t("reward.qtyRemainingTitle") : "จำนวนคงเหลือ — แก้เพื่อเติมสต็อก"} style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", color: remaining === 0 ? T.accent : T.text, fontWeight: 800 }} />
+                    <span style={{ fontSize: 10.5, color: T.muted }}>{remaining === 0 ? (t ? t("reward.soldOutBadge") : "หมด") : (t ? t("reward.qtyLabel") : "จำนวน")}</span>
                   </span>
                   <span style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-                    <input type="number" value={p.probability ?? 0} onChange={(e) => editProb(p.id, e.target.value)} onFocus={(e) => e.target.select()} title="โอกาสออก (%)" style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", fontWeight: 800 }} />
-                    <span style={{ fontSize: 10.5, color: T.muted }}>% โอกาส</span>
+                    <input type="number" value={p.probability ?? 0} onChange={(e) => editProb(p.id, e.target.value)} onFocus={(e) => e.target.select()} title={t ? t("reward.probTitle") : "โอกาสออก (%)"} style={{ ...sty, width: 46, padding: "5px 6px", textAlign: "right", fontWeight: 800 }} />
+                    <span style={{ fontSize: 10.5, color: T.muted }}>{t ? t("reward.probLabel") : "% โอกาส"}</span>
                   </span>
                   {p.type !== "cash" && p.type !== "now" && p.type !== "next" && (
                     <span style={{ display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
-                      <input type="number" value={p.value ?? 0} onChange={(e) => editValue(p.id, e.target.value)} onFocus={(e) => e.target.select()} title="มูลค่าต่อชิ้น (บาท) — ใช้บันทึกรายจ่ายเท่านั้น ไม่แสดงบนวงล้อ" style={{ ...sty, width: 52, padding: "5px 6px", textAlign: "right" }} />
-                      <span style={{ fontSize: 10.5, color: T.muted }}>฿/ชิ้น</span>
+                      <input type="number" value={p.value ?? 0} onChange={(e) => editValue(p.id, e.target.value)} onFocus={(e) => e.target.select()} title={t ? t("reward.valueTitleRow") : "มูลค่าต่อชิ้น (บาท) — ใช้บันทึกรายจ่ายเท่านั้น ไม่แสดงบนวงล้อ"} style={{ ...sty, width: 52, padding: "5px 6px", textAlign: "right" }} />
+                      <span style={{ fontSize: 10.5, color: T.muted }}>{t ? t("reward.valuePerItemLabel") : "฿/ชิ้น"}</span>
                     </span>
                   )}
                 </div>
@@ -21450,23 +21834,25 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
           })}
         </div>
       )}
-      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="ชื่อรางวัล เช่น ส่วนลด 10฿ / แจกไม้แบต" style={{ ...sty, width: "100%", marginBottom: 6, boxSizing: "border-box" }} />
+      <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t ? t("reward.namePlaceholder") : "ชื่อรางวัล เช่น ส่วนลด 10฿ / แจกไม้แบต"} style={{ ...sty, width: "100%", marginBottom: 6, boxSizing: "border-box" }} />
       <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
         <select value={type} onChange={(e) => setType(e.target.value)} style={{ ...sty, flexShrink: 0 }}>
-          <option value="now">ส่วนลด ใช้ทันที</option>
-          <option value="next">ส่วนลด ครั้งถัดไป</option>
-          <option value="item">ของรางวัล (ไม่ใช่ส่วนลด)</option>
-          <option value="cash">เงินสด</option>
+          <option value="now">{t ? t("reward.optionDiscountNow") : "ส่วนลด ใช้ทันที"}</option>
+          <option value="next">{t ? t("reward.optionDiscountNext") : "ส่วนลด ครั้งถัดไป"}</option>
+          <option value="item">{t ? t("reward.optionItem") : "ของรางวัล (ไม่ใช่ส่วนลด)"}</option>
+          <option value="cash">{t ? t("reward.typeLabel.cash") : "เงินสด"}</option>
         </select>
-        {needsAmount && <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} onFocus={(e) => e.target.select()} placeholder="฿" title="มูลค่า (บาท)" style={{ ...sty, width: 58, flexShrink: 0 }} />}
-        {needsValue && <input type="number" value={value} onChange={(e) => setValue(e.target.value)} onFocus={(e) => e.target.select()} placeholder="฿/ชิ้น" title="มูลค่าต่อชิ้น (บาท) — สำหรับบันทึกรายจ่าย" style={{ ...sty, width: 58, flexShrink: 0 }} />}
-        <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} onFocus={(e) => e.target.select()} placeholder="จำนวน" title="จำนวนรางวัลทั้งหมด" style={{ ...sty, width: 58, flexShrink: 0 }} />
-        <input type="number" value={probability} onChange={(e) => setProbability(e.target.value)} onFocus={(e) => e.target.select()} placeholder="% โอกาส" title="โอกาสออก (%)" style={{ ...sty, width: 58, flexShrink: 0 }} />
+        {needsAmount && <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} onFocus={(e) => e.target.select()} placeholder="฿" title={t ? t("reward.amountTitle") : "มูลค่า (บาท)"} style={{ ...sty, width: 58, flexShrink: 0 }} />}
+        {needsValue && <input type="number" value={value} onChange={(e) => setValue(e.target.value)} onFocus={(e) => e.target.select()} placeholder={t ? t("reward.valuePerItemLabel") : "฿/ชิ้น"} title={t ? t("reward.valueTitleForm") : "มูลค่าต่อชิ้น (บาท) — สำหรับบันทึกรายจ่าย"} style={{ ...sty, width: 58, flexShrink: 0 }} />}
+        <input type="number" value={qty} onChange={(e) => setQty(e.target.value)} onFocus={(e) => e.target.select()} placeholder={t ? t("reward.qtyLabel") : "จำนวน"} title={t ? t("reward.quantity") : "จำนวนรางวัลทั้งหมด"} style={{ ...sty, width: 58, flexShrink: 0 }} />
+        <input type="number" value={probability} onChange={(e) => setProbability(e.target.value)} onFocus={(e) => e.target.select()} placeholder={t ? t("reward.probLabel") : "% โอกาส"} title={t ? t("reward.probTitle") : "โอกาสออก (%)"} style={{ ...sty, width: 58, flexShrink: 0 }} />
         <button onClick={add} style={{ padding: "0 13px", height: 36, borderRadius: 10, background: T.accent, border: "none", color: "#fff", display: "flex", alignItems: "center", flexShrink: 0 }}><Plus size={17} /></button>
       </div>
-      <div style={{ fontSize: 10.5, color: T.muted, marginTop: 6 }}>"จำนวน" คือของจริงที่มี หมุนถูกแล้วลดลง 1 จนกว่าจะหมด — "% โอกาส" คือโอกาสออกต่อการหมุน 1 ครั้ง แยกจากจำนวนโดยสิ้นเชิง — "฿/ชิ้น" ใช้บันทึกรายจ่ายของรางวัลใน Finance เท่านั้น ไม่แสดงบนวงล้อ</div>
+      <div style={{ fontSize: 10.5, color: T.muted, marginTop: 6 }}>{t ? t("reward.helpText") : "\"จำนวน\" คือของจริงที่มี หมุนถูกแล้วลดลง 1 จนกว่าจะหมด — \"% โอกาส\" คือโอกาสออกต่อการหมุน 1 ครั้ง แยกจากจำนวนโดยสิ้นเชิง — \"฿/ชิ้น\" ใช้บันทึกรายจ่ายของรางวัลใน Finance เท่านั้น ไม่แสดงบนวงล้อ"}</div>
       <div style={{ marginTop: 10, padding: "9px 12px", borderRadius: 10, background: overLimit ? "#fdecec" : T.surface2, border: `1px solid ${overLimit ? T.accent : T.border}`, fontSize: 12, fontWeight: 700, color: overLimit ? T.accent : T.text }}>
-        {overLimit ? `⚠️ โอกาสรวมเกิน 100% (${probTotal}%) — กรุณาลดโอกาสของบางรางวัลก่อนใช้งานวงล้อ` : `โอกาสได้รางวัลรวม ${probTotal}% / ไม่ได้รางวัล ${noPrizePct}% / รวม 100% ✓`}
+        {overLimit
+          ? (t ? t("reward.probOverLimit", { total: probTotal }) : `⚠️ โอกาสรวมเกิน 100% (${probTotal}%) — กรุณาลดโอกาสของบางรางวัลก่อนใช้งานวงล้อ`)
+          : (t ? t("reward.probSummary", { total: probTotal, none: noPrizePct }) : `โอกาสได้รางวัลรวม ${probTotal}% / ไม่ได้รางวัล ${noPrizePct}% / รวม 100% ✓`)}
       </div>
     </div>
   );
@@ -21480,24 +21866,24 @@ function WheelPrizeEditor({ prizes, setPrizes }) {
 // same WheelPrizeEditor component). Follows the same "toggle lives inside the detail sheet" convention as
 // RankingSettingsSheet's own enable button, for visual/interaction consistency between the 3 Advanced
 // Feature detail screens.
-function RewardSettingsSheet({ settings, setSettings, onClose }) {
+function RewardSettingsSheet({ settings, setSettings, onClose, t }) {
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>🎁 รางวัล (วงล้อ)</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>🎁 {t ? t("reward.wheelSettingsTitle") : "รางวัล (วงล้อ)"}</div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>เปิดใช้งานวงล้อรางวัล</div>
-        <Seg options={[[true, "เปิด"], [false, "ปิด"]]} value={settings.wheelEnabled !== false} onChange={(v) => setSettings((s) => ({ ...s, wheelEnabled: v }))} />
+        <div style={{ fontSize: 13, fontWeight: 700 }}>{t ? t("reward.enableWheel") : "เปิดใช้งานวงล้อรางวัล"}</div>
+        <Seg options={[[true, t ? t("common.on") : "เปิด"], [false, t ? t("common.off") : "ปิด"]]} value={settings.wheelEnabled !== false} onChange={(v) => setSettings((s) => ({ ...s, wheelEnabled: v }))} />
       </div>
       {settings.wheelEnabled !== false && (<>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>รางวัลที่หมดแล้วในวงล้อ</div>
-          <Seg options={[[false, "แค่ที่เหลือ"], [true, "แสดงทั้งหมด"]]} value={!!settings.wheelShowSoldOut} onChange={(v) => setSettings((s) => ({ ...s, wheelShowSoldOut: v }))} />
+          <div style={{ fontSize: 13, fontWeight: 700 }}>{t ? t("reward.soldOutSectionTitle") : "รางวัลที่หมดแล้วในวงล้อ"}</div>
+          <Seg options={[[false, t ? t("reward.availableOnly") : "แค่ที่เหลือ"], [true, t ? t("reward.showAll") : "แสดงทั้งหมด"]]} value={!!settings.wheelShowSoldOut} onChange={(v) => setSettings((s) => ({ ...s, wheelShowSoldOut: v }))} />
         </div>
-        <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14 }}>"แสดงทั้งหมด" = วงล้อยังโชว์ครบเหมือนของเดิม (ผู้เล่นไม่รู้ว่าหมดแล้ว) แต่หมุนไม่มีทางออกจริง</div>
-        <Label>🎡 วงล้อรางวัล — กำหนดรางวัลและโอกาสออก</Label>
-        <WheelPrizeEditor prizes={settings.wheelPrizes || []} setPrizes={(updater) => setSettings((s) => ({ ...s, wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater }))} />
+        <div style={{ fontSize: 10.5, color: T.muted, marginBottom: 14 }}>{t ? t("reward.soldOutHelp") : "\"แสดงทั้งหมด\" = วงล้อยังโชว์ครบเหมือนของเดิม (ผู้เล่นไม่รู้ว่าหมดแล้ว) แต่หมุนไม่มีทางออกจริง"}</div>
+        <Label>🎡 {t ? t("reward.wheelConfigHeader") : "วงล้อรางวัล — กำหนดรางวัลและโอกาสออก"}</Label>
+        <WheelPrizeEditor prizes={settings.wheelPrizes || []} setPrizes={(updater) => setSettings((s) => ({ ...s, wheelPrizes: typeof updater === "function" ? updater(s.wheelPrizes || []) : updater }))} t={t} />
       </>)}
-      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>ปิด</button>
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>{t ? t("common.close") : "ปิด"}</button>
     </Overlay>
   );
 }
@@ -21595,7 +21981,7 @@ function AdvancedSettingsSheet({ settings, setSettings, rankingConfigs, updateRa
           t={t}
         />
       )}
-      {rewardOpen && <RewardSettingsSheet settings={settings} setSettings={setSettings} onClose={() => setRewardOpen(false)} />}
+      {rewardOpen && <RewardSettingsSheet settings={settings} setSettings={setSettings} onClose={() => setRewardOpen(false)} t={t} />}
       {promotionOpen && <PromotionSettingsSheet settings={settings} setSettings={setSettings} sessionHistory={sessionHistory} onClose={() => setPromotionOpen(false)} t={t} />}
     </Overlay>
   );
@@ -22505,15 +22891,15 @@ function buildWheelSegments(prizes, showSoldOut) {
 // v1.11.43 (spec section 8): wording for the post-spin result card, derived ENTIRELY from the already-
 // selected prize's existing structured fields (type/amount/label) — never re-derives or duplicates the
 // redemption/probability logic itself (that already fully ran via applyWheelPrize by the time this renders).
-function wheelResultCopy(prize) {
-  if (!prize) return { icon: "🏸", title: "รอบนี้ยังไม่ได้รางวัล", sub: "ไว้ลองใหม่ครั้งหน้า!", isWin: false };
+function wheelResultCopy(prize, t) {
+  if (!prize) return { icon: "🏸", title: t ? t("reward.resultNoWinTitle") : "รอบนี้ยังไม่ได้รางวัล", sub: t ? t("reward.resultNoWinSub") : "ไว้ลองใหม่ครั้งหน้า!", isWin: false };
   const amt = Math.round(Number(prize.amount) || 0);
-  if (prize.type === "now") return { icon: "🎉", title: `ส่วนลด ฿${amt}`, sub: "ใช้ได้ทันทีในก๊วนนี้", isWin: true };
-  if (prize.type === "next") return { icon: "🎉", title: `ส่วนลด ฿${amt}`, sub: "ใช้ในก๊วนครั้งถัดไป", isWin: true };
-  if (prize.type === "cash") return { icon: "🎉", title: `เงินสด ฿${amt}`, sub: "รับได้เลยตอนนี้", isWin: true };
-  return { icon: "🎉", title: prize.label, sub: "ของรางวัลพิเศษ 🎁", isWin: true }; // "item"
+  if (prize.type === "now") return { icon: "🎉", title: t ? t("reward.resultDiscountTitle", { amt }) : `ส่วนลด ฿${amt}`, sub: t ? t("reward.resultDiscountNowSub") : "ใช้ได้ทันทีในก๊วนนี้", isWin: true };
+  if (prize.type === "next") return { icon: "🎉", title: t ? t("reward.resultDiscountTitle", { amt }) : `ส่วนลด ฿${amt}`, sub: t ? t("reward.resultDiscountNextSub") : "ใช้ในก๊วนครั้งถัดไป", isWin: true };
+  if (prize.type === "cash") return { icon: "🎉", title: t ? t("reward.resultCashTitle", { amt }) : `เงินสด ฿${amt}`, sub: t ? t("reward.resultCashSub") : "รับได้เลยตอนนี้", isWin: true };
+  return { icon: "🎉", title: prize.label, sub: t ? t("reward.resultItemSub") : "ของรางวัลพิเศษ 🎁", isWin: true }; // "item" — prize.label is never translated (user/organizer data)
 }
-function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose }) {
+function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose, t }) {
   const [rotation, setRotation] = useState(0);
   const [spinning, setSpinning] = useState(false);
   const [resultPrize, setResultPrize] = useState(undefined); // undefined = not spun yet; null = spun, no prize; object = spun, won a prize
@@ -22562,7 +22948,7 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
   // scale the wheel to fill most of the screen on any device (phone or tablet, portrait or landscape) while
   // always leaving room for the title/subtitle above and the spin/close buttons below so nothing overflows
   const wheelSize = "min(88vw, 56vh, 620px)";
-  const copy = resultPrize !== undefined ? wheelResultCopy(resultPrize) : null;
+  const copy = resultPrize !== undefined ? wheelResultCopy(resultPrize, t) : null;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.88)", zIndex: 80, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "calc(20px + env(safe-area-inset-top)) 20px calc(20px + env(safe-area-inset-bottom))", boxSizing: "border-box", overflow: "hidden" }}>
       <style>{`
@@ -22574,12 +22960,12 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
           subtitle line renders — previously the title's own small marginBottom (6px) was the ONLY gap when
           the subtitle was hidden, reading as cramped against the pointer. Wheel size/centering untouched. */}
       <div style={{ marginBottom: 18 }}>
-        <div style={{ color: "#fff", fontSize: 17, fontWeight: 800 }}>🎡 หมุนวงล้อรางวัล</div>
+        <div style={{ color: "#fff", fontSize: 17, fontWeight: 800 }}>🎡 {t ? t("reward.spinTitle") : "หมุนวงล้อรางวัล"}</div>
         {/* v1.11.19: when "แสดงทั้งหมด" (showSoldOut) is on, the wheel deliberately still displays sold-out
             slices so players can't tell prizes ran out (see wheelShowSoldOut) — showing this "เหลือรางวัล 0
             จาก N" line would immediately give that away, so it's hidden in that mode. Still shown normally
             under "แค่ที่เหลือ" (the default), where seeing the live count is the point. */}
-        {!showSoldOut && totalPlayers > 0 && <div style={{ color: "#cbd5cf", fontSize: 11.5, marginTop: 4 }}>เหลือรางวัล {totalPrizeQty} จาก {totalPlayers} คนที่ยังไม่ได้หมุน</div>}
+        {!showSoldOut && totalPlayers > 0 && <div style={{ color: "#cbd5cf", fontSize: 11.5, marginTop: 4 }}>{t ? t("reward.spinRemainingLine", { qty: totalPrizeQty, total: totalPlayers }) : `เหลือรางวัล ${totalPrizeQty} จาก ${totalPlayers} คนที่ยังไม่ได้หมุน`}</div>}
       </div>
       <div style={{ position: "relative", width: wheelSize, height: wheelSize, flexShrink: 0 }}>
         {/* subtle static outer ring — never rotates, purely a "this is one polished component" frame around the spinning disc (spec sections 1/6) */}
@@ -22632,9 +23018,9 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
       </div>
       {resultPrize === undefined ? (
         <>
-          <button onClick={spin} disabled={spinning || segs.length === 0} style={{ marginTop: 26, padding: "13px 34px", borderRadius: 30, background: spinning ? T.muted : T.green, border: "none", color: "#fff", fontSize: 15, fontWeight: 800, boxShadow: spinning ? "none" : "0 4px 14px rgba(18,152,106,0.45)" }}>{spinning ? "กำลังหมุน..." : "หมุนเลย!"}</button>
-          {segs.length === 0 && <div style={{ color: "#e5b3b3", fontSize: 12.5, marginTop: 10 }}>ยังไม่ได้ตั้งค่ารางวัลในวงล้อ</div>}
-          {!spinning && <button onClick={onClose} style={{ marginTop: 14, background: "none", border: "none", color: "#cbd5cf", fontSize: 13 }}>ปิด</button>}
+          <button onClick={spin} disabled={spinning || segs.length === 0} style={{ marginTop: 26, padding: "13px 34px", borderRadius: 30, background: spinning ? T.muted : T.green, border: "none", color: "#fff", fontSize: 15, fontWeight: 800, boxShadow: spinning ? "none" : "0 4px 14px rgba(18,152,106,0.45)" }}>{spinning ? (t ? t("reward.spinningLabel") : "กำลังหมุน...") : (t ? t("reward.spinNow") : "หมุนเลย!")}</button>
+          {segs.length === 0 && <div style={{ color: "#e5b3b3", fontSize: 12.5, marginTop: 10 }}>{t ? t("reward.noPrizesConfigured") : "ยังไม่ได้ตั้งค่ารางวัลในวงล้อ"}</div>}
+          {!spinning && <button onClick={onClose} style={{ marginTop: 14, background: "none", border: "none", color: "#cbd5cf", fontSize: 13 }}>{t ? t("common.close") : "ปิด"}</button>}
         </>
       ) : (
         <div style={{ position: "relative", width: "100%", display: "flex", flexDirection: "column", alignItems: "center" }}>
@@ -22647,11 +23033,11 @@ function SpinWheel({ prizes, remainingPlayers, showSoldOut, onFinish, onClose })
               organizer's exact original label/redemption bookkeeping (applyWheelPrize) is untouched. */}
           <div style={{ marginTop: 22, background: "#fff", borderRadius: 18, padding: "22px 26px", textAlign: "center", width: "min(86vw, 300px)", boxSizing: "border-box", animation: "badq-result-pop 0.35s cubic-bezier(0.34,1.56,0.64,1)" }}>
             <div style={{ fontSize: 30, marginBottom: 6 }}>{copy.icon}</div>
-            {copy.isWin && <div style={{ fontSize: 13, color: T.green, fontWeight: 800, marginBottom: 2 }}>ยินดีด้วย!</div>}
+            {copy.isWin && <div style={{ fontSize: 13, color: T.green, fontWeight: 800, marginBottom: 2 }}>{t ? t("reward.congrats") : "ยินดีด้วย!"}</div>}
             <div style={{ fontSize: 18, fontWeight: 800, color: copy.isWin ? T.text : T.muted, marginBottom: 4 }}>{copy.title}</div>
             <div style={{ fontSize: 12.5, color: T.muted }}>{copy.sub}</div>
           </div>
-          <button onClick={onClose} style={{ marginTop: 18, padding: "11px 30px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}>{copy.isWin ? "รับรางวัล" : "ปิด"}</button>
+          <button onClick={onClose} style={{ marginTop: 18, padding: "11px 30px", borderRadius: 30, background: "#fff", border: "none", color: "#111", fontSize: 14, fontWeight: 800 }}>{copy.isWin ? (t ? t("reward.claimReward") : "รับรางวัล") : (t ? t("common.close") : "ปิด")}</button>
         </div>
       )}
     </div>
