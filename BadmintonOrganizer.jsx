@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.53";
+const APP_VERSION = "1.12.54";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -2798,6 +2798,11 @@ const FINANCE_CATEGORY_I18N_KEY = {
   "ค่าเดินทาง": "finance.category.travel",
   "ค่าใช้จ่ายอื่น": "finance.category.other",
   "อื่น ๆ": "finance.category.other",
+  // v1.12.54 (Localization fix, Item 2 — verified defect): TOURNAMENT_INCOME_CATEGORIES's two labels went
+  // through this exact same financeCategoryDisplayLabel lookup (see FinanceEntryList) but had no entry
+  // here, so they silently fell through to "return label unchanged" and never localized under the EN UI.
+  "สปอนเซอร์": "finance.sponsor", // exact-match reuse of the existing finance.sponsor key
+  "รายได้อื่นๆ": "finance.category.tournamentOtherIncome", // differs from finance.otherIncome's "รายได้อื่น" by the trailing ๆ — new key, no existing Thai copy changed
 };
 function financeCategoryDisplayLabel(label, t) {
   if (!t || label == null) return label;
@@ -3914,24 +3919,33 @@ function buildShareText({ name, date, playerCount, totalMatches, maxGames, total
 // v1.11.4: single Tournament share-text generator — built from the SAME buildTournamentResultReport
 // object that feeds the Podium/Bracket/PDF, so the shared text can never separately calculate or drift
 // from what's actually on screen. Includes medals + the final score line; ends with a small BadQ credit.
-function buildTournamentShareText(report, teamsById, peopleById, formatDate = fmtThaiDate) {
+// v1.12.54 (Localization fix, Item 2 — verified defect): this generates system-owned text (medal
+// labels, status, credit line — never user-entered names) handed to the OS share sheet/clipboard, and
+// previously had no `tr` parameter at all, so it never followed the selected UI language. `tr` is
+// OPTIONAL (both call sites already pass it) — omitting it still renders the exact pre-fix Thai text,
+// so no existing behavior changes for a caller that doesn't thread it. Every reused key below is an exact
+// text match for the string it replaces (tournament.unnamedFallback/teams/active/champion/runnerUp,
+// tournamentWizard.thirdPlaceLabel, summary.matchesLabel); the two with no existing match
+// (the in-progress status line and the credit line) get new keys instead of reusing a near-miss.
+function buildTournamentShareText(report, teamsById, peopleById, formatDate = fmtThaiDate, tr) {
+  const L = (key, fallback) => (tr ? tr(key) : fallback);
   const { t, totals, podium, finalMatch, isCompleted } = report;
-  const lines = [`🏆 BadQ Tournament — ${t.name || "Tournament ไม่มีชื่อ"}`, `${formatDate(t.date)} · ${totals.teamCount} ทีม · ${totals.completedMatches} แมตช์`];
+  const lines = [`🏆 BadQ Tournament — ${t.name || L("tournament.unnamedFallback", "Tournament ไม่มีชื่อ")}`, `${formatDate(t.date)} · ${totals.teamCount} ${L("tournament.teams", "ทีม")} · ${totals.completedMatches} ${L("summary.matchesLabel", "แมตช์")}`];
   if (podium && podium.champion) {
     lines.push("");
-    lines.push(`🥇 แชมป์: ${tTeamName(teamsById[podium.champion], peopleById)}`);
-    if (podium.runnerUp) lines.push(`🥈 รองแชมป์: ${tTeamName(teamsById[podium.runnerUp], peopleById)}`);
-    if (podium.thirdIds && podium.thirdIds.length) lines.push(`🥉 อันดับ 3: ${podium.thirdIds.map((id) => tTeamName(teamsById[id], peopleById)).join(" / ")}`);
+    lines.push(`🥇 ${L("tournament.champion", "แชมป์")}: ${tTeamName(teamsById[podium.champion], peopleById)}`);
+    if (podium.runnerUp) lines.push(`🥈 ${L("tournament.runnerUp", "รองแชมป์")}: ${tTeamName(teamsById[podium.runnerUp], peopleById)}`);
+    if (podium.thirdIds && podium.thirdIds.length) lines.push(`🥉 ${L("tournamentWizard.thirdPlaceLabel", "อันดับ 3")}: ${podium.thirdIds.map((id) => tTeamName(teamsById[id], peopleById)).join(" / ")}`);
     if (finalMatch && matchScoreText(finalMatch)) {
       const lbl = tMatchLabel(finalMatch, teamsById, peopleById);
-      lines.push(`ชิงชนะเลิศ: ${lbl.a} ${matchScoreText(finalMatch)} ${lbl.b}`);
+      lines.push(`${L("tournament.shareFinalLabel", "ชิงชนะเลิศ")}: ${lbl.a} ${matchScoreText(finalMatch)} ${lbl.b}`);
     }
   } else if (!isCompleted) {
     lines.push("");
-    lines.push("สถานะ: กำลังแข่งขัน — ยังไม่ทราบผู้ชนะ");
+    lines.push(L("tournament.shareStatusInProgress", "สถานะ: กำลังแข่งขัน — ยังไม่ทราบผู้ชนะ"));
   }
   lines.push("");
-  lines.push("สร้างโดย BadQ 🏸");
+  lines.push(L("tournament.shareCredit", "สร้างโดย BadQ 🏸"));
   return lines.join("\n");
 }
 async function shareSummary(text) {
@@ -4558,7 +4572,10 @@ async function verifyBackupImageManifest(parsed, data) {
   const want = new Set(man.images.map((i) => i && i.sha256).filter(Boolean));
   const missing = [...want].filter((h) => !present.has(h)).length;
   const extra = [...present].filter((h) => !want.has(h)).length;
-  if (missing || extra) return { ok: false, checked: true, missing, extra, reason: "รูปภาพในไฟล์สำรองไม่ครบหรือไม่ตรงกับรายการตรวจสอบ (หาย " + missing + ", เกิน " + extra + ") — ไฟล์อาจเสียหาย" };
+  // v1.12.54 (Localization): `reason` is now a stable, locale-neutral CODE (never a displayed sentence) —
+  // see backupValidationFailureMessage(reason, tr, info), the single place that maps a code to localized
+  // text at display time. `missing`/`extra` stay on the result object for that mapper to interpolate.
+  if (missing || extra) return { ok: false, checked: true, missing, extra, reason: "image-manifest-mismatch" };
   return { ok: true, checked: true, count: want.size };
 }
 
@@ -4766,11 +4783,16 @@ function backupStats(data) {
   };
 }
 // cheap structural check — catches "this isn't even a BadQ backup" before we try to migrate/use it
+// v1.12.54 (Localization): every `reason` below is a stable, locale-neutral CODE, never a sentence —
+// see backupValidationFailureMessage(reason, tr, info) (near restoreFailureMessage) for the single place
+// a code is mapped to localized display text. Previously these were raw Thai sentences shown verbatim
+// to the user regardless of the selected UI language (a verified Item 2 defect); the codes themselves,
+// and this function's own structural logic, are unchanged.
 function validateBackupStructure(parsed) {
-  if (!parsed || typeof parsed !== "object") return { ok: false, reason: "โครงสร้างไฟล์ไม่ถูกต้อง" };
-  if (parsed.app !== BACKUP_APP_ID) return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ" };
-  if (typeof parsed.backupVersion !== "number" || typeof parsed.schemaVersion !== "number") return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ" };
-  if (!parsed.data || typeof parsed.data !== "object" || !Array.isArray(parsed.data.players)) return { ok: false, reason: "โครงสร้างข้อมูลในไฟล์สำรองไม่ถูกต้อง" };
+  if (!parsed || typeof parsed !== "object") return { ok: false, reason: "invalid-file-format" };
+  if (parsed.app !== BACKUP_APP_ID) return { ok: false, reason: "invalid-file" };
+  if (typeof parsed.backupVersion !== "number" || typeof parsed.schemaVersion !== "number") return { ok: false, reason: "invalid-file" };
+  if (!parsed.data || typeof parsed.data !== "object" || !Array.isArray(parsed.data.players)) return { ok: false, reason: "invalid-structure" };
   return { ok: true };
 }
 // forward-migrates `data` up to SCHEMA_VERSION, then fills in backward-compatible defaults for any
@@ -4846,11 +4868,11 @@ function migrateBackupData(parsed) {
 // deeper integrity check AFTER migration — corrupted core structure rejects the whole restore;
 // broken/invalid sub-fields fall back to a safe default instead of failing the whole import.
 function validateBackupIntegrity(data) {
-  if (!Array.isArray(data.players)) return { ok: false, reason: "ข้อมูลผู้เล่นเสียหาย" };
+  if (!Array.isArray(data.players)) return { ok: false, reason: "corrupt-player" };
   const seenP = new Set();
   for (const p of data.players) {
-    if (!p || !p.id) return { ok: false, reason: "พบผู้เล่นที่ไม่มีรหัส (id)" };
-    if (seenP.has(p.id)) return { ok: false, reason: "พบรหัสผู้เล่นซ้ำกัน" };
+    if (!p || !p.id) return { ok: false, reason: "missing-player-id" };
+    if (seenP.has(p.id)) return { ok: false, reason: "duplicate-player-id" };
     seenP.add(p.id);
     p.skillIndex = Math.max(1, Math.min(11, Number(p.skillIndex) || 1)); // clamp to valid 1–11 range
     p.discount = Number(p.discount) || 0;
@@ -4858,13 +4880,13 @@ function validateBackupIntegrity(data) {
   const allMatches = [...data.history, ...data.current, ...data.future, ...data.sessionHistory.flatMap((s) => s.matches || [])];
   const seenM = new Set();
   for (const m of allMatches) {
-    if (!m || !m.id) return { ok: false, reason: "พบแมตช์ที่ไม่มีรหัส (id)" };
-    if (seenM.has(m.id)) return { ok: false, reason: "พบรหัสแมตช์ซ้ำกัน" };
+    if (!m || !m.id) return { ok: false, reason: "missing-match-id" };
+    if (seenM.has(m.id)) return { ok: false, reason: "duplicate-match-id" };
     seenM.add(m.id);
   }
   const seenS = new Set();
   for (const s of data.sessionHistory) {
-    if (seenS.has(s.id)) return { ok: false, reason: "พบรหัสประวัติก๊วนซ้ำกัน" };
+    if (seenS.has(s.id)) return { ok: false, reason: "duplicate-session-id" };
     seenS.add(s.id);
     (s.bill || []).forEach((b) => { b.total = Number(b.total) || 0; }); // payment amounts must be numeric
   }
@@ -4877,21 +4899,21 @@ function validateBackupIntegrity(data) {
   const allT = [...(data.tournamentHistory || []), ...(data.activeTournament ? [data.activeTournament] : [])];
   for (const t of allT) {
     if (!t || !t.id) continue;
-    if (seenT.has(t.id)) return { ok: false, reason: "พบรหัส Tournament ซ้ำกัน" };
+    if (seenT.has(t.id)) return { ok: false, reason: "duplicate-tournament-id" };
     seenT.add(t.id);
   }
   // discount credit IDs must stay globally unique after restore too — same dedup-by-stable-id rule.
   const seenDC = new Set();
   for (const c of data.discountCredits || []) {
     if (!c || !c.id) continue;
-    if (seenDC.has(c.id)) return { ok: false, reason: "พบรหัสส่วนลดซ้ำกัน" };
+    if (seenDC.has(c.id)) return { ok: false, reason: "duplicate-discount-id" };
     seenDC.add(c.id);
   }
   // v1.11.34: same dedup-by-stable-id rule for Reward History entries.
   const seenRH = new Set();
   for (const r of data.rewardHistory || []) {
     if (!r || !r.id) continue;
-    if (seenRH.has(r.id)) return { ok: false, reason: "พบรหัสประวัติรางวัลซ้ำกัน" };
+    if (seenRH.has(r.id)) return { ok: false, reason: "duplicate-reward-id" };
     seenRH.add(r.id);
   }
   return { ok: true, data };
@@ -11589,13 +11611,13 @@ function AppInner() {
     const step = async (name) => { try { onStep && onStep(name); } catch (e) {} await yieldToUI(); t = now(); };
     let parsed;
     await step("parsing");
-    try { parsed = JSON.parse(text); } catch (e) { return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ", timings }; }
+    try { parsed = JSON.parse(text); } catch (e) { return { ok: false, reason: "invalid-file", timings }; }
     timings.parseMs = Math.round(now() - t);
     const struct = validateBackupStructure(parsed);
     if (!struct.ok) return { ...struct, timings };
     await step("migrating");
     let migrated;
-    try { migrated = migrateBackupData(parsed); } catch (e) { return { ok: false, reason: "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ", timings }; }
+    try { migrated = migrateBackupData(parsed); } catch (e) { return { ok: false, reason: "invalid-file", timings }; }
     const integ = validateBackupIntegrity(migrated.data);
     timings.migrateValidateMs = Math.round(now() - t);
     if (!integ.ok) return { ...integ, timings };
@@ -11603,7 +11625,9 @@ function AppInner() {
     await step("checking-images");
     const manifestCheck = await verifyBackupImageManifest(parsed, integ.data);
     timings.imageManifestMs = Math.round(now() - t);
-    if (!manifestCheck.ok) return { ok: false, reason: manifestCheck.reason, timings };
+    // v1.12.54 (Localization fix): spread the full manifestCheck (not just `reason`) so `missing`/`extra`
+    // survive to the display site for backupValidationFailureMessage's {missing}/{extra} interpolation.
+    if (!manifestCheck.ok) return { ...manifestCheck, timings };
     return { ok: true, backup: { ...migrated, data: integ.data, assets: parsed.assets && typeof parsed.assets === "object" ? parsed.assets : null }, timings, imageCheck: manifestCheck };
   };
   const applyRestore = async (restoreMode, backup, onPhase, restoreOpts) => {
@@ -16698,7 +16722,7 @@ function TournamentDashboard(props) {
 
       <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
         <button onClick={() => (t.status === "paused" ? tResumeTournament() : tPauseTournament())} style={btnSecondary}>{t.status === "paused" ? tr("match.resume") : tr("tournament.pause")}</button>
-        <button onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate))} style={btnSecondary}><Share2 size={15} /> {tr("common.share")}</button>
+        <button onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr))} style={btnSecondary}><Share2 size={15} /> {tr("common.share")}</button>
         <button onClick={() => setConfirmComplete(true)} style={{ ...btnPrimary, background: T.accent }}><LogOut size={15} /> {tr("tournament.endButton")}</button>
       </div>
       {/* v1.11.4: Export PDF available on the live dashboard too — same buildTournamentResultReport +
@@ -18348,15 +18372,18 @@ function fmtThaiMonthLabel(ym) {
 // their own detail sheet sorted newest-first. Deliberately reads straight off the flat `rewardHistory` ledger
 // (never per-session `s.wheelPrizes`/bill state) so it survives sessions being deleted from sessionHistory —
 // exactly like discountCredits' own ledger already does elsewhere in this app.
+// v1.12.54 (Localization fix, Item 1): a reward's name is USER-CREATED CONTENT — it is either typed by the
+// organizer in Reward Wheel/prize settings, or seeded once from a default label (e.g. "ส่วนลด 20฿
+// (ใช้ทันที)") that the organizer can then freely rename. Per the task's rule, user-created content must
+// render exactly as entered/stored and must NEVER be auto-translated by matching its text, even when that
+// text happens to look like one of the shipped Thai default labels and even when the UI language is
+// English. This function previously pattern-matched the rawName against the three default labels and
+// substituted a localized string whenever it matched — e.g. a reward literally named "ส่วนลด 20฿
+// (ใช้ทันที)" would silently render as "20฿ discount (now)" under the English UI, which is exactly the
+// behavior the task's own worked example says must never happen. Fixed to always return the stored name
+// verbatim; `t` is kept as a parameter (now unused) only so neither call site below needs to change.
 function rewardHistoryDisplayName(rawName, t) {
-  const raw = String(rawName || "");
-  let m = raw.match(/^ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ใช้ทันที\)$/);
-  if (m) return t("reward.defaultDiscountNow", { amount: m[1] });
-  m = raw.match(/^ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ครั้งหน้า\)$/);
-  if (m) return t("reward.defaultDiscountNext", { amount: m[1] });
-  m = raw.match(/^ฟรีค่าสนาม!\s*ส่วนลด\s+(\d+(?:\.\d+)?)฿\s+\(ทันที\)$/);
-  if (m) return t("reward.defaultFreeCourt", { amount: m[1] });
-  return raw;
+  return String(rawName || "");
 }
 function GlobalRewardHistory({ rewardHistory, fmtDate, t, tc }) {
   const [openPlayerId, setOpenPlayerId] = useState(null);
@@ -19525,14 +19552,19 @@ function buildRankingShowcaseReport(clubName, players, sessionHistory, rankingCo
   const unqualified = result.unqualified.map((u) => ({ player: playersById[u.playerId] || { id: u.playerId, name: "?" }, gamesPlayed: u.gamesPlayed, minGames: u.minGames }));
   return { clubName, result, groups, unqualified, playersById };
 }
-function rankingShareText(report) {
-  const lines = [`🏆 Ranking — ${report.clubName}`, `อัปเดตล่าสุด ${todayLocalISO()}`, ""];
+// v1.12.54 (Localization fix, Item 2 — verified defect, same pattern as buildTournamentShareText above):
+// had no `tr` at all. `tr` is OPTIONAL — its one call site already has it, and omitting it still renders
+// the exact pre-fix Thai text. `g.tier.name` is intentionally left untouched — rank tier names are
+// organizer-configurable (Item 1: user-created content), never auto-translated.
+function rankingShareText(report, tr) {
+  const L = (key, fallback) => (tr ? tr(key) : fallback);
+  const lines = [`🏆 Ranking — ${report.clubName}`, `${L("ranking.showcaseLastUpdatedLabel", "อัปเดตล่าสุด")} ${todayLocalISO()}`, ""];
   report.groups.forEach((g) => {
     lines.push(`${g.tier.icon} ${g.tier.name}`);
     g.players.forEach((row) => lines.push(`  ${row.player.name} — RP ${row.stats.rp}`));
     lines.push("");
   });
-  lines.push("สร้างโดย BadQ 🏸");
+  lines.push(L("tournament.shareCredit", "สร้างโดย BadQ 🏸"));
   return lines.join("\n");
 }
 function rankingPdfFilename(clubName) {
@@ -19603,7 +19635,7 @@ function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <button onClick={() => shareSummary(rankingShareText(report))} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}>📤 {tr ? tr("ranking.showcaseShareButton") : "แชร์ Ranking"}</button>
+        <button onClick={() => shareSummary(rankingShareText(report, tr))} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}>📤 {tr ? tr("ranking.showcaseShareButton") : "แชร์ Ranking"}</button>
         <button onClick={() => setPrintOpen(true)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>🖨️ Export PDF</button>
       </div>
       <button onClick={onClose} style={btnSecondary}>{tr ? tr("common.close") : "ปิด"}</button>
@@ -20302,7 +20334,7 @@ function TournamentHistoricalDetail({ t, playersById, onOpenTournamentPrint, tr,
       <SectionHead icon={<Share2 size={16} color={T.green} />} title={tr("tournamentSummary.shareExportTitle")} />
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <button
-          onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate))}
+          onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr))}
           style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}
         ><Share2 size={15} /> {tr("tournamentSummary.shareSummaryButton")}</button>
         <button
@@ -20505,7 +20537,7 @@ function PaymentTab({ players, history, current, settings, setSettings, togglePa
       {payerTab === "quan" || !showTournamentTab ? (
         <QuanPaymentPanel {...{ players, history, current, settings, setSettings, togglePaid, session, setSession, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, discountCredits, applyDiscountCredits, courtCount, setCourtCount, courtLabels, mode, rewardHistory, sessionHistory, onGoToGames, t, tc, fmtDate }} />
       ) : (
-        <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }} />
+        <TournamentPaymentPanel {...{ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t }} />
       )}
     </div>
   );
@@ -21073,33 +21105,45 @@ function QuanPaymentPanel({ players, history, current, settings, setSettings, to
 // Selector covers the live activeTournament plus anything in tournamentHistory so an organizer can still
 // chase a late payment after a Tournament has ended (each toggle only ever touches the ONE selected
 // Tournament — see tTogglePlayerPaid / tToggleHistoricalPlayerPaid).
-function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid }) {
+// v1.12.54 (Localization fix, Item 2 — verified defect): this component had NO `t`/`tr` prop at all and
+// every string below was hardcoded Thai, so it never switched to English under the EN UI (unlike its
+// sibling QuanPaymentPanel, which already takes `t`). Fixed by threading `t` in from the one call site
+// (PaymentTab, which already has `t`/`tc` in scope) and wrapping every system-owned string in `t(...)`,
+// reusing an existing catalog key wherever its Thai text matched verbatim (finance.paid/received/
+// paidStatusShort/unpaidStatusShort/searchPlayerPlaceholder/searchNoResults/allPaidCelebration/
+// noOnePaidYet/paidOfTotalPeople, common.all, tournament.unnamedFallback) and adding a new key only where
+// the wording differed from an existing key (e.g. this panel's own "ค้างชำระ" vs finance.outstanding's
+// "ค้างรับ") — never silently changing any existing Thai copy. The local variable that used to shadow the
+// `t` i18n convention (meaning "selected tournament") is renamed to `tour` so `t` can now mean the i18n
+// function here exactly as it does everywhere else in this file. No business logic changed.
+function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, t }) {
   const all = [activeTournament, ...(tournamentHistory || [])].filter(Boolean);
   const [selectedId, setSelectedId] = useState(null);
   const [payFilter, setPayFilter] = useState("unpaid"); // "all" | "unpaid" | "paid"
   const [search, setSearch] = useState(""); // v1.11.15 — filters the displayed list only, scoped to the selected Tournament's own registered players
 
   if (all.length === 0) {
-    return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>ยังไม่มี Tournament — สร้าง Tournament ได้ในแท็บ "เกม"</div>;
+    return <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "40px 0" }}>{t ? t("tournament.noneForPayment") : "ยังไม่มี Tournament — สร้าง Tournament ได้ในแท็บ \"เกม\""}</div>;
   }
-  const t = all.find((x) => x.id === selectedId) || all[0];
-  const isActive = !!activeTournament && t.id === activeTournament.id;
-  const togglePaidFor = (playerId) => (isActive ? tTogglePlayerPaid(playerId) : tToggleHistoricalPlayerPaid(t.id, playerId));
+  const tour = all.find((x) => x.id === selectedId) || all[0];
+  const isActive = !!activeTournament && tour.id === activeTournament.id;
+  const togglePaidFor = (playerId) => (isActive ? tTogglePlayerPaid(playerId) : tToggleHistoricalPlayerPaid(tour.id, playerId));
 
-  const peopleById = { ...(playersById || {}), ...Object.fromEntries((t.guestPlayers || []).map((g) => [g.id, g])) };
-  const summary = tournamentPaymentSummary(t);
-  const noFee = !t.registration || t.registration.feeMode === "none";
-  const rows = (t.teams || []).flatMap((tm) => (tm.playerIds || []).map((pid) => ({
+  const peopleById = { ...(playersById || {}), ...Object.fromEntries((tour.guestPlayers || []).map((g) => [g.id, g])) };
+  const summary = tournamentPaymentSummary(tour);
+  const noFee = !tour.registration || tour.registration.feeMode === "none";
+  const rows = (tour.teams || []).flatMap((tm) => (tm.playerIds || []).map((pid) => ({
     playerId: pid,
     person: peopleById[pid],
     teammates: (tm.playerIds || []).length > 1 ? tTeamName(tm, peopleById) : null,
-    amountDue: tournamentPlayerFeeAmount(t, pid),
-    paid: isTournamentPlayerPaid(t, pid),
+    amountDue: tournamentPlayerFeeAmount(tour, pid),
+    paid: isTournamentPlayerPaid(tour, pid),
   }))).sort((a, b) => (a.person?.name || "").localeCompare(b.person?.name || ""));
   const searchQ = search.trim().toLowerCase();
   const filteredRows = rows.filter((r) => (payFilter === "all" ? true : payFilter === "paid" ? r.paid : !r.paid)).filter((r) => !searchQ || (r.person?.name || "").toLowerCase().includes(searchQ));
   const outstanding = Math.max(0, summary.expectedTotal - summary.receivedTotal);
   const progressPct = summary.totalPlayers > 0 ? Math.round((summary.paidPlayers / summary.totalPlayers) * 100) : 0;
+  const unnamedFallback = t ? t("tournament.unnamedFallback") : "Tournament ไม่มีชื่อ";
 
   return (
     <div>
@@ -21107,37 +21151,37 @@ function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersBy
         <div style={{ marginBottom: 12 }}>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: T.muted, marginBottom: 5 }}>🏆 Tournament</div>
           <select
-            value={t.id}
+            value={tour.id}
             onChange={(e) => setSelectedId(e.target.value)}
             style={{ width: "100%", padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13.5, fontWeight: 700, outline: "none" }}
           >
             {all.map((x) => (
-              <option key={x.id} value={x.id}>{x.name || "Tournament ไม่มีชื่อ"} — {x.date || ""}{!activeTournament || x.id !== activeTournament.id ? " (จบแล้ว)" : ""}</option>
+              <option key={x.id} value={x.id}>{x.name || unnamedFallback} — {x.date || ""}{!activeTournament || x.id !== activeTournament.id ? (t ? t("tournament.endedSuffix") : " (จบแล้ว)") : ""}</option>
             ))}
           </select>
         </div>
       )}
 
       <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "11px 13px", marginBottom: 12 }}>
-        <div style={{ fontSize: 14.5, fontWeight: 800 }}>{t.name || "Tournament ไม่มีชื่อ"}</div>
-        <div style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{t.date || "-"} · {summary.totalPlayers} คนลงทะเบียน</div>
+        <div style={{ fontSize: 14.5, fontWeight: 800 }}>{tour.name || unnamedFallback}</div>
+        <div style={{ fontSize: 12, color: T.muted, marginTop: 2 }}>{tour.date || "-"} · {t ? t("tournament.registeredCountSuffix", { count: summary.totalPlayers }) : `${summary.totalPlayers} คนลงทะเบียน`}</div>
       </div>
 
       {noFee ? (
-        <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "24px 0" }}>Tournament นี้ไม่ได้เก็บค่าสมัคร</div>
+        <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "24px 0" }}>{t ? t("tournament.noRegistrationFee") : "Tournament นี้ไม่ได้เก็บค่าสมัคร"}</div>
       ) : (
         <>
           <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
             <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-              <div style={{ fontSize: 11, color: T.muted }}>ชำระแล้ว</div>
-              <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{summary.paidPlayers}/{summary.totalPlayers} คน</div>
+              <div style={{ fontSize: 11, color: T.muted }}>{t ? t("finance.paid") : "ชำระแล้ว"}</div>
+              <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{t ? t("finance.paidOfTotalPeople", { paid: summary.paidPlayers, total: summary.totalPlayers }) : `${summary.paidPlayers}/${summary.totalPlayers} คน`}</div>
             </div>
             <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-              <div style={{ fontSize: 11, color: T.muted }}>รับแล้ว</div>
+              <div style={{ fontSize: 11, color: T.muted }}>{t ? t("finance.received") : "รับแล้ว"}</div>
               <div style={{ fontSize: 16, fontWeight: 800, color: T.green }}>{formatCurrency(summary.receivedTotal)} <span style={{ fontSize: 12, color: T.muted, fontWeight: 600 }}>/ {formatCurrency(summary.expectedTotal)}</span></div>
             </div>
             <div style={{ flex: 1, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 12, padding: "10px 12px" }}>
-              <div style={{ fontSize: 11, color: T.muted }}>ค้างชำระ</div>
+              <div style={{ fontSize: 11, color: T.muted }}>{t ? t("tournament.outstandingLabel") : "ค้างชำระ"}</div>
               <div style={{ fontSize: 16, fontWeight: 800, color: outstanding > 0 ? T.accent : T.green }}>{formatCurrency(outstanding)}</div>
             </div>
           </div>
@@ -21146,25 +21190,33 @@ function TournamentPaymentPanel({ activeTournament, tournamentHistory, playersBy
           </div>
 
           <div style={{ marginBottom: 8 }}>
-            <Seg options={[["unpaid", "ยังไม่จ่าย"], ["all", "ทั้งหมด"], ["paid", "จ่ายแล้ว"]]} value={payFilter} onChange={setPayFilter} />
+            <Seg options={[["unpaid", t ? t("finance.unpaidStatusShort") : "ยังไม่จ่าย"], ["all", t ? t("common.all") : "ทั้งหมด"], ["paid", t ? t("finance.paidStatusShort") : "จ่ายแล้ว"]]} value={payFilter} onChange={setPayFilter} />
           </div>
           <div style={{ position: "relative", marginBottom: 10 }}>
             <Search size={15} style={{ position: "absolute", left: 10, top: 9.5, color: T.muted }} />
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="ค้นหาผู้เล่น" style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={t ? t("finance.searchPlayerPlaceholder") : "ค้นหาผู้เล่น"} style={{ width: "100%", padding: "8px 10px 8px 32px", borderRadius: 10, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, outline: "none", boxSizing: "border-box" }} />
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 6 }}>
             {filteredRows.length === 0 ? (
-              <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>{searchQ ? "ไม่พบผู้เล่นที่ค้นหา" : payFilter === "unpaid" ? "ชำระครบแล้ว 🎉" : payFilter === "paid" ? "ยังไม่มีใครจ่าย" : "ยังไม่มีผู้เล่นลงทะเบียน"}</div>
+              <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "16px 0" }}>
+                {searchQ
+                  ? (t ? t("finance.searchNoResults") : "ไม่พบผู้เล่นที่ค้นหา")
+                  : payFilter === "unpaid"
+                  ? (t ? t("finance.allPaidCelebration") : "ชำระครบแล้ว 🎉")
+                  : payFilter === "paid"
+                  ? (t ? t("finance.noOnePaidYet") : "ยังไม่มีใครจ่าย")
+                  : (t ? t("tournament.noPlayersRegisteredYet") : "ยังไม่มีผู้เล่นลงทะเบียน")}
+              </div>
             ) : filteredRows.map((r) => (
               <div key={r.playerId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 11px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}` }}>
                 <Avatar p={r.person || { name: "?" }} size={30} />
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.person?.name || "?"}</span>
                   <span style={{ display: "block", fontSize: 11.5, color: T.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                    {formatCurrency(r.amountDue)}{r.teammates ? ` · คู่: ${r.teammates}` : ""}
+                    {formatCurrency(r.amountDue)}{r.teammates ? (t ? t("tournament.paymentTeammateSuffix", { name: r.teammates }) : ` · คู่: ${r.teammates}`) : ""}
                   </span>
                 </span>
-                <button onClick={() => togglePaidFor(r.playerId)} style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: r.paid ? "#e2f5ec" : "#fdecea", color: r.paid ? T.green : T.accent }}>{r.paid ? "🟢 จ่ายแล้ว" : "🔴 ยังไม่จ่าย"}</button>
+                <button onClick={() => togglePaidFor(r.playerId)} style={{ flexShrink: 0, padding: "6px 11px", borderRadius: 20, fontSize: 12, fontWeight: 800, border: "none", background: r.paid ? "#e2f5ec" : "#fdecea", color: r.paid ? T.green : T.accent }}>{r.paid ? `🟢 ${t ? t("finance.paidStatusShort") : "จ่ายแล้ว"}` : `🔴 ${t ? t("finance.unpaidStatusShort") : "ยังไม่จ่าย"}`}</button>
               </div>
             ))}
           </div>
@@ -22293,6 +22345,38 @@ function CustomLevelEditor({ customLevels, setCustomLevels, t }) {
   );
 }
 
+// v1.12.54 (Localization fix, Item 2): maps the stable, locale-neutral CODES now returned by
+// validateBackupStructure/validateBackupIntegrity/verifyBackupImageManifest/validateBackupFile (see those
+// functions' own v1.12.54 comments) to localized display text — the one place those codes become a
+// sentence shown to the user. Mirrors restoreFailureMessage's existing, already-correct pattern immediately
+// above. `info` carries the raw result object so the image-manifest-mismatch case can interpolate the real
+// missing/extra counts; every fallback below is the EXACT Thai sentence this code used to return directly
+// (verified against the pre-fix source), so an app running without `tr` (defensive `t ? ... : null` sites)
+// renders identically to before this fix — only now it also localizes correctly when `tr` is available.
+function backupValidationFailureMessage(reason, tr, info) {
+  const r = String(reason || "");
+  const L = (key, fallback) => (tr ? tr(key) : fallback);
+  if (r === "invalid-file-format") return L("backup.invalidFileFormat", "โครงสร้างไฟล์ไม่ถูกต้อง");
+  if (r === "invalid-structure") return L("backup.invalidStructure", "โครงสร้างข้อมูลในไฟล์สำรองไม่ถูกต้อง");
+  if (r === "corrupt-player") return L("backup.corruptPlayer", "ข้อมูลผู้เล่นเสียหาย");
+  if (r === "missing-player-id") return L("backup.missingPlayerId", "พบผู้เล่นที่ไม่มีรหัส (id)");
+  if (r === "duplicate-player-id") return L("backup.duplicatePlayerId", "พบรหัสผู้เล่นซ้ำกัน");
+  if (r === "missing-match-id") return L("backup.missingMatchId", "พบแมตช์ที่ไม่มีรหัส (id)");
+  if (r === "duplicate-match-id") return L("backup.duplicateMatchId", "พบรหัสแมตช์ซ้ำกัน");
+  if (r === "duplicate-session-id") return L("backup.duplicateSessionId", "พบรหัสประวัติก๊วนซ้ำกัน");
+  if (r === "duplicate-tournament-id") return L("backup.duplicateTournamentId", "พบรหัส Tournament ซ้ำกัน");
+  if (r === "duplicate-discount-id") return L("backup.duplicateDiscountId", "พบรหัสส่วนลดซ้ำกัน");
+  if (r === "duplicate-reward-id") return L("backup.duplicateRewardId", "พบรหัสประวัติรางวัลซ้ำกัน");
+  if (r === "image-manifest-mismatch") {
+    const missing = info && typeof info.missing === "number" ? info.missing : 0;
+    const extra = info && typeof info.extra === "number" ? info.extra : 0;
+    return tr
+      ? tr("backup.imageManifestMismatch", { missing, extra })
+      : ("รูปภาพในไฟล์สำรองไม่ครบหรือไม่ตรงกับรายการตรวจสอบ (หาย " + missing + ", เกิน " + extra + ") — ไฟล์อาจเสียหาย");
+  }
+  // "invalid-file" and any unrecognized/empty code: same safe generic fallback this used to return directly.
+  return L("backup.invalidFile", "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ");
+}
 // local-file backup / restore UI: export the whole app state as a JSON file, or import one back with
 // a validate -> preview -> confirm flow. A "replace all" restore always takes a safety snapshot first
 // (see App().applyRestore) so it can be undone with the button below the two main actions.
@@ -22435,7 +22519,10 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       text = null; // v1.12.39: drop the raw file text as soon as it is parsed (memory)
       const __t1 = __now();
       logImportPhase("validating", __t1 - __tRead, { ok: res.ok, ...(res.timings || {}), imagesChecked: !!(res.imageCheck && res.imageCheck.checked) });
-      if (!res.ok) { setImportError(res.reason || (t ? t("backup.invalidFile") : "ไฟล์นี้ไม่ใช่ไฟล์สำรอง BadQ ที่รองรับ")); return; }
+      // v1.12.54 (Localization fix, Item 2): res.reason is now a stable code (see backupValidationFailureMessage's
+      // own header comment) — this is the single place it becomes localized display text, instead of the raw
+      // Thai sentence this previously showed verbatim regardless of the selected UI language.
+      if (!res.ok) { setImportError(backupValidationFailureMessage(res.reason, t, res)); return; }
       setRestoreMode("replace");
       setPreview(res.backup);
     } finally {
