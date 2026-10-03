@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.12.54";
+const APP_VERSION = "1.14.0";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -194,6 +194,28 @@ const PSTATUS_OPTS = ["absent", "registered", "waiting", "ready", "resting", "le
 // new work anywhere in the app (see activePlayers), so they're excluded here too.
 function isSessionAttendee(p) {
   return !!(p && !p.archived && p.status && p.status !== "absent" && p.status !== "registered" && p.status !== "left");
+}
+// v1.14.0 (Post-Tutorial Core Fix Pass — Session Player-Capacity Count): the ONE canonical "does this
+// player currently occupy one of today's accepted-session capacity slots" predicate. Intended meaning of
+// settings.maxPlayers is "how many players have been accepted into today's session", NOT "how many are
+// currently ready/waiting to play" — once accepted, a normal in-session status change (ready -> resting,
+// resting -> left, etc.) must never silently free that slot back up for a new registration to take.
+// Deliberately distinct from every other status-based predicate in this file, each of which answers a
+// different question and must keep its own existing statuses:
+//   - matchmaking eligibility: "ready" only (every buildMatch/queue call site, unchanged)
+//   - computeBill's payers filter: excludes "registered"/"waiting" (unchanged — not accepted yet, so not
+//     billed yet, even though "registered" already DOES consume a capacity slot once accepted)
+//   - isSessionAttendee (above): a different "currently physically relevant to a lock/avoid/picker
+//     decision" question — excludes "left" on purpose, since someone already gone can't be in a future pair
+//   - FinancialEstimatePanel's eligibleForEstimate / buildCourtRecommendation's own `registered` filter:
+//     forward-looking planning estimates (who WILL need a court/game soon), not a slot-accounting question
+//     — left unchanged, see each site's own v1.14.0 comment
+// "playing" is intentionally NOT a separate literal value here: a player's real p.status is never actually
+// "playing" (that string only ever appears on a MATCH's own m.status — see the PSTATUS comment above and
+// PSTATUS_OPTS, which has no "playing" entry at all); a player currently in a match still has status
+// "ready" underneath, which already counts below.
+function countsTowardSessionCapacity(status) {
+  return status === "registered" || status === "ready" || status === "resting" || status === "left";
 }
 // v1.9.17: handedness badge on the Player Card — a violet distinct from every skill-level color
 // (LEVEL_COLORS_BY_INDEX has no purple), every PSTATUS color, T.blue, and T.accent, as specified.
@@ -7038,6 +7060,472 @@ if (typeof window !== "undefined" && !window.__badqGlobalErrorHooksInstalled) {
 // Tutorial state (which guides have been completed, whether the first-use offer has already been shown)
 // is NOT business data — see TUTORIAL_STATE_KEY / loadTutorialState / saveTutorialState above, which this
 // engine is the only caller of.
+
+// ===================== TUTORIAL SANDBOX (v1.12.55 — Interactive Realistic Tutorial Upgrade) =====================
+// Everything from here down to `useTutorialSandbox` is a COMPLETELY SEPARATE, self-contained data world used
+// ONLY by interactive tutorial steps. It never reads or writes any real app state (players/session/history/
+// payment/finance/ranking/tournament/promotions/rewards/Journal/Backup-Restore/Web Sync/Commercial-Cloud) and
+// never touches localStorage/IndexedDB/any production persistence path. It is built once per guide (re)start
+// from a frozen JSON template (TUTORIAL_FIXTURE_TEMPLATE) via a fresh JSON.parse(JSON.stringify(...)) clone,
+// so every run starts from byte-identical data (spec Section 18 — Determinism) and no sandbox action can ever
+// leak into the next run or into any other part of the app.
+//
+// "Super Smash" (club/group name) and "Golden Championship" (tournament name) are the Owner's required
+// canonical demo anchors (spec Section 14) and are used here verbatim, on purpose, so the tutorial feels
+// like the organizer's own real club. Every individual demo PLAYER name below is deliberately fictional
+// (none match any real roster) — only the club/tournament identity itself is the intentional canonical
+// anchor, never an individual person. The 3 Reward Wheel prize labels and the 3 Promotion campaign names
+// are copied verbatim from the Owner-supplied reference backup (schema/content reference only, per Section
+// 2 — the backup file itself is never loaded into the running app).
+const TUTORIAL_FIXTURE_TEMPLATE = {
+  clubName: "Super Smash",
+  players: [
+    { id: "tut-p1", name: "Ploy", skillIndex: 3, status: "ready", handedness: "right", memberType: "member", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+    { id: "tut-p2", name: "Game", skillIndex: 3, status: "ready", handedness: "right", memberType: "member", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+    { id: "tut-p3", name: "Add", skillIndex: 3, status: "ready", handedness: "right", memberType: "member", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+    { id: "tut-p4", name: "Ton", skillIndex: 2, status: "ready", handedness: "left", memberType: "member", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+    { id: "tut-p5", name: "Beer", skillIndex: 2, status: "waiting", handedness: "right", memberType: "member", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+    { id: "tut-p6", name: "Earth", skillIndex: 2, status: "resting", handedness: "right", memberType: "guest", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+    { id: "tut-p7", name: "Milk", skillIndex: 4, status: "registered", handedness: "right", memberType: "owner", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+    { id: "tut-p8", name: "Gap", skillIndex: 4, status: "left", handedness: "right", memberType: "member", discount: 0, wheelDiscount: 0, carriedInDiscount: 0, paid: false, archived: false },
+  ],
+  // one "lock" (must always pair together) + one "avoidOpponent" (must never face each other) — enough to
+  // demonstrate both a clean Auto-Match and a manual pairing that trips a real constraint warning.
+  lockPairs: [
+    { id: "tut-lock-1", type: "lock", a: "tut-p1", b: "tut-p2" },
+    { id: "tut-lock-2", type: "avoidOpponent", a: "tut-p3", b: "tut-p4" },
+  ],
+  settings: {
+    court: 65, shuttle: 25, shuttleSingles: 50, shuttleDoubles: 25, other: 0,
+    costModel: "simple", rounds: "2fixed", winScore: 21, deuce: true, pairingMode: "auto",
+    wheelEnabled: true,
+    // verbatim from the Owner's reference backup (settings.wheelPrizes) — a required canonical anchor.
+    wheelPrizes: [
+      { id: "ce0wt9m", label: "ส่วนลด 20฿ (ใช้ทันที)", type: "now", amount: 20, qty: 2, totalQty: 2, probability: 12.5, value: 0, wheelOrder: 0 },
+      { id: "a5vp48b", label: "ส่วนลด 10฿ (ครั้งหน้า)", type: "next", amount: 10, qty: 5, totalQty: 5, probability: 31.3, value: 0, wheelOrder: 1 },
+      { id: "97iydzz", label: "ฟรีค่าสนาม! ส่วนลด 65฿ (ทันที)", type: "now", amount: 65, qty: 1, totalQty: 1, probability: 6.3, value: 0, wheelOrder: 2 },
+    ],
+    // verbatim from the Owner's reference backup (settings.promotions) — required canonical anchors.
+    promotions: [
+      { campaignId: "odpfg38", name: "เล่นครบ 10 ครั้ง", enabled: true, archived: false, eligibility: "all", trigger: { kind: "attendanceCount", target: 10 }, reward: { type: "physical", name: "Grip 1 ชิ้น" } },
+      { campaignId: "6ks6zih", name: "เล่นต่อเนื่อง 5 ครั้ง", enabled: true, archived: false, eligibility: "all", trigger: { kind: "attendanceStreak", target: 5 }, reward: { type: "discount", name: "Credit 50฿" } },
+      { campaignId: "waeupzw", name: "เล่นต่อเนื่อง 10 ครั้ง เป็นคนแรก", enabled: true, archived: false, eligibility: "member", trigger: { kind: "attendanceStreak", target: 10 }, reward: { type: "physical", name: "ไม้แบต yonex" } },
+    ],
+  },
+  // tutorial-only Ranking settings — minGames lowered to 2 (from the real club's 5) purely so the demo can
+  // show qualified Ranks from a handful of fixture matches; rankTiers keep the real tier names/icons/order
+  // (organizer-configured catalog values, not personal data) since that IS the realistic content Section 1
+  // asks for. This object is passed directly into the pure computeClubRanking() helper and is never written
+  // into the app's real `rankingConfigs` state, which stays keyed only by the organizer's real club names.
+  rankingSettings: {
+    enabled: true, minGames: 2, calcRange: { mode: "all", n: 30 },
+    rankTiers: [
+      { id: "bronze", name: "Bronze", order: 1, icon: "🔰", image: null, conditionType: "rp", rpMin: 0, winRateMin: 0, topPct: 100 },
+      { id: "silver", name: "Silver", order: 2, icon: "⭐", image: null, conditionType: "rp", rpMin: 110, winRateMin: 0, topPct: 100 },
+      { id: "gold", name: "Gold", order: 3, icon: "🌟", image: null, conditionType: "rp", rpMin: 120, winRateMin: 0, topPct: 100 },
+      { id: "platinum", name: "Platinum", order: 4, icon: "💠", image: null, conditionType: "rp", rpMin: 130, winRateMin: 0, topPct: 100 },
+      { id: "diamond", name: "Diamond", order: 5, icon: "💎", image: null, conditionType: "rp", rpMin: 140, winRateMin: 0, topPct: 100 },
+      { id: "commander", name: "Commander", order: 6, icon: "🛡️", image: null, conditionType: "rp_top", rpMin: 150, winRateMin: 0, topPct: 20 },
+      { id: "conqueror", name: "Conqueror", order: 7, icon: "👑", image: null, conditionType: "rp_top", rpMin: 150, winRateMin: 0, topPct: 10 },
+    ],
+  },
+  // two short, already-finished casual sessions under the "Super Smash" name — just enough completed,
+  // scored matches for every one of the 8 fixture players to clear the tutorial-only minGames:2 threshold.
+  rankingSessionHistory: [
+    {
+      name: "Super Smash", date: "2026-09-20", endedAt: 1,
+      players: [
+        { id: "tut-p1", skillIndex: 3 }, { id: "tut-p2", skillIndex: 3 }, { id: "tut-p3", skillIndex: 3 }, { id: "tut-p4", skillIndex: 2 },
+      ],
+      matches: [
+        { teamA: ["tut-p1", "tut-p2"], teamB: ["tut-p3", "tut-p4"], scores: [{ a: 21, b: 15 }, { a: 21, b: 18 }] },
+        { teamA: ["tut-p1", "tut-p3"], teamB: ["tut-p2", "tut-p4"], scores: [{ a: 21, b: 17 }, { a: 21, b: 19 }] },
+        { teamA: ["tut-p2", "tut-p3"], teamB: ["tut-p1", "tut-p4"], scores: [{ a: 21, b: 16 }, { a: 18, b: 21 }, { a: 21, b: 14 }] },
+      ],
+    },
+    {
+      name: "Super Smash", date: "2026-09-27", endedAt: 2,
+      players: [
+        { id: "tut-p5", skillIndex: 2 }, { id: "tut-p6", skillIndex: 2 }, { id: "tut-p7", skillIndex: 4 }, { id: "tut-p8", skillIndex: 4 },
+      ],
+      matches: [
+        { teamA: ["tut-p5", "tut-p6"], teamB: ["tut-p7", "tut-p8"], scores: [{ a: 21, b: 19 }, { a: 19, b: 21 }, { a: 21, b: 17 }] },
+        { teamA: ["tut-p5", "tut-p7"], teamB: ["tut-p6", "tut-p8"], scores: [{ a: 21, b: 16 }, { a: 21, b: 18 }] },
+      ],
+    },
+  ],
+  // an extra fixture match (also under "Super Smash") that the Ranking demo's "see next game's effect"
+  // button appends to a LOCAL COPY of rankingSessionHistory only — never mutates the arrays above.
+  rankingNextMatch: { teamA: ["tut-p1", "tut-p3"], teamB: ["tut-p2", "tut-p4"], scores: [{ a: 21, b: 14 }, { a: 21, b: 20 }] },
+  // a tiny self-contained match for the Game Lifecycle demo (Start -> score -> Finish) — independent of
+  // every other demo so it works correctly no matter which guide/step reaches it first.
+  demoMatch: { id: "tut-m-lifecycle", teamA: ["tut-p1", "tut-p2"], teamB: ["tut-p3", "tut-p4"], status: "next", scores: [{ a: null, b: null }] },
+  // two already-finished matches (separate from demoMatch above) so the Payment demo has real completed
+  // games to bill immediately, without depending on the Game Lifecycle demo having been played first.
+  billingMatches: [
+    { id: "tut-m-b1", teamA: ["tut-p1", "tut-p2"], teamB: ["tut-p3", "tut-p4"], status: "done", scores: [{ a: 21, b: 15 }, { a: 21, b: 18 }] },
+    { id: "tut-m-b2", teamA: ["tut-p1", "tut-p3"], teamB: ["tut-p2", "tut-p4"], status: "done", scores: [{ a: 18, b: 21 }, { a: 15, b: 21 }] },
+  ],
+  generalExpenses: [{ id: "tut-exp-1", category: "อาหาร/น้ำ", description: "", amount: 100, date: "2026-10-03" }],
+  promoVisits: { odpfg38: 7, "6ks6zih": 3, waeupzw: 8 },
+  // a reduced "Golden Championship" — ONE division, ONE group of 4 teams, round-robin. 5 of the 6 matches
+  // are already decided; the 6th is left pending for the Tournament demo's "Record Result" interaction.
+  tournament: {
+    id: "tut-tourney-1", name: "Golden Championship", format: "group",
+    pointsConfig: { win: 3, draw: 1, loss: 0 },
+    teams: [
+      { id: "tut-team-1", name: "Ploy/Game", playerIds: ["tut-p1", "tut-p2"] },
+      { id: "tut-team-2", name: "Add/Ton", playerIds: ["tut-p3", "tut-p4"] },
+      { id: "tut-team-3", name: "Beer/Earth", playerIds: ["tut-p5", "tut-p6"] },
+      { id: "tut-team-4", name: "Milk/Gap", playerIds: ["tut-p7", "tut-p8"] },
+    ],
+    matches: [
+      { id: "tut-tm-1", teamAId: "tut-team-1", teamBId: "tut-team-2", status: "completed", scores: [{ a: 21, b: 15 }, { a: 21, b: 17 }], winnerTeamId: "tut-team-1" },
+      { id: "tut-tm-2", teamAId: "tut-team-1", teamBId: "tut-team-3", status: "completed", scores: [{ a: 21, b: 18 }, { a: 18, b: 21 }, { a: 21, b: 16 }], winnerTeamId: "tut-team-1" },
+      { id: "tut-tm-3", teamAId: "tut-team-2", teamBId: "tut-team-4", status: "completed", scores: [{ a: 21, b: 14 }, { a: 21, b: 19 }], winnerTeamId: "tut-team-2" },
+      { id: "tut-tm-4", teamAId: "tut-team-3", teamBId: "tut-team-4", status: "completed", scores: [{ a: 21, b: 19 }, { a: 18, b: 21 }, { a: 21, b: 17 }], winnerTeamId: "tut-team-3" },
+      { id: "tut-tm-5", teamAId: "tut-team-2", teamBId: "tut-team-3", status: "completed", scores: [{ a: 21, b: 16 }, { a: 21, b: 18 }], winnerTeamId: "tut-team-2" },
+      { id: "tut-tm-6", teamAId: "tut-team-1", teamBId: "tut-team-4", status: "next", scores: [] },
+    ],
+  },
+  backupSample: { players: 8, matches: 2, lastExportedAt: null },
+};
+function buildTutorialFixtureState() {
+  // Structured-clone-via-JSON of the static template above: every (re)start of a guide gets a byte-identical
+  // fresh copy (spec Section 18 — Determinism) and no two concurrently-open tutorial runs (or a later real
+  // production feature) can ever share, and therefore mutate, the same underlying objects/arrays.
+  return JSON.parse(JSON.stringify(TUTORIAL_FIXTURE_TEMPLATE));
+}
+// useTutorialSandbox: the ONLY place interactive tutorial steps read or write demo data. `resetToken`
+// changing (bumped once per startGuide() call, see useTutorialEngine below) throws away whatever the
+// previous run did and rebuilds a fresh fixture — so replaying a guide, or switching to a different guide,
+// always starts clean. Every action below sets ONLY this local state; none of them ever call a real app
+// setter, read/write localStorage or IndexedDB, or import/execute the Owner's reference backup file.
+function useTutorialSandbox(resetToken) {
+  const [fixture, setFixture] = useState(buildTutorialFixtureState);
+  useEffect(() => { setFixture(buildTutorialFixtureState()); }, [resetToken]);
+
+  const setPlayerStatus = useCallback((playerId, status) => {
+    setFixture((f) => ({ ...f, players: f.players.map((p) => (p.id === playerId ? { ...p, status } : p)) }));
+  }, []);
+
+  const runAutoMatchmaking = useCallback(() => {
+    setFixture((f) => {
+      const pool = f.players.filter((p) => p.status === "ready");
+      const built = pool.length >= 4 ? buildMatch(pool, "doubles", f.lockPairs, f.players, { partner: {}, opp: {} }, {}) : null;
+      return { ...f, lastAutoMatch: built ? { teamA: built.teamA, teamB: built.teamB } : null, lastManualMatch: null, lastWarnings: [] };
+    });
+  }, []);
+  // deliberately pairs tut-p1 with tut-p3 (splitting the tut-p1/tut-p2 LOCK) and puts tut-p3 directly
+  // against tut-p4 (violating the tut-p3/tut-p4 AVOID-OPPONENT rule) so computeManualConstraintWarnings —
+  // the real engine's own manual-override checker — has something real to surface.
+  const tryRuleBreakingManualPairing = useCallback((tr) => {
+    setFixture((f) => {
+      const teamA = ["tut-p1", "tut-p3"], teamB = ["tut-p2", "tut-p4"];
+      const warnings = computeManualConstraintWarnings(teamA, teamB, f.lockPairs, f.players, f.players.map((p) => p.id), tr);
+      return { ...f, lastManualMatch: { teamA, teamB }, lastAutoMatch: null, lastWarnings: warnings };
+    });
+  }, []);
+
+  const startDemoMatch = useCallback(() => {
+    setFixture((f) => ({ ...f, demoMatch: { ...f.demoMatch, status: "playing" } }));
+  }, []);
+  const scoreDemoMatch = useCallback((a, b) => {
+    setFixture((f) => ({ ...f, demoMatch: { ...f.demoMatch, scores: [{ a, b }] } }));
+  }, []);
+  const finishDemoMatch = useCallback(() => {
+    setFixture((f) => ({ ...f, demoMatch: { ...f.demoMatch, status: "done" } }));
+  }, []);
+
+  const togglePlayerPaid = useCallback((playerId) => {
+    setFixture((f) => ({ ...f, players: f.players.map((p) => (p.id === playerId ? { ...p, paid: !p.paid } : p)) }));
+  }, []);
+
+  const spinRewardWheel = useCallback(() => {
+    setFixture((f) => ({ ...f, wheelSpun: true, wheelResult: pickWheelOutcome(f.settings.wheelPrizes) }));
+  }, []);
+
+  const simulateOneMoreVisit = useCallback(() => {
+    setFixture((f) => {
+      const next = { ...f.promoVisits };
+      Object.keys(next).forEach((k) => { next[k] = next[k] + 1; });
+      return { ...f, promoVisits: next };
+    });
+  }, []);
+
+  const advanceRankingOneGame = useCallback(() => {
+    setFixture((f) => (f.rankingAdvanced ? f : { ...f, rankingAdvanced: true }));
+  }, []);
+
+  const recordTournamentResult = useCallback(() => {
+    setFixture((f) => ({
+      ...f,
+      tournament: {
+        ...f.tournament,
+        matches: f.tournament.matches.map((m) => (m.status === "completed" ? m : { ...m, status: "completed", scores: [{ a: 21, b: 16 }, { a: 21, b: 18 }], winnerTeamId: m.teamAId })),
+      },
+    }));
+  }, []);
+
+  const simulateBackupExport = useCallback(() => {
+    setFixture((f) => ({ ...f, backupSample: { ...f.backupSample, lastExportedAt: Date.now() } }));
+  }, []);
+  const simulateBackupRestore = useCallback(() => {
+    // purely cosmetic within the sandbox: flips the one fixture player who started "left" back to "ready",
+    // standing in for "a restore brought your roster back" — never calls the real applyRestore()/exportBackup().
+    setFixture((f) => ({ ...f, players: f.players.map((p) => (p.id === "tut-p8" ? { ...p, status: "ready" } : p)), backupRestored: true }));
+  }, []);
+
+  const resetDemo = useCallback(() => { setFixture(buildTutorialFixtureState()); }, []);
+
+  const ranking = useMemo(() => {
+    const history = fixture.rankingAdvanced ? [...fixture.rankingSessionHistory, { name: "Super Smash", date: "2026-10-03", endedAt: 3, players: fixture.players, matches: [fixture.rankingNextMatch] }] : fixture.rankingSessionHistory;
+    return computeClubRanking("Super Smash", fixture.players, history, fixture.rankingSettings);
+  }, [fixture.players, fixture.rankingSessionHistory, fixture.rankingSettings, fixture.rankingAdvanced, fixture.rankingNextMatch]);
+
+  const bill = useMemo(() => computeBill(fixture.players, fixture.settings, fixture.billingMatches), [fixture.players, fixture.settings, fixture.billingMatches]);
+
+  const standings = useMemo(() => computeStandings(fixture.tournament.teams, fixture.tournament.matches, fixture.tournament.pointsConfig), [fixture.tournament]);
+  const champion = useMemo(() => {
+    const allDone = fixture.tournament.matches.every((m) => m.status === "completed");
+    return allDone && standings.length ? fixture.tournament.teams.find((t) => t.id === standings[0].teamId) : null;
+  }, [fixture.tournament, standings]);
+
+  const financeNet = useMemo(() => {
+    const revenue = bill.reduce((s, p) => s + (p.total || 0), 0);
+    const expenses = fixture.generalExpenses.reduce((s, e) => s + (e.amount || 0), 0);
+    return { revenue, expenses, net: revenue - expenses };
+  }, [bill, fixture.generalExpenses]);
+
+  const addDemoExpense = useCallback(() => {
+    setFixture((f) => ({ ...f, generalExpenses: [...f.generalExpenses, { id: "tut-exp-" + (f.generalExpenses.length + 1), category: "ค่าลูกแบต", description: "", amount: 50, date: "2026-10-03" }] }));
+  }, []);
+
+  return {
+    fixture, ranking, bill, standings, champion, financeNet,
+    setPlayerStatus, runAutoMatchmaking, tryRuleBreakingManualPairing,
+    startDemoMatch, scoreDemoMatch, finishDemoMatch, togglePlayerPaid,
+    spinRewardWheel, simulateOneMoreVisit, advanceRankingOneGame,
+    recordTournamentResult, simulateBackupExport, simulateBackupRestore, addDemoExpense, resetDemo,
+  };
+}
+
+// --- Interactive tutorial widgets ---------------------------------------------------------------------
+// Each widget below is a small, fully self-contained "mini-app" rendered INSIDE the tutorial card (never a
+// hole punched through the full-screen blocking overlay — see TutorialOverlay). Every widget reads/writes
+// ONLY the sandbox object passed to it; none of them ever reach into the real app's props/state/setters.
+const sandboxCardStyle = { marginTop: 10, padding: "10px 12px", borderRadius: 12, background: T.bg, border: `1px dashed ${T.border}` };
+const sandboxBtn = { ...btnPrimary, flex: "none", padding: "7px 12px", fontSize: 12.5 };
+const sandboxBtnSecondary = { ...btnSecondary, flex: "none", padding: "7px 12px", fontSize: 12.5 };
+function SandboxBadge({ t }) {
+  return <div style={{ fontSize: 10.5, fontWeight: 800, color: T.accent, marginBottom: 8 }}>{t ? t("tutorial.sandbox.badge") : "tutorial.sandbox.badge"}</div>;
+}
+
+function StatusToggleDemo({ sandbox, t }) {
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{t ? t("tutorial.sandbox.status.tapHint") : "tutorial.sandbox.status.tapHint"}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {sandbox.fixture.players.map((p) => {
+          const meta = PSTATUS[p.status] || PSTATUS.absent;
+          const label = t ? t(PSTATUS_I18N_KEY[p.status] || "attendance.status.absent") : meta.label;
+          const opts = PSTATUS_OPTS;
+          const nextStatus = opts[(opts.indexOf(p.status) + 1) % opts.length];
+          return (
+            <button key={p.id} onClick={() => sandbox.setPlayerStatus(p.id, nextStatus)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 20, border: `1px solid ${meta.color}`, background: meta.bg, color: meta.color, fontSize: 11.5, fontWeight: 800, cursor: "pointer" }}>
+              {p.name} · {label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function MatchmakingDemo({ sandbox, t, tr }) {
+  const f = sandbox.fixture;
+  const nameOf = (id) => (f.players.find((p) => p.id === id) || {}).name || id;
+  const match = f.lastAutoMatch || f.lastManualMatch;
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <button onClick={sandbox.runAutoMatchmaking} style={sandboxBtn}>{t ? t("tutorial.sandbox.runMatchmaking") : "tutorial.sandbox.runMatchmaking"}</button>
+        <button onClick={() => sandbox.tryRuleBreakingManualPairing(tr)} style={sandboxBtnSecondary}>{t ? t("tutorial.sandbox.tryManualPairing") : "tutorial.sandbox.tryManualPairing"}</button>
+      </div>
+      {match && (
+        <div style={{ fontSize: 12.5, color: T.text, marginBottom: 6 }}>
+          <b>{t ? t("tutorial.sandbox.matchResult") : "tutorial.sandbox.matchResult"}:</b> {match.teamA.map(nameOf).join(" + ")} <span style={{ color: T.muted }}>vs</span> {match.teamB.map(nameOf).join(" + ")}
+        </div>
+      )}
+      {f.lastWarnings && f.lastWarnings.length > 0 && (
+        <div style={{ fontSize: 11.5, color: "#b45309", background: "#fef3c7", border: "1px solid #fcd34d", borderRadius: 8, padding: "6px 8px" }}>
+          {f.lastWarnings.map((w) => (<div key={w.id}>⚠️ {w.text}</div>))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GameLifecycleDemo({ sandbox, t }) {
+  const m = sandbox.fixture.demoMatch;
+  const nameOf = (id) => (sandbox.fixture.players.find((p) => p.id === id) || {}).name || id;
+  const winner = m.status === "done" ? matchWinner(m) : null;
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      <div style={{ fontSize: 12.5, color: T.text, marginBottom: 8 }}>{m.teamA.map(nameOf).join(" + ")} <span style={{ color: T.muted }}>vs</span> {m.teamB.map(nameOf).join(" + ")}</div>
+      {m.status === "next" && (<button onClick={sandbox.startDemoMatch} style={sandboxBtn}>{t ? t("match.startGameLabel") : "เริ่มเกม"}</button>)}
+      {m.status === "playing" && (
+        <div>
+          <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 6 }}>{t ? t("tutorial.sandbox.lifecycle.scoreHint") : "tutorial.sandbox.lifecycle.scoreHint"}</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button onClick={() => sandbox.scoreDemoMatch(21, 17)} style={sandboxBtnSecondary}>21 - 17</button>
+            <button onClick={sandbox.finishDemoMatch} style={sandboxBtn}>{t ? t("match.finishGameActionLabel") : "จบเกม"}</button>
+          </div>
+        </div>
+      )}
+      {m.status === "done" && (
+        <div style={{ fontSize: 12.5, fontWeight: 800, color: T.green }}>
+          🏸 {winner === "A" ? m.teamA.map(nameOf).join(" + ") : m.teamB.map(nameOf).join(" + ")} {t ? t("tutorial.sandbox.lifecycle.won") : "tutorial.sandbox.lifecycle.won"}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentDemo({ sandbox, t }) {
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      {sandbox.bill.map((p) => (
+        <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: `1px solid ${T.border}` }}>
+          <span style={{ flex: 1, fontSize: 12.5, color: T.text }}>{p.name}</span>
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>฿{p.total}</span>
+          <button onClick={() => sandbox.togglePlayerPaid(p.id)} style={{ fontSize: 11, fontWeight: 800, padding: "4px 10px", borderRadius: 20, border: `1px solid ${p.paid ? T.green : T.border}`, background: p.paid ? "#e2f5ec" : T.surface, color: p.paid ? T.green : T.muted, cursor: "pointer" }}>
+            {t ? t(p.paid ? "finance.paidStatusShort" : "finance.unpaidStatusShort") : (p.paid ? "จ่ายแล้ว" : "ยังไม่จ่าย")}
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RewardAndPromotionDemo({ sandbox, t }) {
+  const f = sandbox.fixture;
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      <div style={{ marginBottom: 10 }}>
+        <button onClick={sandbox.spinRewardWheel} style={sandboxBtn}>{t ? t("finance.spinWheelButton") : "หมุนวงล้อรางวัล"}</button>
+        {f.wheelSpun && (
+          <div style={{ marginTop: 6, fontSize: 12.5, fontWeight: 700, color: f.wheelResult ? T.green : T.muted }}>
+            {f.wheelResult ? (t ? t("tutorial.sandbox.wheelResultWin", { prize: f.wheelResult.label }) : f.wheelResult.label) : (t ? t("tutorial.sandbox.wheelResultNone") : "tutorial.sandbox.wheelResultNone")}
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 6 }}>{t ? t("tutorial.sandbox.promo.progress") : "tutorial.sandbox.promo.progress"}</div>
+      {f.settings.promotions.map((c) => {
+        const count = f.promoVisits[c.campaignId] || 0;
+        const target = c.trigger.target;
+        const unlocked = count >= target;
+        return (
+          <div key={c.campaignId} style={{ fontSize: 12, marginBottom: 4, color: unlocked ? T.green : T.text }}>
+            {unlocked ? "🎁" : "▫️"} {c.name} — {Math.min(count, target)}/{target} {unlocked ? (t ? t("tutorial.sandbox.promo.unlocked") : "") : ""}
+          </div>
+        );
+      })}
+      <button onClick={sandbox.simulateOneMoreVisit} style={{ ...sandboxBtnSecondary, marginTop: 6 }}>{t ? t("tutorial.sandbox.promo.simulateVisit") : "tutorial.sandbox.promo.simulateVisit"}</button>
+    </div>
+  );
+}
+
+function FinanceSnapshotDemo({ sandbox, t }) {
+  const fn = sandbox.financeNet;
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      <div style={{ fontSize: 12.5, color: T.text, marginBottom: 4 }}>{t ? t("finance.netProfit") : "กำไรสุทธิ"} / {t ? t("finance.netLoss") : "ขาดทุนสุทธิ"}: <b style={{ color: fn.net >= 0 ? T.green : "#d9453d" }}>฿{fn.net}</b></div>
+      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>฿{fn.revenue} {t ? t("finance.netProfit") : "รายรับ"} − ฿{fn.expenses} {t ? t("finance.expenses") : "รายจ่าย"}</div>
+      <button onClick={sandbox.addDemoExpense} style={sandboxBtnSecondary}>{t ? t("tutorial.sandbox.finance.addExpense") : "tutorial.sandbox.finance.addExpense"}</button>
+    </div>
+  );
+}
+
+function RankingSnapshotDemo({ sandbox, t }) {
+  const r = sandbox.ranking;
+  const nameOf = (id) => (sandbox.fixture.players.find((p) => p.id === id) || {}).name || id;
+  const rows = r.qualifiedOrder.map((pid) => ({ pid, stats: r.stats[pid], tier: r.rankByPlayer[pid] }));
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      {rows.map((row) => (
+        <div key={row.pid} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 0", fontSize: 12.5 }}>
+          <span style={{ flex: 1 }}>{nameOf(row.pid)}</span>
+          <span>{row.tier ? `${row.tier.icon} ${row.tier.name}` : (t ? t("tutorial.sandbox.ranking.noRank") : "—")}</span>
+          <span style={{ color: T.muted }}>RP {Math.round(row.stats.rp)}</span>
+        </div>
+      ))}
+      <button onClick={sandbox.advanceRankingOneGame} style={{ ...sandboxBtnSecondary, marginTop: 8 }}>{t ? t("tutorial.sandbox.ranking.nextGame") : "tutorial.sandbox.ranking.nextGame"}</button>
+    </div>
+  );
+}
+
+function TournamentStageDemo({ sandbox, t }) {
+  const f = sandbox.fixture;
+  const nameOfTeam = (id) => (f.tournament.teams.find((tm) => tm.id === id) || {}).name || id;
+  const pending = f.tournament.matches.find((m) => m.status !== "completed");
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      {sandbox.standings.map((row, i) => (
+        <div key={row.teamId} style={{ display: "flex", gap: 8, fontSize: 12, padding: "3px 0" }}>
+          <span style={{ width: 16, color: T.muted }}>{i + 1}</span>
+          <span style={{ flex: 1 }}>{nameOfTeam(row.teamId)}</span>
+          <span style={{ color: T.muted }}>{row.win}W-{row.loss}L</span>
+          <span style={{ fontWeight: 800 }}>{row.points}pt</span>
+        </div>
+      ))}
+      {pending && (<button onClick={sandbox.recordTournamentResult} style={{ ...sandboxBtn, marginTop: 8 }}>{t ? t("tutorial.sandbox.tournament.recordResult") : "tutorial.sandbox.tournament.recordResult"} ({nameOfTeam(pending.teamAId)} vs {nameOfTeam(pending.teamBId)})</button>)}
+      {sandbox.champion && (<div style={{ marginTop: 8, fontSize: 13, fontWeight: 800, color: T.accent }}>{t ? t("tutorial.sandbox.tournament.champion", { team: sandbox.champion.name }) : "🏆 " + sandbox.champion.name}</div>)}
+    </div>
+  );
+}
+
+function BackupRestoreSimDemo({ sandbox, t }) {
+  const f = sandbox.fixture;
+  return (
+    <div style={sandboxCardStyle}>
+      <SandboxBadge t={t} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <button onClick={sandbox.simulateBackupExport} style={sandboxBtn}>{t ? t("tutorial.sandbox.backup.export") : "tutorial.sandbox.backup.export"}</button>
+        <button onClick={sandbox.simulateBackupRestore} style={sandboxBtnSecondary}>{t ? t("tutorial.sandbox.backup.restore") : "tutorial.sandbox.backup.restore"}</button>
+      </div>
+      {f.backupSample.lastExportedAt && (<div style={{ fontSize: 11.5, color: T.muted }}>✅ {f.backupSample.players} players · {f.backupSample.matches} matches</div>)}
+      {f.backupRestored && (<div style={{ fontSize: 12, fontWeight: 700, color: T.green, marginTop: 4 }}>{t ? t("tutorial.sandbox.backup.restored") : "tutorial.sandbox.backup.restored"}</div>)}
+    </div>
+  );
+}
+
+// TutorialInteractiveSlot: the single dispatch point from a step's declarative `interactive.kind` to the
+// actual widget component — the only place that needs to change if a new interactive kind is ever added.
+function TutorialInteractiveSlot({ kind, sandbox, t, tr }) {
+  if (!kind || !sandbox) return null;
+  switch (kind) {
+    case "status": return <StatusToggleDemo sandbox={sandbox} t={t} />;
+    case "matchmaking": return <MatchmakingDemo sandbox={sandbox} t={t} tr={tr} />;
+    case "lifecycle": return <GameLifecycleDemo sandbox={sandbox} t={t} />;
+    case "payment": return <PaymentDemo sandbox={sandbox} t={t} />;
+    case "reward": return <RewardAndPromotionDemo sandbox={sandbox} t={t} />;
+    case "finance": return <FinanceSnapshotDemo sandbox={sandbox} t={t} />;
+    case "ranking": return <RankingSnapshotDemo sandbox={sandbox} t={t} />;
+    case "tournament": return <TournamentStageDemo sandbox={sandbox} t={t} />;
+    case "backup": return <BackupRestoreSimDemo sandbox={sandbox} t={t} />;
+    default: return null;
+  }
+}
+
 const TUTORIAL_GUIDES = [
   {
     id: "quickstart", icon: "🚀",
@@ -7046,11 +7534,11 @@ const TUTORIAL_GUIDES = [
     steps: [
       { id: "qs1", tab: "members", target: "add-player-btn", titleKey: "tutorial.qs.step1.title", bodyKey: "tutorial.qs.step1.body" },
       { id: "qs2", tab: "members", target: "add-player-btn", titleKey: "tutorial.qs.step2.title", bodyKey: "tutorial.qs.step2.body" },
-      { id: "qs3", tab: "members", target: "member-status-row", titleKey: "tutorial.qs.step3.title", bodyKey: "tutorial.qs.step3.body" },
+      { id: "qs3", tab: "members", target: "member-status-row", titleKey: "tutorial.qs.step3.title", bodyKey: "tutorial.qs.step3.body", interactive: { kind: "status" } },
       { id: "qs4", tab: "members", target: "group-settings-btn", titleKey: "tutorial.qs.step4.title", bodyKey: "tutorial.qs.step4.body" },
-      { id: "qs5", tab: "session", target: null, titleKey: "tutorial.qs.step5.title", bodyKey: "tutorial.qs.step5.body" },
-      { id: "qs6", tab: "session", target: null, titleKey: "tutorial.qs.step6.title", bodyKey: "tutorial.qs.step6.body" },
-      { id: "qs7", tab: "finance", target: "finance-seg", titleKey: "tutorial.qs.step7.title", bodyKey: "tutorial.qs.step7.body" },
+      { id: "qs5", tab: "session", target: null, titleKey: "tutorial.qs.step5.title", bodyKey: "tutorial.qs.step5.body", interactive: { kind: "matchmaking" } },
+      { id: "qs6", tab: "session", target: null, titleKey: "tutorial.qs.step6.title", bodyKey: "tutorial.qs.step6.body", interactive: { kind: "lifecycle" } },
+      { id: "qs7", tab: "finance", target: "finance-seg", titleKey: "tutorial.qs.step7.title", bodyKey: "tutorial.qs.step7.body", interactive: { kind: "payment" } },
       { id: "qs8", tab: "settings", target: "settings-tutorial-row", titleKey: "tutorial.qs.step8.title", bodyKey: "tutorial.qs.step8.body" },
     ],
   },
@@ -7059,8 +7547,8 @@ const TUTORIAL_GUIDES = [
     titleKey: "tutorial.guide.players.title", descKey: "tutorial.guide.players.desc",
     steps: [
       { id: "pl1", tab: "members", target: "add-player-btn", titleKey: "tutorial.players.step1.title", bodyKey: "tutorial.players.step1.body" },
-      { id: "pl2", tab: "members", target: "member-status-row", titleKey: "tutorial.players.step2.title", bodyKey: "tutorial.players.step2.body" },
-      { id: "pl3", tab: "settings", target: "settings-advanced-row", titleKey: "tutorial.players.step3.title", bodyKey: "tutorial.players.step3.body" },
+      { id: "pl2", tab: "members", target: "member-status-row", titleKey: "tutorial.players.step2.title", bodyKey: "tutorial.players.step2.body", interactive: { kind: "status" } },
+      { id: "pl3", tab: "settings", target: "settings-advanced-row", titleKey: "tutorial.players.step3.title", bodyKey: "tutorial.players.step3.body", interactive: { kind: "ranking" } },
     ],
   },
   {
@@ -7068,8 +7556,8 @@ const TUTORIAL_GUIDES = [
     titleKey: "tutorial.guide.groups.title", descKey: "tutorial.guide.groups.desc",
     steps: [
       { id: "gr1", tab: "members", target: "group-settings-btn", titleKey: "tutorial.groups.step1.title", bodyKey: "tutorial.groups.step1.body" },
-      { id: "gr2", tab: "session", target: null, titleKey: "tutorial.groups.step2.title", bodyKey: "tutorial.groups.step2.body" },
-      { id: "gr3", tab: "session", target: null, titleKey: "tutorial.groups.step3.title", bodyKey: "tutorial.groups.step3.body" },
+      { id: "gr2", tab: "session", target: null, titleKey: "tutorial.groups.step2.title", bodyKey: "tutorial.groups.step2.body", interactive: { kind: "matchmaking" } },
+      { id: "gr3", tab: "session", target: null, titleKey: "tutorial.groups.step3.title", bodyKey: "tutorial.groups.step3.body", interactive: { kind: "lifecycle" } },
       { id: "gr4", tab: "session", target: null, titleKey: "tutorial.groups.step4.title", bodyKey: "tutorial.groups.step4.body" },
     ],
   },
@@ -7079,7 +7567,7 @@ const TUTORIAL_GUIDES = [
     steps: [
       { id: "tn1", tab: "members", target: "members-tournament-toggle", titleKey: "tutorial.tournament.step1.title", bodyKey: "tutorial.tournament.step1.body" },
       { id: "tn2", tab: "members", target: null, titleKey: "tutorial.tournament.step2.title", bodyKey: "tutorial.tournament.step2.body" },
-      { id: "tn3", tab: "session", target: null, titleKey: "tutorial.tournament.step3.title", bodyKey: "tutorial.tournament.step3.body" },
+      { id: "tn3", tab: "session", target: null, titleKey: "tutorial.tournament.step3.title", bodyKey: "tutorial.tournament.step3.body", interactive: { kind: "tournament" } },
       { id: "tn4", tab: "finance", target: null, titleKey: "tutorial.tournament.step4.title", bodyKey: "tutorial.tournament.step4.body" },
     ],
   },
@@ -7088,8 +7576,8 @@ const TUTORIAL_GUIDES = [
     titleKey: "tutorial.guide.payment.title", descKey: "tutorial.guide.payment.desc",
     steps: [
       { id: "pm1", tab: "members", target: "group-settings-btn", titleKey: "tutorial.payment.step1.title", bodyKey: "tutorial.payment.step1.body" },
-      { id: "pm2", tab: "finance", target: "finance-seg", titleKey: "tutorial.payment.step2.title", bodyKey: "tutorial.payment.step2.body" },
-      { id: "pm3", tab: "settings", target: "settings-advanced-row", titleKey: "tutorial.payment.step3.title", bodyKey: "tutorial.payment.step3.body" },
+      { id: "pm2", tab: "finance", target: "finance-seg", titleKey: "tutorial.payment.step2.title", bodyKey: "tutorial.payment.step2.body", interactive: { kind: "payment" } },
+      { id: "pm3", tab: "settings", target: "settings-advanced-row", titleKey: "tutorial.payment.step3.title", bodyKey: "tutorial.payment.step3.body", interactive: { kind: "reward" } },
       { id: "pm4", tab: "finance", target: "finance-seg", titleKey: "tutorial.payment.step4.title", bodyKey: "tutorial.payment.step4.body" },
     ],
   },
@@ -7098,7 +7586,7 @@ const TUTORIAL_GUIDES = [
     titleKey: "tutorial.guide.finance.title", descKey: "tutorial.guide.finance.desc",
     steps: [
       { id: "fn1", tab: "finance", target: "finance-seg", titleKey: "tutorial.finance.step1.title", bodyKey: "tutorial.finance.step1.body" },
-      { id: "fn2", tab: "finance", target: null, titleKey: "tutorial.finance.step2.title", bodyKey: "tutorial.finance.step2.body" },
+      { id: "fn2", tab: "finance", target: null, titleKey: "tutorial.finance.step2.title", bodyKey: "tutorial.finance.step2.body", interactive: { kind: "finance" } },
       { id: "fn3", tab: "finance", target: "finance-export-btn", titleKey: "tutorial.finance.step3.title", bodyKey: "tutorial.finance.step3.body" },
     ],
   },
@@ -7107,7 +7595,7 @@ const TUTORIAL_GUIDES = [
     titleKey: "tutorial.guide.backup.title", descKey: "tutorial.guide.backup.desc",
     steps: [
       { id: "bk1", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.backup.step1.title", bodyKey: "tutorial.backup.step1.body" },
-      { id: "bk2", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.backup.step2.title", bodyKey: "tutorial.backup.step2.body" },
+      { id: "bk2", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.backup.step2.title", bodyKey: "tutorial.backup.step2.body", interactive: { kind: "backup" } },
       { id: "bk3", tab: "settings", target: "settings-backup-row", titleKey: "tutorial.backup.step3.title", bodyKey: "tutorial.backup.step3.body" },
     ],
   },
@@ -7133,6 +7621,11 @@ function useTutorialEngine(tab, setTab) {
   const [activeGuideId, setActiveGuideId] = useState(null);
   const [stepIndex, setStepIndex] = useState(0);
   const [offerQuickStart, setOfferQuickStart] = useState(false);
+  // v1.12.55: bumped once per startGuide() call (including replaying the SAME guide id) — the one signal
+  // useTutorialSandbox needs to throw away the previous run's sandbox state and rebuild a fresh fixture, so
+  // every guide (re)start is byte-identical (spec Section 18 — Determinism). Purely in-memory, like every
+  // other piece of runtime-only state in this hook.
+  const [guideStartCount, setGuideStartCount] = useState(0);
 
   const activeGuide = activeGuideId ? (TUTORIAL_GUIDES.find((g) => g.id === activeGuideId) || null) : null;
   const activeStep = activeGuide ? activeGuide.steps[stepIndex] : null;
@@ -7165,6 +7658,7 @@ function useTutorialEngine(tab, setTab) {
     setOfferQuickStart(false);
     setActiveGuideId(id);
     setStepIndex(0);
+    setGuideStartCount((c) => c + 1);
   }, []);
 
   const closeGuide = useCallback(() => { setActiveGuideId(null); setStepIndex(0); }, []);
@@ -7198,7 +7692,7 @@ function useTutorialEngine(tab, setTab) {
   const dismissOffer = useCallback(() => setOfferQuickStart(false), []);
 
   return {
-    tutorialState, activeGuide, activeStep, stepIndex,
+    tutorialState, activeGuideId, activeGuide, activeStep, stepIndex, guideStartCount,
     offerQuickStart, offerQuickStartOnce, dismissOffer,
     startGuide, closeGuide, markCompleted, next, back, skip,
     isCompleted: (id) => tutorialState.completedGuides.indexOf(id) !== -1,
@@ -7211,7 +7705,7 @@ function useTutorialEngine(tab, setTab) {
 // for this step), progress dots + "N / total", and Skip/Back/Next/Finish. A full-screen layer with no
 // onClick handler sits over the whole app while a guide is active, so an accidental tap anywhere outside
 // the card's own buttons can never reach — and therefore can never mutate — any real control underneath.
-function TutorialOverlay({ guide, step, stepIndex, onNext, onBack, onSkip, t }) {
+function TutorialOverlay({ guide, step, stepIndex, onNext, onBack, onSkip, t, tr, sandbox }) {
   const [rect, setRect] = useState(null);
   useEffect(() => {
     if (!step) { setRect(null); return; }
@@ -7244,14 +7738,39 @@ function TutorialOverlay({ guide, step, stepIndex, onNext, onBack, onSkip, t }) 
   const vw = typeof window !== "undefined" ? window.innerWidth : 360;
   const vh = typeof window !== "undefined" ? window.innerHeight : 640;
   const cardWidth = Math.min(340, vw - 32);
+  // v1.12.55 (Interactive Realistic Tutorial Upgrade, Section 15 — mandatory viewport safety): the card is
+  // now a fixed-height flex COLUMN of exactly three parts — a fixed header (progress dots + N/total +
+  // title), a SCROLLABLE middle (step body text + the interactive widget, if any), and a sticky footer
+  // (Skip/Back/Next/Finish) that lives OUTSIDE the scrollable region. Previously the whole card (nav buttons
+  // included) was one single scrolling block, so a long step body on a short viewport could push
+  // Skip/Back/Next/Finish below the fold with no way to reach them — confirmed reproducible with the long
+  // TH/EN copy on this guide's own steps at a small viewport height. `cardMaxHeight` below is now derived
+  // from the ACTUAL remaining space around the spotlight (never a flat constant), and `cardTop` is always
+  // chosen so `cardTop + cardMaxHeight` stays inside the viewport — so the footer is mathematically
+  // guaranteed to be on-screen, at every one of the 4 required viewport presets (see the v1.12.55 report's
+  // Category E tests), no matter how long the step's body text or how short the device.
   let cardTop = null, cardLeft = Math.max(16, (vw - cardWidth) / 2);
+  let cardMaxHeight = Math.min(460, vh - 32);
   if (spot) {
     cardLeft = Math.max(16, Math.min(spot.left, vw - cardWidth - 16));
-    const spaceBelow = vh - (spot.top + spot.height);
-    const spaceAbove = spot.top;
-    cardTop = spaceBelow >= 200 || spaceBelow >= spaceAbove
-      ? Math.min(spot.top + spot.height + 14, vh - 220)
-      : Math.max(16, spot.top - 14 - 210);
+    const spaceBelow = vh - (spot.top + spot.height) - 16;
+    const spaceAbove = spot.top - 16;
+    if (spaceBelow >= 160 || spaceBelow >= spaceAbove) {
+      cardTop = spot.top + spot.height + 14;
+      cardMaxHeight = Math.max(160, Math.min(460, vh - cardTop - 16));
+    } else {
+      cardMaxHeight = Math.max(160, Math.min(460, spaceAbove));
+      cardTop = Math.max(16, spot.top - 14 - cardMaxHeight);
+    }
+    // Final unconditional safety clamp: `measure()` can fire once with a stale/transient `rect` (e.g. the
+    // single frame between triggering the target's `scrollIntoView({behavior:"smooth"})` and the scroll
+    // actually landing — see the effect above), which can momentarily report a `spot` far outside the
+    // current viewport. Without this clamp the branches above could still place the card, or size it,
+    // partly or fully off-screen for that one frame — taking the footer with it. Re-clamping both values
+    // against the real `vh` here, regardless of what the spot-relative math above produced, guarantees
+    // `cardTop + cardMaxHeight` can never exceed the viewport no matter how implausible the measured spot.
+    cardMaxHeight = Math.max(160, Math.min(cardMaxHeight, vh - 32));
+    cardTop = Math.max(16, Math.min(cardTop, vh - cardMaxHeight - 16));
   }
   const cardStyle = spot
     ? { position: "fixed", top: cardTop, left: cardLeft, width: cardWidth }
@@ -7264,14 +7783,23 @@ function TutorialOverlay({ guide, step, stepIndex, onNext, onBack, onSkip, t }) 
       ) : (
         <div style={{ position: "fixed", inset: 0, background: "rgba(10,14,20,0.62)" }} />
       )}
-      <div style={{ ...cardStyle, maxWidth: cardWidth, maxHeight: vh - 32, overflowY: "auto", boxSizing: "border-box", background: T.surface, borderRadius: 16, padding: "16px 16px 14px", boxShadow: "0 12px 32px rgba(0,0,0,0.28)", paddingBottom: "calc(14px + env(safe-area-inset-bottom))" }}>
-        <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
-          {guide.steps.map((s, i) => (<div key={s.id} style={{ flex: 1, height: 4, borderRadius: 2, background: i <= stepIndex ? T.accent : T.border }} />))}
+      <div style={{ ...cardStyle, maxWidth: cardWidth, maxHeight: cardMaxHeight, display: "flex", flexDirection: "column", boxSizing: "border-box", background: T.surface, borderRadius: 16, boxShadow: "0 12px 32px rgba(0,0,0,0.28)", overflow: "hidden" }}>
+        {/* fixed header — never scrolls */}
+        <div style={{ flex: "none", padding: "16px 16px 0" }}>
+          <div style={{ display: "flex", gap: 4, marginBottom: 10 }}>
+            {guide.steps.map((s, i) => (<div key={s.id} style={{ flex: 1, height: 4, borderRadius: 2, background: i <= stepIndex ? T.accent : T.border }} />))}
+          </div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginBottom: 4 }}>{stepIndex + 1} / {guide.steps.length}</div>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.text }}>{t ? t(step.titleKey) : step.titleKey}</div>
         </div>
-        <div style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginBottom: 4 }}>{stepIndex + 1} / {guide.steps.length}</div>
-        <div style={{ fontSize: 15, fontWeight: 800, color: T.text, marginBottom: 6 }}>{t ? t(step.titleKey) : step.titleKey}</div>
-        <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, marginBottom: 14, whiteSpace: "pre-line" }}>{t ? t(step.bodyKey) : step.bodyKey}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {/* scrollable middle — step body text + the interactive widget (if this step has one) */}
+        <div style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: "8px 16px 14px" }}>
+          <div style={{ fontSize: 13, color: T.text, lineHeight: 1.5, whiteSpace: "pre-line" }}>{t ? t(step.bodyKey) : step.bodyKey}</div>
+          {step.interactive && <TutorialInteractiveSlot kind={step.interactive.kind} sandbox={sandbox} t={t} tr={tr} />}
+        </div>
+        {/* sticky footer — Skip/Back/Next/Finish are ALWAYS visible and tappable, regardless of how long the
+            body above is or how short the viewport is (the one hard requirement this redesign exists for). */}
+        <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 8, padding: "10px 16px calc(14px + env(safe-area-inset-bottom))", borderTop: `1px solid ${T.border}` }}>
           <button onClick={onSkip} style={{ background: "none", border: "none", color: T.muted, fontSize: 12.5, fontWeight: 700, padding: "8px 4px", cursor: "pointer" }}>{t ? t("common.skip") : "common.skip"}</button>
           <div style={{ flex: 1 }} />
           {stepIndex > 0 && (<button onClick={onBack} style={{ ...btnSecondary, flex: "none", padding: "8px 14px" }}>{t ? t("common.back") : "common.back"}</button>)}
@@ -7828,6 +8356,10 @@ function AppInner() {
   // existing top-level `tab` state (UI navigation only — see useTutorialEngine's own header comment for
   // why this is always safe) and so its overlay can be rendered above everything else further down.
   const tutorialEngine = useTutorialEngine(tab, setTab);
+  // v1.12.55: the tutorial's own isolated sandbox world (see useTutorialSandbox above) — rebuilt fresh every
+  // time guideStartCount changes (i.e. every startGuide() call). Completely separate from every real piece
+  // of app state declared elsewhere in AppInner; nothing here is ever read by, or written into, any of it.
+  const tutorialSandbox = useTutorialSandbox(tutorialEngine.guideStartCount);
   // Fresh-install first-use offer: fires at most once per install, only once the boot waterfall has fully
   // resolved to the "new-install" signal (see TUTORIAL_GUIDES' header comment for why this exact,
   // already-tested signal — and no naive "bg-v11 missing" heuristic — is used). An existing user upgrading
@@ -9495,7 +10027,10 @@ function AppInner() {
     const newId = uid();
     setPlayers((prev) => {
       const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
-      const comingCount = prev.filter((p) => p.status === "registered" || p.status === "ready").length;
+      // v1.14.0: was registered-or-ready only — now the canonical accepted-capacity predicate (see
+      // countsTowardSessionCapacity), so a player who was accepted earlier today and has since moved to
+      // resting/left still correctly holds their slot and doesn't silently let a NEW add-player through.
+      const comingCount = prev.filter((p) => countsTowardSessionCapacity(p.status)).length;
       const initialStatus = cap > 0 && comingCount >= cap ? "waiting" : "ready";
       // v1.11.67 (section S): a BRAND NEW player only ever owes an entrance fee if Entrance Fee is
       // enabled for this group AT THE MOMENT they're added — this is the one and only place a player is
@@ -9619,7 +10154,12 @@ function AppInner() {
   // manual override the feature explicitly calls for.
   const setStatus = (id, st) => setPlayers((prev) => {
     const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
-    const comingCount = prev.filter((p) => p.id !== id && (p.status === "registered" || p.status === "ready")).length;
+    // v1.14.0: was registered-or-ready only (see countsTowardSessionCapacity) — a player already accepted
+    // today who has since moved to resting/left must keep holding their slot, so a DIFFERENT player's fresh
+    // absent->coming check-in below is correctly still blocked/redirected to waiting. The TRIGGER condition
+    // for this cap check (a fresh absent->registered/ready transition, see `capped` below) is intentionally
+    // unchanged — this only fixes WHO counts as already occupying a slot, not when the check fires.
+    const comingCount = prev.filter((p) => p.id !== id && countsTowardSessionCapacity(p.status)).length;
     return prev.map((p) => {
       if (p.id !== id) return p;
       const capped = cap > 0 && p.status === "absent" && (st === "registered" || st === "ready") && comingCount >= cap;
@@ -12200,6 +12740,8 @@ function AppInner() {
           onBack={tutorialEngine.back}
           onSkip={tutorialEngine.skip}
           t={t}
+          tr={t}
+          sandbox={tutorialSandbox}
         />
       )}
     </div>
@@ -22124,6 +22666,18 @@ function PromotionSettingsSheet({ settings, setSettings, sessionHistory, onClose
 // anything.
 function PromotionCampaignEditor({ campaign, onSave, onClose, t }) {
   const base = useMemo(() => normalizePromotionCampaign(campaign || {}), [campaign]);
+  // v1.14.0 (Post-Tutorial Core Fix Pass — Promotion form validation UX): the ONE pre-existing required-field
+  // rule this editor has ever enforced is `if (!name.trim()) return;` inside submit() below — tapping Save
+  // with a blank campaign name has always silently done nothing, with zero feedback. `errors`/`formError`/
+  // `nameRef` below make that EXISTING rule visible and actionable (red border + inline localized message +
+  // scroll/focus to the field + a form-level banner) without changing what is or isn't actually required —
+  // no other field in this form has ever had a hard save-blocking requirement (every other field is
+  // defensively defaulted/coerced by normalizePromotionCampaign above, e.g. an invalid target or amount has
+  // always silently fallen back to a safe default rather than being rejected), so no new requirement is
+  // introduced here. See the v1.14.0 report for the related fields inspected but deliberately left as-is.
+  const [errors, setErrors] = useState({});
+  const [formError, setFormError] = useState(false);
+  const nameRef = useRef(null);
   const [name, setName] = useState(base.name);
   const [eligibility, setEligibility] = useState(base.eligibility);
   const [kind, setKind] = useState(base.trigger.kind);
@@ -22139,9 +22693,32 @@ function PromotionCampaignEditor({ campaign, onSave, onClose, t }) {
   const [maxRewards, setMaxRewards] = useState(base.maxRewards != null ? String(base.maxRewards) : "");
   const [unlimited, setUnlimited] = useState(base.maxRewards == null);
   const inputStyle = { width: "100%", padding: "9px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, marginBottom: 10, boxSizing: "border-box" };
+  const errorInputStyle = { ...inputStyle, border: `1.5px solid ${T.accent}`, marginBottom: 4 };
   const segStyle = (active) => ({ flex: 1, padding: "8px 0", borderRadius: 9, border: `1.5px solid ${active ? T.green : T.border}`, background: active ? "#e2f5ec" : T.surface, color: active ? T.green : T.text, fontSize: 12, fontWeight: 800 });
+  // v1.14.0: also drops the form-level banner once every field-level error has been corrected, not just the
+  // one input's own inline message — otherwise "กรุณากรอกข้อมูลที่จำเป็นให้ครบ" could keep showing after the
+  // organizer had already fixed the only invalid field, which fails requirement (7) ("validation errors
+  // should clear/update naturally when the user corrects the relevant field") for the banner specifically.
+  const clearError = (field) => setErrors((prev) => {
+    if (!prev[field]) return prev;
+    const next = { ...prev, [field]: undefined };
+    setFormError(Object.values(next).some(Boolean));
+    return next;
+  });
   const submit = () => {
-    if (!name.trim()) return;
+    const nextErrors = {};
+    if (!name.trim()) nextErrors.name = t ? t("validation.required", { field: t("promotion.field.name") }) : "กรุณากรอกชื่อโปรโมชั่น";
+    setErrors(nextErrors);
+    const hasErrors = Object.keys(nextErrors).length > 0;
+    setFormError(hasErrors);
+    if (hasErrors) {
+      // scroll/focus to the FIRST invalid field — currently always `name`, the only hard-required field,
+      // but written as a lookup so a future genuinely-required field slots in without restructuring this.
+      if (nextErrors.name && nameRef.current) {
+        try { nameRef.current.focus(); nameRef.current.scrollIntoView({ behavior: "smooth", block: "center" }); } catch (e) {}
+      }
+      return;
+    }
     onSave({
       ...base,
       name: name.trim(), eligibility, trigger: { kind, target: Number(target) || 1 }, repeatMode,
@@ -22155,7 +22732,15 @@ function PromotionCampaignEditor({ campaign, onSave, onClose, t }) {
       <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 14 }}>{campaign ? (t ? t("common.edit") : "แก้ไข") : (t ? t("promotion.createAction") : "สร้างโปรโมชั่น")}</div>
 
       <Label>{t ? t("promotion.field.name") : "ชื่อโปรโมชั่น"}</Label>
-      <input value={name} onChange={(e) => setName(e.target.value)} style={inputStyle} placeholder={t ? t("promotion.field.namePlaceholder") : "เช่น เล่นต่อเนื่อง 10 ครั้ง"} />
+      <input
+        ref={nameRef}
+        value={name}
+        onChange={(e) => { setName(e.target.value); clearError("name"); }}
+        style={errors.name ? errorInputStyle : inputStyle}
+        placeholder={t ? t("promotion.field.namePlaceholder") : "เช่น เล่นต่อเนื่อง 10 ครั้ง"}
+        aria-invalid={!!errors.name}
+      />
+      {errors.name && (<div style={{ fontSize: 11, color: T.accent, fontWeight: 700, marginTop: -6, marginBottom: 10 }}>{errors.name}</div>)}
 
       <Label>{t ? t("promotion.field.eligibility") : "ผู้เล่นที่เข้าร่วม"}</Label>
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
@@ -22227,6 +22812,11 @@ function PromotionCampaignEditor({ campaign, onSave, onClose, t }) {
         {!unlimited && <input type="number" min="1" value={maxRewards} onChange={(e) => setMaxRewards(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: 80, flex: "none" }} />}
       </div>
 
+      {formError && (
+        <div style={{ padding: "9px 11px", borderRadius: 10, background: "#fdeae7", border: `1px solid ${T.accent}`, fontSize: 12, color: T.accent, fontWeight: 700, marginBottom: 10 }}>
+          {t ? t("validation.completeRequiredFields") : "กรุณากรอกข้อมูลที่จำเป็นให้ครบ"}
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={onClose} style={btnSecondary}>{t ? t("common.cancel") : "ยกเลิก"}</button>
         <button onClick={submit} style={btnPrimary}>{t ? t("common.save") : "บันทึก"}</button>
