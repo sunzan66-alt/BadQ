@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.14.8";
+      var CURRENT_VERSION = "1.14.9";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -2894,6 +2894,30 @@ const th = defineMessages("th", [
   ["backup.exportedAtLine", "วันที่สำรอง: {date}"],
   ["backup.statPlayers", "ผู้เล่น {count} คน"],
   ["backup.statSessions", "ประวัติก๊วน {count} ครั้ง"],
+  ["share.groupSummary.defaultName", "ก๊วนแบดมินตัน"],
+  ["share.playersLine.one", "ผู้เล่น {count} คน"],
+  ["share.playersLine.other", "ผู้เล่น {count} คน"],
+  ["share.mostGamesLine", "เกมมากสุด {count} เกม"],
+  ["share.totalExpenseLine", "ค่าใช้จ่ายรวม {amount}"],
+  ["share.copiedFallback", "อุปกรณ์นี้แชร์ตรงไม่ได้ — คัดลอกข้อความสรุปก๊วนแล้ว"],
+  ["backup.playerCount.one", "ผู้เล่น {count} คน"],
+  ["backup.playerCount.other", "ผู้เล่น {count} คน"],
+  ["backup.sessionRecordCount.one", "ประวัติก๊วน {count} ครั้ง"],
+  ["backup.sessionRecordCount.other", "ประวัติก๊วน {count} ครั้ง"],
+  ["backup.matchTotalCount.one", "แมตช์ทั้งหมด {count} แมตช์"],
+  ["backup.matchTotalCount.other", "แมตช์ทั้งหมด {count} แมตช์"],
+  ["backup.diagLogTitle", "Diagnostic Log (v1.11.47, ชั่วคราว)"],
+  ["backup.bootLogTitle", "บันทึกการซิงค์ข้อมูล (debug)"],
+  ["backup.diagRefresh", "รีเฟรช"],
+  ["backup.diagCopyAll", "คัดลอกทั้งหมด"],
+  ["backup.diagTapRefresh", "แตะ \"รีเฟรช\" เพื่อโหลด"],
+  ["backup.diagEmpty", "ยังไม่มีข้อมูล"],
+  ["backup.diagCopied", "คัดลอก Diagnostic Log แล้ว"],
+  ["backup.diagCopyFailed", "คัดลอกไม่สำเร็จ"],
+  ["backup.versionLine", "เวอร์ชัน: BadQ v{version}"],
+  ["backup.contactOptionalNote", "เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น"],
+  ["app.updateBanner", "มีเวอร์ชันใหม่ (v{version}) พร้อมใช้งาน"],
+  ["app.updateNotReady", "ยังติดตั้งเวอร์ชันใหม่ไม่เสร็จ — กรุณากดอีกครั้งในอีกสักครู่"],
   ["backup.statMatches", "แมตช์ {count} แมตช์"],
   ["backup.statActiveSession", "มีก๊วนที่กำลังใช้งาน 1 ก๊วน"],
   ["backup.statHasPayment", "มีข้อมูลชำระเงิน"],
@@ -4711,6 +4735,30 @@ const en = defineMessages("en", [
   ["backup.exportedAtLine", "Backup date: {date}"],
   ["backup.statPlayers", "{count} players"],
   ["backup.statSessions", "{count} session records"],
+  ["share.groupSummary.defaultName", "Badminton session"],
+  ["share.playersLine.one", "{count} player"],
+  ["share.playersLine.other", "{count} players"],
+  ["share.mostGamesLine", "Most games: {count}"],
+  ["share.totalExpenseLine", "Total expenses: {amount}"],
+  ["share.copiedFallback", "This device can't share directly — the group summary text was copied"],
+  ["backup.playerCount.one", "{count} player"],
+  ["backup.playerCount.other", "{count} players"],
+  ["backup.sessionRecordCount.one", "{count} session record"],
+  ["backup.sessionRecordCount.other", "{count} session records"],
+  ["backup.matchTotalCount.one", "{count} match total"],
+  ["backup.matchTotalCount.other", "{count} matches total"],
+  ["backup.diagLogTitle", "Diagnostic log (v1.11.47, temporary)"],
+  ["backup.bootLogTitle", "Data sync log (debug)"],
+  ["backup.diagRefresh", "Refresh"],
+  ["backup.diagCopyAll", "Copy all"],
+  ["backup.diagTapRefresh", "Tap \"Refresh\" to load"],
+  ["backup.diagEmpty", "No data yet"],
+  ["backup.diagCopied", "Diagnostic log copied"],
+  ["backup.diagCopyFailed", "Copy failed"],
+  ["backup.versionLine", "Version: BadQ v{version}"],
+  ["backup.contactOptionalNote", "Phone number and LINE ID are optional and are used only to contact members."],
+  ["app.updateBanner", "A new version (v{version}) is ready"],
+  ["app.updateNotReady", "The new version isn't finished installing yet — please try again in a moment"],
   ["backup.statMatches", "{count} matches"],
   ["backup.statActiveSession", "1 session currently in progress"],
   ["backup.statHasPayment", "Includes payment data"],
@@ -5277,7 +5325,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
   });
 })();
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.14.8";
+const APP_VERSION = "1.14.9";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -11490,6 +11538,9 @@ function downloadFinancialReportXlsx(report, formats) {
 }
 
 // build the plain-text summary used by the Web Share API (with clipboard/alert fallback)
+// v1.14.9 (i18n cleanup): `tr`/`trc` (t/tc) are OPTIONAL — omitting them renders the pre-existing Thai text unchanged. When given, the
+// system-owned labels follow the selected UI language (counts are pluralised through tc); the group name and the already-formatted
+// date string are passed through untouched.
 function buildShareText({
   name,
   date,
@@ -11497,8 +11548,13 @@ function buildShareText({
   totalMatches,
   maxGames,
   totalExpense
-}) {
-  return `BadQ — ${name || "ก๊วนแบดมินตัน"}\n${date || ""}\nผู้เล่น ${playerCount} คน\n${totalMatches} แมตช์\nเกมมากสุด ${maxGames} เกม\nค่าใช้จ่ายรวม ${formatCurrency(totalExpense)}`;
+}, tr, trc) {
+  if (!tr || !trc) return `BadQ — ${name || "ก๊วนแบดมินตัน"}\n${date || ""}\nผู้เล่น ${playerCount} คน\n${totalMatches} แมตช์\nเกมมากสุด ${maxGames} เกม\nค่าใช้จ่ายรวม ${formatCurrency(totalExpense)}`;
+  return [`BadQ — ${name || tr("share.groupSummary.defaultName")}`, date || "", trc("share.playersLine", playerCount), trc("common.matchCount", totalMatches), tr("share.mostGamesLine", {
+    count: maxGames
+  }), tr("share.totalExpenseLine", {
+    amount: formatCurrency(totalExpense)
+  })].join("\n");
 }
 // v1.11.4: single Tournament share-text generator — built from the SAME buildTournamentResultReport
 // object that feeds the Podium/Bracket/PDF, so the shared text can never separately calculate or drift
@@ -11538,7 +11594,7 @@ function buildTournamentShareText(report, teamsById, peopleById, formatDate = fm
   lines.push(L("tournament.shareCredit", "สร้างโดย BadQ 🏸"));
   return lines.join("\n");
 }
-async function shareSummary(text) {
+async function shareSummary(text, tr) {
   try {
     if (navigator.share) {
       await navigator.share({
@@ -11551,7 +11607,7 @@ async function shareSummary(text) {
   }
   try {
     await navigator.clipboard.writeText(text);
-    alert("อุปกรณ์นี้แชร์ตรงไม่ได้ — คัดลอกข้อความสรุปก๊วนแล้ว");
+    alert(tr ? tr("share.copiedFallback") : "อุปกรณ์นี้แชร์ตรงไม่ได้ — คัดลอกข้อความสรุปก๊วนแล้ว");
   } catch (e) {
     alert(text);
   }
@@ -12816,6 +12872,43 @@ function backupStats(data) {
     hasFinanceData: (data.generalExpenses || []).length > 0 || (data.otherIncome || []).length > 0 || (data.sessionHistory || []).some(s => (s.expenses || []).length > 0),
     discountCreditCount: (data.discountCredits || []).length,
     rewardHistoryCount: (data.rewardHistory || []).length
+  };
+}
+// v1.14.9 (Manual Backup Reminder). SOURCE OF TRUTH: `settings.lastBackupAt` (ISO string, persisted with the rest of settings in
+// "bg-v11" and therefore durable across reload / PWA close-reopen / offline / version update). It is written in exactly one place —
+// exportBackup(), AFTER the user-initiated export file was actually delivered (download or share completed) — and nowhere else:
+// automatic recovery points, session-end / Tournament recovery points, Import, Restore, Undo-import, opening the Backup screen and
+// dismissing the reminder never touch it (applyRestore also carries the device's current value across a replace-restore).
+// Legacy installs already hold this field from earlier manual exports, so it IS the "last successful manual backup" timestamp.
+// nextBackupReminder = lastSuccessfulManualBackupAt + 72h. An install that has never exported (no timestamp) is anchored at the
+// first time this version saw it (a localStorage display-preference style key, outside settings/backups): it is reminded 72h after
+// that, never on every launch.
+const BACKUP_REMINDER_INTERVAL_MS = 72 * 3600 * 1000;
+const BACKUP_REMINDER_BASELINE_KEY = "badq_backupReminderBaselineAt";
+function lastSuccessfulManualBackupAtMs(settings, now) {
+  const raw = settings && settings.lastBackupAt;
+  if (!raw) return null;
+  const ms = new Date(raw).getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  if (ms > now + 24 * 3600 * 1000) return null; // wildly in the future (clock error): not a reliable anchor
+  return ms;
+}
+function backupReminderDecision({
+  settings,
+  baselineMs,
+  now,
+  dismissedThisSession
+}) {
+  const manual = lastSuccessfulManualBackupAtMs(settings, now);
+  const anchor = manual != null ? manual : Number.isFinite(baselineMs) && baselineMs > 0 && baselineMs <= now + 24 * 3600 * 1000 ? baselineMs : null;
+  const dueAt = anchor != null ? anchor + BACKUP_REMINDER_INTERVAL_MS : null;
+  const due = dueAt != null && now >= dueAt;
+  return {
+    show: !!due && !dismissedThisSession,
+    due: !!due,
+    dueAt,
+    kind: manual == null ? "never" : "elapsed",
+    days: manual != null ? Math.floor((now - manual) / 86400000) : null
   };
 }
 // cheap structural check — catches "this isn't even a BadQ backup" before we try to migrate/use it
@@ -18296,6 +18389,74 @@ function readBadqCacheNames(cacheStorage) {
     return Promise.resolve([]);
   }
 }
+// v1.14.9 — a worker the browser already ACTIVATED on its own (e.g. after a full PWA close) is not a "waiting" worker, yet it is still an
+// update the Owner has not accepted: it keeps serving the accepted shell (see shell/sw.js). The page asks its controller (GET_STATE) and
+// shows the banner only when that worker is genuinely newer than the running app.
+function activeWorkerUpdateDecision(state, runningVersion) {
+  if (!state || state.type !== "BADQ_SW_STATE" || !state.workerVersion) return {
+    show: false,
+    version: null
+  };
+  return compareVersionStrings(state.workerVersion, runningVersion) > 0 ? {
+    show: true,
+    version: String(state.workerVersion)
+  } : {
+    show: false,
+    version: null
+  };
+}
+// Owner-approved acceptance of an ALREADY-ACTIVE (unaccepted) newer worker: posts the same explicit SKIP_WAITING message to the controller,
+// waits (bounded) for its BADQ_ACCEPTED confirmation (the accepted version is durable by then), and only then reloads — once.
+async function runAcceptActiveUpdate(env) {
+  const container = env.container;
+  const controller = container && container.controller;
+  if (!controller) return {
+    ok: false,
+    reason: "no-controller"
+  };
+  if (env.beforeHandoff) await env.beforeHandoff();
+  const schedule = env.setTimeoutFn || setTimeout,
+    unschedule = env.clearTimeoutFn || clearTimeout;
+  return new Promise(resolve => {
+    let done = false,
+      timer = null;
+    const cleanup = () => {
+      try {
+        container.removeEventListener("message", onMsg);
+      } catch (e) {}
+      if (timer != null) {
+        const t = timer;
+        timer = null;
+        unschedule(t);
+      }
+    };
+    const finish = (ok, reason) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      if (ok) env.reload();
+      resolve(ok ? {
+        ok: true
+      } : {
+        ok: false,
+        reason
+      });
+    };
+    const onMsg = e => {
+      if (e && e.data && e.data.type === "BADQ_ACCEPTED") finish(true);
+    };
+    try {
+      container.addEventListener("message", onMsg);
+      controller.postMessage({
+        type: "SKIP_WAITING"
+      });
+    } catch (e) {
+      finish(false, "post-failed");
+      return;
+    }
+    timer = schedule(() => finish(false, "accept-timeout"), env.acceptTimeoutMs || 5000);
+  });
+}
 function observeWaitingServiceWorker(container, onWaiting) {
   if (!container || typeof container.getRegistration !== "function") return () => {};
   let disposed = false;
@@ -19158,6 +19319,24 @@ function AppInner() {
   // session-only (not persisted) so a still-overdue reminder resurfaces on the next full app open instead
   // of being silenced forever by one tap.
   const [backupNoticeDismissed, setBackupNoticeDismissed] = useState(false);
+  // v1.14.9: first-seen anchor for installs that have never exported a backup (see BACKUP_REMINDER_BASELINE_KEY). Read once; written
+  // once, only when no manual-backup timestamp exists and no anchor was stored yet. Never reset afterwards.
+  const [backupReminderBaselineMs, setBackupReminderBaselineMs] = useState(() => {
+    try {
+      const v = Number(localStorage.getItem(BACKUP_REMINDER_BASELINE_KEY));
+      return Number.isFinite(v) && v > 0 ? v : null;
+    } catch (e) {
+      return null;
+    }
+  });
+  useEffect(() => {
+    if (!loaded || backupReminderBaselineMs != null || lastSuccessfulManualBackupAtMs(settings, Date.now()) != null) return;
+    const now = Date.now();
+    try {
+      localStorage.setItem(BACKUP_REMINDER_BASELINE_KEY, String(now));
+    } catch (e) {/* storage unavailable: in-memory anchor only for this session */}
+    setBackupReminderBaselineMs(now);
+  }, [loaded, settings, backupReminderBaselineMs]);
   // v1.9.26: true only when the boot load found a "bg-v11" value that existed but failed to JSON.parse
   // (real corruption — not "first ever launch, nothing saved yet"). While true, the save effect below
   // refuses to write anything, so the app can never silently paper over corrupted-but-still-technically-
@@ -19320,9 +19499,37 @@ function AppInner() {
         if (d.show) setUpdateAvailable(prev => prev || d.version || APP_VERSION);
       });
     });
+    // v1.14.9: third signal — the controlling worker itself is newer than the running app (browser-activated, not yet accepted).
+    const swc = "serviceWorker" in navigator ? navigator.serviceWorker : null;
+    const onSwMessage = e => {
+      const d = activeWorkerUpdateDecision(e && e.data, APP_VERSION);
+      if (d.show && !waitingDisposed) {
+        unacceptedActiveRef.current = true;
+        setUpdateAvailable(prev => prev || d.version);
+      }
+    };
+    const askController = () => {
+      try {
+        if (swc && swc.controller) swc.controller.postMessage({
+          type: "GET_STATE"
+        });
+      } catch (e) {}
+    };
+    const onVisible = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") askController();
+    };
+    if (swc && typeof swc.addEventListener === "function") {
+      swc.addEventListener("message", onSwMessage);
+      askController();
+    }
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
     const stopWaitingObserver = () => {
       waitingDisposed = true;
       stopWaitingObserver0();
+      try {
+        swc && swc.removeEventListener("message", onSwMessage);
+      } catch (e) {}
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible);
     };
     return () => {
       window.removeEventListener("badq:update-available", onUpdate);
@@ -19339,6 +19546,7 @@ function AppInner() {
   // saves below are fire-and-attempt (best-effort, never block the button past a short safety timeout).
   const updateHandoffRef = useRef(false); // v1.12.39 (review F4): a restore refuses while the update handoff runs
   const updateApplyBusyRef = useRef(false); // v1.14.3: one Owner-tap handoff at a time (never two SKIP_WAITING posts)
+  const unacceptedActiveRef = useRef(false); // v1.14.9: the controlling worker is newer than the running app but not yet accepted
   const applyUpdateNow = async () => {
     if (restoreFenceRef.current) return; // v1.12.39: never while a restore owns storage
     if (updateApplyBusyRef.current) return;
@@ -19429,22 +19637,31 @@ function AppInner() {
       reason: "error"
     };
     try {
-      result = await runControlledUpdateHandoff({
-        container: "serviceWorker" in navigator ? navigator.serviceWorker : null,
+      const swContainer = "serviceWorker" in navigator ? navigator.serviceWorker : null;
+      let hasWaiting = false;
+      try {
+        const reg0 = swContainer && (await swContainer.getRegistration());
+        hasWaiting = !!(reg0 && reg0.waiting);
+      } catch (e) {}
+      const handoffEnv = {
+        container: swContainer,
         beforeHandoff: saveForHandoff,
         reload: () => {
           try {
             location.replace(location.pathname + "?_v=" + Date.now());
           } catch (e) {}
         }
-      });
+      };
+      // v1.14.9: a worker already activated by the browser but not accepted yet is accepted via the SAME explicit SKIP_WAITING message
+      // (no waiting worker exists to post to); otherwise the unchanged waiting-worker handoff runs.
+      result = unacceptedActiveRef.current && !hasWaiting ? await runAcceptActiveUpdate(handoffEnv) : await runControlledUpdateHandoff(handoffEnv);
     } catch (e) {}
     if (!result.ok) {
       // No waiting worker yet (or the post failed): NO SKIP_WAITING, NO substitute cache-busted reload, local state untouched.
       // The banner stays so the Owner can simply tap again.
       updateHandoffRef.current = false;
       updateApplyBusyRef.current = false;
-      setUpdateNote("ยังติดตั้งเวอร์ชั่นใหม่ไม่เสร็จ — กรุณากดอีกครั้งในอีกสักครู่");
+      setUpdateNote(t("app.updateNotReady"));
     }
   };
   // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
@@ -25595,10 +25812,12 @@ function AppInner() {
           courtCount: data.courtCount,
           courtLabels: syncCourtLabels(data.courtLabels, data.courtCount),
           mode: data.mode,
+          // v1.14.9: Import / Restore / Undo never move the manual-backup reminder anchor — this device's own lastBackupAt always wins over the file's.
           settings: normSettings({
             ...data.settings,
             tournamentEnabled: rFeatureFlags.tournamentEnabled,
-            wheelEnabled: rFeatureFlags.wheelEnabled
+            wheelEnabled: rFeatureFlags.wheelEnabled,
+            lastBackupAt: live.settings && live.settings.lastBackupAt || settings && settings.lastBackupAt || null
           }),
           session: attachLocalGroupIdentity(normSession(data.session), restoredLocalGroups),
           lockPairs: data.lockPairs,
@@ -25949,9 +26168,18 @@ function AppInner() {
       tr: t
     });
   }
-  const BACKUP_REMINDER_DAYS = 7;
-  const daysSinceBackup = settings.lastBackupAt ? Math.floor((Date.now() - new Date(settings.lastBackupAt).getTime()) / 86400000) : null;
-  const showBackupReminder = !backupNoticeDismissed && (daysSinceBackup == null || daysSinceBackup >= BACKUP_REMINDER_DAYS);
+
+  // v1.14.9: 72h after the last successful MANUAL backup (see backupReminderDecision). Session-only dismissal stays: one banner, one
+  // element, hidden for the rest of this app session once dismissed; a new successful manual backup clears it immediately because the
+  // decision is derived from settings.lastBackupAt on every render.
+  const backupReminder = backupReminderDecision({
+    settings,
+    baselineMs: backupReminderBaselineMs,
+    now: Date.now(),
+    dismissedThisSession: backupNoticeDismissed
+  });
+  const daysSinceBackup = backupReminder.days;
+  const showBackupReminder = backupReminder.show;
   return (
     /*#__PURE__*/
     /* v1.12.14 (P0 responsive fix): 100vh on mobile is the browser's LARGE (toolbar-hidden) viewport
@@ -26569,7 +26797,9 @@ function AppInner() {
         fontSize: 12.5,
         fontWeight: 700
       }
-    }, "\u0E21\u0E35\u0E40\u0E27\u0E2D\u0E23\u0E4C\u0E0A\u0E31\u0E48\u0E19\u0E43\u0E2B\u0E21\u0E48 (v", updateAvailable, ") \u0E1E\u0E23\u0E49\u0E2D\u0E21\u0E43\u0E0A\u0E49\u0E07\u0E32\u0E19", updateNote && /*#__PURE__*/React.createElement("div", {
+    }, t("app.updateBanner", {
+      version: updateAvailable
+    }), updateNote && /*#__PURE__*/React.createElement("div", {
       style: {
         fontSize: 11.5,
         fontWeight: 600,
@@ -26587,7 +26817,7 @@ function AppInner() {
         fontSize: 12,
         fontWeight: 800
       }
-    }, "\u0E2D\u0E31\u0E1B\u0E40\u0E14\u0E15\u0E15\u0E2D\u0E19\u0E19\u0E35\u0E49")), showBackupReminder && /*#__PURE__*/React.createElement("div", {
+    }, t("app.updateNow"))), showBackupReminder && /*#__PURE__*/React.createElement("div", {
       style: {
         background: "#fff7e6",
         border: "1px solid #f0c96b",
@@ -30540,6 +30770,7 @@ function GeneralSettingsSheet({
   uiTimeZone,
   setUiTimeZone,
   t,
+  tc,
   fmtDateTime,
   onClose
 }) {
@@ -31014,7 +31245,7 @@ function GeneralSettingsSheet({
     style: {
       marginTop: 6
     }
-  }, "\u0E40\u0E1A\u0E2D\u0E23\u0E4C\u0E42\u0E17\u0E23\u0E28\u0E31\u0E1E\u0E17\u0E4C\u0E41\u0E25\u0E30 LINE ID \u0E40\u0E1B\u0E47\u0E19\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E44\u0E21\u0E48\u0E1A\u0E31\u0E07\u0E04\u0E31\u0E1A \u0E43\u0E0A\u0E49\u0E2A\u0E33\u0E2B\u0E23\u0E31\u0E1A\u0E15\u0E34\u0E14\u0E15\u0E48\u0E2D\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01\u0E40\u0E17\u0E48\u0E32\u0E19\u0E31\u0E49\u0E19")), /*#__PURE__*/React.createElement(ExpandRow, {
+  }, t ? t("backup.contactOptionalNote") : "เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น")), /*#__PURE__*/React.createElement(ExpandRow, {
     title: t("settings.dataManagement"),
     id: "manage"
   }, "\u0E41\u0E01\u0E49\u0E44\u0E02\u0E2B\u0E23\u0E37\u0E2D\u0E25\u0E1A\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E15\u0E34\u0E14\u0E15\u0E48\u0E2D (\u0E40\u0E1A\u0E2D\u0E23\u0E4C\u0E42\u0E17\u0E23/LINE ID) \u0E02\u0E2D\u0E07\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01\u0E41\u0E15\u0E48\u0E25\u0E30\u0E04\u0E19\u0E44\u0E14\u0E49\u0E17\u0E35\u0E48\u0E42\u0E1B\u0E23\u0E44\u0E1F\u0E25\u0E4C\u0E1C\u0E39\u0E49\u0E40\u0E25\u0E48\u0E19 \u2192 \u0E41\u0E01\u0E49\u0E44\u0E02\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01 \u0E2A\u0E48\u0E27\u0E19\u0E01\u0E32\u0E23\u0E25\u0E1A\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E2A\u0E21\u0E32\u0E0A\u0E34\u0E01\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14\u0E2B\u0E23\u0E37\u0E2D\u0E25\u0E49\u0E32\u0E07\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14 \u0E17\u0E33\u0E44\u0E14\u0E49\u0E14\u0E49\u0E32\u0E19\u0E25\u0E48\u0E32\u0E07\u0E43\u0E19\u0E2B\u0E21\u0E27\u0E14\u0E19\u0E35\u0E49"), /*#__PURE__*/React.createElement("div", {
@@ -31053,6 +31284,7 @@ function GeneralSettingsSheet({
     autoBackups: autoBackups,
     bootLog: bootLog,
     t: t,
+    tc: tc,
     fmtDateTime: fmtDateTime
   })), /*#__PURE__*/React.createElement("button", {
     onClick: () => setConfirmDeleteMembers(true),
@@ -39023,7 +39255,7 @@ function TournamentDashboard(props) {
     onClick: () => t.status === "paused" ? tResumeTournament() : tPauseTournament(),
     style: btnSecondary
   }, t.status === "paused" ? tr("match.resume") : tr("tournament.pause")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr)),
+    onClick: () => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr), tr),
     style: btnSecondary
   }, /*#__PURE__*/React.createElement(Share2, {
     size: 15
@@ -44232,11 +44464,7 @@ function HistoryTab({
         fontSize: 12,
         color: T.muted
       }
-    }, /*#__PURE__*/React.createElement("span", null, tr("history.sessionRowSummary", {
-      count: (s.players || []).length,
-      matches: s.stats?.totalMatches ?? 0,
-      courts: s.courtCount || 1
-    })), /*#__PURE__*/React.createElement("span", {
+    }, /*#__PURE__*/React.createElement("span", null, [trc("common.personCount", (s.players || []).length), trc("common.matchCount", s.stats?.totalMatches ?? 0), trc("common.courtCount", s.courtCount || 1)].join(" · ")), /*#__PURE__*/React.createElement("span", {
       style: {
         marginLeft: "auto",
         fontWeight: 800,
@@ -44267,6 +44495,7 @@ function HistoryTab({
     removeHistExpense: removeHistExpense,
     updateHistSessionDate: updateHistSessionDate,
     tr: tr,
+    trc: trc,
     fmtDate: fmtDate
   })), openT && /*#__PURE__*/React.createElement(Overlay, {
     onClose: () => setOpenTId(null)
@@ -44577,6 +44806,7 @@ function SettingsTab({
     uiTimeZone: uiTimeZone,
     setUiTimeZone: setUiTimeZone,
     t: t,
+    tc: tc,
     fmtDateTime: fmtDateTime,
     onClose: () => setView(null)
   }), view === "online" && /*#__PURE__*/React.createElement(BadQOnlineSheet, {
@@ -44639,6 +44869,7 @@ function HistoricalDetail({
   removeHistExpense,
   updateHistSessionDate,
   tr,
+  trc,
   fmtDate
 }) {
   // v1.12.15 (retroactive session date edit): tap-to-edit, same pattern as the court-label inline editor
@@ -44772,11 +45003,7 @@ function HistoricalDetail({
     }
   }, /*#__PURE__*/React.createElement(Calendar, {
     size: 11
-  })), /*#__PURE__*/React.createElement("span", null, "\xB7 ", tr("historicalDetail.summaryLine", {
-    count: (s.players || []).length,
-    courts: s.courtCount || 1,
-    mode: fmtMode(s.settings || {}, s.mode)
-  }))), (s.photo || s.photoRef) && /*#__PURE__*/React.createElement("button", {
+  })), /*#__PURE__*/React.createElement("span", null, "\xB7 ", [trc("common.personCount", (s.players || []).length), trc("common.courtCount", s.courtCount || 1), fmtMode(s.settings || {}, s.mode, tr)].join(" · "))), (s.photo || s.photoRef) && /*#__PURE__*/React.createElement("button", {
     onClick: () => clearHistPhoto(s.id),
     style: {
       background: "none",
@@ -44795,7 +45022,7 @@ function HistoricalDetail({
       totalMatches: stats.totalMatches || 0,
       maxGames: stats.maxGames || 0,
       totalExpense: grandTotal
-    })),
+    }, tr, trc), tr),
     style: {
       width: "100%",
       display: "flex",
@@ -44923,9 +45150,7 @@ function HistoricalDetail({
         fontWeight: 800,
         color: T.text
       }
-    }, tr("historicalDetail.gamesCountLabel", {
-      count: p.games || 0
-    })));
+    }, trc("common.gameCount", p.games || 0)));
   })), /*#__PURE__*/React.createElement(SectionHead, {
     icon: /*#__PURE__*/React.createElement(Wallet, {
       size: 16,
@@ -45167,9 +45392,7 @@ function HistoricalDetail({
       color: T.muted
     }),
     title: tr("history.matchHistory"),
-    sub: tr("historicalDetail.gamesCountLabel", {
-      count: (s.matches || []).length
-    })
+    sub: trc("common.gameCount", (s.matches || []).length)
   }), (s.matches || []).length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       color: T.muted,
@@ -46838,7 +47061,7 @@ function RankingShowcaseSheet({
       marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => shareSummary(rankingShareText(report, tr)),
+    onClick: () => shareSummary(rankingShareText(report, tr), tr),
     style: {
       flex: 1,
       padding: "11px 0",
@@ -48811,7 +49034,7 @@ function TournamentHistoricalDetail({
       marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr)),
+    onClick: () => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr), tr),
     style: {
       flex: 1,
       display: "flex",
@@ -49073,7 +49296,7 @@ function SummaryTab({
       totalMatches,
       maxGames,
       totalExpense: grandTotal
-    })),
+    }, t, tc), t),
     style: {
       width: "100%",
       display: "flex",
@@ -53934,6 +54157,16 @@ function importPhaseLabel(phase, tr) {
   const key = IMPORT_PHASE_LABEL_KEYS[phase];
   return tr && key ? tr(key) : fallback;
 }
+// v1.14.9 (i18n cleanup): the "N players · M session records [· K matches total]" lines are composed from three separately
+// pluralised catalog entries (tc), never from one fixed sentence — so each part follows the selected language and singular/plural.
+function backupCountsText(t, tc, st, withMatches) {
+  const plural = (base, count) => tc ? tc(base, count) : t(base + ".other", {
+    count
+  });
+  const parts = [plural("backup.playerCount", st.playerCount), plural("backup.sessionRecordCount", st.sessionHistoryCount)];
+  if (withMatches) parts.push(plural("backup.matchTotalCount", st.matchCount));
+  return parts.join(" · ");
+}
 function BackupSettingsEditor({
   exportBackup,
   validateBackupFile,
@@ -53969,10 +54202,10 @@ function BackupSettingsEditor({
       const raw = localStorage.getItem("bg-v11-diag") || "[]";
       if (navigator.clipboard) {
         await navigator.clipboard.writeText(raw);
-        alert("คัดลอก Diagnostic Log แล้ว");
+        alert(t ? t("backup.diagCopied") : "คัดลอก Diagnostic Log แล้ว");
       } else alert(raw);
     } catch (e) {
-      alert("คัดลอกไม่สำเร็จ");
+      alert(t ? t("backup.diagCopyFailed") : "คัดลอกไม่สำเร็จ");
     }
   };
   const [showAllAutoBackups, setShowAllAutoBackups] = useState(false); // v1.11.16: only the newest checkpoint shows by default — rest collapsed behind a tap
@@ -54185,20 +54418,13 @@ function BackupSettingsEditor({
       marginBottom: 8,
       lineHeight: 1.7
     }
-  }, successMsg.kind === "export" && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.exportSuccessTitle") : "สำรองข้อมูลเรียบร้อย", /*#__PURE__*/React.createElement("br", null), t ? t("backup.exportSuccessStats", {
-    playerCount: successMsg.stats.playerCount,
-    sessionHistoryCount: successMsg.stats.sessionHistoryCount,
-    matchCount: successMsg.stats.matchCount
-  }) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง · แมตช์ทั้งหมด ${successMsg.stats.matchCount} แมตช์`, /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
+  }, successMsg.kind === "export" && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.exportSuccessTitle") : "สำรองข้อมูลเรียบร้อย", /*#__PURE__*/React.createElement("br", null), t ? backupCountsText(t, tc, successMsg.stats, true) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง · แมตช์ทั้งหมด ${successMsg.stats.matchCount} แมตช์`, /*#__PURE__*/React.createElement("br", null), /*#__PURE__*/React.createElement("span", {
     style: {
       color: T.muted
     }
   }, t ? t("backup.exportSuccessSize", {
     size: successMsg.sizeLabel
-  }) : `ขนาดไฟล์สำรอง ${successMsg.sizeLabel}`)), successMsg.kind === "import" && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.importSuccessTitle") : "นำเข้าข้อมูลเรียบร้อย", /*#__PURE__*/React.createElement("br", null), t ? t("backup.playerAndSessionCountLine", {
-    playerCount: successMsg.stats.playerCount,
-    sessionHistoryCount: successMsg.stats.sessionHistoryCount
-  }) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง`), successMsg.kind === "undo" && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.undoSuccessTitle") : "ย้อนกลับข้อมูลก่อนนำเข้าเรียบร้อย")), importError && importError.startsWith("__verify_failed__:") &&
+  }) : `ขนาดไฟล์สำรอง ${successMsg.sizeLabel}`)), successMsg.kind === "import" && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.importSuccessTitle") : "นำเข้าข้อมูลเรียบร้อย", /*#__PURE__*/React.createElement("br", null), t ? backupCountsText(t, tc, successMsg.stats, false) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง`), successMsg.kind === "undo" && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.undoSuccessTitle") : "ย้อนกลับข้อมูลก่อนนำเข้าเรียบร้อย")), importError && importError.startsWith("__verify_failed__:") &&
   /*#__PURE__*/
   // v1.11.76 (P0 fix, req 6): distinct banner for "applyRestore ran but the persisted-count
   // verification failed" — kept fully separate from the pre-existing "not a valid backup file"
@@ -54277,10 +54503,7 @@ function BackupSettingsEditor({
     style: {
       color: T.muted
     }
-  }, t ? t("backup.playerAndSessionCountLine", {
-    playerCount: entry.stats.playerCount,
-    sessionHistoryCount: entry.stats.sessionHistoryCount
-  }) : `ผู้เล่น ${entry.stats.playerCount} คน · ประวัติก๊วน ${entry.stats.sessionHistoryCount} ครั้ง`, t ? entry.reason === "tournament" ? t("backup.afterTournamentNote") : t("backup.afterSessionNote") : entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน")), /*#__PURE__*/React.createElement("button", {
+  }, t ? backupCountsText(t, tc, entry.stats, false) : `ผู้เล่น ${entry.stats.playerCount} คน · ประวัติก๊วน ${entry.stats.sessionHistoryCount} ครั้ง`, t ? entry.reason === "tournament" ? t("backup.afterTournamentNote") : t("backup.afterSessionNote") : entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน")), /*#__PURE__*/React.createElement("button", {
     disabled: busy,
     onClick: () => {
       setSuccessMsg(null);
@@ -54345,7 +54568,7 @@ function BackupSettingsEditor({
       fontWeight: 700,
       color: T.muted
     }
-  }, "\u0E1A\u0E31\u0E19\u0E17\u0E36\u0E01\u0E01\u0E32\u0E23\u0E0B\u0E34\u0E07\u0E04\u0E4C\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25 (debug)"), /*#__PURE__*/React.createElement(ChevronDown, {
+  }, t ? t("backup.bootLogTitle") : "บันทึกการซิงค์ข้อมูล (debug)"), /*#__PURE__*/React.createElement(ChevronDown, {
     size: 13,
     color: T.muted,
     style: {
@@ -54398,7 +54621,7 @@ function BackupSettingsEditor({
       fontWeight: 700,
       color: T.muted
     }
-  }, "Diagnostic Log (v1.11.47, \u0E0A\u0E31\u0E48\u0E27\u0E04\u0E23\u0E32\u0E27)"), /*#__PURE__*/React.createElement(ChevronDown, {
+  }, t ? t("backup.diagLogTitle") : "Diagnostic Log (v1.11.47, ชั่วคราว)"), /*#__PURE__*/React.createElement(ChevronDown, {
     size: 13,
     color: T.muted,
     style: {
@@ -54425,7 +54648,7 @@ function BackupSettingsEditor({
       background: T.surface2,
       color: T.text
     }
-  }, "\u0E23\u0E35\u0E40\u0E1F\u0E23\u0E0A"), /*#__PURE__*/React.createElement("button", {
+  }, t ? t("backup.diagRefresh") : "รีเฟรช"), /*#__PURE__*/React.createElement("button", {
     onClick: copyDiagLog,
     style: {
       fontSize: 11,
@@ -54436,7 +54659,7 @@ function BackupSettingsEditor({
       background: T.surface2,
       color: T.text
     }
-  }, "\u0E04\u0E31\u0E14\u0E25\u0E2D\u0E01\u0E17\u0E31\u0E49\u0E07\u0E2B\u0E21\u0E14"), /*#__PURE__*/React.createElement("span", {
+  }, t ? t("backup.diagCopyAll") : "คัดลอกทั้งหมด"), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 10.5,
       color: T.muted,
@@ -54447,12 +54670,12 @@ function BackupSettingsEditor({
       fontSize: 11.5,
       color: T.muted
     }
-  }, "\u0E41\u0E15\u0E30 \"\u0E23\u0E35\u0E40\u0E1F\u0E23\u0E0A\" \u0E40\u0E1E\u0E37\u0E48\u0E2D\u0E42\u0E2B\u0E25\u0E14") : diagLog.length === 0 ? /*#__PURE__*/React.createElement("div", {
+  }, t ? t("backup.diagTapRefresh") : "แตะ \"รีเฟรช\" เพื่อโหลด") : diagLog.length === 0 ? /*#__PURE__*/React.createElement("div", {
     style: {
       fontSize: 11.5,
       color: T.muted
     }
-  }, "\u0E22\u0E31\u0E07\u0E44\u0E21\u0E48\u0E21\u0E35\u0E02\u0E49\u0E2D\u0E21\u0E39\u0E25") : /*#__PURE__*/React.createElement("div", {
+  }, t ? t("backup.diagEmpty") : "ยังไม่มีข้อมูล") : /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexDirection: "column",
@@ -54526,7 +54749,9 @@ function BackupSettingsEditor({
       color: T.muted,
       marginBottom: 12
     }
-  }, "Version: BadQ v", preview.appVersion), /*#__PURE__*/React.createElement("div", {
+  }, t ? t("backup.versionLine", {
+    version: preview.appVersion
+  }) : `Version: BadQ v${preview.appVersion}`), /*#__PURE__*/React.createElement("div", {
     style: {
       background: T.surface2,
       borderRadius: 11,
@@ -54537,11 +54762,11 @@ function BackupSettingsEditor({
     }
   }, (() => {
     const st = backupStats(preview.data);
-    return /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.statPlayers", {
+    return /*#__PURE__*/React.createElement(React.Fragment, null, t ? tc ? tc("backup.playerCount", st.playerCount) : t("backup.playerCount.other", {
       count: st.playerCount
-    }) : `ผู้เล่น ${st.playerCount} คน`, /*#__PURE__*/React.createElement("br", null), t ? t("backup.statSessions", {
+    }) : `ผู้เล่น ${st.playerCount} คน`, /*#__PURE__*/React.createElement("br", null), t ? tc ? tc("backup.sessionRecordCount", st.sessionHistoryCount) : t("backup.sessionRecordCount.other", {
       count: st.sessionHistoryCount
-    }) : `ประวัติก๊วน ${st.sessionHistoryCount} ครั้ง`, /*#__PURE__*/React.createElement("br", null), t ? t("backup.statMatches", {
+    }) : `ประวัติก๊วน ${st.sessionHistoryCount} ครั้ง`, /*#__PURE__*/React.createElement("br", null), t ? tc ? tc("common.matchCount", st.matchCount) : t("common.matchCount.other", {
       count: st.matchCount
     }) : `แมตช์ ${st.matchCount} แมตช์`, /*#__PURE__*/React.createElement("br", null), st.hasCurrentSession && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.statActiveSession") : "มีก๊วนที่กำลังใช้งาน 1 ก๊วน", /*#__PURE__*/React.createElement("br", null)), st.hasPayment && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.statHasPayment") : "มีข้อมูลชำระเงิน", /*#__PURE__*/React.createElement("br", null)), st.hasQR && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.statHasQR") : "มี QR รับเงิน", /*#__PURE__*/React.createElement("br", null)), st.tournamentHistoryCount > 0 && /*#__PURE__*/React.createElement(React.Fragment, null, t ? t("backup.statTournamentHistory", {
       count: st.tournamentHistoryCount

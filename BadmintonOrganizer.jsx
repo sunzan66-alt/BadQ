@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.8";
+const APP_VERSION = "1.14.9";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -4431,8 +4431,12 @@ function downloadFinancialReportXlsx(report, formats) {
 }
 
 // build the plain-text summary used by the Web Share API (with clipboard/alert fallback)
-function buildShareText({ name, date, playerCount, totalMatches, maxGames, totalExpense }) {
-  return `BadQ — ${name || "ก๊วนแบดมินตัน"}\n${date || ""}\nผู้เล่น ${playerCount} คน\n${totalMatches} แมตช์\nเกมมากสุด ${maxGames} เกม\nค่าใช้จ่ายรวม ${formatCurrency(totalExpense)}`;
+// v1.14.9 (i18n cleanup): `tr`/`trc` (t/tc) are OPTIONAL — omitting them renders the pre-existing Thai text unchanged. When given, the
+// system-owned labels follow the selected UI language (counts are pluralised through tc); the group name and the already-formatted
+// date string are passed through untouched.
+function buildShareText({ name, date, playerCount, totalMatches, maxGames, totalExpense }, tr, trc) {
+  if (!tr || !trc) return `BadQ — ${name || "ก๊วนแบดมินตัน"}\n${date || ""}\nผู้เล่น ${playerCount} คน\n${totalMatches} แมตช์\nเกมมากสุด ${maxGames} เกม\nค่าใช้จ่ายรวม ${formatCurrency(totalExpense)}`;
+  return [`BadQ — ${name || tr("share.groupSummary.defaultName")}`, date || "", trc("share.playersLine", playerCount), trc("common.matchCount", totalMatches), tr("share.mostGamesLine", { count: maxGames }), tr("share.totalExpenseLine", { amount: formatCurrency(totalExpense) })].join("\n");
 }
 // v1.11.4: single Tournament share-text generator — built from the SAME buildTournamentResultReport
 // object that feeds the Podium/Bracket/PDF, so the shared text can never separately calculate or drift
@@ -4466,11 +4470,11 @@ function buildTournamentShareText(report, teamsById, peopleById, formatDate = fm
   lines.push(L("tournament.shareCredit", "สร้างโดย BadQ 🏸"));
   return lines.join("\n");
 }
-async function shareSummary(text) {
+async function shareSummary(text, tr) {
   try {
     if (navigator.share) { await navigator.share({ text }); return; }
   } catch (e) { return; }
-  try { await navigator.clipboard.writeText(text); alert("อุปกรณ์นี้แชร์ตรงไม่ได้ — คัดลอกข้อความสรุปก๊วนแล้ว"); }
+  try { await navigator.clipboard.writeText(text); alert(tr ? tr("share.copiedFallback") : "อุปกรณ์นี้แชร์ตรงไม่ได้ — คัดลอกข้อความสรุปก๊วนแล้ว"); }
   catch (e) { alert(text); }
 }
 // read an image WITHOUT cropping (for QR — must stay scannable)
@@ -5301,6 +5305,38 @@ function backupStats(data) {
     hasFinanceData: (data.generalExpenses || []).length > 0 || (data.otherIncome || []).length > 0 || (data.sessionHistory || []).some((s) => (s.expenses || []).length > 0),
     discountCreditCount: (data.discountCredits || []).length,
     rewardHistoryCount: (data.rewardHistory || []).length,
+  };
+}
+// v1.14.9 (Manual Backup Reminder). SOURCE OF TRUTH: `settings.lastBackupAt` (ISO string, persisted with the rest of settings in
+// "bg-v11" and therefore durable across reload / PWA close-reopen / offline / version update). It is written in exactly one place —
+// exportBackup(), AFTER the user-initiated export file was actually delivered (download or share completed) — and nowhere else:
+// automatic recovery points, session-end / Tournament recovery points, Import, Restore, Undo-import, opening the Backup screen and
+// dismissing the reminder never touch it (applyRestore also carries the device's current value across a replace-restore).
+// Legacy installs already hold this field from earlier manual exports, so it IS the "last successful manual backup" timestamp.
+// nextBackupReminder = lastSuccessfulManualBackupAt + 72h. An install that has never exported (no timestamp) is anchored at the
+// first time this version saw it (a localStorage display-preference style key, outside settings/backups): it is reminded 72h after
+// that, never on every launch.
+const BACKUP_REMINDER_INTERVAL_MS = 72 * 3600 * 1000;
+const BACKUP_REMINDER_BASELINE_KEY = "badq_backupReminderBaselineAt";
+function lastSuccessfulManualBackupAtMs(settings, now) {
+  const raw = settings && settings.lastBackupAt;
+  if (!raw) return null;
+  const ms = new Date(raw).getTime();
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  if (ms > now + 24 * 3600 * 1000) return null; // wildly in the future (clock error): not a reliable anchor
+  return ms;
+}
+function backupReminderDecision({ settings, baselineMs, now, dismissedThisSession }) {
+  const manual = lastSuccessfulManualBackupAtMs(settings, now);
+  const anchor = manual != null ? manual : (Number.isFinite(baselineMs) && baselineMs > 0 && baselineMs <= now + 24 * 3600 * 1000 ? baselineMs : null);
+  const dueAt = anchor != null ? anchor + BACKUP_REMINDER_INTERVAL_MS : null;
+  const due = dueAt != null && now >= dueAt;
+  return {
+    show: !!due && !dismissedThisSession,
+    due: !!due,
+    dueAt,
+    kind: manual == null ? "never" : "elapsed",
+    days: manual != null ? Math.floor((now - manual) / 86400000) : null,
   };
 }
 // cheap structural check — catches "this isn't even a BadQ backup" before we try to migrate/use it
@@ -8398,6 +8434,30 @@ function waitingUpdateDecision(cacheNames, runningVersion) {
 function readBadqCacheNames(cacheStorage) {
   try { return cacheStorage && typeof cacheStorage.keys === "function" ? Promise.resolve(cacheStorage.keys()).catch(() => []) : Promise.resolve([]); } catch (e) { return Promise.resolve([]); }
 }
+// v1.14.9 — a worker the browser already ACTIVATED on its own (e.g. after a full PWA close) is not a "waiting" worker, yet it is still an
+// update the Owner has not accepted: it keeps serving the accepted shell (see shell/sw.js). The page asks its controller (GET_STATE) and
+// shows the banner only when that worker is genuinely newer than the running app.
+function activeWorkerUpdateDecision(state, runningVersion) {
+  if (!state || state.type !== "BADQ_SW_STATE" || !state.workerVersion) return { show: false, version: null };
+  return compareVersionStrings(state.workerVersion, runningVersion) > 0 ? { show: true, version: String(state.workerVersion) } : { show: false, version: null };
+}
+// Owner-approved acceptance of an ALREADY-ACTIVE (unaccepted) newer worker: posts the same explicit SKIP_WAITING message to the controller,
+// waits (bounded) for its BADQ_ACCEPTED confirmation (the accepted version is durable by then), and only then reloads — once.
+async function runAcceptActiveUpdate(env) {
+  const container = env.container;
+  const controller = container && container.controller;
+  if (!controller) return { ok: false, reason: "no-controller" };
+  if (env.beforeHandoff) await env.beforeHandoff();
+  const schedule = env.setTimeoutFn || setTimeout, unschedule = env.clearTimeoutFn || clearTimeout;
+  return new Promise((resolve) => {
+    let done = false, timer = null;
+    const cleanup = () => { try { container.removeEventListener("message", onMsg); } catch (e) {} if (timer != null) { const t = timer; timer = null; unschedule(t); } };
+    const finish = (ok, reason) => { if (done) return; done = true; cleanup(); if (ok) env.reload(); resolve(ok ? { ok: true } : { ok: false, reason }); };
+    const onMsg = (e) => { if (e && e.data && e.data.type === "BADQ_ACCEPTED") finish(true); };
+    try { container.addEventListener("message", onMsg); controller.postMessage({ type: "SKIP_WAITING" }); } catch (e) { finish(false, "post-failed"); return; }
+    timer = schedule(() => finish(false, "accept-timeout"), env.acceptTimeoutMs || 5000);
+  });
+}
 function observeWaitingServiceWorker(container, onWaiting) {
   if (!container || typeof container.getRegistration !== "function") return () => {};
   let disposed = false;
@@ -9039,6 +9099,17 @@ function AppInner() {
   // session-only (not persisted) so a still-overdue reminder resurfaces on the next full app open instead
   // of being silenced forever by one tap.
   const [backupNoticeDismissed, setBackupNoticeDismissed] = useState(false);
+  // v1.14.9: first-seen anchor for installs that have never exported a backup (see BACKUP_REMINDER_BASELINE_KEY). Read once; written
+  // once, only when no manual-backup timestamp exists and no anchor was stored yet. Never reset afterwards.
+  const [backupReminderBaselineMs, setBackupReminderBaselineMs] = useState(() => {
+    try { const v = Number(localStorage.getItem(BACKUP_REMINDER_BASELINE_KEY)); return Number.isFinite(v) && v > 0 ? v : null; } catch (e) { return null; }
+  });
+  useEffect(() => {
+    if (!loaded || backupReminderBaselineMs != null || lastSuccessfulManualBackupAtMs(settings, Date.now()) != null) return;
+    const now = Date.now();
+    try { localStorage.setItem(BACKUP_REMINDER_BASELINE_KEY, String(now)); } catch (e) { /* storage unavailable: in-memory anchor only for this session */ }
+    setBackupReminderBaselineMs(now);
+  }, [loaded, settings, backupReminderBaselineMs]);
   // v1.9.26: true only when the boot load found a "bg-v11" value that existed but failed to JSON.parse
   // (real corruption — not "first ever launch, nothing saved yet"). While true, the save effect below
   // refuses to write anything, so the app can never silently paper over corrupted-but-still-technically-
@@ -9167,7 +9238,17 @@ function AppInner() {
         if (d.show) setUpdateAvailable((prev) => prev || d.version || APP_VERSION);
       });
     });
-    const stopWaitingObserver = () => { waitingDisposed = true; stopWaitingObserver0(); };
+    // v1.14.9: third signal — the controlling worker itself is newer than the running app (browser-activated, not yet accepted).
+    const swc = "serviceWorker" in navigator ? navigator.serviceWorker : null;
+    const onSwMessage = (e) => {
+      const d = activeWorkerUpdateDecision(e && e.data, APP_VERSION);
+      if (d.show && !waitingDisposed) { unacceptedActiveRef.current = true; setUpdateAvailable((prev) => prev || d.version); }
+    };
+    const askController = () => { try { if (swc && swc.controller) swc.controller.postMessage({ type: "GET_STATE" }); } catch (e) {} };
+    const onVisible = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") askController(); };
+    if (swc && typeof swc.addEventListener === "function") { swc.addEventListener("message", onSwMessage); askController(); }
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
+    const stopWaitingObserver = () => { waitingDisposed = true; stopWaitingObserver0(); try { swc && swc.removeEventListener("message", onSwMessage); } catch (e) {} if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible); };
     return () => { window.removeEventListener("badq:update-available", onUpdate); stopWaitingObserver(); };
   }, []);
   // v1.11.41 (Section B2): explicit, user-confirmed update handoff — the ONLY place that ever tells a
@@ -9180,6 +9261,7 @@ function AppInner() {
   // saves below are fire-and-attempt (best-effort, never block the button past a short safety timeout).
   const updateHandoffRef = useRef(false); // v1.12.39 (review F4): a restore refuses while the update handoff runs
   const updateApplyBusyRef = useRef(false); // v1.14.3: one Owner-tap handoff at a time (never two SKIP_WAITING posts)
+  const unacceptedActiveRef = useRef(false); // v1.14.9: the controlling worker is newer than the running app but not yet accepted
   const applyUpdateNow = async () => {
     if (restoreFenceRef.current) return; // v1.12.39: never while a restore owns storage
     if (updateApplyBusyRef.current) return;
@@ -9231,18 +9313,20 @@ function AppInner() {
     };
     let result = { ok: false, reason: "error" };
     try {
-      result = await runControlledUpdateHandoff({
-        container: "serviceWorker" in navigator ? navigator.serviceWorker : null,
-        beforeHandoff: saveForHandoff,
-        reload: () => { try { location.replace(location.pathname + "?_v=" + Date.now()); } catch (e) {} },
-      });
+      const swContainer = "serviceWorker" in navigator ? navigator.serviceWorker : null;
+      let hasWaiting = false;
+      try { const reg0 = swContainer && (await swContainer.getRegistration()); hasWaiting = !!(reg0 && reg0.waiting); } catch (e) {}
+      const handoffEnv = { container: swContainer, beforeHandoff: saveForHandoff, reload: () => { try { location.replace(location.pathname + "?_v=" + Date.now()); } catch (e) {} } };
+      // v1.14.9: a worker already activated by the browser but not accepted yet is accepted via the SAME explicit SKIP_WAITING message
+      // (no waiting worker exists to post to); otherwise the unchanged waiting-worker handoff runs.
+      result = unacceptedActiveRef.current && !hasWaiting ? await runAcceptActiveUpdate(handoffEnv) : await runControlledUpdateHandoff(handoffEnv);
     } catch (e) {}
     if (!result.ok) {
       // No waiting worker yet (or the post failed): NO SKIP_WAITING, NO substitute cache-busted reload, local state untouched.
       // The banner stays so the Owner can simply tap again.
       updateHandoffRef.current = false;
       updateApplyBusyRef.current = false;
-      setUpdateNote("ยังติดตั้งเวอร์ชั่นใหม่ไม่เสร็จ — กรุณากดอีกครั้งในอีกสักครู่");
+      setUpdateNote(t("app.updateNotReady"));
     }
   };
   // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
@@ -13139,7 +13223,8 @@ function AppInner() {
         next = {
           players: rPlayers, history: data.history, current: data.current, future: data.future, roundNo: data.roundNo,
           courtCount: data.courtCount, courtLabels: syncCourtLabels(data.courtLabels, data.courtCount), mode: data.mode,
-          settings: normSettings({ ...data.settings, tournamentEnabled: rFeatureFlags.tournamentEnabled, wheelEnabled: rFeatureFlags.wheelEnabled }),
+          // v1.14.9: Import / Restore / Undo never move the manual-backup reminder anchor — this device's own lastBackupAt always wins over the file's.
+          settings: normSettings({ ...data.settings, tournamentEnabled: rFeatureFlags.tournamentEnabled, wheelEnabled: rFeatureFlags.wheelEnabled, lastBackupAt: (live.settings && live.settings.lastBackupAt) || (settings && settings.lastBackupAt) || null }),
           session: attachLocalGroupIdentity(normSession(data.session), restoredLocalGroups), lockPairs: data.lockPairs,
           sessionHistory: (data.sessionHistory || []).map((item) => attachLocalGroupIdentity(item, restoredLocalGroups)),
           generalExpenses: data.generalExpenses || [], otherIncome: data.otherIncome || [],
@@ -13334,9 +13419,12 @@ function AppInner() {
     return <TournamentPrintView report={tournamentPrintReport} fmtDateFull={fmtDateFull} fmtDateTime={fmtDateTime} onClose={() => setTournamentPrintReport(null)} tr={t} />;
   }
 
-  const BACKUP_REMINDER_DAYS = 7;
-  const daysSinceBackup = settings.lastBackupAt ? Math.floor((Date.now() - new Date(settings.lastBackupAt).getTime()) / 86400000) : null;
-  const showBackupReminder = !backupNoticeDismissed && (daysSinceBackup == null || daysSinceBackup >= BACKUP_REMINDER_DAYS);
+  // v1.14.9: 72h after the last successful MANUAL backup (see backupReminderDecision). Session-only dismissal stays: one banner, one
+  // element, hidden for the rest of this app session once dismissed; a new successful manual backup clears it immediately because the
+  // decision is derived from settings.lastBackupAt on every render.
+  const backupReminder = backupReminderDecision({ settings, baselineMs: backupReminderBaselineMs, now: Date.now(), dismissedThisSession: backupNoticeDismissed });
+  const daysSinceBackup = backupReminder.days;
+  const showBackupReminder = backupReminder.show;
 
   return (
     /* v1.12.14 (P0 responsive fix): 100vh on mobile is the browser's LARGE (toolbar-hidden) viewport
@@ -13552,8 +13640,8 @@ function AppInner() {
         {updateAvailable && (
           <div style={{ background: "#eaf3ff", border: "1px solid #a9cdf0", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "center", gap: 9 }}>
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>🔄</span>
-            <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700 }}>มีเวอร์ชั่นใหม่ (v{updateAvailable}) พร้อมใช้งาน{updateNote && <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 2 }}>{updateNote}</div>}</div>
-            <button onClick={applyUpdateNow} style={{ flexShrink: 0, padding: "7px 13px", borderRadius: 9, background: T.blue, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>อัปเดตตอนนี้</button>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700 }}>{t("app.updateBanner", { version: updateAvailable })}{updateNote && <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 2 }}>{updateNote}</div>}</div>
+            <button onClick={applyUpdateNow} style={{ flexShrink: 0, padding: "7px 13px", borderRadius: 9, background: T.blue, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>{t("app.updateNow")}</button>
           </div>
         )}
 
@@ -15058,7 +15146,7 @@ function TimeZoneSettingsSheet({ timeZone, setTimeZone, t, onClose }) {
 // longer accepted here — they existed ONLY to feed the removed BadQ Online row (moved to SettingsTab, see
 // its own comment) and the removed legacy Member Portal (Beta) sheet. Nothing else in this component ever
 // read them; dropping them here is pure dead-prop cleanup, not a behavior change.
-function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, fmtDateTime, onClose }) {
+function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDateTime, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
@@ -15224,7 +15312,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           </ExpandRow>
           <ExpandRow title={t("settings.dataStored")} id="data">
             ขึ้นอยู่กับการใช้งาน แอปอาจเก็บ: ชื่อสมาชิก, รูปโปรไฟล์, ระดับฝีมือ, มือถนัด, ประเภทสมาชิก, เบอร์โทรศัพท์ (ถ้ากรอก), LINE ID (ถ้ากรอก), ประวัติการเข้าร่วมก๊วน, ประวัติการแข่งขัน/ผลการแข่งขัน, สถิติผู้เล่น, ข้อมูลการชำระเงินที่เกี่ยวข้อง และ Tournament data
-            <div style={{ marginTop: 6 }}>เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น</div>
+            <div style={{ marginTop: 6 }}>{t ? t("backup.contactOptionalNote") : "เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น"}</div>
           </ExpandRow>
           <ExpandRow title={t("settings.dataManagement")} id="manage">
             แก้ไขหรือลบข้อมูลติดต่อ (เบอร์โทร/LINE ID) ของสมาชิกแต่ละคนได้ที่โปรไฟล์ผู้เล่น → แก้ไขสมาชิก ส่วนการลบข้อมูลสมาชิกทั้งหมดหรือล้างข้อมูลทั้งหมด ทำได้ด้านล่างในหมวดนี้
@@ -15238,7 +15326,7 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
       {backupSheetOpen && (
         <Overlay onClose={() => setBackupSheetOpen(false)}>
           <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t ? t("backup.title") : "สำรอง / นำเข้า / ส่งออกข้อมูล"}</div>
-          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} t={t} fmtDateTime={fmtDateTime} />
+          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} t={t} tc={tc} fmtDateTime={fmtDateTime} />
         </Overlay>
       )}
 
@@ -18468,7 +18556,7 @@ function TournamentDashboard(props) {
 
       <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
         <button onClick={() => (t.status === "paused" ? tResumeTournament() : tPauseTournament())} style={btnSecondary}>{t.status === "paused" ? tr("match.resume") : tr("tournament.pause")}</button>
-        <button onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr))} style={btnSecondary}><Share2 size={15} /> {tr("common.share")}</button>
+        <button onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr), tr)} style={btnSecondary}><Share2 size={15} /> {tr("common.share")}</button>
         <button onClick={() => setConfirmComplete(true)} style={{ ...btnPrimary, background: T.accent }}><LogOut size={15} /> {tr("tournament.endButton")}</button>
       </div>
       {/* v1.11.4: Export PDF available on the live dashboard too — same buildTournamentResultReport +
@@ -20400,7 +20488,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
                     <span style={{ marginLeft: "auto", fontSize: 12, color: T.muted, fontWeight: 700 }}>{fmtDate ? fmtDate(s.date) : fmtThaiDate(s.date)}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", fontSize: 12, color: T.muted }}>
-                    <span>{tr("history.sessionRowSummary", { count: (s.players || []).length, matches: (s.stats?.totalMatches ?? 0), courts: s.courtCount || 1 })}</span>
+                    <span>{[trc("common.personCount", (s.players || []).length), trc("common.matchCount", (s.stats?.totalMatches ?? 0)), trc("common.courtCount", s.courtCount || 1)].join(" · ")}</span>
                     <span style={{ marginLeft: "auto", fontWeight: 800, color: T.green }}>{formatCurrency((s.bill || []).reduce((sum, b) => sum + (b.total || 0), 0))}</span>
                   </div>
                   {payableSBill.length > 0 && <div style={{ marginTop: 4, fontSize: 11, color: T.muted }}>{tr("history.paidProgressCasual", { paid: paidCount, total: payableSBill.length })}</div>}
@@ -20413,7 +20501,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 
       {open && (
         <Overlay onClose={() => setOpenId(null)}>
-          <HistoricalDetail s={open} playersById={playersById} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} updateHistSessionDate={updateHistSessionDate} tr={tr} fmtDate={fmtDate} />
+          <HistoricalDetail s={open} playersById={playersById} rewardHistory={rewardHistory} toggleHistoricalPaid={toggleHistoricalPaid} onDelete={() => setConfirmDeleteId(open.id)} openHistPhoto={openHistPhoto} clearHistPhoto={clearHistPhoto} addHistExpense={addHistExpense} updateHistExpense={updateHistExpense} removeHistExpense={removeHistExpense} updateHistSessionDate={updateHistSessionDate} tr={tr} trc={trc} fmtDate={fmtDate} />
         </Overlay>
       )}
 
@@ -20532,7 +20620,7 @@ function SettingsTab({
           archivedPlayers={archivedPlayers} restorePlayer={restorePlayer}
           players={players}
           sessionHistory={sessionHistory} rankingConfigs={rankingConfigs} updateRankingConfig={updateRankingConfig}
-          uiLocale={uiLocale} setUiLocale={setUiLocale} uiTimeZone={uiTimeZone} setUiTimeZone={setUiTimeZone} t={t} fmtDateTime={fmtDateTime}
+          uiLocale={uiLocale} setUiLocale={setUiLocale} uiTimeZone={uiTimeZone} setUiTimeZone={setUiTimeZone} t={t} tc={tc} fmtDateTime={fmtDateTime}
           onClose={() => setView(null)}
         />
       )}
@@ -20566,7 +20654,7 @@ function SettingsTab({
   );
 }
 
-function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, updateHistSessionDate, tr, fmtDate }) {
+function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid, onDelete, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, updateHistSessionDate, tr, trc, fmtDate }) {
   // v1.12.15 (retroactive session date edit): tap-to-edit, same pattern as the court-label inline editor
   // (CourtLabelTag) elsewhere in this file — a small pencil button toggles a native <input type="date">
   // in place of the static text; committing (onChange, since a native date picker's selection IS the
@@ -20623,14 +20711,14 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
             {updateHistSessionDate && !editingDate && (
               <button onClick={() => setEditingDate(true)} title={tr("history.editDate")} style={{ background: "none", border: "none", padding: 0, display: "flex", color: T.muted }}><Calendar size={11} /></button>
             )}
-            <span>· {tr("historicalDetail.summaryLine", { count: (s.players || []).length, courts: s.courtCount || 1, mode: fmtMode(s.settings || {}, s.mode) })}</span>
+            <span>· {[trc("common.personCount", (s.players || []).length), trc("common.courtCount", s.courtCount || 1), fmtMode(s.settings || {}, s.mode, tr)].join(" · ")}</span>
           </div>
           {(s.photo || s.photoRef) && <button onClick={() => clearHistPhoto(s.id)} style={{ background: "none", border: "none", color: T.muted, fontSize: 11, fontWeight: 700, padding: 0, marginTop: 3 }}>{tr("historicalDetail.removePhoto")}</button>}
         </div>
       </div>
 
       <button
-        onClick={() => shareSummary(buildShareText({ name: s.name, date: fmtDate ? fmtDate(s.date) : fmtThaiDate(s.date), playerCount: (s.players || []).length, totalMatches: stats.totalMatches || 0, maxGames: stats.maxGames || 0, totalExpense: grandTotal }))}
+        onClick={() => shareSummary(buildShareText({ name: s.name, date: fmtDate ? fmtDate(s.date) : fmtThaiDate(s.date), playerCount: (s.players || []).length, totalMatches: stats.totalMatches || 0, maxGames: stats.maxGames || 0, totalExpense: grandTotal }, tr, trc), tr)}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 14 }}
       ><Share2 size={15} /> {tr("historicalDetail.shareButton")}</button>
 
@@ -20664,7 +20752,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
                 <Avatar p={avatarPhoto ? { ...p, photo: avatarPhoto } : p} size={28} />
                 <span style={{ flex: 1, fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.name} <span style={{ color: levelColor(p.skillIndex), fontWeight: 800, fontSize: 12 }}>({p.level})</span></span>
                 {(st.win + st.loss + st.draw) > 0 && <span style={{ fontSize: 11.5, color: T.muted }}>{st.win}-{st.loss}-{st.draw}</span>}
-                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{tr("historicalDetail.gamesCountLabel", { count: p.games || 0 })}</span>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{trc("common.gameCount", p.games || 0)}</span>
               </div>
             );
           })}
@@ -20732,7 +20820,7 @@ function HistoricalDetail({ s, playersById, rewardHistory, toggleHistoricalPaid,
         </div>
       </div>
 
-      <SectionHead icon={<History size={16} color={T.muted} />} title={tr("history.matchHistory")} sub={tr("historicalDetail.gamesCountLabel", { count: (s.matches || []).length })} />
+      <SectionHead icon={<History size={16} color={T.muted} />} title={tr("history.matchHistory")} sub={trc("common.gameCount", (s.matches || []).length)} />
       {(s.matches || []).length === 0 ? <div style={{ color: T.muted, fontSize: 13, textAlign: "center", padding: "8px 0", marginBottom: 18 }}>{tr("historicalDetail.noCompletedMatches")}</div> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 }}>
           {(s.matches || []).map((m) => <CompactMatch key={m.id} m={m} getP={getSP} onClick={() => {}} />)}
@@ -21438,7 +21526,7 @@ function RankingShowcaseSheet({ clubName, players, sessionHistory, rankingConfig
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        <button onClick={() => shareSummary(rankingShareText(report, tr))} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}>📤 {tr ? tr("ranking.showcaseShareButton") : "แชร์ Ranking"}</button>
+        <button onClick={() => shareSummary(rankingShareText(report, tr), tr)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}>📤 {tr ? tr("ranking.showcaseShareButton") : "แชร์ Ranking"}</button>
         <button onClick={() => setPrintOpen(true)} style={{ flex: 1, padding: "11px 0", borderRadius: 11, background: T.green, border: "none", color: "#fff", fontSize: 13, fontWeight: 800 }}>🖨️ Export PDF</button>
       </div>
       <button onClick={onClose} style={btnSecondary}>{tr ? tr("common.close") : "ปิด"}</button>
@@ -22137,7 +22225,7 @@ function TournamentHistoricalDetail({ t, playersById, onOpenTournamentPrint, tr,
       <SectionHead icon={<Share2 size={16} color={T.green} />} title={tr("tournamentSummary.shareExportTitle")} />
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <button
-          onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr))}
+          onClick={() => shareSummary(buildTournamentShareText(report, teamsById, peopleById, fmtDate || fmtThaiDate, tr), tr)}
           style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "11px 0", borderRadius: 11, background: T.surface2, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700 }}
         ><Share2 size={15} /> {tr("tournamentSummary.shareSummaryButton")}</button>
         <button
@@ -22248,7 +22336,7 @@ function SummaryTab({ players: rosterPlayers, history, current, getP, settings, 
       </div>
 
       <button
-        onClick={() => shareSummary(buildShareText({ name: session?.name, date: session?.date, playerCount: ranking.length, totalMatches, maxGames, totalExpense: grandTotal }))}
+        onClick={() => shareSummary(buildShareText({ name: session?.name, date: session?.date, playerCount: ranking.length, totalMatches, maxGames, totalExpense: grandTotal }, t, tc), t)}
         style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 7, padding: "10px 0", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 13, fontWeight: 700, marginBottom: 18 }}
       ><Share2 size={15} /> {t("summary.shareSession")}</button>
 
@@ -24298,6 +24386,14 @@ function importPhaseLabel(phase, tr) {
   const key = IMPORT_PHASE_LABEL_KEYS[phase];
   return tr && key ? tr(key) : fallback;
 }
+// v1.14.9 (i18n cleanup): the "N players · M session records [· K matches total]" lines are composed from three separately
+// pluralised catalog entries (tc), never from one fixed sentence — so each part follows the selected language and singular/plural.
+function backupCountsText(t, tc, st, withMatches) {
+  const plural = (base, count) => (tc ? tc(base, count) : t(base + ".other", { count }));
+  const parts = [plural("backup.playerCount", st.playerCount), plural("backup.sessionRecordCount", st.sessionHistoryCount)];
+  if (withMatches) parts.push(plural("backup.matchTotalCount", st.matchCount));
+  return parts.join(" · ");
+}
 function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, t, tc, fmtDateTime }) {
   const formatDateTime = fmtDateTime || fmtThaiDateTime;
   const [busy, setBusy] = useState(false);
@@ -24317,9 +24413,9 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
   const copyDiagLog = async () => {
     try {
       const raw = localStorage.getItem("bg-v11-diag") || "[]";
-      if (navigator.clipboard) { await navigator.clipboard.writeText(raw); alert("คัดลอก Diagnostic Log แล้ว"); }
+      if (navigator.clipboard) { await navigator.clipboard.writeText(raw); alert(t ? t("backup.diagCopied") : "คัดลอก Diagnostic Log แล้ว"); }
       else alert(raw);
-    } catch (e) { alert("คัดลอกไม่สำเร็จ"); }
+    } catch (e) { alert(t ? t("backup.diagCopyFailed") : "คัดลอกไม่สำเร็จ"); }
   };
   const [showAllAutoBackups, setShowAllAutoBackups] = useState(false); // v1.11.16: only the newest checkpoint shows by default — rest collapsed behind a tap
   const [successMsg, setSuccessMsg] = useState(null); // { kind: "export"|"import"|"undo", stats?, sizeLabel? }
@@ -24448,8 +24544,8 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       )}
       {successMsg && (
         <div style={{ background: "#e2f5ec", border: `1px solid ${T.green}`, borderRadius: 11, padding: "10px 12px", fontSize: 12.5, color: T.green, marginBottom: 8, lineHeight: 1.7 }}>
-          {successMsg.kind === "export" && <>{t ? t("backup.exportSuccessTitle") : "สำรองข้อมูลเรียบร้อย"}<br />{t ? t("backup.exportSuccessStats", { playerCount: successMsg.stats.playerCount, sessionHistoryCount: successMsg.stats.sessionHistoryCount, matchCount: successMsg.stats.matchCount }) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง · แมตช์ทั้งหมด ${successMsg.stats.matchCount} แมตช์`}<br /><span style={{ color: T.muted }}>{t ? t("backup.exportSuccessSize", { size: successMsg.sizeLabel }) : `ขนาดไฟล์สำรอง ${successMsg.sizeLabel}`}</span></>}
-          {successMsg.kind === "import" && <>{t ? t("backup.importSuccessTitle") : "นำเข้าข้อมูลเรียบร้อย"}<br />{t ? t("backup.playerAndSessionCountLine", { playerCount: successMsg.stats.playerCount, sessionHistoryCount: successMsg.stats.sessionHistoryCount }) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง`}</>}
+          {successMsg.kind === "export" && <>{t ? t("backup.exportSuccessTitle") : "สำรองข้อมูลเรียบร้อย"}<br />{t ? backupCountsText(t, tc, successMsg.stats, true) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง · แมตช์ทั้งหมด ${successMsg.stats.matchCount} แมตช์`}<br /><span style={{ color: T.muted }}>{t ? t("backup.exportSuccessSize", { size: successMsg.sizeLabel }) : `ขนาดไฟล์สำรอง ${successMsg.sizeLabel}`}</span></>}
+          {successMsg.kind === "import" && <>{t ? t("backup.importSuccessTitle") : "นำเข้าข้อมูลเรียบร้อย"}<br />{t ? backupCountsText(t, tc, successMsg.stats, false) : `ผู้เล่น ${successMsg.stats.playerCount} คน · ประวัติก๊วน ${successMsg.stats.sessionHistoryCount} ครั้ง`}</>}
           {successMsg.kind === "undo" && <>{t ? t("backup.undoSuccessTitle") : "ย้อนกลับข้อมูลก่อนนำเข้าเรียบร้อย"}</>}
         </div>
       )}
@@ -24482,7 +24578,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
                 <div style={{ fontSize: 12, lineHeight: 1.5, minWidth: 0 }}>
                   <div style={{ fontWeight: 700, color: T.text }}>{formatDateTime(entry.savedAt)}</div>
                   <div style={{ color: T.muted }}>
-                    {t ? t("backup.playerAndSessionCountLine", { playerCount: entry.stats.playerCount, sessionHistoryCount: entry.stats.sessionHistoryCount }) : `ผู้เล่น ${entry.stats.playerCount} คน · ประวัติก๊วน ${entry.stats.sessionHistoryCount} ครั้ง`}
+                    {t ? backupCountsText(t, tc, entry.stats, false) : `ผู้เล่น ${entry.stats.playerCount} คน · ประวัติก๊วน ${entry.stats.sessionHistoryCount} ครั้ง`}
                     {t ? (entry.reason === "tournament" ? t("backup.afterTournamentNote") : t("backup.afterSessionNote")) : (entry.reason === "tournament" ? " · หลังจบ Tournament" : " · หลังจบก๊วน")}
                   </div>
                 </div>
@@ -24504,7 +24600,7 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
       {bootLog && bootLog.length > 0 && (
         <div style={{ marginTop: 16 }}>
           <button onClick={() => setShowBootLog((v) => !v)} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer" }}>
-            <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>บันทึกการซิงค์ข้อมูล (debug)</span>
+            <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>{t ? t("backup.bootLogTitle") : "บันทึกการซิงค์ข้อมูล (debug)"}</span>
             <ChevronDown size={13} color={T.muted} style={{ transform: showBootLog ? "rotate(180deg)" : "none" }} />
           </button>
           {showBootLog && (
@@ -24527,20 +24623,20 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
           panel never itself perturbs anything. Meant to be removed once the investigation concludes. */}
       <div style={{ marginTop: 16 }}>
         <button onClick={() => { const next = !showDiagLog; setShowDiagLog(next); if (next) loadDiagLog(); }} style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: "pointer" }}>
-          <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>Diagnostic Log (v1.11.47, ชั่วคราว)</span>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: T.muted }}>{t ? t("backup.diagLogTitle") : "Diagnostic Log (v1.11.47, ชั่วคราว)"}</span>
           <ChevronDown size={13} color={T.muted} style={{ transform: showDiagLog ? "rotate(180deg)" : "none" }} />
         </button>
         {showDiagLog && (
           <div style={{ marginTop: 8 }}>
             <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-              <button onClick={loadDiagLog} style={{ fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text }}>รีเฟรช</button>
-              <button onClick={copyDiagLog} style={{ fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text }}>คัดลอกทั้งหมด</button>
+              <button onClick={loadDiagLog} style={{ fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text }}>{t ? t("backup.diagRefresh") : "รีเฟรช"}</button>
+              <button onClick={copyDiagLog} style={{ fontSize: 11, fontWeight: 700, padding: "6px 10px", borderRadius: 8, border: `1px solid ${T.border}`, background: T.surface2, color: T.text }}>{t ? t("backup.diagCopyAll") : "คัดลอกทั้งหมด"}</button>
               <span style={{ fontSize: 10.5, color: T.muted, alignSelf: "center" }}>Page ID: {(typeof window !== "undefined" && window.__pageInstanceId) || "-"}</span>
             </div>
             {!diagLog ? (
-              <div style={{ fontSize: 11.5, color: T.muted }}>แตะ "รีเฟรช" เพื่อโหลด</div>
+              <div style={{ fontSize: 11.5, color: T.muted }}>{t ? t("backup.diagTapRefresh") : "แตะ \"รีเฟรช\" เพื่อโหลด"}</div>
             ) : diagLog.length === 0 ? (
-              <div style={{ fontSize: 11.5, color: T.muted }}>ยังไม่มีข้อมูล</div>
+              <div style={{ fontSize: 11.5, color: T.muted }}>{t ? t("backup.diagEmpty") : "ยังไม่มีข้อมูล"}</div>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 320, overflowY: "auto" }}>
                 {diagLog.map((e, i) => (
@@ -24576,15 +24672,15 @@ function BackupSettingsEditor({ exportBackup, validateBackupFile, applyRestore, 
           <div onClick={(e) => e.stopPropagation()} style={{ background: T.surface, borderRadius: 16, padding: 18, maxWidth: 360, width: "100%", maxHeight: "85dvh", overflowY: "auto", boxSizing: "border-box" }}>
             <div style={{ fontSize: 15, fontWeight: 800, marginBottom: 10 }}>{t ? t("backup.found") : "พบข้อมูลสำรอง"}</div>
             <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 2 }}>{t ? t("backup.exportedAtLine", { date: formatDateTime(preview.exportedAt) }) : `วันที่สำรอง: ${formatDateTime(preview.exportedAt)}`}</div>
-            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 12 }}>Version: BadQ v{preview.appVersion}</div>
+            <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 12 }}>{t ? t("backup.versionLine", { version: preview.appVersion }) : `Version: BadQ v${preview.appVersion}`}</div>
             <div style={{ background: T.surface2, borderRadius: 11, padding: 12, fontSize: 12.5, marginBottom: 14, lineHeight: 1.9 }}>
               {(() => {
                 const st = backupStats(preview.data);
                 return (
                   <>
-                    {t ? t("backup.statPlayers", { count: st.playerCount }) : `ผู้เล่น ${st.playerCount} คน`}<br />
-                    {t ? t("backup.statSessions", { count: st.sessionHistoryCount }) : `ประวัติก๊วน ${st.sessionHistoryCount} ครั้ง`}<br />
-                    {t ? t("backup.statMatches", { count: st.matchCount }) : `แมตช์ ${st.matchCount} แมตช์`}<br />
+                    {t ? (tc ? tc("backup.playerCount", st.playerCount) : t("backup.playerCount.other", { count: st.playerCount })) : `ผู้เล่น ${st.playerCount} คน`}<br />
+                    {t ? (tc ? tc("backup.sessionRecordCount", st.sessionHistoryCount) : t("backup.sessionRecordCount.other", { count: st.sessionHistoryCount })) : `ประวัติก๊วน ${st.sessionHistoryCount} ครั้ง`}<br />
+                    {t ? (tc ? tc("common.matchCount", st.matchCount) : t("common.matchCount.other", { count: st.matchCount })) : `แมตช์ ${st.matchCount} แมตช์`}<br />
                     {st.hasCurrentSession && <>{t ? t("backup.statActiveSession") : "มีก๊วนที่กำลังใช้งาน 1 ก๊วน"}<br /></>}
                     {st.hasPayment && <>{t ? t("backup.statHasPayment") : "มีข้อมูลชำระเงิน"}<br /></>}
                     {st.hasQR && <>{t ? t("backup.statHasQR") : "มี QR รับเงิน"}<br /></>}
