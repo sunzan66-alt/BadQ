@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.6";
+const APP_VERSION = "1.14.7";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -15024,11 +15024,11 @@ function TimeZoneSettingsSheet({ timeZone, setTimeZone, t, onClose }) {
 // read them; dropping them here is pure dead-prop cleanup, not a behavior change.
 function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCustomLevels, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, players, sessionHistory, rankingConfigs, updateRankingConfig, uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, fmtDateTime, onClose }) {
   const [levelSheetOpen, setLevelSheetOpen] = useState(false);
-  const [rankingClubPickerOpen, setRankingClubPickerOpen] = useState(false); // v1.11.68: section 9 club-picker-first flow
-  const [rankingSettingsClub, setRankingSettingsClub] = useState(null); // v1.11.68: club name whose Rank settings sheet is open
   const [backupSheetOpen, setBackupSheetOpen] = useState(false);
   const [archivedSheetOpen, setArchivedSheetOpen] = useState(false); // v1.11.6: "สมาชิกที่เก็บไว้"
   const [timeZoneSheetOpen, setTimeZoneSheetOpen] = useState(false);
+  const [privacySheetOpen, setPrivacySheetOpen] = useState(false); // v1.14.7: consolidated Privacy & data subpage
+  const [timedCourtInfoOpen, setTimedCourtInfoOpen] = useState(false); // v1.14.7: lightweight \u24d8 explanation (never touches the setting)
   const [expanded, setExpanded] = useState(null); // "policy" | "data" | "manage" | null
   const [confirmDeleteMembers, setConfirmDeleteMembers] = useState(false);
   const [confirmWipeAll, setConfirmWipeAll] = useState(false);
@@ -15048,157 +15048,103 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
     </div>
   );
 
+  // v1.14.7 grouped-settings rows (presentation only): left icon + label, optional right-side control / value, chevron for navigation.
+  const rowBase = { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", minHeight: 44, borderTop: `1px solid ${T.border}` };
+  const GroupHeader = ({ children }) => <div style={{ fontSize: 11.5, fontWeight: 800, color: T.muted, letterSpacing: 0.3, margin: "14px 2px 6px" }}>{children}</div>;
+  const Group = ({ children }) => <div style={{ borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, overflow: "hidden" }}>{children}</div>;
+  const InlineSeg = ({ options, value, onChange, testId }) => (
+    <div data-testid={testId} style={{ display: "flex", gap: 2, background: T.surface2, borderRadius: 9, padding: 3, flexShrink: 0 }}>
+      {options.map(([v, lb]) => (
+        <button key={String(v)} onClick={() => onChange(v)} aria-pressed={value === v} style={{ padding: "5px 12px", borderRadius: 7, border: "none", fontSize: 12, fontWeight: 800, cursor: "pointer", background: value === v ? T.green : "transparent", color: value === v ? "#fff" : T.text }}>{lb}</button>
+      ))}
+    </div>
+  );
+  const LinkRow = ({ first, onClick, testId, children }) => (
+    <button data-testid={testId} onClick={onClick} style={{ ...rowBase, width: "100%", textAlign: "left", background: "none", border: "none", borderTop: first ? "none" : rowBase.borderTop, cursor: "pointer", color: T.text }}>{children}<ChevronRight size={15} color={T.muted} style={{ flexShrink: 0 }} /></button>
+  );
+  const timedOn = settings.realtimeCourtAvailability === true;
+
   return (
     <Overlay onClose={onClose}>
-      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>⚙️ {t("settings.title")}</div>
+      <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>⚙️ {t("settings.title")}</div>
 
-      {/* v1.12.41 (Localization Phase 1): the language preference lives here, not in `settings` (see
-          useBadQI18n's header comment) — switching it writes only to its own localStorage key and never
-          touches this settings object, so it can never reach the Journal, a backup export, or Restore. */}
-      <Label>🌐 {t("settings.language")}</Label>
-      <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
-        {["th", "en"].map((code) => (
-          <button
-            key={code}
-            onClick={() => setUiLocale(code)}
-            style={{
-              flex: 1, padding: "10px 0", borderRadius: 11, cursor: "pointer",
-              border: `1px solid ${uiLocale === code ? T.green : T.border}`,
-              background: uiLocale === code ? T.green : T.surface,
-              color: uiLocale === code ? "#fff" : T.text,
-              fontSize: 13, fontWeight: 800,
-            }}
-          >
-            {t(`settings.language.${code}`)}
-          </button>
-        ))}
-      </div>
-
-      {/* v1.12.49: presentation-only IANA time-zone preference. Like language, this value lives outside
-          `settings`; changing it cannot enter Journal, IndexedDB business state, Backup, or Restore. */}
-      <Label>🕒 {t("settings.timeZone")}</Label>
-      <NavRow testId="time-zone-row" onClick={() => setTimeZoneSheetOpen(true)}>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{t(((window.BadQI18n && window.BadQI18n.TIME_ZONE_OPTIONS) || []).find((option) => option.id === uiTimeZone)?.labelKey || "settings.timeZone.option.bangkok")}</div>
-          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{timeZoneOffsetDisplay(uiTimeZone)}</div>
+      <GroupHeader>{t("settings.sectionGeneral")}</GroupHeader>
+      <Group>
+        {/* v1.12.41 (Localization Phase 1): the language preference lives outside `settings` (see useBadQI18n) — switching it writes only
+            to its own localStorage key and never touches this settings object, so it can never reach the Journal, a backup or Restore. */}
+        <div style={{ ...rowBase, borderTop: "none" }}>
+          <span style={{ fontSize: 13, fontWeight: 800, flex: 1 }}>🌐 {t("settings.language")}</span>
+          <InlineSeg testId="language-seg" options={[["th", "ไทย"], ["en", "English"]]} value={uiLocale} onChange={setUiLocale} />
         </div>
-        <ChevronRight size={15} color={T.muted} />
-      </NavRow>
+
+        {/* v1.12.49: presentation-only IANA time-zone preference (lives outside `settings`). */}
+        <LinkRow testId="time-zone-row" onClick={() => setTimeZoneSheetOpen(true)}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>🕐 {t("settings.timeZone")}</div>
+            <div style={{ fontSize: 11, color: T.muted, marginTop: 2 }}>{t(((window.BadQI18n && window.BadQI18n.TIME_ZONE_OPTIONS) || []).find((option) => option.id === uiTimeZone)?.labelKey || "settings.timeZone.option.bangkok")} · {timeZoneOffsetDisplay(uiTimeZone)}</div>
+          </div>
+        </LinkRow>
+
+        {/* v1.14.5 setting, v1.14.7 presentation: persistent toggle (part of `settings`). The explanation is behind the ⓘ button only. */}
+        <div style={rowBase}>
+          <span style={{ fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", gap: 4, flex: 1, minWidth: 0 }}>
+            <span>🗓️ {t("settings.realtimeCourt")}</span>
+            <button data-testid="timed-court-info" aria-label={t("settings.realtimeCourtInfoLabel")} onClick={() => setTimedCourtInfoOpen(true)} style={{ border: "none", background: "none", color: T.muted, fontSize: 14, lineHeight: 1, padding: "4px 5px", cursor: "pointer" }}>ⓘ</button>
+          </span>
+          <InlineSeg testId="timed-court-seg" options={[[false, t("common.off")], [true, t("common.on")]]} value={timedOn} onChange={(v) => setSettings((x) => ({ ...x, realtimeCourtAvailability: v === true }))} />
+        </div>
+
+        <LinkRow testId="skill-level-row" onClick={() => setLevelSheetOpen(true)}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>🏸 {t("settings.skillLevels")}</div>
+            <div style={{ fontSize: 11, color: T.muted, marginTop: 2, display: "flex", gap: 6 }}><span>{t("settings.skillSystem")}</span><span style={{ marginLeft: "auto", fontWeight: 800, color: T.text }}>{presetDisplayName(currentPresetId, t)}</span></div>
+          </div>
+        </LinkRow>
+      </Group>
       {timeZoneSheetOpen && <TimeZoneSettingsSheet timeZone={uiTimeZone} setTimeZone={setUiTimeZone} t={t} onClose={() => setTimeZoneSheetOpen(false)} />}
-
-      {/* v1.14.5: persistent toggle (part of `settings`, so it survives reload and Backup/Restore). OFF (the default, and what every legacy
-          save reads as) ignores the clock entirely; turning it OFF never touches any court's start/end, rate or free hours. */}
-      <Label>🕓 {t("settings.realtimeCourt")}</Label>
-      <Seg options={[[false, t("common.off")], [true, t("common.on")]]} value={settings.realtimeCourtAvailability === true} onChange={(v) => setSettings((x) => ({ ...x, realtimeCourtAvailability: v === true }))} />
-
-      <Label>🏸 {t("settings.skillLevels")}</Label>
-      <NavRow onClick={() => setLevelSheetOpen(true)}>
-        <span style={{ fontSize: 12.5, color: T.muted }}>{t("settings.skillSystem")}</span>
-        <span style={{ marginLeft: "auto", fontWeight: 800, fontSize: 13, color: T.text }}>{presetDisplayName(currentPresetId, t)}</span>
-        <ChevronRight size={15} color={T.muted} />
-      </NavRow>
       {levelSheetOpen && <LevelSettingsSheet settings={settings} changeLevelPreset={changeLevelPreset} setCustomLevels={setCustomLevels} t={t} onClose={() => setLevelSheetOpen(false)} />}
-
-      {/* v1.11.68 (Ranking System, section 9): placed directly under ระดับฝีมือ per spec. Tapping FIRST
-          shows a club-selection list (any club, independent of the currently-active session) — only after
-          picking a club does that club's own Rank settings screen open. No new bottom-nav tab. */}
-      <NavRow onClick={() => setRankingClubPickerOpen(true)}>
-        <span style={{ fontSize: 17 }}>🏆</span>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t("ranking.settings")}</div>
-          <div style={{ fontSize: 10.5, color: T.muted, marginTop: 1 }}>{t("ranking.advancedRowSub")}</div>
-        </div>
-        <ChevronRight size={15} color={T.muted} />
-      </NavRow>
-      {rankingClubPickerOpen && (
-        <RankingClubPickerSheet
-          sessionHistory={sessionHistory}
-          onPick={(name) => { setRankingClubPickerOpen(false); setRankingSettingsClub(name); }}
-          onClose={() => setRankingClubPickerOpen(false)}
-          t={t}
-        />
-      )}
-      {rankingSettingsClub && (
-        <RankingSettingsSheet
-          clubName={rankingSettingsClub}
-          rankingConfig={getRankingConfigFor(rankingConfigs, rankingSettingsClub)}
-          updateRankingConfig={updateRankingConfig}
-          players={players}
-          sessionHistory={sessionHistory}
-          onClose={() => setRankingSettingsClub(null)}
-          t={t}
-        />
-      )}
-
-      {/* v1.11.34: "ไม่ได้มานานเกิน [N] เดือน" (spec section 2) — used ONLY by the ผู้เล่น tab's
-          "ไม่ได้มานาน" filter, never auto-deletes/auto-archives anyone. Default 6 (see getDefaultSettings). */}
-      <div style={{ marginTop: 14 }}><Label>👥 {t("settings.memberManagement")}</Label></div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8 }}>
-        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>{t("settings.inactiveThreshold")}</span>
-        <input
-          type="number"
-          min={1}
-          value={settings.inactiveMonths ?? 6}
-          onChange={(e) => setSettings((s) => ({ ...s, inactiveMonths: Math.max(1, Number(e.target.value) || 6) }))}
-          onFocus={(e) => e.target.select()}
-          style={{ width: 56, padding: "6px 8px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }}
-        />
-        <span style={{ fontSize: 12.5, color: T.text, fontWeight: 700 }}>{t("settings.monthUnit")}</span>
-      </div>
-
-      {/* v1.12.12 (P2.2 IA reorg): "☁️ BadQ Online" moved OUT of ตั้งค่าทั่วไป into its own top-level Settings
-          card (see SettingsTab) — Settings → BadQ Online directly, not Settings → ตั้งค่าทั่วไป → BadQ Online.
-          The legacy "🌐 Member Portal (Beta)" row that used to sit below this has been REMOVED entirely (see
-          the comment above MemberPortalSheet's old location, right before ArchivedPlayersSheet, for what was
-          and wasn't touched). */}
-
-      <div style={{ marginTop: 6 }}><Label>🔒 {t("settings.privacy")}</Label></div>
-
-      {/* v1.12.41 (Localization Phase 1): only the ExpandRow TITLES have an approved catalog key — the long
-          body paragraphs are policy text with no prepared translation yet, so they stay Thai literals
-          (fallback), matching "Do not claim the full app is translated at this stage." */}
-      <ExpandRow title={t("settings.privacyPolicy")} id="policy">
-        BadQ เก็บข้อมูลสมาชิกและประวัติการเล่นไว้ในเครื่องของคุณเท่านั้น (ไม่มีการส่งข้อมูลขึ้นเซิร์ฟเวอร์ภายนอก) ใช้เพื่อจัดก๊วน จับคู่ และสรุปผลภายในแอปนี้เท่านั้น
-      </ExpandRow>
-      <ExpandRow title={t("settings.dataStored")} id="data">
-        ขึ้นอยู่กับการใช้งาน แอปอาจเก็บ: ชื่อสมาชิก, รูปโปรไฟล์, ระดับฝีมือ, มือถนัด, ประเภทสมาชิก, เบอร์โทรศัพท์ (ถ้ากรอก), LINE ID (ถ้ากรอก), ประวัติการเข้าร่วมก๊วน, ประวัติการแข่งขัน/ผลการแข่งขัน, สถิติผู้เล่น, ข้อมูลการชำระเงินที่เกี่ยวข้อง และ Tournament data
-        <div style={{ marginTop: 6 }}>เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น</div>
-      </ExpandRow>
-      <ExpandRow title={t("settings.dataManagement")} id="manage">
-        แก้ไขหรือลบข้อมูลติดต่อ (เบอร์โทร/LINE ID) ของสมาชิกแต่ละคนได้ที่โปรไฟล์ผู้เล่น → แก้ไขสมาชิก ส่วนการลบข้อมูลสมาชิกทั้งหมดหรือล้างข้อมูลทั้งหมด ทำได้ด้านล่างในหมวดนี้
-      </ExpandRow>
-
-      {/* v1.11.6: "สมาชิกที่เก็บไว้" — recovery list for players archived from แก้ไขสมาชิก → เก็บสมาชิก.
-          Archiving never deletes anything, so this is where they're found again and restored.
-          v1.12.43 (Localization Phase 3): this row label + the sheet it opens are now translated (the sheet
-          itself is explicitly in this phase's scope); the REST of GeneralSettingsSheet is untouched, per
-          the boundary and per test_v11241_localization_e2e.js's L5 assertions (unaffected -- they don't
-          reference this row's text). */}
-      <NavRow onClick={() => setArchivedSheetOpen(true)}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t("player.archived")}</span>
-        {archivedPlayers && archivedPlayers.length > 0 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted, marginLeft: 8 }}>{archivedPlayers.length}</span>}
-        <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
-      </NavRow>
-      {archivedSheetOpen && <ArchivedPlayersSheet archivedPlayers={archivedPlayers || []} restorePlayer={restorePlayer} t={t} onClose={() => setArchivedSheetOpen(false)} />}
-
-      <NavRow onClick={() => setBackupSheetOpen(true)}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t ? t("backup.title") : "การสำรอง / นำเข้า / ส่งออกข้อมูล"}</span>
-        <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
-      </NavRow>
-      {backupSheetOpen && (
-        <Overlay onClose={() => setBackupSheetOpen(false)}>
-          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t ? t("backup.title") : "สำรอง / นำเข้า / ส่งออกข้อมูล"}</div>
-          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} t={t} fmtDateTime={fmtDateTime} />
+      {timedCourtInfoOpen && (
+        <Overlay onClose={() => setTimedCourtInfoOpen(false)}>
+          <div data-testid="timed-court-info-body" style={{ fontSize: 13, lineHeight: 1.6, marginBottom: 14 }}>{t("settings.realtimeCourtInfo")}</div>
+          <button onClick={() => setTimedCourtInfoOpen(false)} style={btnSecondary}>{t("common.close")}</button>
         </Overlay>
       )}
 
-      {/* destructive actions — explicit confirmation required, never a single accidental tap */}
-      <button onClick={() => setConfirmDeleteMembers(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 700 }}>{t ? t("backup.deleteMembersButton") : "ลบข้อมูลสมาชิก"}</button>
-      <button onClick={() => setConfirmWipeAll(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 800 }}>{t ? t("backup.wipeAll") : "ล้างข้อมูลทั้งหมด"}</button>
+      {/* v1.14.7: Ranking configuration is NOT duplicated here any more — it lives only under ตั้งค่าขั้นสูง → Ranking (AdvancedSettings). */}
 
-      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 8 }}>{t ? t("common.close") : "ปิด"}</button>
+      {/* Member management section (structured so future Member Account rows can be added here; none are implemented now).
+          v1.11.34: "ไม่ได้มานานเกิน [N] เดือน" is used ONLY by the ผู้เล่น tab's "ไม่ได้มานาน" filter, never auto-deletes/auto-archives anyone. */}
+      <GroupHeader>👥 {t("settings.memberManagement")}</GroupHeader>
+      <Group>
+        <LinkRow first testId="archived-players-row" onClick={() => setArchivedSheetOpen(true)}>
+          <span style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>{t("player.archived")}</span>
+          {archivedPlayers && archivedPlayers.length > 0 && <span style={{ fontSize: 11, fontWeight: 800, color: T.muted }}>{archivedPlayers.length}</span>}
+        </LinkRow>
+        <div style={rowBase}>
+          <span style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>{t("settings.inactiveThreshold")}</span>
+          <input
+            data-testid="inactive-months-input"
+            type="number" inputMode="numeric" min={1}
+            value={settings.inactiveMonths ?? 6}
+            onChange={(e) => setSettings((s) => ({ ...s, inactiveMonths: Math.max(1, Number(e.target.value) || 6) }))}
+            onFocus={(e) => e.target.select()}
+            style={{ width: 52, padding: "5px 6px", borderRadius: 8, border: `1px solid ${T.border}`, textAlign: "center", fontSize: 13, fontWeight: 800, color: T.text, outline: "none" }}
+          />
+          <span style={{ fontSize: 12.5, fontWeight: 700 }}>{t("settings.monthUnit")}</span>
+        </div>
+      </Group>
+      {archivedSheetOpen && <ArchivedPlayersSheet archivedPlayers={archivedPlayers || []} restorePlayer={restorePlayer} t={t} onClose={() => setArchivedSheetOpen(false)} />}
 
-      {confirmDeleteMembers && (
+      <GroupHeader>🔒 {t("settings.privacy")}</GroupHeader>
+      <Group>
+        <LinkRow first testId="privacy-data-row" onClick={() => setPrivacySheetOpen(true)}>
+          <span style={{ fontSize: 13, fontWeight: 700, flex: 1 }}>{t("settings.privacy")}</span>
+        </LinkRow>
+      </Group>
+
+      <button onClick={onClose} style={{ ...btnSecondary, marginTop: 14 }}>{t ? t("common.close") : "ปิด"}</button>
+
+{confirmDeleteMembers && (
         <Overlay onClose={() => setConfirmDeleteMembers(false)}>
           <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{t ? t("backup.deleteMembersConfirmTitle") : "ลบข้อมูลสมาชิกทั้งหมด?"}</div>
           <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>
@@ -15227,6 +15173,47 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
           <div style={{ fontWeight: 800, fontSize: 15, marginBottom: 8 }}>{t ? t("backup.wipeComplete") : "ล้างข้อมูลทั้งหมดแล้ว"}</div>
           <div style={{ fontSize: 12.5, color: T.muted, marginBottom: 16, lineHeight: 1.6 }}>{t ? t("backup.wipedNoticeBody") : "หากล้างผิด กู้คืนได้ที่ การสำรอง / นำเข้า / ส่งออกข้อมูล → ย้อนกลับการนำเข้าครั้งล่าสุด (ใช้ได้ครั้งเดียว)"}</div>
           <button onClick={() => { setWipedNotice(false); onClose(); }} style={btnPrimary}>{t ? t("common.close") : "ปิด"}</button>
+        </Overlay>
+      )}
+      {/* v1.14.7: the former large Privacy blocks (and the data actions that sat below them) now live behind ONE entry. Content and
+          behaviour are unchanged — only their location moved. */}
+      {privacySheetOpen && (
+        <Overlay onClose={() => setPrivacySheetOpen(false)}>
+          <div data-testid="privacy-data-sheet" style={{ fontSize: 16, fontWeight: 800, marginBottom: 12 }}>🔒 {t("settings.privacy")}</div>
+
+          {/* v1.12.41 (Localization Phase 1): only the ExpandRow TITLES have an approved catalog key — the long body paragraphs are
+              policy text with no prepared translation yet, so they stay Thai literals (fallback). */}
+          <ExpandRow title={t("settings.privacyPolicy")} id="policy">
+            BadQ เก็บข้อมูลสมาชิกและประวัติการเล่นไว้ในเครื่องของคุณเท่านั้น (ไม่มีการส่งข้อมูลขึ้นเซิร์ฟเวอร์ภายนอก) ใช้เพื่อจัดก๊วน จับคู่ และสรุปผลภายในแอปนี้เท่านั้น
+          </ExpandRow>
+          <ExpandRow title={t("settings.dataStored")} id="data">
+            ขึ้นอยู่กับการใช้งาน แอปอาจเก็บ: ชื่อสมาชิก, รูปโปรไฟล์, ระดับฝีมือ, มือถนัด, ประเภทสมาชิก, เบอร์โทรศัพท์ (ถ้ากรอก), LINE ID (ถ้ากรอก), ประวัติการเข้าร่วมก๊วน, ประวัติการแข่งขัน/ผลการแข่งขัน, สถิติผู้เล่น, ข้อมูลการชำระเงินที่เกี่ยวข้อง และ Tournament data
+            <div style={{ marginTop: 6 }}>เบอร์โทรศัพท์และ LINE ID เป็นข้อมูลไม่บังคับ ใช้สำหรับติดต่อสมาชิกเท่านั้น</div>
+          </ExpandRow>
+          <ExpandRow title={t("settings.dataManagement")} id="manage">
+            แก้ไขหรือลบข้อมูลติดต่อ (เบอร์โทร/LINE ID) ของสมาชิกแต่ละคนได้ที่โปรไฟล์ผู้เล่น → แก้ไขสมาชิก ส่วนการลบข้อมูลสมาชิกทั้งหมดหรือล้างข้อมูลทั้งหมด ทำได้ด้านล่างในหมวดนี้
+          </ExpandRow>
+
+          <div style={{ marginTop: 6 }}>
+          <NavRow onClick={() => setBackupSheetOpen(true)}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: T.text }}>{t ? t("backup.title") : "การสำรอง / นำเข้า / ส่งออกข้อมูล"}</span>
+        <ChevronRight size={15} color={T.muted} style={{ marginLeft: "auto" }} />
+      </NavRow>
+      {backupSheetOpen && (
+        <Overlay onClose={() => setBackupSheetOpen(false)}>
+          <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 14 }}>{t ? t("backup.title") : "สำรอง / นำเข้า / ส่งออกข้อมูล"}</div>
+          <BackupSettingsEditor exportBackup={exportBackup} validateBackupFile={validateBackupFile} applyRestore={applyRestore} undoRestore={undoRestore} lastBackupAt={lastBackupAt} hasPreRestoreBackup={hasPreRestoreBackup} autoBackups={autoBackups} bootLog={bootLog} t={t} fmtDateTime={fmtDateTime} />
+        </Overlay>
+      )}
+
+
+          {/* destructive actions — explicit confirmation required, never a single accidental tap */}
+      <button onClick={() => setConfirmDeleteMembers(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 700 }}>{t ? t("backup.deleteMembersButton") : "ลบข้อมูลสมาชิก"}</button>
+      <button onClick={() => setConfirmWipeAll(true)} style={{ width: "100%", textAlign: "left", padding: "11px 12px", borderRadius: 11, background: "#fdecea", border: `1px solid ${T.accent}`, marginBottom: 8, color: T.accent, fontSize: 13, fontWeight: 800 }}>{t ? t("backup.wipeAll") : "ล้างข้อมูลทั้งหมด"}</button>
+
+
+          </div>
+          <button onClick={() => setPrivacySheetOpen(false)} style={{ ...btnSecondary, marginTop: 8 }}>{t ? t("common.close") : "ปิด"}</button>
         </Overlay>
       )}
     </Overlay>
