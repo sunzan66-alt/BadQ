@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.5";
+const APP_VERSION = "1.14.6";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -19288,35 +19288,27 @@ function CourtTimeRows({ courtCount, courtLabels, settings, setSettings, session
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
   const rate = Math.max(0, Number(settings && settings.courtCost && settings.courtCost.ratePerHour) || 0);
   const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), rate);
-  const total = totalCourtCostFromRows(rows);
   const setRate = (v) => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), ratePerHour: Math.max(0, Number(v) || 0) } }));
   const patch = (court, p) => setSession((s) => ({ ...s, courtHours: patchCourtHoursRow(s.courtHours, court, p) }));
-  const inputStyle = { padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none", background: T.surface, color: T.text };
+  // v1.14.6: setup-only UI — one compact row per court (label, start → end, free hours). Actual hours / per-court cost / total are NOT
+  // shown here (the Finance cost screen keeps showing them); they are still derived from the same session.courtHours data.
+  const inputStyle = { padding: "5px 4px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none", background: T.surface, color: T.text, width: 82, minWidth: 0, flex: "0 1 82px" };
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
       <NumField label={t("court.ratePerHourLabel")} value={rate} onChange={setRate} />
       {rows.map((row) => (
-        <div key={row.court} style={{ display: "flex", flexDirection: "column", gap: 5, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-            <span style={{ fontSize: 12, fontWeight: 800, minWidth: 54 }}>{t("match.colCourt")} {courtLabelFor(courtLabels, row.court)}</span>
-            <input type="time" value={row.startAt || ""} onChange={(e) => patch(row.court, { startAt: e.target.value || null })} style={inputStyle} />
-            <span style={{ fontSize: 11, color: T.muted }}>→</span>
-            <input type="time" value={row.endAt || ""} onChange={(e) => patch(row.court, { endAt: e.target.value || null })} style={inputStyle} />
-            <span style={{ fontSize: 11, color: T.muted }}>{t("court.actualUsedPrefix")} {Math.round(row.actualDurationHours * 100) / 100} {t("court.hourUnit")}</span>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
+        <div key={row.court} style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "nowrap", paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
+          <span style={{ fontSize: 12, fontWeight: 800, minWidth: 40, flexShrink: 0 }}>{t("match.colCourt")} {courtLabelFor(courtLabels, row.court)}</span>
+          <input type="time" value={row.startAt || ""} onChange={(e) => patch(row.court, { startAt: e.target.value || null })} style={inputStyle} />
+          <span style={{ fontSize: 11, color: T.muted }}>→</span>
+          <input type="time" value={row.endAt || ""} onChange={(e) => patch(row.court, { endAt: e.target.value || null })} style={inputStyle} />
+          <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
             <span style={{ fontSize: 11.5, color: T.muted }}>{t("court.freeHoursLabel")}</span>
-            <CompactNumInput value={row.freeHours} onCommit={(v) => patch(row.court, { freeHours: Math.max(0, v), billableHours: null })} />
+            <CompactNumInput value={row.freeHours} width={38} onCommit={(v) => patch(row.court, { freeHours: Math.max(0, v), billableHours: null })} />
             <span style={{ fontSize: 11, color: T.muted }}>{t("court.hourUnit")}</span>
-            {rate > 0 && <span style={{ fontSize: 12, fontWeight: 800, minWidth: 54, textAlign: "right" }}>{formatCurrency(row.cost)}</span>}
-          </div>
+          </span>
         </div>
       ))}
-      {rate > 0 && (
-        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
-          <span style={{ color: T.muted, fontWeight: 700 }}>{t("court.totalLabel")}</span><span>{formatCurrency(total)}</span>
-        </div>
-      )}
     </div>
   );
 }

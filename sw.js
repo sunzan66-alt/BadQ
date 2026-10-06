@@ -1,7 +1,7 @@
 // BadQ service worker — enables offline use.
 // Bump CACHE_NAME (kept in lockstep with APP_VERSION) on every deploy so old shells are dropped
 // automatically; the app itself already handles cache-busted reloads when a new version is live.
-const CACHE_NAME = "badq-cache-v1.14.5";
+const CACHE_NAME = "badq-cache-v1.14.6";
 // Only caches that follow BadQ's OWN versioned naming convention are ever eligible for obsolete-cache cleanup;
 // caches of other apps on the same origin (e.g. other GitHub Pages projects) are never listed for deletion.
 const BADQ_CACHE_RE = /^badq-cache-v[0-9][0-9.]*$/;
