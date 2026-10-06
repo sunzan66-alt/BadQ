@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.2";
+const APP_VERSION = "1.14.4";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -437,6 +437,275 @@ function saveTutorialState(state) {
 }
 const uid = () => Math.random().toString(36).slice(2, 9);
 
+// ===== Phase 4A (Web Sync) — LOCAL PLAYER IDENTITY FOUNDATION =====
+// NEW players get a dedicated, collision-checked, secure identifier; the generic uid() above is deliberately
+// unchanged because many unrelated Core entities (matches, sessions, rewards, tournaments ...) still use it.
+// Exact frozen algorithm (docs/WEBSYNC_PHASE4_CONTRACT_FREEZE.md section 2): crypto.getRandomValues over 16
+// bytes -> 32 lowercase hex characters -> "player_" prefix. No Math.random fallback, no randomUUID, no PII.
+// EXISTING player ids are immutable opaque strings: nothing here (or in applyPlayerPatch) rewrites them.
+const PLAYER_ID_PREFIX = "player_";
+const PLAYER_ID_PATTERN = /^player_[0-9a-f]{32}$/;
+const PLAYER_ID_MAX_ATTEMPTS = 16;
+function playerIdError(code) { const e = new Error(code); e.code = code; return e; }
+function generatePlayerId(cryptoApi) {
+  if (!cryptoApi || typeof cryptoApi.getRandomValues !== "function") throw playerIdError("secure-random-unavailable");
+  const buf = new Uint8Array(16);
+  let bytes;
+  try { bytes = cryptoApi.getRandomValues(buf) || buf; } catch (e) { throw playerIdError("secure-random-unavailable"); }
+  if (!bytes || bytes.length !== 16) throw playerIdError("secure-random-unavailable");
+  let hex = "";
+  for (let i = 0; i < 16; i += 1) {
+    const b = Number(bytes[i]);
+    if (!Number.isInteger(b) || b < 0 || b > 255) throw playerIdError("secure-random-unavailable");
+    hex += (b < 16 ? "0" : "") + b.toString(16);
+  }
+  // An all-zero draw is a valid (if astronomically unlikely) frozen-algorithm result: player_ + 32 zeros. Not an error.
+  return PLAYER_ID_PREFIX + hex;
+}
+// Every player id that is safely and deterministically enumerable from CURRENT durable Core state: the live
+// roster (including archived players) plus the places that already persist player ids — live/undo/redo
+// matches (+ a court's prepared `queued` match), Lock/avoid rules, archived session snapshots (players, bill,
+// matches), the active/archived tournaments (teams, registrations, per-player stats, paid ledger), the
+// reward ledger, the discount-credit ledger and the membership-payment (otherIncome) records. Read-only; nothing here creates storage or a tombstone, and a
+// fully hard-deleted player with no remaining reference simply has no authoritative id to include.
+function collectKnownPlayerIds(state) {
+  const ids = new Set();
+  const s = state && typeof state === "object" ? state : {};
+  const list = (v) => (Array.isArray(v) ? v : []);
+  const add = (v) => { if (typeof v === "string" && v) ids.add(v); };
+  const addAll = (v) => { list(v).forEach(add); };
+  const addMatch = (m) => {
+    if (!m || typeof m !== "object") return;
+    addAll(m.teamA); addAll(m.teamB);
+    if (m.queued && typeof m.queued === "object") { addAll(m.queued.teamA); addAll(m.queued.teamB); }
+  };
+  const addTournament = (t) => {
+    if (!t || typeof t !== "object") return;
+    list(t.teams).forEach((tm) => { if (tm) addAll(tm.playerIds); });
+    list(t.registrations).forEach((r) => { if (r) add(r.playerId); });
+    list(t.playerStats).forEach((ps) => { if (ps) add(ps.playerId); });
+    if (t.registration && typeof t.registration === "object") addAll(t.registration.paidPlayerIds);
+  };
+  list(s.players).forEach((p) => { if (p) add(p.id); });
+  list(s.history).forEach(addMatch);
+  list(s.current).forEach(addMatch);
+  list(s.future).forEach(addMatch);
+  list(s.lockPairs).forEach((r) => { if (Array.isArray(r)) addAll(r); else if (r && typeof r === "object") { add(r.a); add(r.b); } });
+  list(s.sessionHistory).forEach((h) => {
+    if (!h || typeof h !== "object") return;
+    list(h.players).forEach((p) => { if (p) add(p.id); });
+    list(h.bill).forEach((b) => { if (b) add(b.id); });
+    list(h.matches).forEach(addMatch);
+  });
+  addTournament(s.activeTournament);
+  list(s.tournamentHistory).forEach(addTournament);
+  list(s.rewardHistory).forEach((r) => { if (r) add(r.playerId); });
+  list(s.discountCredits).forEach((c) => { if (c) add(c.playerId); });
+  list(s.otherIncome).forEach((r) => { if (r) add(r.playerId); }); // membership-payment records persist playerId
+  return ids;
+}
+// Draw a fresh candidate until it does not collide with a known id. A collision never mutates the colliding
+// identity; it only discards the candidate. Bounded: after maxAttempts the caller fails NEW-player creation only.
+function createUniquePlayerId(state, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const cryptoApi = Object.prototype.hasOwnProperty.call(opts, "cryptoApi")
+    ? opts.cryptoApi : (typeof crypto !== "undefined" ? crypto : null);
+  const maxAttempts = Number.isInteger(opts.maxAttempts) && opts.maxAttempts > 0 ? opts.maxAttempts : PLAYER_ID_MAX_ATTEMPTS;
+  const known = collectKnownPlayerIds(state);
+  // opts.reserved (optional Set): candidates already handed to an in-flight add whose insertion has not rendered yet.
+  const reserved = opts.reserved && typeof opts.reserved.has === "function" ? opts.reserved : null;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const candidate = generatePlayerId(cryptoApi);
+    if (known.has(candidate) || (reserved && reserved.has(candidate))) continue;
+    if (reserved && typeof reserved.add === "function") reserved.add(candidate);
+    return candidate;
+  }
+  throw playerIdError("player-id-generation-failed");
+}
+// ---- Add-attempt lifecycle (Phase 4A) -----------------------------------------------------------------------------------
+// An Add is an ATTEMPT with an explicit, ephemeral identity: a unique Symbol token. The token is stamped on the record the
+// attempt inserts as a Symbol-keyed own property - it survives ordinary `{...p}` edits, but JSON / structured-clone /
+// Backup / Object.keys never see it (so it is not Core business state, not persisted, not in the Backup schema), and a
+// record that arrives any other way (Restore, another attempt, a same-id replacement) never carries it.
+const PLAYER_ADD_ATTEMPT = Symbol("badq.playerAddAttempt");
+// FINAL collision fence, PURE: given the actual `prev` roster it returns a NEW array with the stamped record appended, or
+// null when the id is already present (or invalid). It mutates nothing it was handed and touches nothing outside itself,
+// so it is safe under any updater scheduling / replay.
+function appendNewPlayerFenced(prev, record, token) {
+  const list = Array.isArray(prev) ? prev : [];
+  if (!record || typeof record.id !== "string" || !record.id) return null;
+  if (list.some((p) => p && p.id === record.id)) return null;
+  const stamped = { ...record };
+  if (token !== undefined) stamped[PLAYER_ADD_ATTEMPT] = token;
+  return [...list, stamped];
+}
+// ---- Phase 4C Players Sync: PURE Core-side helpers (no storage, no React, no network) ----------------------------------------------
+// The sync engine only ever sees this PROJECTION of a player: id, name, skillIndex, archived. Contact/billing/photo/notes/history
+// fields never leave the Core record (they are not even visible to the engine).
+// Phase 4C: explicit presentation mapping from the FROZEN engine values (SYNC_STATUSES / CONFLICT_CODES, which contain "_" and "-") to valid i18n
+// keys (^[a-z][a-zA-Z0-9]*(\.[a-zA-Z0-9]+)+$). Raw persisted values are NEVER concatenated into a translation key. Codes without a dedicated
+// message map explicitly to the generic fallback key.
+const PLAYER_SYNC_STATUS_KEYS = Object.freeze({
+  unselected: "online.playerSync.status.unselected",
+  stale: "online.playerSync.status.stale",
+  ready: "online.playerSync.status.ready",
+  pending: "online.playerSync.status.pending",
+  conflict: "online.playerSync.status.conflict",
+  paused_missing_local: "online.playerSync.status.pausedMissingLocal",
+});
+const PLAYER_SYNC_CONFLICT_FALLBACK_KEY = "online.playerSync.conflict.other";
+const PLAYER_SYNC_CONFLICT_KEYS = Object.freeze({
+  "identity-collision": "online.playerSync.conflict.identityCollision",
+  "edit-conflict": "online.playerSync.conflict.editConflict",
+  "cloud-update-available": "online.playerSync.conflict.cloudUpdateAvailable",
+  "cloud-missing": "online.playerSync.conflict.cloudMissing",
+  "cloud-regressed": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "cloud-inconsistent": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "pending-obsolete": "online.playerSync.conflict.pendingObsolete",
+  "local-payload-invalid": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "local-duplicate-id": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "local-reappeared-review": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "local-restored-review": "online.playerSync.conflict.localRestoredReview",
+  "restored-dispatch-review": "online.playerSync.conflict.restoredDispatchReview",
+  "pending-unsettled": "online.playerSync.conflict.pendingUnsettled",
+  "dispatch-armed": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "server-rejected": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "server-response-invalid": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+  "server-conflict": PLAYER_SYNC_CONFLICT_FALLBACK_KEY,
+});
+function playerSyncStatusKey(status) {
+  return typeof status === "string" && Object.hasOwn(PLAYER_SYNC_STATUS_KEYS, status) ? PLAYER_SYNC_STATUS_KEYS[status] : PLAYER_SYNC_STATUS_KEYS.stale;
+}
+function playerSyncConflictKey(code) {
+  return typeof code === "string" && Object.hasOwn(PLAYER_SYNC_CONFLICT_KEYS, code) ? PLAYER_SYNC_CONFLICT_KEYS[code] : PLAYER_SYNC_CONFLICT_FALLBACK_KEY;
+}
+// Phase 4C Round 2/3 (fail-closed Restore critical section): the engine runs "durable fence of EVERY binding + verification -> promoteFn" as ONE
+// exclusive critical section (cross-tab Web Lock in production), so no binding can be created or released between the fence scan and the promotion.
+// Failure, an exception, a malformed answer, an unreachable lock or a timeout BEFORE promotion is an ERROR result: `promoteFn` is not called, Core
+// keeps its pre-Restore state. The timeout only abandons the section while it has not started promoting (ctl.promoting). Only "no Commercial bridge in
+// this session" means there is nothing to fence.
+async function playerSyncRestoreFencedPromote(bridge, promoteFn, opts) {
+  if (!bridge) return { ok: true, result: await promoteFn() };
+  const ps = bridge.playerSync;
+  if (!ps || typeof ps.runRestoreCritical !== "function") return { ok: false, reason: "fence-unavailable" };
+  const ctl = { aborted: false, promoting: false };
+  const timeoutMs = opts && opts.timeoutMs > 0 ? opts.timeoutMs : 10000;
+  let timer = null;
+  try {
+    const guard = new Promise((resolve) => { timer = setTimeout(() => { if (!ctl.promoting) { ctl.aborted = true; resolve({ timedOut: true }); } }, timeoutMs); });
+    const out = await Promise.race([Promise.resolve().then(() => ps.runRestoreCritical("restore-before-promotion", promoteFn, ctl)), guard]);
+    if (out && out.timedOut === true) return { ok: false, reason: "fence-timeout" };
+    if (!out || typeof out !== "object" || out.ok !== true) return { ok: false, reason: (out && typeof out.reason === "string" && /^fence-/.test(out.reason)) ? out.reason : "fence-failed" };
+    return { ok: true, result: out.result };
+  } catch (e) {
+    if (ctl.promoting) throw e; // the promotion itself failed: the caller's existing promotion error handling applies
+    return { ok: false, reason: "fence-exception" };
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+function playerSyncProjectPlayers(players) {
+  const list = Array.isArray(players) ? players : [];
+  const out = [];
+  for (const p of list) {
+    if (!p || typeof p.id !== "string") continue;
+    out.push({ id: p.id, name: p.name, skillIndex: p.skillIndex, archived: p.archived === true });
+  }
+  return out;
+}
+// Builds the durable snapshot from the persisted bg-v11 JSON text read back from PRIMARY storage. Never from React state.
+function playerSyncSnapshotFromPersisted(read) {
+  if (!read || read.source !== "primary" || typeof read.value !== "string") return { ok: false, code: "durable-snapshot-unavailable" };
+  let parsed;
+  try { parsed = JSON.parse(read.value); } catch (e) { return { ok: false, code: "durable-snapshot-unavailable" }; }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.players)) return { ok: false, code: "durable-snapshot-unavailable" };
+  const epoch = typeof parsed.restoreEpoch === "number" && Number.isSafeInteger(parsed.restoreEpoch) && parsed.restoreEpoch > 0 ? parsed.restoreEpoch : 0;
+  return { ok: true, restoreEpoch: epoch, players: playerSyncProjectPlayers(parsed.players) };
+}
+// PURE updater: applies ONLY name/skillIndex/archived (+ the derived display level label) to the exact player, and ONLY if the live
+// value still equals what the Owner previewed. Returns { ok, players } or { ok:false, code }; never mutates its input.
+function applyApprovedCloudFields(players, { playerId, expectedLocal, cloud, settings }) {
+  const list = Array.isArray(players) ? players : [];
+  const index = list.findIndex((p) => p && p.id === playerId);
+  if (index < 0) return { ok: false, code: "local-player-missing" };
+  const current = list[index];
+  if (!expectedLocal || current.name !== expectedLocal.displayName || current.skillIndex !== expectedLocal.skillIndex || (current.archived === true) !== expectedLocal.archived) {
+    return { ok: false, code: "local-changed-since-preview" };
+  }
+  if (!cloud || typeof cloud.displayName !== "string" || !Number.isInteger(cloud.skillIndex) || typeof cloud.archived !== "boolean") return { ok: false, code: "cloud-payload-invalid" };
+  const next = { ...current, name: cloud.displayName, skillIndex: cloud.skillIndex, level: displayLevelFor(cloud.skillIndex, settings), archived: cloud.archived };
+  if (cloud.archived && current.archived !== true) next.archivedAt = Date.now();
+  if (!cloud.archived && current.archived === true) next.archivedAt = null;
+  return { ok: true, players: list.map((p, i) => (i === index ? next : p)) };
+}
+// PURE: a brand-new Core player record for an Owner-accepted cloud-only player. Same defaults as a manually added member.
+function buildPlayerFromCloud(playerId, payload, { settings, order, createdAt, initialStatus }) {
+  const entranceFeeOn = !!(settings && settings.membership && settings.membership.entranceFee && settings.membership.entranceFee.enabled);
+  const archived = payload.archived === true;
+  return { id: playerId, name: payload.displayName, level: displayLevelFor(payload.skillIndex, settings), skillIndex: payload.skillIndex, status: initialStatus, games: 0, order, photo: null, waitingSince: createdAt, lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived, archivedAt: archived ? createdAt : null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? createdAt : null, isLocked: false, entranceFeePaid: !entranceFeeOn, entranceFeePaidAt: null, membershipExpiry: null };
+}
+// Conservative id-reference scan: any occurrence of the id anywhere in state that other records may point at (history, session
+// history, reward/discount ledgers, current round ...) makes a cloud-only import of that id a blocked collision.
+function playerSyncIdIsReferenced(playerId, state) {
+  if (typeof playerId !== "string" || !playerId) return true;
+  try {
+    for (const key of Object.keys(state || {})) {
+      if (key === "players") { if ((state.players || []).some((p) => p && p.id === playerId)) return true; continue; }
+      const text = JSON.stringify(state[key]);
+      if (typeof text === "string" && text.indexOf(JSON.stringify(playerId)) >= 0) return true;
+    }
+    return false;
+  } catch (e) { return true; }
+}
+// PURE, IDEMPOTENT terminal step for an attempt's token: finds the record that still proves it belongs to THIS attempt (exact
+// id AND exact token), returns a NEW array in which that record is a copy WITHOUT the token (plus `photoRef` when a usable
+// string ref is supplied). If no such record exists (gone / replaced / restored / same-id record from another attempt / token
+// already removed) it returns `prev` itself - nothing changes and nothing is resurrected. Never mutates the record in place.
+function finishAddAttemptToken(prev, id, token, ref) {
+  // FAIL CLOSED on the ownership inputs BEFORE touching the roster: without a nonempty string id and a real Symbol token there
+  // is no attempt to prove (an omitted/undefined token must never "match" an untagged record's undefined token slot).
+  if (typeof id !== "string" || !id || typeof token !== "symbol") return prev;
+  const list = Array.isArray(prev) ? prev : [];
+  if (!list.some((p) => p && p.id === id && p[PLAYER_ADD_ATTEMPT] === token)) return prev;
+  // A usable ref is a string with at least one non-whitespace character; a blank ref still ends the attempt (token removed) but adds no photoRef.
+  const usableRef = typeof ref === "string" && ref.trim().length > 0;
+  return list.map((p) => {
+    if (!p || p.id !== id || p[PLAYER_ADD_ATTEMPT] !== token) return p;
+    const next = { ...p };
+    delete next[PLAYER_ADD_ATTEMPT];
+    if (usableRef) next.photoRef = ref;
+    return next;
+  });
+}
+// Settles every attempt whose commit has been observed (target <= tick) against the COMMITTED roster. Runs from an effect,
+// never from inside a state updater. Each attempt reaches exactly one terminal outcome: it is removed from `attempts`, its
+// reservation is released, and only then are UI / photo effects triggered.
+function settleAddAttempts(attempts, reserved, players, tick, hooks) {
+  const list = Array.isArray(players) ? players : [];
+  Array.from(attempts.entries()).forEach(([token, a]) => {
+    if (a.target > tick) return; // its commit is not observed yet -> stays reserved
+    attempts.delete(token);
+    reserved.delete(a.id);
+    const ok = list.some((p) => p && p[PLAYER_ADD_ATTEMPT] === token);
+    if (ok) {
+      // terminal success: with a photo the token is released when the upload settles (ref / null / error); with none, right now
+      if (a.photo) { if (hooks && hooks.startPhoto) hooks.startPhoto(token, a.id, a.photo); }
+      else if (hooks && hooks.releaseToken) hooks.releaseToken(token, a.id);
+    }
+    else if (hooks && hooks.notifyRejected) hooks.notifyRejected(a);
+    if (typeof a.onOutcome === "function") a.onOutcome({ ok, id: a.id });
+  });
+}
+// The single edit boundary for updatePlayer: a profile patch can never alter the player's identity. An `id`
+// key in the patch is ignored (the stored id stays byte-for-byte); every other field behaves exactly as before.
+function applyPlayerPatch(player, patch, settings) {
+  const { id: ignoredId, ...safePatch } = patch && typeof patch === "object" ? patch : {};
+  const next = { ...player, ...safePatch };
+  next.id = player.id;
+  if (safePatch.skillIndex != null) next.level = displayLevelFor(next.skillIndex, settings);
+  return next;
+}
+
 // ===== v1.12.20 (P0 — Image Storage & Reference Architecture) — LOCAL IMAGE ASSET STORE =====
 // Every uploaded image (player photo, ก๊วน/Group photo, Tournament logo, custom Rank image) is written
 // here EXACTLY ONCE and referenced by a stable `*Ref` id from the business object that owns it (see
@@ -531,7 +800,7 @@ function serializeForPersist(obj) { return JSON.stringify(obj, persistImageRepla
 // The ONE persisted ("bg-v11"/LKG/mirror) state shape — same keys, same order as every pre-v1.12.39 save, plus
 // `restoreEpoch` (v1.12.39, only when a staged restore has ever been promoted on this device; see
 // bootCandidatePredatesRestore).
-const PERSISTED_STATE_KEYS = ["players", "history", "current", "future", "roundNo", "courtCount", "courtLabels", "mode", "settings", "session", "lockPairs", "sessionHistory", "generalExpenses", "otherIncome", "discountCredits", "rewardHistory", "activeTournament", "tournamentHistory", "groupDefaults", "rankingConfigs", "cloudClub", "lastIntentionalPlayerWipeAt", "journalReceipts"];
+const PERSISTED_STATE_KEYS = ["players", "history", "current", "future", "roundNo", "courtCount", "courtLabels", "mode", "settings", "session", "lockPairs", "sessionHistory", "generalExpenses", "otherIncome", "discountCredits", "rewardHistory", "activeTournament", "tournamentHistory", "groupDefaults", "rankingConfigs", "localGroups", "cloudClub", "lastIntentionalPlayerWipeAt", "journalReceipts"];
 function buildPersistedStateObject(src) {
   const o = {};
   for (const k of PERSISTED_STATE_KEYS) o[k] = src[k];
@@ -772,7 +1041,17 @@ function normSession(s) {
   // edited value can never crash a later .map()/.reduce() or produce NaN/negative hours.
   const courtHours = (Array.isArray(base.courtHours) ? base.courtHours : [])
     .filter((r) => r && typeof r === "object" && Number(r.court) > 0)
-    .map((r) => ({ court: Math.round(Number(r.court)), hours: Math.max(0, Number(r.hours) || 0), source: r.source === "manual" ? "manual" : "auto" }));
+    .map((r) => {
+      // v1.14.4 (P0-A): the per-court startAt / endAt / billableHours fields written by the court-cost UI since
+      // v1.12.12 used to be DROPPED here on every load/restore (only court/hours/source survived), so per-court
+      // times silently reset after a reload. Each is now validated field-by-field and preserved; an absent or
+      // malformed value is simply omitted (== "falls back to the session window / actual usage", as before).
+      const o = { court: Math.round(Number(r.court)), hours: Math.max(0, Number(r.hours) || 0), source: r.source === "manual" ? "manual" : "auto" };
+      if (isValidClockTime(r.startAt)) o.startAt = r.startAt;
+      if (isValidClockTime(r.endAt)) o.endAt = r.endAt;
+      if (r.billableHours != null && r.billableHours !== "" && Number.isFinite(Number(r.billableHours))) o.billableHours = Math.max(0, Number(r.billableHours));
+      return o;
+    });
   // v1.11.52 (Shuttlecock Cost Redesign, spec C/D/H): "จำนวนลูกที่ใช้" is session-specific for the exact same
   // reason `courtHours` above is — it must always reset to a clean slate on a brand new session (endSession()
   // never re-lists it in its explicit setSession field list) and must never become a Group Default. Only a
@@ -814,7 +1093,59 @@ function normSession(s) {
         avgCost: rawShuttleOpening.avgCost != null && !isNaN(Number(rawShuttleOpening.avgCost)) ? Math.max(0, Number(rawShuttleOpening.avgCost)) : null,
       }
     : null;
-  return { id: base.id || uid(), name: base.name || "", date: base.date || todayLocalISO(), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage, estimate, shuttleOpening };
+  const localGroupId = typeof base.localGroupId === "string" && /^local_[A-Za-z0-9_-]{16,80}$/.test(base.localGroupId)
+    ? base.localGroupId : null;
+  return { id: base.id || uid(), name: base.name || "", localGroupId, date: base.date || todayLocalISO(), mode: base.mode || "casual", photo: base.photo || null, sessionStartTime: base.sessionStartTime || "19:00", sessionEndTime: base.sessionEndTime || "23:00", clubId: base.clubId || null, courtHours, shuttleUsage, estimate, shuttleOpening };
+}
+
+function localGroupRandomSeed() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID().replace(/-/g, "");
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`;
+}
+
+function phase2LocalGroupRecords() {
+  try {
+    const api = typeof window !== "undefined" ? window.BadQSyncContract : null;
+    if (!api) return [];
+    return api.phase2RecordsFromRaw(localStorage.getItem("badq-commercial-group-links-v1"));
+  } catch (e) { return []; }
+}
+
+function migrateLocalGroupsForState(state, stored) {
+  const api = typeof window !== "undefined" ? window.BadQSyncContract : null;
+  if (!api) return { registry: { schemaVersion: 1, records: [] }, conflicts: [{ code: "sync-contract-unavailable" }] };
+  return api.migrateLocalGroupRegistry({
+    stored: stored == null ? state && state.localGroups : stored,
+    sources: api.collectLocalGroupSources(state || {}),
+    phase2Records: phase2LocalGroupRecords(),
+    randomId: localGroupRandomSeed,
+  });
+}
+
+function attachLocalGroupIdentity(record, registry) {
+  if (!record || typeof record !== "object" || !record.name) return record;
+  const api = typeof window !== "undefined" ? window.BadQSyncContract : null;
+  if (!api) return record;
+  const existing = api.isLocalGroupId(record.localGroupId)
+    ? api.resolveLocalGroup(registry, record.localGroupId)
+    : api.resolveLocalGroup(registry, record.name);
+  return existing.status === "resolved" ? { ...record, localGroupId: existing.record.localGroupId } : record;
+}
+function validLocalGroupRegistryValue(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== 1 || !Array.isArray(value.records)) return false;
+  const ids = new Set();
+  for (const record of value.records) {
+    if (!record || typeof record !== "object" || Array.isArray(record) ||
+        Object.keys(record).some((key) => !["localGroupId", "name", "aliases", "createdAt", "updatedAt"].includes(key)) ||
+        typeof record.localGroupId !== "string" || !/^local_[A-Za-z0-9_-]{16,80}$/.test(record.localGroupId) ||
+        typeof record.name !== "string" || !record.name.trim() || record.name !== record.name.trim() || record.name.length > 120 || /[\u0000-\u001f\u007f]/.test(record.name) ||
+        !Array.isArray(record.aliases) || record.aliases.some((name) => typeof name !== "string" || !name.trim() || name !== name.trim() || name.length > 120 || /[\u0000-\u001f\u007f]/.test(name)) ||
+        new Set(record.aliases).size !== record.aliases.length || record.aliases.includes(record.name) ||
+        !Number.isInteger(record.createdAt) || record.createdAt <= 0 ||
+        !Number.isInteger(record.updatedAt) || record.updatedAt < record.createdAt || ids.has(record.localGroupId)) return false;
+    ids.add(record.localGroupId);
+  }
+  return true;
 }
 // v1.11.35 (Member Portal Phase 1) — this LOCAL install's link (if any) to a Cloud Club. Entirely
 // additive/local bookkeeping: null/disabled is the default and identical-to-before state for every
@@ -2454,8 +2785,57 @@ function buildCourtCostRows(rows, ratePerHour) {
       endAt: row.endAt || null,
       actualDurationHours: row.actualDurationHours != null ? Math.max(0, Number(row.actualDurationHours) || 0) : hours,
       billableHours: hours,
+      // v1.14.4 (P0-A): complimentary / free court hours are DERIVED from the same two stored facts (actual usage vs
+      // billable hours) — never a second stored field, so they can never drift from the cost the row is billed at.
+      freeHours: courtFreeHours(row.actualDurationHours != null ? row.actualDurationHours : hours, hours),
     };
   });
+}
+// ---- v1.14.4 (P0-A) shared per-court time helpers: ONE data path (session.courtHours) for Group Settings AND the cost screen ----
+function isValidClockTime(v) {
+  if (typeof v !== "string" || !/^\d{1,2}:\d{2}$/.test(v)) return false;
+  const [h, m] = v.split(":").map(Number);
+  return h >= 0 && h <= 23 && m >= 0 && m <= 59;
+}
+// free (complimentary) hours = actual usage minus billable hours, never negative. Pure / derived.
+function courtFreeHours(actualHours, billableHours) {
+  const a = Math.max(0, Number(actualHours) || 0), b = Math.max(0, Number(billableHours) || 0);
+  return Math.round(Math.max(0, a - b) * 100) / 100;
+}
+// the inverse, used by the "free hours" input: billable = actual - free (clamped to 0..actual).
+function billableFromFreeHours(actualHours, freeHours) {
+  const a = Math.max(0, Number(actualHours) || 0);
+  const f = Math.min(a, Math.max(0, Number(freeHours) || 0));
+  return Math.round((a - f) * 100) / 100;
+}
+// The default window of a court opened while a session is running: the existing BadQ convention (v1.12.12 addCourt)
+// is "a clean full-hour window starting at the current whole hour" — kept as-is (extracted, not re-invented), so a
+// new court is NEVER backdated to the session's original start.
+function newCourtDefaultWindow(now) {
+  const d = now instanceof Date && !isNaN(now.getTime()) ? now : new Date();
+  const startMin = d.getHours() * 60;
+  return { startAt: minutesToTimeStr(startMin), endAt: minutesToTimeStr(startMin + 60) };
+}
+// Pure merge of a patch into one court's stored row (always an explicit "manual" row, same as the cost screen).
+function patchCourtHoursRow(courtHours, court, patch) {
+  const list = Array.isArray(courtHours) ? courtHours : [];
+  const others = list.filter((r) => r && r.court !== court);
+  const existing = list.find((r) => r && r.court === court) || {};
+  return [...others, { ...existing, court, ...patch, source: "manual" }];
+}
+// Newly added courts (fromCount -> toCount) that have NO stored row yet get the default window; existing rows (incl. a
+// previously closed court's) are never overwritten. Pure; returns the SAME array when nothing changes.
+function courtHoursWithNewCourtDefaults(courtHours, fromCount, toCount, now) {
+  const list = Array.isArray(courtHours) ? courtHours : [];
+  const from = Math.max(0, Math.round(Number(fromCount) || 0)), to = Math.max(0, Math.round(Number(toCount) || 0));
+  if (to <= from) return list;
+  const w = newCourtDefaultWindow(now);
+  let out = list;
+  for (let c = from + 1; c <= to; c++) {
+    if (out.some((r) => r && r.court === c)) continue;
+    out = [...out, { court: c, startAt: w.startAt, endAt: w.endAt, billableHours: null, source: "manual" }];
+  }
+  return out;
 }
 // v1.11.51 (spec F): Total Court Cost = sum of every court's own cost — never a single
 // จำนวนสนาม × Session Duration × Court Rate shortcut (spec I explicitly forbids that once hours can differ).
@@ -2885,6 +3265,62 @@ function sessionExpenseList(s) { return s.expenses || []; }
 function sessionRevenue(s) { return (s.bill || []).reduce((sum, b) => sum + (b.total || 0), 0); }
 function sessionCollected(s) { return (s.bill || []).filter((b) => b.paid).reduce((sum, b) => sum + (b.total || 0), 0); }
 function sessionReceivable(s) { return sessionRevenue(s) - sessionCollected(s); }
+// ===================== v1.14.4 (P0-B) — cumulative GROUP fees actually paid (derived statistic) =====================
+// DEFINITION: money a player has genuinely paid for Group badminton sessions = the sum of `total` over every bill row
+// that is explicitly marked `paid === true` (the existing payment workflow's authoritative state; computeBill freezes the
+// amount into paidAmount at the moment of "รับเงิน"), excluding owner-exempt rows. A calculated amount due is NOT payment.
+// DESIGN: this is a pure DERIVED value recomputed from the durable records every time it is read — there is NO stored
+// counter, so reload / autosave / History re-open / re-render / profile edit / Restore can never double count, and
+// unpaid<-paid or a corrected paid amount is reflected automatically (the source row changed). Group only: it reads
+// `sessionHistory` (archived Group sessions) plus today's live bill — never tournamentHistory (registration fees,
+// tournament expenses, prizes and P/L stay in the Tournament model). It is NOT part of Player Sync (player-sync.js
+// carries only displayName/skillIndex/archived) and writes nothing anywhere.
+const STAT_VISIBILITY_DEFAULTS = Object.freeze({
+  // who may SEE each statistic. Monetary paid statistics are hidden from Members by default; a future Owner/Admin control
+  // will pass `overrides` (same shape) to canViewStat — no Member Portal permission system is built here.
+  groupPaidFeesTotal: Object.freeze({ owner: true, member: false }),
+});
+function canViewStat(statKey, viewerRole, overrides) {
+  const rule = (overrides && overrides[statKey]) || STAT_VISIBILITY_DEFAULTS[statKey];
+  if (!rule) return false; // unknown statistic: deny
+  return viewerRole === "owner" ? rule.owner === true : rule.member === true;
+}
+function isCountedPaidBillRow(b) {
+  if (!b || typeof b !== "object" || b.id == null || b.paid !== true || b.isOwnerExempt) return false;
+  if (b.total == null || b.total === "") return false;
+  const n = Number(b.total);
+  return Number.isFinite(n) && n > 0;
+}
+// sessionHistory: archived Group sessions (each with .bill). liveBill: today's computeBill() rows (optional) and
+// liveSessionId: today's session id (so a session that is somehow present in BOTH places is counted once, as archived).
+// Returns Map(playerId -> { total, paidSessions, lastPaidDate }). Legacy/malformed sessions or rows are skipped, never thrown on.
+function groupPaidFeesByPlayer(sessionHistory, liveBill, liveSessionId) {
+  const out = new Map();
+  const seen = new Set();
+  const add = (b, date) => {
+    const cur = out.get(b.id) || { total: 0, paidSessions: 0, lastPaidDate: null };
+    cur.total = Math.round((cur.total + Number(b.total) + Number.EPSILON) * 100) / 100;
+    cur.paidSessions += 1;
+    if (date && (!cur.lastPaidDate || String(date) > cur.lastPaidDate)) cur.lastPaidDate = String(date);
+    out.set(b.id, cur);
+  };
+  (Array.isArray(sessionHistory) ? sessionHistory : []).forEach((s, i) => {
+    if (!s || typeof s !== "object" || s.mode === "tournament" || !Array.isArray(s.bill)) return;
+    const key = s.id != null ? "id:" + s.id : "idx:" + i;
+    if (seen.has(key)) return; // the same archived session id can never contribute twice
+    seen.add(key);
+    const rowSeen = new Set();
+    s.bill.forEach((b) => { if (isCountedPaidBillRow(b) && !rowSeen.has(b.id)) { rowSeen.add(b.id); add(b, s.date); } });
+  });
+  if (Array.isArray(liveBill) && !(liveSessionId != null && seen.has("id:" + liveSessionId))) {
+    const rowSeen = new Set();
+    liveBill.forEach((b) => { if (isCountedPaidBillRow(b) && !rowSeen.has(b.id)) { rowSeen.add(b.id); add(b, null); } });
+  }
+  return out;
+}
+function groupPaidFeesForPlayer(playerId, sessionHistory, liveBill, liveSessionId) {
+  return groupPaidFeesByPlayer(sessionHistory, liveBill, liveSessionId).get(playerId) || { total: 0, paidSessions: 0, lastPaidDate: null };
+}
 function sessionExpenseTotal(s) { return sessionExpenseList(s).reduce((sum, e) => sum + (Number(e.amount) || 0), 0); }
 // v1.11.41: ลูกแบด selling-price revenue, frozen at endSession() (see snapshot.shuttlecockRevenue) — kept
 // SEPARATE from sessionRevenue/bill (per-player billing, unaffected/untouched) so payment-tracking fields
@@ -4568,9 +5004,8 @@ function normWheelPrizes(prizes) {
    migrate to the current schema, then feed it through the same setters the app uses on normal load". */
 const BACKUP_APP_ID = "BadQ";
 const BACKUP_VERSION = 1; // outer envelope format — bump only if this wrapper shape itself changes
-const SCHEMA_VERSION = 1; // inner `data` shape — bump whenever the persisted state shape changes, and
-                           // add a migration step in migrateBackupData() so OLD backups keep importing
-                           // into NEWER app versions (import is tied to schemaVersion, never APP_VERSION)
+const SCHEMA_VERSION = 1; // localGroups is an optional, backward-compatible schema-1 field. Missing values
+                          // normalize safely during boot/restore; no incompatible backup contract exists.
 // Auto-backup checkpoints (v1.9.16) — a silent, in-app safety net for organizers who never remember to
 // tap "สำรองข้อมูล" themselves. Every time a ก๊วน or Tournament finishes, a full snapshot (same envelope
 // shape as a manual backup file) is stashed into localStorage under this key — no dialog, no download,
@@ -4766,6 +5201,7 @@ function buildBackupPayload(state) {
       discountCredits: state.discountCredits || [],
       groupDefaults: state.groupDefaults || {},
       rankingConfigs: state.rankingConfigs || {}, // v1.11.68: per-club Ranking config only (RP/Rank are always derived, never stored)
+      localGroups: state.localGroups || { schemaVersion: 1, records: [] },
       rewardHistory: state.rewardHistory || [], // v1.11.34: global Reward History ledger, see App()'s rewardHistory state
       cloudClub: state.cloudClub || null, // v1.11.35: Member Portal Phase 1 — this install's Cloud Club link, if any
       // v1.12.13 (P0 offline persistence hotfix): carry the intentional-wipe marker into every backup payload
@@ -4846,8 +5282,7 @@ function validateBackupStructure(parsed) {
 function migrateBackupData(parsed) {
   let { schemaVersion, data } = parsed;
   data = { ...data };
-  // while (schemaVersion < SCHEMA_VERSION) { data = MIGRATIONS[schemaVersion](data); schemaVersion++; }
-  // (no steps needed yet — SCHEMA_VERSION is still 1; this is the extension point for future bumps)
+  if (schemaVersion !== SCHEMA_VERSION) throw new Error("unsupported-backup-schema");
   // v1.12.1 (UX restructure — Advanced Feature migration, root-cause fix): capture whether
   // tournamentEnabled/wheelEnabled were EXPLICITLY booleans in the RAW incoming data BEFORE the
   // `{...getDefaultSettings(), ...data.settings}` backfill two lines below — that backfill unconditionally
@@ -4889,6 +5324,8 @@ function migrateBackupData(parsed) {
   data.discountCredits = (Array.isArray(data.discountCredits) ? data.discountCredits : []).map(normDiscountCredit); // no field at all (old backup) -> []
   data.groupDefaults = data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {}; // no field at all (old backup) -> no saved group defaults
   data.rankingConfigs = normRankingConfigs(data.rankingConfigs); // v1.11.68: no field at all (old backup) -> {} (no club has Ranking configured yet)
+  data.localGroups = data.localGroups && typeof data.localGroups === "object"
+    ? data.localGroups : { schemaVersion: 1, records: [] };
   data.rewardHistory = Array.isArray(data.rewardHistory) ? data.rewardHistory : []; // v1.11.34: no field at all (old backup) -> []
   data.cloudClub = normCloudClub(data.cloudClub); // v1.11.35: no field at all (old backup) -> disabled/local-only
   // v1.12.13 (P0 offline persistence hotfix): optional, additive field — see isSuspiciousPlayerLoss's own
@@ -4915,6 +5352,7 @@ function migrateBackupData(parsed) {
 // broken/invalid sub-fields fall back to a safe default instead of failing the whole import.
 function validateBackupIntegrity(data) {
   if (!Array.isArray(data.players)) return { ok: false, reason: "corrupt-player" };
+  if (!validLocalGroupRegistryValue(data.localGroups)) return { ok: false, reason: "corrupt-local-group-registry" };
   const seenP = new Set();
   for (const p of data.players) {
     if (!p || !p.id) return { ok: false, reason: "missing-player-id" };
@@ -5450,7 +5888,10 @@ function fpSettings(s) {
 function fpSession(session) {
   const s = jIsObj(session) ? session : {};
   const n = normSession({ ...s, id: s.id != null ? s.id : "__none__", date: s.date != null ? s.date : "__none__" });
-  return { ...s, ...n };
+  // v1.14.4: normSession now preserves per-court startAt/endAt/billableHours. The fingerprint deliberately keeps its
+  // pre-v1.14.4 courtHours projection (court/hours/source) so digests authored by v1.14.3 (incl. an un-replayed
+  // journal entry across the upgrade) still verify byte-for-byte — Journal/Backup semantics are unchanged.
+  return { ...s, ...n, courtHours: n.courtHours.map((r) => ({ court: r.court, hours: r.hours, source: r.source })) };
 }
 function fpLockPairs(raw) {
   return (Array.isArray(raw) ? raw : []).map((lp) => {
@@ -7803,7 +8244,7 @@ function TutorialOverlay({ guide, step, stepIndex, onNext, onBack, onSkip, t, tr
     : { position: "fixed", top: "50%", left: "50%", width: cardWidth, transform: "translate(-50%, -50%)" };
 
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 9999 }}>
+    <div data-testid="tutorial-overlay" style={{ position: "fixed", inset: 0, zIndex: 9999 }}>
       {spot ? (
         <div style={{ position: "fixed", top: spot.top, left: spot.left, width: spot.width, height: spot.height, borderRadius: 14, border: `2px solid ${T.accent}`, boxShadow: "0 0 0 9999px rgba(10,14,20,0.62)", pointerEvents: "none", transition: "top 0.22s ease, left 0.22s ease, width 0.22s ease, height 0.22s ease" }} />
       ) : (
@@ -7868,7 +8309,7 @@ function TutorialLibrarySheet({ onStart, isCompleted, onClose, t }) {
 // instant it appeared) and Quick Start always remains available afterwards from the Tutorial Library.
 function TutorialQuickStartOffer({ onStart, onDismiss, t }) {
   return (
-    <div style={{ position: "fixed", left: 16, right: 16, bottom: "calc(66px + env(safe-area-inset-bottom))", zIndex: 500, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "12px 14px", boxShadow: "0 8px 24px rgba(0,0,0,0.18)", display: "flex", alignItems: "center", gap: 10 }}>
+    <div data-testid="tutorial-quick-start-offer" style={{ position: "fixed", left: 16, right: 16, bottom: "calc(66px + env(safe-area-inset-bottom))", zIndex: 500, background: T.surface, border: `1px solid ${T.border}`, borderRadius: 14, padding: "12px 14px", boxShadow: "0 8px 24px rgba(0,0,0,0.18)", display: "flex", alignItems: "center", gap: 10 }}>
       <span style={{ fontSize: 20, flexShrink: 0 }}>🚀</span>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 13, fontWeight: 800, color: T.text }}>{t ? t("tutorial.offer.title") : "tutorial.offer.title"}</div>
@@ -7878,6 +8319,134 @@ function TutorialQuickStartOffer({ onStart, onDismiss, t }) {
       <button onClick={onStart} style={{ ...btnPrimary, flex: "none", padding: "8px 12px" }}>{t ? t("tutorial.offer.start") : "tutorial.offer.start"}</button>
     </div>
   );
+}
+
+// ---- v1.14.3 — controlled Service Worker update: lifecycle observer + waiting-worker readiness + handoff -------------------
+// The Owner-controlled update ("อัปเดตตอนนี้") must be exposed whenever a NEW worker is actually WAITING, independent of the
+// page's HTML version-mismatch signal: an old network-first worker serves the NEW html on an ordinary online navigation, so
+// CURRENT_VERSION already equals the deployed APP_VERSION by the time the new worker finishes installing. Pure helpers (no
+// React, no globals) so they are executable in tests with a lifecycle mock. Nothing here ever calls skipWaiting itself —
+// SKIP_WAITING is posted ONLY by runControlledUpdateHandoff, which only runs from the Owner's tap.
+const SW_WAITING_READY_TIMEOUT_MS = 10000;
+const SW_POST_SKIP_RELOAD_FALLBACK_MS = 4000;
+function observeWaitingServiceWorker(container, onWaiting) {
+  if (!container || typeof container.getRegistration !== "function") return () => {};
+  let disposed = false;
+  let lastSignaled = null; // the exact worker object already announced (no repeated notifications for the same waiting worker)
+  const undo = [];
+  const watched = [];
+  const listen = (target, type, fn) => {
+    if (!target || typeof target.addEventListener !== "function") return;
+    target.addEventListener(type, fn);
+    undo.push(() => { try { target.removeEventListener(type, fn); } catch (e) {} });
+  };
+  // Only a worker that REPLACES an existing one counts: a genuine first install (no controller, no active worker) is not an update.
+  const replacesExisting = (reg) => !!(container.controller || (reg && reg.active));
+  // The ONLY place that signals: it re-reads registration.waiting NOW. worker.state === "installed" alone never signals.
+  const check = (reg) => {
+    if (disposed || !reg) return;
+    const w = reg.waiting;
+    if (!w || w === lastSignaled || !replacesExisting(reg)) return;
+    lastSignaled = w;
+    onWaiting(w);
+  };
+  const watch = (reg, worker) => {
+    if (!worker || watched.indexOf(worker) >= 0) return;
+    watched.push(worker);
+    listen(worker, "statechange", () => check(reg)); // every state change re-reads reg.waiting
+  };
+  Promise.resolve().then(() => container.getRegistration()).then((reg) => {
+    if (disposed || !reg) return;
+    // Race-safe order: attach listeners FIRST, then do a FINAL registration.waiting check, so a worker that became
+    // waiting between "look" and "listen" can never be missed.
+    listen(reg, "updatefound", () => { watch(reg, reg.installing); check(reg); });
+    watch(reg, reg.installing);
+    check(reg);
+  }).catch(() => {});
+  return () => { disposed = true; undo.forEach((f) => f()); undo.length = 0; };
+}
+// Resolves the registration's CURRENT waiting worker, or null — never reloads, never posts anything. The deadline starts BEFORE
+// getRegistration() and bounds the WHOLE operation (registration lookup, installing/updatefound observation, update(), waiting
+// resolution); on expiry it detaches every listener and any late getRegistration()/update() result is ignored.
+// A worker is returned ONLY if, at the moment of resolution, registration.waiting === that worker (state === "installed" is never
+// trusted on its own, and no previously observed candidate is ever retained).
+function awaitWaitingServiceWorker(container, opts) {
+  const o = opts || {};
+  const timeoutMs = typeof o.timeoutMs === "number" ? o.timeoutMs : SW_WAITING_READY_TIMEOUT_MS;
+  const schedule = o.setTimeoutFn || setTimeout, unschedule = o.clearTimeoutFn || clearTimeout;
+  if (!container || typeof container.getRegistration !== "function") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const undo = []; const watched = []; let done = false; let timer = null; let reg = null;
+    const finish = (worker) => {
+      if (done) return;
+      done = true;
+      if (timer != null) unschedule(timer);
+      undo.forEach((f) => f()); undo.length = 0;
+      resolve(worker || null);
+    };
+    timer = schedule(() => finish(null), timeoutMs); // (1) deadline FIRST
+    const listen = (target, type, fn) => {
+      if (done || !target || typeof target.addEventListener !== "function") return;
+      target.addEventListener(type, fn);
+      undo.push(() => { try { target.removeEventListener(type, fn); } catch (e) {} });
+    };
+    const check = () => { if (!done && reg && reg.waiting) finish(reg.waiting); }; // always the CURRENT registration.waiting
+    const watch = (worker) => { if (done || !worker || watched.indexOf(worker) >= 0) return; watched.push(worker); listen(worker, "statechange", check); };
+    let lookup;
+    try { lookup = Promise.resolve(container.getRegistration()); } catch (e) { finish(null); return; }
+    lookup.then((r) => {
+      if (done) return; // late getRegistration() after the deadline: ignored
+      if (!r) { finish(null); return; }
+      reg = r;
+      listen(reg, "updatefound", () => { watch(reg.installing); check(); });
+      watch(reg.installing);
+      check(); // already waiting => immediate success (after listeners are attached)
+      if (!done && typeof reg.update === "function") { try { Promise.resolve(reg.update()).then(check, () => {}); } catch (e) {} } // best-effort explicit check only
+    }, () => finish(null));
+  });
+}
+// One bounded registration lookup: resolves { ok:true, reg } or { ok:false } — never rejects, never stays pending past timeoutMs.
+// The deadline timer is armed BEFORE getRegistration(); a result arriving after the deadline (or after a rejection) is ignored.
+function getRegistrationBounded(container, timeoutMs, schedule, unschedule) {
+  const ms = typeof timeoutMs === "number" ? timeoutMs : SW_WAITING_READY_TIMEOUT_MS;
+  return new Promise((resolve) => {
+    let done = false, timer = null;
+    const finish = (r) => { if (done) return; done = true; if (timer != null) unschedule(timer); resolve(r); };
+    timer = schedule(() => finish({ ok: false }), ms);
+    try { Promise.resolve(container.getRegistration()).then((reg) => finish({ ok: true, reg: reg || null }), () => finish({ ok: false })); }
+    catch (e) { finish({ ok: false }); }
+  });
+}
+// The Owner action. Order: (1) wait for a REAL waiting worker — none => nothing is posted, nothing reloads, local state untouched;
+// (2) the caller's safe-save sequence; (3) re-confirm the CURRENT registration.waiting and post SKIP_WAITING to exactly that worker;
+// (4) controllerchange => exactly one reload, with the bounded fallback timer created ONLY after SKIP_WAITING was actually sent.
+// Every listener / timer this attempt creates is owned by one cleanup, so any failure path detaches it deterministically.
+async function runControlledUpdateHandoff(env) {
+  const container = env.container;
+  const first = await awaitWaitingServiceWorker(container, env.readiness);
+  if (!first) return { ok: false, reason: "no-waiting-worker" };
+  if (env.beforeHandoff) await env.beforeHandoff();
+  const schedule = env.setTimeoutFn || setTimeout, unschedule = env.clearTimeoutFn || clearTimeout;
+  // Post-save re-confirmation: the SECOND registration lookup is bounded too (same deadline as readiness); never-resolving,
+  // rejecting, or late lookups all end in a deterministic failure and a late result is inert.
+  const lookup = await getRegistrationBounded(container, env.readiness && env.readiness.timeoutMs, schedule, unschedule);
+  if (!lookup.ok) return { ok: false, reason: "reconfirm-failed" };
+  const waiting = lookup.reg ? lookup.reg.waiting : null; // CURRENT registration.waiting, read now
+  if (!waiting) return { ok: false, reason: "no-waiting-worker" }; // replaced / gone while saving: never post to a stale reference
+  let reloaded = false, attached = false, timer = null;
+  const cleanup = () => {
+    if (attached) { attached = false; try { container.removeEventListener("controllerchange", onChange); } catch (e) {} }
+    if (timer != null) { const t = timer; timer = null; unschedule(t); }
+  };
+  const reloadOnce = () => { if (reloaded) return; reloaded = true; cleanup(); env.reload(); };
+  const onChange = () => reloadOnce();
+  try {
+    container.addEventListener("controllerchange", onChange, { once: true });
+    attached = true;
+    waiting.postMessage({ type: "SKIP_WAITING" });
+  } catch (e) { cleanup(); return { ok: false, reason: "post-failed" }; }
+  timer = schedule(reloadOnce, SW_POST_SKIP_RELOAD_FALLBACK_MS);
+  return { ok: true };
 }
 
 export default function App() {
@@ -8072,6 +8641,7 @@ function AppInner() {
   const [future, setFuture] = useState([]);
   const [roundNo, setRoundNo] = useState(0);
   const [courtCount, setCourtCountRaw] = useState(2);
+  const courtCountLatestRef = useRef(2); courtCountLatestRef.current = courtCount; // v1.14.4: latest count for the "new court starts now" default
   // reducing court count must release any reserved players sitting on the now-removed court(s) —
   // playing/next/done matches AND queued next-matches alike, since inPlay/reservedIdsFromCurrent/waitQueue
   // all derive from `current`; simply dropping those court's match entries here is enough (no separate
@@ -8084,6 +8654,15 @@ function AppInner() {
       alert("มีเกมที่กำลังเล่น/พักอยู่ในสนามที่จะลดออก — จบเกมหรือย้ายสนามก่อน แล้วค่อยลดจำนวนสนาม");
       return;
     }
+    // v1.14.4 (P0-A): a court ADDED while a session is actually running starts NOW (the default full-hour window), not at
+    // the original session start. Before the session runs (setup) nothing is written, so a new court keeps following the
+    // session window exactly as before. Rows that already exist are never overwritten (see courtHoursWithNewCourtDefaults).
+    const prevCount = courtCountLatestRef.current;
+    if (n > prevCount) {
+      const running = (playersLatestRef.current || []).some((p) => p && p.status && p.status !== "absent") ||
+        (currentLatestRef.current || []).length > 0 || (historyLatestRef.current || []).length > 0;
+      if (running) setSession((s) => { const next = courtHoursWithNewCourtDefaults(s.courtHours, prevCount, n, new Date()); return next === s.courtHours ? s : { ...s, courtHours: next }; });
+    }
     setCourtCountRaw(n); setCurrent((prev) => prev.filter((m) => m.court <= n));
   };
   const [courtLabels, setCourtLabelsRaw] = useState(["1", "2"]); // display numbers for each court/สนาม slot — index-aligned with courtCount, edited via setCourtLabel
@@ -8092,6 +8671,9 @@ function AppInner() {
   const [mode, setMode] = useState("doubles");
   const [settings, setSettings] = useState(getDefaultSettings);
   const [session, setSession] = useState(() => normSession(null)); // session.mode: "casual" (only mode in use today) | "tournament" (future) — see GAME MODE / TOURNAMENT block above; session.id (v1.9.1): stable id so live discountCredits can reference "this session" before it's archived
+  // Web Sync Phase 3: opaque, durable local group identity. The registry lives in the existing
+  // checkpoint/backup transaction; Cloud links remain in their separate Phase 2 store.
+  const [localGroups, setLocalGroups] = useState(() => ({ schemaVersion: 1, records: [] }));
   const [lockPairs, setLockPairs] = useState([]);
   const [sel, setSel] = useState(null);
   const [sessionHistory, setSessionHistory] = useState([]); // archived (ended) sessions — see endSession()
@@ -8255,6 +8837,7 @@ function AppInner() {
   // visibility flush effect below now stringifies FROM THIS ref at the moment it actually needs to, so what
   // it flushes is always the truly-latest committed React state, never a stale pre-debounce snapshot.
   const latestLiveStateRef = useRef(null);
+  const localGroupMigrationBlockedRef = useRef(false);
   // v1.12.33 (P0 iPad Force-Close Durability Fix): monotonic per-instance counter for the critical-mutation
   // journal (see writeCriticalJournalEntry below and applyCriticalJournalToState's own header comment at
   // module scope) — deliberately SEPARATE from saveGenerationRef, because a critical mutation's own
@@ -8422,6 +9005,7 @@ function AppInner() {
   // never shown the "data wiped after swipe-away + reopen" symptom, even on a day it was redeployed just
   // as rapidly as BadQ was.
   const [updateAvailable, setUpdateAvailable] = useState(null); // new version string, or null when none
+  const [updateNote, setUpdateNote] = useState(null); // v1.14.3: shown inside the SAME banner when the Owner tap found no waiting worker yet
   // v1.12.39 (Codex P0 — blocked IndexedDB open): the shell reports a blocked upgrade open; while it lasts the
   // app shows a recoverable full-screen notice instead of an empty, editable (and unsaveable) screen.
   useEffect(() => {
@@ -8478,7 +9062,10 @@ function AppInner() {
     if (window.__badqNewVersion) setUpdateAvailable(window.__badqNewVersion);
     const onUpdate = (e) => setUpdateAvailable((e && e.detail && e.detail.version) || "ใหม่");
     window.addEventListener("badq:update-available", onUpdate);
-    return () => window.removeEventListener("badq:update-available", onUpdate);
+    // v1.14.3: SECOND, lifecycle-driven signal — a worker that is actually WAITING exposes the same banner even when the page
+    // version already equals the deployed one. Never shown for a genuine first install; detached on cleanup.
+    const stopWaitingObserver = observeWaitingServiceWorker("serviceWorker" in navigator ? navigator.serviceWorker : null, () => setUpdateAvailable((prev) => prev || APP_VERSION));
+    return () => { window.removeEventListener("badq:update-available", onUpdate); stopWaitingObserver(); };
   }, []);
   // v1.11.41 (Section B2): explicit, user-confirmed update handoff — the ONLY place that ever tells a
   // waiting Service Worker to take over. Runs the exact 8-step sequence from the spec:
@@ -8489,75 +9076,71 @@ function AppInner() {
   // boot sequence above (Section A) picks the newest valid state on the reload. No long blocking UI: the
   // saves below are fire-and-attempt (best-effort, never block the button past a short safety timeout).
   const updateHandoffRef = useRef(false); // v1.12.39 (review F4): a restore refuses while the update handoff runs
+  const updateApplyBusyRef = useRef(false); // v1.14.3: one Owner-tap handoff at a time (never two SKIP_WAITING posts)
   const applyUpdateNow = async () => {
     if (restoreFenceRef.current) return; // v1.12.39: never while a restore owns storage
-    updateHandoffRef.current = true;
-    try {
-      const savedAt = Date.now();
-      // v1.11.76: pageInstanceId tags every "bg-v11" write so refreshFromStorageIfNewer can tell "another
-      // tab/session wrote this" from "this is my own earlier write" — see wouldRegressProgress.
-      if (restoreFenceRef.current) throw new Error("restore-in-progress"); // v1.12.39
-      const json = serializePersistedState(buildPersistedStateObject({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current }), savedAt).json;
-      latestStateJsonRef.current = json;
-      // v1.11.76: same final pre-write conflict guard as the main save effect (see its comment) — this is
-      // the exact "organizer swipes/kills the PWA to update" path implicated in the original incident, so
-      // it must not be allowed to persist a stale in-memory snapshot over another instance's newer,
-      // more-complete data either.
-      let blockedByConflict = false;
+    if (updateApplyBusyRef.current) return;
+    updateApplyBusyRef.current = true;
+    setUpdateNote(null);
+    // The safe-save sequence is UNCHANGED, but it now runs only once a real waiting worker has been confirmed.
+    const saveForHandoff = async () => {
+      updateHandoffRef.current = true;
       try {
-        const preWriteRead = await window.storage.get("bg-v11");
-        if (preWriteRead?.value) {
-          const onDisk = JSON.parse(preWriteRead.value);
-          if (
-            onDisk.pageInstanceId &&
-            onDisk.pageInstanceId !== window.__pageInstanceId &&
-            wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory, players, lastIntentionalPlayerWipeAt })
-          ) {
-            blockedByConflict = true;
-            pushBootLog({
-              event: "conflict-blocked-prewrite-update",
-              fromSavedAt: lastKnownSavedAtRef.current,
-              toSavedAt: onDisk.savedAt,
-              incomingPageInstanceId: onDisk.pageInstanceId,
-              playerCount: Array.isArray(onDisk.players) ? onDisk.players.length : 0,
-              sessionHistoryCount: Array.isArray(onDisk.sessionHistory) ? onDisk.sessionHistory.length : 0,
-            });
+        const savedAt = Date.now();
+        // v1.11.76: pageInstanceId tags every "bg-v11" write so refreshFromStorageIfNewer can tell "another
+        // tab/session wrote this" from "this is my own earlier write" — see wouldRegressProgress.
+        if (restoreFenceRef.current) throw new Error("restore-in-progress"); // v1.12.39
+        const json = serializePersistedState(buildPersistedStateObject({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, localGroups, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current }), savedAt).json;
+        latestStateJsonRef.current = json;
+        // v1.11.76: same final pre-write conflict guard as the main save effect (see its comment) — this is
+        // the exact "organizer swipes/kills the PWA to update" path implicated in the original incident, so
+        // it must not be allowed to persist a stale in-memory snapshot over another instance's newer,
+        // more-complete data either.
+        let blockedByConflict = false;
+        try {
+          const preWriteRead = await window.storage.get("bg-v11");
+          if (preWriteRead?.value) {
+            const onDisk = JSON.parse(preWriteRead.value);
+            if (
+              onDisk.pageInstanceId &&
+              onDisk.pageInstanceId !== window.__pageInstanceId &&
+              wouldRegressProgress(onDisk, { history, sessionHistory, tournamentHistory, players, lastIntentionalPlayerWipeAt })
+            ) {
+              blockedByConflict = true;
+              pushBootLog({
+                event: "conflict-blocked-prewrite-update",
+                fromSavedAt: lastKnownSavedAtRef.current,
+                toSavedAt: onDisk.savedAt,
+                incomingPageInstanceId: onDisk.pageInstanceId,
+                playerCount: Array.isArray(onDisk.players) ? onDisk.players.length : 0,
+                sessionHistoryCount: Array.isArray(onDisk.sessionHistory) ? onDisk.sessionHistory.length : 0,
+              });
+            }
           }
-        }
+        } catch (e) {}
+        if (blockedByConflict) throw new Error("bg-v11 write blocked: stale snapshot would regress another instance's progress");
+        if (restoreFenceRef.current) throw new Error("restore-in-progress"); // v1.12.39 (review F4): re-checked after the await
+        try { localStorage.setItem("bg:bg-v11", json); } catch (e) {} // (1) Mirror — synchronous, best-effort
+        try { await window.storage.set("bg-v11", json); } catch (e) {} // (2) Primary (the shell refuses it if a newer restore epoch is on disk)
+        if (!restoreFenceRef.current) { try { await window.storage.set(LKG_KEY, json); } catch (e) {} } // (3) LKG checkpoint
+        lastKnownSavedAtRef.current = savedAt;
       } catch (e) {}
-      if (blockedByConflict) throw new Error("bg-v11 write blocked: stale snapshot would regress another instance's progress");
-      if (restoreFenceRef.current) throw new Error("restore-in-progress"); // v1.12.39 (review F4): re-checked after the await
-      try { localStorage.setItem("bg:bg-v11", json); } catch (e) {} // (1) Mirror — synchronous, best-effort
-      try { await window.storage.set("bg-v11", json); } catch (e) {} // (2) Primary (the shell refuses it if a newer restore epoch is on disk)
-      if (!restoreFenceRef.current) { try { await window.storage.set(LKG_KEY, json); } catch (e) {} } // (3) LKG checkpoint
-      lastKnownSavedAtRef.current = savedAt;
-    } catch (e) {}
-
-    const reloadOnce = (() => {
-      let done = false;
-      return () => {
-        if (done) return;
-        done = true;
-        try { location.replace(location.pathname + "?_v=" + Date.now()); } catch (e) {}
-      };
-    })();
-
+    };
+    let result = { ok: false, reason: "error" };
     try {
-      const reg = "serviceWorker" in navigator ? await navigator.serviceWorker.getRegistration() : null;
-      const waiting = reg && reg.waiting;
-      if (waiting) {
-        // (6) wait for the new SW to actually take control before reloading — but never wait forever
-        // (older/edge-case browsers that don't fire controllerchange reliably still get a bounded fallback).
-        navigator.serviceWorker.addEventListener("controllerchange", reloadOnce, { once: true });
-        waiting.postMessage({ type: "SKIP_WAITING" }); // (4) -> (5)
-        setTimeout(reloadOnce, 4000);
-        return;
-      }
+      result = await runControlledUpdateHandoff({
+        container: "serviceWorker" in navigator ? navigator.serviceWorker : null,
+        beforeHandoff: saveForHandoff,
+        reload: () => { try { location.replace(location.pathname + "?_v=" + Date.now()); } catch (e) {} },
+      });
     } catch (e) {}
-    // No waiting worker found (e.g. this device hasn't finished installing the new SW yet, or the update
-    // was only detected via the plain version-string check) — fall back to the original cache-busted
-    // reload so the button still always does *something* rather than silently no-op.
-    reloadOnce();
+    if (!result.ok) {
+      // No waiting worker yet (or the post failed): NO SKIP_WAITING, NO substitute cache-busted reload, local state untouched.
+      // The banner stays so the Owner can simply tap again.
+      updateHandoffRef.current = false;
+      updateApplyBusyRef.current = false;
+      setUpdateNote("ยังติดตั้งเวอร์ชั่นใหม่ไม่เสร็จ — กรุณากดอีกครั้งในอีกสักครู่");
+    }
   };
   // Applies a parsed "bg-v11" blob to React state. Shared by the initial load AND the staleness guard
   // below so the two can never silently drift apart on which fields they read/default.
@@ -8596,9 +9179,13 @@ function AppInner() {
         wheelPrizes: normWheelPrizes(s.settings.wheelPrizes && s.settings.wheelPrizes.length ? s.settings.wheelPrizes : d.wheelPrizes),
       }));
     }
-    s.session && setSession(normSession(s.session)); // old saves have no `mode`/`id`/session times — default them, backward-compatible
+    const localGroupMigration = migrateLocalGroupsForState(s, s.localGroups);
+    const migratedLocalGroups = localGroupMigration.registry;
+    localGroupMigrationBlockedRef.current = localGroupMigration.conflicts.some((item) => item.code === "local-group-registry-invalid");
+    setLocalGroups(migratedLocalGroups);
+    s.session && setSession(attachLocalGroupIdentity(normSession(s.session), migratedLocalGroups)); // old saves acquire an opaque ID without changing their name/business data
     s.lockPairs && setLockPairs(migrateLockPairs(s.lockPairs));
-    setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses)); // new field: default [] if absent (backward-compatible)
+    setSessionHistory((Array.isArray(s.sessionHistory) ? s.sessionHistory : []).map(ensureSessionExpenses).map((item) => attachLocalGroupIdentity(item, migratedLocalGroups))); // new field: default [] if absent (backward-compatible)
     setGeneralExpenses(Array.isArray(s.generalExpenses) ? s.generalExpenses : []);
     setOtherIncome(Array.isArray(s.otherIncome) ? s.otherIncome : []);
     setDiscountCredits((Array.isArray(s.discountCredits) ? s.discountCredits : []).map(normDiscountCredit));
@@ -8651,7 +9238,7 @@ function AppInner() {
       // v1.11.48 (Section C/D): buildBackupSnapshot (not buildBackupPayload) — a lightweight, photo-
       // stripped copy built specifically for this checkpoint. See buildBackupSnapshot's own comment for
       // why this is safe and non-destructive to existing data.
-      const payload = buildBackupSnapshot({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current });
+      const payload = buildBackupSnapshot({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, localGroups, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current });
       const entry = { savedAt: Date.now(), reason: reason || "auto", stats: backupStats(payload.data), payload };
       const next = [entry, ...autoBackups].slice(0, AUTO_BACKUP_MAX);
       setAutoBackups(next);
@@ -9270,6 +9857,45 @@ function AppInner() {
       window.removeEventListener("focus", onVisible);
     };
   }, [loaded]);
+  // Assign identity only after boot has selected a durable state. New names receive a random opaque ID;
+  // edits rename the registry record while retaining that ID. This is isolated metadata and never changes
+  // the legacy name-keyed settings, match, billing, or journal semantics.
+  useEffect(() => {
+    if (!loaded || localGroupMigrationBlockedRef.current || !session || !session.name || !window.BadQSyncContract) return;
+    const api = window.BadQSyncContract;
+    const name = api.normalizeLocalGroupName(session.name);
+    if (!name) return;
+    if (api.isLocalGroupId(session.localGroupId)) {
+      setLocalGroups((previous) => {
+        const found = api.resolveLocalGroup(previous, session.localGroupId);
+        if (found.status === "missing") {
+          const migrated = api.migrateLocalGroupRegistry({
+            stored: previous,
+            sources: [{ name, localGroupId: session.localGroupId }],
+            phase2Records: phase2LocalGroupRecords(),
+            randomId: localGroupRandomSeed,
+          }).registry;
+          return JSON.stringify(migrated) === JSON.stringify(previous) ? previous : migrated;
+        }
+        if (found.status === "resolved" && found.record.name !== name) return api.renameLocalGroup(previous, session.localGroupId, name);
+        return previous;
+      });
+      return;
+    }
+    setLocalGroups((previous) => {
+      const migrated = api.migrateLocalGroupRegistry({
+        stored: previous,
+        sources: [{ name, localGroupId: null }],
+        phase2Records: phase2LocalGroupRecords(),
+        randomId: localGroupRandomSeed,
+      });
+      const resolved = api.resolveLocalGroup(migrated.registry, name);
+      if (migrated.conflicts.length === 0 && resolved.status === "resolved") {
+        setSession((current) => current.localGroupId ? current : { ...current, localGroupId: resolved.record.localGroupId });
+      }
+      return JSON.stringify(migrated.registry) === JSON.stringify(previous) ? previous : migrated.registry;
+    });
+  }, [loaded, session && session.name, session && session.localGroupId]);
   // v1.11.48 (Section B/F — CRITICAL ORDERING FIX, root cause of the v1.11.48 crash): this used to be a
   // SEPARATE useEffect here, watching [sessionHistory, tournamentHistory, loaded] and calling
   // saveAutoBackup() un-awaited whenever history grew. Because React runs passive effects in HOOK
@@ -9304,7 +9930,7 @@ function AppInner() {
   // `await`. This is what makes "refresh emergency state before any await" true unconditionally, not just for
   // whichever generation happens to survive the debounce.
   useEffect(() => {
-    latestLiveStateRef.current = { players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts };
+    latestLiveStateRef.current = { players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, localGroups, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts };
     // v1.12.35: opportunistic resync for every path OTHER than the tight race between two closely-queued
     // critical operations (which is instead kept correct synchronously, inside each operation's own applyFn —
     // see criticalBaselineRef's declaration comment). Covers boot, undo, manual roster/match edits, etc., so
@@ -9329,7 +9955,7 @@ function AppInner() {
     // v1.12.38: players/history/current come from their synchronous latest-value refs (see makeTrackedSetter),
     // never a committed value that a newer, not-yet-rendered update has already replaced.
     criticalBaselineRef.current = { players: playersLatestRef.current, history: historyLatestRef.current, current: currentLatestRef.current, future, roundNo, session, settings, discountCredits, rewardHistory, mode, lockPairs, sessionHistory, courtCount, courtLabels };
-  }, [players, lastIntentionalPlayerWipeAt, journalReceipts, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub]);
+  }, [players, lastIntentionalPlayerWipeAt, journalReceipts, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, localGroups, cloudClub]);
   // v1.12.33 (P0 iPad Force-Close Durability Fix — findings #1/#3/#5); REPLACED v1.12.34 by
   // commitCriticalMutation below (P0 Durability Remediation, Codex review findings #4/#5): writes ONE small,
   // self-contained journal entry for a critical mutation (match completion / session finalization) and
@@ -9711,7 +10337,7 @@ function AppInner() {
         // v1.12.39: ONE canonical persisted shape (buildPersistedStateObject) serialized with verified image
         // references (serializePersistedState); `body` (everything except savedAt/pageInstanceId) lets a restore
         // suppress the one redundant autosave of exactly the content it just promoted.
-        const { body, json } = serializePersistedState(buildPersistedStateObject({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current }), savedAt);
+        const { body, json } = serializePersistedState(buildPersistedStateObject({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, localGroups, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts, restoreEpoch: restoreEpochRef.current }), savedAt);
         if (suppressAutosaveBodyRef.current != null) {
           const same = suppressAutosaveBodyRef.current === body;
           suppressAutosaveBodyRef.current = null;
@@ -9819,6 +10445,8 @@ function AppInner() {
           recordSaveFailure(mySaveGeneration, "primaryOk-false");
         } else {
           recordSaveSuccess(mySaveGeneration);
+          // Phase 4C: a CONFIRMED primary write may carry a new durable player value; the sync engine re-reads the durable state itself.
+          try { window.BadQCommercialBridge?.playerSync?.notifyDurableSave?.(); } catch (e) {}
         }
         if (result?.primaryOk !== false && json.indexOf('"data:image/') >= 0) scheduleImageAssetization("autosave-inline-images"); // v1.12.39
         // Last Known Good: only ever updated from HERE, i.e. only once bootStatus has already resolved
@@ -9857,7 +10485,7 @@ function AppInner() {
         }
       } catch (e) {}
     })();
-  }, [players, lastIntentionalPlayerWipeAt, journalReceipts, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, cloudClub, loaded, loadCorrupted, bootStatus, persistTick]);
+  }, [players, lastIntentionalPlayerWipeAt, journalReceipts, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, activeTournament, tournamentHistory, groupDefaults, rankingConfigs, localGroups, cloudClub, loaded, loadCorrupted, bootStatus, persistTick]);
   // v1.12.32 (P1 Launch Fix Batch C, finding #3 — silent autosave failure): manual retry for the persistent
   // save-failure warning banner below. Deliberately reuses the EXACT same `window.storage.set("bg-v11", ...)`
   // call the automatic save effect above uses (per the "do not introduce a new storage architecture"
@@ -10043,29 +10671,112 @@ function AppInner() {
   // hand, since adding them here already means they're present and ready to play. Still respects the
   // court-capacity cap exactly like setStatus does: if the club is already full (comingCount >= maxPlayers),
   // the new member is queued into "waiting" instead of silently blowing past the cap.
-  const addPlayer = (name, skillIndex, photo) => {
-    const n = name.trim(); if (!n) return;
+  // Phase 4A add-attempt lifecycle (see PLAYER_ADD_ATTEMPT): pendingPlayerIdsRef holds ids reserved by attempts that have not
+  // reached a committed terminal outcome; addAttemptsRef maps attempt token -> { id, photo, target, onOutcome }.
+  const pendingPlayerIdsRef = useRef(new Set());
+  const addAttemptsRef = useRef(new Map());
+  const addTickRef = useRef(0);
+  // Phase 4C Players Sync host. The sync engine (commercial-sync.js / player-sync.js) reads local players ONLY from the durable
+  // PRIMARY bg-v11 snapshot below, and changes them ONLY through these two Owner-approved calls. It is registered while this App is
+  // mounted and removed on unmount; without it every engine call fails closed.
+  useEffect(() => {
+    const readDurable = async () => {
+      if (restoreFenceRef.current) return { ok: false, code: "durable-snapshot-unavailable" };
+      try { return playerSyncSnapshotFromPersisted(await window.storage.getPrimaryFirst("bg-v11")); }
+      catch (e) { return { ok: false, code: "durable-snapshot-unavailable" }; }
+    };
+    const waitDurable = async (playerId, want) => {
+      const deadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const snap = await readDurable();
+        const found = snap.ok ? snap.players.find((q) => q.id === playerId) : null;
+        if (found && found.name === want.displayName && found.skillIndex === want.skillIndex && found.archived === want.archived) return true;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+      return false;
+    };
+    const host = {
+      readDurableSnapshot: readDurable,
+      async applyApprovedFields({ playerId, expectedLocal, cloud }) {
+        if (restoreFenceRef.current) return { ok: false, code: "restore-in-progress" };
+        const live = latestLiveStateRef.current || {};
+        const result = applyApprovedCloudFields(playersLatestRef.current, { playerId, expectedLocal, cloud, settings: live.settings });
+        if (!result.ok) return { ok: false, code: result.code };
+        setPlayers(result.players);
+        return (await waitDurable(playerId, cloud)) ? { ok: true } : { ok: false, code: "local-apply-not-durable" };
+      },
+      async createPlayerFromCloud({ playerId, payload }) {
+        if (restoreFenceRef.current) return { ok: false, code: "restore-in-progress" };
+        const live = latestLiveStateRef.current || {};
+        const roster = playersLatestRef.current;
+        if (roster.some((q) => q && q.id === playerId)) return { ok: false, code: "identity-collision" };
+        const cap = Number(live.settings && live.settings.maxPlayers) || 0;
+        const initialStatus = cap > 0 && roster.filter((q) => countsTowardSessionCapacity(q.status)).length >= cap ? "waiting" : "ready";
+        const record = buildPlayerFromCloud(playerId, payload, { settings: live.settings, order: roster.length, createdAt: Date.now(), initialStatus });
+        const next = appendNewPlayerFenced(roster, record);
+        if (!next) return { ok: false, code: "identity-collision" };
+        setPlayers(next);
+        return (await waitDurable(playerId, payload)) ? { ok: true } : { ok: false, code: "local-apply-not-durable" };
+      },
+      async isKnownPlayerId(playerId) {
+        return playerSyncIdIsReferenced(playerId, latestLiveStateRef.current || { players: playersLatestRef.current });
+      },
+    };
+    window.BadQPlayerSyncHost = host;
+    return () => { if (window.BadQPlayerSyncHost === host) delete window.BadQPlayerSyncHost; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const [addAttemptTick, setAddAttemptTick] = useState(0);
+  // Phase 4A add-attempt settle: runs AFTER commit, observes the committed roster, releases reservations, starts photo work.
+  useEffect(() => {
+    settleAddAttempts(addAttemptsRef.current, pendingPlayerIdsRef.current, players, addAttemptTick, {
+      notifyRejected: () => { try { alert("ไม่สามารถเพิ่มผู้เล่นได้ — รหัสผู้เล่นที่สุ่มได้ซ้ำกับผู้เล่นที่มีอยู่แล้ว ข้อมูลที่กรอกยังอยู่ กรุณากดเพิ่มอีกครั้ง (ไม่มีผู้เล่นเดิมถูกเปลี่ยนแปลง)"); } catch (e) { /* alert unavailable */ } },
+      // Every terminal photo outcome (usable ref / null / rejection) ends in the same pure, idempotent token release; only a usable ref adds photoRef.
+      startPhoto: (token, id, photo) => {
+        let up; try { up = Promise.resolve(uploadImage(photo)); } catch (e) { up = Promise.reject(e); }
+        up.then((ref) => ref || null, () => null).then((ref) => { setPlayers((prev) => finishAddAttemptToken(prev, id, token, ref)); });
+      },
+      releaseToken: (token, id) => { setPlayers((prev) => finishAddAttemptToken(prev, id, token, null)); },
+    });
+  }, [players, addAttemptTick]);
+  useEffect(() => () => { addAttemptsRef.current.clear(); pendingPlayerIdsRef.current.clear(); }, []); // unmount: no reservation outlives the component
+  // Returns "pending" (attempt started - the caller learns the COMMITTED outcome via onOutcome({ok,id})), "skipped" (empty name),
+  // or false (no secure id could be drawn - nothing reserved, nothing inserted).
+  const addPlayer = (name, skillIndex, photo, onOutcome) => {
+    const n = name.trim(); if (!n) return "skipped";
     const si = Math.max(1, Math.min(11, Number(skillIndex) || 1));
-    // v1.12.20 (Image Storage & Reference Architecture): id generated up-front (not inside the setPlayers
-    // updater) so a photo passed in at creation time (Quick Add) can be registered into the local Image
-    // Asset Store and its ref backfilled onto this exact new player afterward — additive, same pattern as
-    // openPhoto/onPhotoFile above.
-    const newId = uid();
+    // Phase 4A: NEW players get a secure, collision-checked "player_<32 hex>" id (see createUniquePlayerId). If secure
+    // randomness is unavailable (or a safe id cannot be drawn) ONLY this creation fails - nothing is created or reserved, no
+    // Math.random fallback - and every existing player/feature keeps working.
+    let newId;
+    try {
+      // The reservation covers overlapping Add calls that share one stale render snapshot; the authoritative fence is the
+      // pure appendNewPlayerFenced check against the actual `prev` inside the updater below.
+      newId = createUniquePlayerId({ players, history, current, future, lockPairs, sessionHistory, activeTournament, tournamentHistory, rewardHistory, discountCredits, otherIncome }, { reserved: pendingPlayerIdsRef.current });
+    } catch (e) {
+      try { alert("ไม่สามารถสร้างผู้เล่นใหม่ได้ — เบราว์เซอร์นี้สุ่มรหัสผู้เล่นแบบปลอดภัยไม่ได้ กรุณาอัปเดตเบราว์เซอร์หรือเปิดแอปใหม่ แล้วลองเพิ่มอีกครั้ง (ผู้เล่นเดิมและฟังก์ชันอื่นยังใช้งานได้ตามปกติ)"); } catch (e2) { /* alert unavailable */ }
+      return false;
+    }
+    const token = Symbol("playerAddAttempt");
+    const createdAt = Date.now();
+    const target = addTickRef.current + 1; addTickRef.current = target;
+    addAttemptsRef.current.set(token, { id: newId, photo: photo || null, target, onOutcome });
+    // The updater below is PURE: it reads only `prev` and constants captured above, writes nothing outside itself, and its
+    // result is the same however many times or whenever it is evaluated. Success/rejection is NOT read from it - it is
+    // observed from the committed roster by settleAddAttempts.
     setPlayers((prev) => {
       const cap = Number(settings.maxPlayers) || 0; // 0/null = ไม่จำกัด
-      // v1.14.0: was registered-or-ready only — now the canonical accepted-capacity predicate (see
-      // countsTowardSessionCapacity), so a player who was accepted earlier today and has since moved to
-      // resting/left still correctly holds their slot and doesn't silently let a NEW add-player through.
+      // v1.14.0: the canonical accepted-capacity predicate (see countsTowardSessionCapacity), so a player accepted earlier today
+      // and since moved to resting/left still holds their slot and doesn't let a NEW add-player through.
       const comingCount = prev.filter((p) => countsTowardSessionCapacity(p.status)).length;
       const initialStatus = cap > 0 && comingCount >= cap ? "waiting" : "ready";
-      // v1.11.67 (section S): a BRAND NEW player only ever owes an entrance fee if Entrance Fee is
-      // enabled for this group AT THE MOMENT they're added — this is the one and only place a player is
-      // ever created with entranceFeePaid:false. membershipExpiry always starts null (never enrolled) —
-      // recurring membership only ever begins once a real payment is recorded (payMembership).
+      // v1.11.67 (section S): a BRAND NEW player only owes an entrance fee if Entrance Fee is enabled for this group AT THE
+      // MOMENT they're added. membershipExpiry always starts null - recurring membership only begins once a payment is recorded.
       const entranceFeeOn = !!(settings.membership && settings.membership.entranceFee && settings.membership.entranceFee.enabled);
-      return [...prev, { id: newId, name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: Date.now(), lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? Date.now() : null, isLocked: false, entranceFeePaid: !entranceFeeOn, entranceFeePaidAt: null, membershipExpiry: null }];
+      return appendNewPlayerFenced(prev, { id: newId, name: n, level: displayLevelFor(si, settings), skillIndex: si, status: initialStatus, games: 0, order: prev.length, photo: photo || null, waitingSince: createdAt, lastPlayedRound: -1, waitTotal: 0, waitCount: 0, waitMax: 0, paid: false, discount: 0, wheelDiscount: 0, pendingDiscount: 0, carriedInDiscount: 0, spun: false, wheelResult: null, handedness: "right", handPref: null, memberType: "member", phone: "", lineId: "", archived: false, archivedAt: null, arrivalTime: null, departureTime: null, waitlistedAt: initialStatus === "waiting" ? createdAt : null, isLocked: false, entranceFeePaid: !entranceFeeOn, entranceFeePaidAt: null, membershipExpiry: null }, token) || prev;
     });
-    if (photo) uploadImage(photo).then((ref) => { if (ref) setPlayers((prev) => prev.map((p) => (p.id === newId ? { ...p, photoRef: ref } : p))); });
+    setAddAttemptTick(target); // guarantees a render + settle even when the fence rejected (roster unchanged)
+    return "pending";
   };
   // reset every player's attendance status back to "absent" — a single-tap "start a new day" action,
   // distinct from endSession() (which archives + clears the whole session/history); this only touches
@@ -10212,12 +10923,8 @@ function AppInner() {
   // never drift out of sync. Deliberately does NOT touch status/photo (status has its own quick-dropdown;
   // photo keeps using the existing openPhoto()+crop flow) — those interactions stay exactly as they were.
   const updatePlayer = (id, patch) => {
-    setPlayers((prev) => prev.map((p) => {
-      if (p.id !== id) return p;
-      const next = { ...p, ...patch };
-      if (patch.skillIndex != null) next.level = displayLevelFor(next.skillIndex, settings);
-      return next;
-    }));
+    // Phase 4A: the patch is applied through applyPlayerPatch so an `id` in it can never change a player's identity.
+    setPlayers((prev) => prev.map((p) => (p.id !== id ? p : applyPlayerPatch(p, patch, settings))));
   };
   // switch the active level-preset: skillIndex (matchmaking) never changes, only the cached display label
   // is recomputed for every player so their level badge reflects the new preset immediately.
@@ -11413,6 +12120,7 @@ function AppInner() {
       const snapshot = {
         id: base.session.id || uid(), // reuse the live session's id (v1.9.1) so discountCredits' sourceSessionId/usedSessionId stay valid after archiving
         name: base.session.name || "ก๊วนไม่มีชื่อ",
+        localGroupId: base.session.localGroupId || null,
         date: base.session.date,
         // v1.12.20 (Image Storage & Reference Architecture): freeze the STABLE ASSET REF only when one
         // exists, instead of always re-embedding the full Base64 group photo into every historical session
@@ -11584,7 +12292,7 @@ function AppInner() {
       // name/photo/hours every time, e.g. "ก๊วนวันอาทิตย์ 19:00-23:00") — only the date resets to today
       // v1.12.33: computed as a plain value (`newSessionObj`), not only inside the setSession updater, so it
       // can ALSO be captured verbatim into the journal patch below — same reasoning as resetPlayerFields above.
-      const newSessionObj = { id: uid(), name: base.session.name, date: todayLocalISO(), mode: "casual", photo: base.session.photo || null, sessionStartTime: base.session.sessionStartTime || "19:00", sessionEndTime: base.session.sessionEndTime || "23:00" };
+      const newSessionObj = { id: uid(), name: base.session.name, localGroupId: base.session.localGroupId || null, date: todayLocalISO(), mode: "casual", photo: base.session.photo || null, sessionStartTime: base.session.sessionStartTime || "19:00", sessionEndTime: base.session.sessionEndTime || "23:00" };
       // v1.12.35 (Codex finding #8 — "crash-replayed Session End omits wheel-prize stock reset"): computed
       // ONCE here, at authoring time, and carried verbatim in the patch, so the live path (applyStateTransition
       // below) and a future crash-replay of this exact entry (applyCriticalJournalToState's sessionEnd branch)
@@ -12078,7 +12786,7 @@ function AppInner() {
   // Returns null if the user cancelled the native share sheet or every fallback failed; otherwise
   // { stats, sizeLabel } for the caller to show a success banner with.
   const exportBackup = async () => {
-    let payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts });
+    let payload = buildBackupPayload({ players, history, current, future, roundNo, courtCount, courtLabels, mode, settings, session, lockPairs, sessionHistory, activeTournament, tournamentHistory, generalExpenses, otherIncome, discountCredits, rewardHistory, groupDefaults, rankingConfigs, localGroups, cloudClub, lastIntentionalPlayerWipeAt, journalReceipts });
     // v1.12.39 (review F3): an export must never contain an image only as an "@img:" reference. Missing assets are
     // loaded from the image store first; if any still cannot be resolved, the export is refused (clear message)
     // instead of producing a file that would lose those images.
@@ -12250,6 +12958,9 @@ function AppInner() {
     };
     const S = window.storage && window.storage.restore;
     restoreFenceRef.current = true;
+    // Phase 4C: from the first instant of a Restore/Undo player-sync stops starting requests (best-effort quiesce, NOT a safety decision).
+    // The safety guarantee is the verified durable fence below, which is a hard precondition of promotion (fail-closed, no timeout pass-through).
+    try { window.BadQCommercialBridge?.playerSync?.quiesce?.("restore-started"); } catch (e) {}
     autosaveSkippedByFenceRef.current = false;
     setRestoreUi({ phase: "waiting-pending-saves", startedAt: Date.now(), status: "running" });
     let keepFence = false;
@@ -12302,16 +13013,20 @@ function AppInner() {
       if (restoreMode === "replace") {
         const rPlayers = data.players.map(normPlayer);
         const rFeatureFlags = inferAdvancedFeatureFlags(data.settings, data.activeTournament, data.tournamentHistory, data.rewardHistory);
+        const localGroupMigration = migrateLocalGroupsForState(data, data.localGroups);
+        if (localGroupMigration.conflicts.length) return fail("local-group-migration-conflict");
+        const restoredLocalGroups = localGroupMigration.registry;
         next = {
           players: rPlayers, history: data.history, current: data.current, future: data.future, roundNo: data.roundNo,
           courtCount: data.courtCount, courtLabels: syncCourtLabels(data.courtLabels, data.courtCount), mode: data.mode,
           settings: normSettings({ ...data.settings, tournamentEnabled: rFeatureFlags.tournamentEnabled, wheelEnabled: rFeatureFlags.wheelEnabled }),
-          session: normSession(data.session), lockPairs: data.lockPairs, sessionHistory: data.sessionHistory,
+          session: attachLocalGroupIdentity(normSession(data.session), restoredLocalGroups), lockPairs: data.lockPairs,
+          sessionHistory: (data.sessionHistory || []).map((item) => attachLocalGroupIdentity(item, restoredLocalGroups)),
           generalExpenses: data.generalExpenses || [], otherIncome: data.otherIncome || [],
           discountCredits: (data.discountCredits || []).map(normDiscountCredit), rewardHistory: data.rewardHistory || [],
           activeTournament: normTournament(data.activeTournament) || null, tournamentHistory: data.tournamentHistory || [],
           groupDefaults: data.groupDefaults && typeof data.groupDefaults === "object" ? data.groupDefaults : {},
-          rankingConfigs: normRankingConfigs(data.rankingConfigs), cloudClub: normCloudClub(data.cloudClub),
+          rankingConfigs: normRankingConfigs(data.rankingConfigs), localGroups: restoredLocalGroups, cloudClub: normCloudClub(data.cloudClub),
           // v1.12.13: a replace that lands on zero players is, by construction, an intentional wipe.
           lastIntentionalPlayerWipeAt: rPlayers.length === 0 ? Date.now() : null,
           // v1.12.37: a restore never discards this install's receipts. v1.12.39: an UNDO brings back the
@@ -12324,9 +13039,17 @@ function AppInner() {
         // LATEST committed state; the live session is untouched.
         const byIds = (arr) => new Set((arr || []).map((x) => x && x.id));
         const eSH = byIds(live.sessionHistory), eTH = byIds(live.tournamentHistory), eDC = byIds(live.discountCredits), eRH = byIds(live.rewardHistory);
+        const importedGroupMigration = migrateLocalGroupsForState(data, data.localGroups);
+        if (importedGroupMigration.conflicts.length) return fail("local-group-migration-conflict");
+        const mergeGroups = window.BadQSyncContract.mergeLocalGroupRegistries(
+          window.BadQSyncContract.validLocalGroupRegistry(live.localGroups) ? live.localGroups : { schemaVersion: 1, records: [] },
+          importedGroupMigration.registry
+        );
+        if (!mergeGroups.ok) return fail(mergeGroups.code);
         next = {
           ...live,
-          sessionHistory: [...(live.sessionHistory || []), ...(data.sessionHistory || []).filter((x) => !eSH.has(x.id))],
+          localGroups: mergeGroups.registry,
+          sessionHistory: [...(live.sessionHistory || []), ...(data.sessionHistory || []).filter((x) => !eSH.has(x.id)).map((item) => attachLocalGroupIdentity(item, mergeGroups.registry))],
           tournamentHistory: [...(live.tournamentHistory || []), ...(data.tournamentHistory || []).filter((x) => !eTH.has(x.id))],
           discountCredits: [...(live.discountCredits || []), ...(data.discountCredits || []).filter((x) => !eDC.has(x.id)).map(normDiscountCredit)],
           rewardHistory: [...(live.rewardHistory || []), ...(data.rewardHistory || []).filter((x) => !eRH.has(x.id))],
@@ -12349,7 +13072,6 @@ function AppInner() {
       phase("saving", { byteLength: stagedJson.length });
       await yieldToUI();
       const oldMirrors = { primary: S.mirrorGet("bg-v11"), lkg: S.mirrorGet(LKG_KEY) };
-      S.mirrorSet("bg-v11", null); S.mirrorSet(LKG_KEY, null);
       const plan = undo ? {
         // undo: the consumed snapshot and its journal archive go away; the journal of the state being undone is
         // archived; the pre-restore entries come back.
@@ -12365,7 +13087,14 @@ function AppInner() {
         journal: restoreMode === "replace" ? { archiveToKey: PRERESTORE_JOURNAL_KEY, clear: true } : {},
         seqKeys: ["bg-v11", LKG_KEY],
       };
-      const pr = await S.promote(plan, watch());
+      // Round 2: prepare candidate (done) -> durably fence + VERIFY every affected player-sync binding -> only then promote. A fence that
+      // returns ok:false, throws, never resolves or cannot be verified leaves Core primary state and the mirrors untouched and reports a retryable failure.
+      const fenced = await playerSyncRestoreFencedPromote(window.BadQCommercialBridge, async () => {
+        S.mirrorSet("bg-v11", null); S.mirrorSet(LKG_KEY, null);
+        return S.promote(plan, watch());
+      }, { timeoutMs: 10000 });
+      if (!fenced.ok) return fail("player-sync-fence-" + fenced.reason);
+      const pr = fenced.result;
       report.promotion = { outcome: pr.outcome, reason: pr.reason || null, ms: pr.ms, archivedJournalCount: pr.result && pr.result.archivedJournalCount };
       if (pr.outcome !== "committed") {
         S.mirrorSet("bg-v11", oldMirrors.primary); S.mirrorSet(LKG_KEY, oldMirrors.lkg);
@@ -12396,12 +13125,13 @@ function AppInner() {
       latestLiveStateRef.current = { ...next };
       if (restoreMode === "replace") {
         setLastIntentionalPlayerWipeAt(next.lastIntentionalPlayerWipeAt);
+        localGroupMigrationBlockedRef.current = false;
         setPlayers(next.players); setHistory(next.history); setCurrent(next.current); setFuture(next.future);
         setRoundNo(next.roundNo); setCourtCount(next.courtCount); setCourtLabelsRaw(next.courtLabels); setMode(next.mode);
         setSettings(next.settings); setSession(next.session); setLockPairs(next.lockPairs); setSessionHistory(next.sessionHistory);
         setActiveTournament(next.activeTournament); setTournamentHistory(next.tournamentHistory);
         setGeneralExpenses(next.generalExpenses); setOtherIncome(next.otherIncome); setDiscountCredits(next.discountCredits);
-        setRewardHistory(next.rewardHistory); setGroupDefaults(next.groupDefaults); setRankingConfigs(next.rankingConfigs); setCloudClub(next.cloudClub);
+        setRewardHistory(next.rewardHistory); setGroupDefaults(next.groupDefaults); setRankingConfigs(next.rankingConfigs); setLocalGroups(next.localGroups); setCloudClub(next.cloudClub);
         setJournalReceipts(next.journalReceipts);
         // the journal was archived and cleared inside the promotion: nothing of the replaced session may retry
         setScoreDrafts({});
@@ -12410,8 +13140,14 @@ function AppInner() {
         setHasPreRestoreBackup(!undo);
         prevHistLenRef.current = { session: (next.sessionHistory || []).length, tournament: (next.tournamentHistory || []).length };
       } else {
-        setSessionHistory(next.sessionHistory); setTournamentHistory(next.tournamentHistory);
+        setLocalGroups(next.localGroups); setSessionHistory(next.sessionHistory); setTournamentHistory(next.tournamentHistory);
         setDiscountCredits(next.discountCredits); setRewardHistory(next.rewardHistory);
+      }
+      try { window.BadQCommercialBridge?.markBadmintonGroupLinksStale?.("restore-revalidation-required"); } catch (e) {}
+      // second, post-promotion pass: re-fences any row created/changed between the pre-promotion fence and the commit (the promotion itself
+      // is already fenced and committed; this is best-effort with one retry and cannot undo it).
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try { const again = await window.BadQCommercialBridge?.playerSync?.fenceForRestore?.("restore-revalidation-required"); if (!again || again.ok === true) break; } catch (e) {}
       }
       await yieldToUI();
       phase("done", { verified: true, totalMs: Math.round(now() - T0) });
@@ -12443,7 +13179,7 @@ function AppInner() {
     mode: "doubles", settings: getDefaultSettings(),
     session: { id: uid(), name: "", date: todayLocalISO(), mode: "casual" },
     lockPairs: [], sessionHistory: [], generalExpenses: [], otherIncome: [], activeTournament: null,
-    tournamentHistory: [], discountCredits: [], rewardHistory: [], rankingConfigs: {}, cloudClub: null, // v1.11.35
+    tournamentHistory: [], discountCredits: [], rewardHistory: [], rankingConfigs: {}, localGroups: { schemaVersion: 1, records: [] }, cloudClub: null, // v1.11.35
   } });
   // revert the most recent "replace all" restore using the safety snapshot taken right before it.
   // v1.12.39: the same staged, verified, single-transaction promotion as a restore. The journal entries archived
@@ -12696,7 +13432,7 @@ function AppInner() {
         {updateAvailable && (
           <div style={{ background: "#eaf3ff", border: "1px solid #a9cdf0", borderRadius: 12, padding: "10px 11px", marginBottom: 14, display: "flex", alignItems: "center", gap: 9 }}>
             <span style={{ fontSize: 17, flexShrink: 0, lineHeight: "20px" }}>🔄</span>
-            <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700 }}>มีเวอร์ชั่นใหม่ (v{updateAvailable}) พร้อมใช้งาน</div>
+            <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, fontWeight: 700 }}>มีเวอร์ชั่นใหม่ (v{updateAvailable}) พร้อมใช้งาน{updateNote && <div style={{ fontSize: 11.5, fontWeight: 600, marginTop: 2 }}>{updateNote}</div>}</div>
             <button onClick={applyUpdateNow} style={{ flexShrink: 0, padding: "7px 13px", borderRadius: 9, background: T.blue, border: "none", color: "#fff", fontSize: 12, fontWeight: 800 }}>อัปเดตตอนนี้</button>
           </div>
         )}
@@ -12719,7 +13455,7 @@ function AppInner() {
           sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
           summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory, t, tc }}
         />}
-        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDate, fmtDateFull, fmtDateTime, tutorialIsCompleted: tutorialEngine.isCompleted, onStartTutorialGuide: tutorialEngine.startGuide }} />}
+        {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, localGroups, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDate, fmtDateFull, fmtDateTime, tutorialIsCompleted: tutorialEngine.isCompleted, onStartTutorialGuide: tutorialEngine.startGuide }} />}
         {tab === "finance" && <FinanceTab {...{ sessionHistory, session, setSession, generalExpenses, otherIncome, addHistExpense, updateHistExpense, removeHistExpense, addGeneralExpense, updateGeneralExpense, removeGeneralExpense, addOtherIncome, updateOtherIncome, removeOtherIncome, openHistPhoto, clearHistPhoto, discountCredits, applyDiscountCredits, cancelDiscountCredit, players, history, current, settings, setSettings, togglePaid, setPDiscount, applyWheelPrize, endSession, retryEndSessionCommit, qrRef, courtCount, setCourtCount, courtLabels, rewardHistory, onOpenFinancePrint: setFinancePrintReport, activeTournament, tournamentHistory, playersById, tTogglePlayerPaid, tToggleHistoricalPlayerPaid, uiLocale, onGoToGames: () => setTab("session"), t, tc, fmtDate, fmtDateFull, fmtMonthFull, fmtMonthLabel, fmtMonthDay, fmtDateTime }} gameMode={mode} />}
       </div>
 
@@ -12987,7 +13723,15 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
   const newPlayerFileRef = useRef();
   const [cropJob, setCropJob] = useState(null); // raw picked-image src awaiting crop, or null
   const onDraftPhotoFile = async (e) => { const f = e.target.files?.[0]; e.target.value = ""; if (!f) return; const raw = await fileToDataURL(f).catch(() => null); if (raw) setCropJob(raw); };
-  const submit = () => { addPlayer(name, skillIndex, draftPhoto); setName(""); setDraftPhoto(null); };
+  // Phase 4A: the modal/draft are released ONLY by the COMMITTED outcome of the add attempt (onOutcome), never because an add was merely requested.
+  const addingRef = useRef(false);
+  const submit = () => {
+    if (addingRef.current) return false; // one attempt at a time
+    const r = addPlayer(name, skillIndex, draftPhoto, (res) => { addingRef.current = false; if (res && res.ok) { setName(""); setDraftPhoto(null); setAddPlayerOpen(false); } });
+    if (r === "pending") { addingRef.current = true; return true; }
+    if (r === "skipped") { setName(""); setDraftPhoto(null); setAddPlayerOpen(false); return true; } // empty name: unchanged legacy behaviour
+    return false; // secure id unavailable: modal stays open, draft intact
+  };
   return (
     <div>
       {/* v1.12.1 (UX restructure, spec 2/6): group/session info + ตั้งค่าก๊วน now open this page (the new
@@ -13027,12 +13771,12 @@ function MembersTab({ players, archivedPlayers, playingIds, addPlayer, resetAllT
             <button onClick={() => newPlayerFileRef.current.click()} title={t("player.addPhoto")} style={{ position: "relative", border: `1px solid ${T.border}`, background: T.surface, borderRadius: 11, padding: 0, width: 46, height: 46, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
               {draftPhoto ? <img src={draftPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={18} color={T.muted} />}
             </button>
-            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (submit(), setAddPlayerOpen(false))} placeholder={t("player.name")} style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
+            <input autoFocus value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} placeholder={t("player.name")} style={{ flex: 1, padding: "11px 12px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14.5, outline: "none" }} />
           </div>
           <div style={{ marginBottom: 14 }}>
             <select value={skillIndex} onChange={(e) => setSkillIndex(Number(e.target.value))} style={{ width: "100%", padding: "10px 8px", borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, color: T.text, fontSize: 14, fontWeight: 700 }}>{levelOptions.map((o) => <option key={o.skillIndex + o.label} value={o.skillIndex}>{o.label}</option>)}</select>
           </div>
-          <button onClick={() => { submit(); setAddPlayerOpen(false); }} disabled={!name.trim()} style={{ ...btnPrimary, width: "100%", opacity: name.trim() ? 1 : 0.5 }}><Plus size={16} /> {t("player.add")}</button>
+          <button onClick={() => { submit(); }} disabled={!name.trim()} style={{ ...btnPrimary, width: "100%", opacity: name.trim() ? 1 : 0.5 }}><Plus size={16} /> {t("player.add")}</button>
         </Overlay>
       )}
 
@@ -13739,6 +14483,13 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
   ], [history, current, sessionHistory, session]);
   const cs = playerStats(p.id, casualMatches);
   const ts = tournamentStatsForPlayer(p.id, tournamentHistory);
+  // v1.14.4 (P0-B): cumulative Group fees ACTUALLY paid — derived on every render from archived paid bill rows + today's
+  // paid rows (see groupPaidFeesByPlayer); no stored counter. Owner-side sheet, so shown via canViewStat("owner").
+  const groupPaid = useMemo(() => {
+    let liveBill = null;
+    try { const doneCurrent = (current || []).filter((m) => m && m.status === "done"); liveBill = computeBill(players || [], settings || {}, [...(history || []), ...doneCurrent]); } catch (e) { liveBill = null; }
+    return groupPaidFeesForPlayer(p.id, sessionHistory, liveBill, session && session.id);
+  }, [players, settings, history, current, sessionHistory, session, p.id]);
   // v1.11.7 STAT RECONCILIATION FIX: "แมตช์ทั้งหมด" must equal ชนะ+แพ้ (matchesPlayed = wins + losses).
   // Badminton has no genuine "draw" result, so a casual match that finished with no score entered
   // (cs.noScore — the organizer tapped "จบเกม" without using ScoreEditor, which is a normal, common
@@ -13929,6 +14680,7 @@ function PlayerProfileSheet({ player: p, getP, players, history, current, sessio
           "Champion" / "Runner-up" / "Third") — same 5 cards, no new stats added per spec. */}
       <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
         <MiniStat label={t("player.attendanceCount")} value={sessionsAttended} />
+        {canViewStat("groupPaidFeesTotal", "owner") && <MiniStat label={t("player.groupPaidFeesTotal")} value={formatCurrency(groupPaid.total)} color={T.green} />}
         <MiniStat label={t("tournament.title")} value={ts.tournaments} />
         <MiniStat label={`🥇 ${t("tournament.champion")}`} value={ts.championships} color={T.green} />
         <MiniStat label={`🥈 ${t("tournament.runnerUp")}`} value={ts.runnerUps} />
@@ -14818,8 +15570,32 @@ const ONLINE_STATUS_LABEL_KEY = {
   [ONLINE_STATUS.REVOKED]: "online.status.moved",
   [ONLINE_STATUS.ERROR]: "online.status.error",
 };
+// Both Firebase clients initialize asynchronously. Core Cloud remains the v1.14.2 default app; the
+// Commercial bridge is a separate named app and can never supply identity to Core Workspace calls.
+function useBadQCloudAdapter() {
+  const readAdapter = () => (typeof window !== "undefined" ? window.BadQCloud : null);
+  const [adapter, setAdapter] = useState(readAdapter);
+  useEffect(() => {
+    const refresh = () => setAdapter(readAdapter());
+    window.addEventListener("badq:cloud-ready", refresh);
+    refresh();
+    return () => window.removeEventListener("badq:cloud-ready", refresh);
+  }, []);
+  return adapter;
+}
+function useBadQCommercialAdapter() {
+  const readAdapter = () => (typeof window !== "undefined" ? window.BadQCommercialBridge : null);
+  const [adapter, setAdapter] = useState(readAdapter);
+  useEffect(() => {
+    const refresh = () => setAdapter(readAdapter());
+    window.addEventListener("badq:commercial-bridge-ready", refresh);
+    refresh();
+    return () => window.removeEventListener("badq:commercial-bridge-ready", refresh);
+  }, []);
+  return adapter;
+}
 function BadQOnlineNavRow({ deviceId, onOpen, tr }) {
-  const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
+  const cloud = useBadQCloudAdapter();
   const available = !!(cloud && cloud.available);
   const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
   const [workspace, setWorkspace] = useState(null);
@@ -14860,14 +15636,126 @@ function BadQOnlineNavRow({ deviceId, onOpen, tr }) {
   );
 }
 
+// Phase 4C: minimal Players Sync panel (inside the Badminton Group linking card). Opt-in per player, explicit status, retry,
+// conflict preview + explicit accept, cloud-only preview + explicit add. It never sends or applies anything on its own beyond
+// the engine's own fail-closed reconciliation of players the Owner explicitly selected.
+function PlayerSyncPanel({ commercial, localGroupId, players, t }) {
+  const engine = commercial && commercial.playerSync ? commercial.playerSync : null;
+  const [view, setView] = useState(() => (engine ? engine.getView(localGroupId) : null));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [cloudOnly, setCloudOnly] = useState(null);
+  useEffect(() => {
+    if (!engine) return;
+    setView(engine.getView(localGroupId));
+    const off = engine.subscribe(() => setView(engine.getView(localGroupId)));
+    return () => { try { off && off(); } catch (e) {} };
+  }, [engine, localGroupId]);
+  if (!engine) return <div data-testid="player-sync-unavailable" style={{ fontSize: 11.5, color: T.muted, marginTop: 10 }}>{t("online.playerSync.unavailable")}</div>;
+  const run = async (fn) => {
+    setBusy(true); setError("");
+    try { await fn(); } catch (e) { setError(t("online.playerSync.actionError") + (e && e.code ? ` (${e.code})` : "")); }
+    finally { setBusy(false); if (engine) setView(engine.getView(localGroupId)); }
+  };
+  const bindings = (view && view.bindings) || {};
+  const ready = !!(view && view.capability && view.capability.ok && view.storeState === "ready");
+  const list = Array.isArray(players) ? players : [];
+  const known = new Set(list.map((p) => p.id));
+  const orphan = Object.keys(bindings).filter((id) => !known.has(id));
+  const level = (p) => t("online.playerSync.previewLevel", { level: p.skillIndex });
+  const fmt = (v) => (v ? `${v.displayName} · ${t("online.playerSync.previewLevel", { level: v.skillIndex })} · ${v.archived ? t("online.playerSync.previewArchived") : t("online.playerSync.previewActive")}` : "—");
+  const conflictText = (code) => { const k = playerSyncConflictKey(code); const v = t(k); return v && v !== k ? v : t(PLAYER_SYNC_CONFLICT_FALLBACK_KEY); };
+  const doSelect = (p, on) => run(async () => { on ? await engine.selectPlayer({ localGroupId, playerId: p.id }) : await engine.deselectPlayer({ localGroupId, playerId: p.id }); });
+  const doReview = (id) => run(async () => setPreview(await engine.previewResolution({ localGroupId, playerId: id })));
+  const doAccept = () => run(async () => { await engine.acceptCloudUpdate({ localGroupId, playerId: preview.playerId, token: preview.token }); setPreview(null); });
+  const doUseLocal = () => run(async () => { await engine.useLocalValue({ localGroupId, playerId: preview.playerId, token: preview.token }); setPreview(null); });
+  const rowFor = (id, name, p) => {
+    const b = bindings[id];
+    const selected = !!b && b.membership === "selected";
+    const status = b ? b.status : "unselected";
+    const elig = p && engine.eligibility ? engine.eligibility(p) : { ok: true };
+    const blocked = !selected && !elig.ok;
+    const color = status === "ready" ? T.green : status === "conflict" || status === "paused_missing_local" ? T.accent : T.muted;
+    return (
+      <div key={id} data-testid={`player-sync-row-${id}`} style={{ padding: "7px 0", borderTop: `1px solid ${T.border}` }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <input type="checkbox" aria-label={t("online.playerSync.select")} checked={selected} disabled={busy || !ready || blocked || !p} onChange={(e) => p && doSelect(p, e.target.checked)} />
+          <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, color: T.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{name}</div>
+          <div style={{ fontSize: 10.5, fontWeight: 800, color }}>{t(playerSyncStatusKey(status))}</div>
+        </div>
+        {blocked && <div style={{ fontSize: 10.5, color: T.muted, marginLeft: 24 }}>{t(elig.code === "player-id-unsupported" ? "online.playerSync.unsupportedId" : "online.playerSync.invalidLocal")}</div>}
+        {selected && status === "conflict" && (
+          <div style={{ marginLeft: 24, marginTop: 3 }}>
+            <div style={{ fontSize: 10.5, color: T.accent }}>{conflictText(b.conflictCode)}</div>
+            <button disabled={busy} onClick={() => doReview(id)} style={{ ...btnSecondary, flex: "none", padding: "5px 10px", fontSize: 11.5, marginTop: 4 }}>{t("online.playerSync.review")}</button>
+          </div>
+        )}
+        {selected && status === "paused_missing_local" && (
+          <button disabled={busy || !known.has(id)} onClick={() => run(() => engine.resumeAfterReview({ localGroupId, playerId: id }))} style={{ ...btnSecondary, flex: "none", padding: "5px 10px", fontSize: 11.5, marginTop: 4, marginLeft: 24 }}>{t("online.playerSync.resume")}</button>
+        )}
+        {selected && (status === "pending" || status === "stale") && (
+          <button disabled={busy} onClick={() => run(() => engine.reconcile({ localGroupId, playerIds: [id] }))} style={{ ...btnSecondary, flex: "none", padding: "5px 10px", fontSize: 11.5, marginTop: 4, marginLeft: 24 }}>{t("online.playerSync.retry")}</button>
+        )}
+      </div>
+    );
+  };
+  return (
+    <div data-testid="player-sync-panel" style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${T.border}` }}>
+      <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{t("online.playerSync.title")}</div>
+      <div style={{ fontSize: 10.5, color: T.muted, margin: "3px 0 6px" }}>{t("online.playerSync.hint")}</div>
+      {view && view.storeState === "invalid" && <div style={{ fontSize: 11, color: T.accent }}>{t("online.playerSync.storeInvalid")}</div>}
+      {!ready && !(view && view.storeState === "invalid") && <div style={{ fontSize: 11, color: T.muted }}>{t("online.playerSync.notReady")}</div>}
+      {typeof navigator !== "undefined" && navigator.onLine === false && <div style={{ fontSize: 10.5, color: T.muted }}>{t("online.playerSync.offline")}</div>}
+      <div style={{ maxHeight: 260, overflowY: "auto" }}>
+        {list.map((p) => rowFor(p.id, p.name, p))}
+        {orphan.map((id) => rowFor(id, id, null))}
+      </div>
+      {preview && (
+        <div data-testid="player-sync-preview" style={{ marginTop: 8, padding: 10, borderRadius: 9, background: T.surface2, border: `1px solid ${T.border}` }}>
+          <div style={{ fontSize: 11, color: T.accent, marginBottom: 4 }}>{conflictText(preview.kind)}</div>
+          <div style={{ fontSize: 11.5, color: T.text }}>{t("online.playerSync.previewLocal")}: {fmt(preview.local)}</div>
+          <div style={{ fontSize: 11.5, color: T.text }}>{t("online.playerSync.previewCloud")}: {fmt(preview.cloud && preview.cloud.payload)}</div>
+          <div style={{ fontSize: 10.5, color: T.muted, margin: "4px 0 6px" }}>{t("online.playerSync.previewNote")}</div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {preview.canUseCloud && <button disabled={busy} onClick={doAccept} style={{ ...btnPrimary, padding: "7px 0", fontSize: 12 }}>{t("online.playerSync.acceptCloud")}</button>}
+            {preview.canUseLocal && <button disabled={busy} onClick={doUseLocal} style={{ ...btnSecondary, padding: "7px 0", fontSize: 12 }}>{t("online.playerSync.useLocal")}</button>}
+            <button disabled={busy} onClick={() => setPreview(null)} style={{ ...btnSecondary, padding: "7px 0", fontSize: 12 }}>{t("online.playerSync.cancel")}</button>
+          </div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+        <button disabled={busy || !ready} onClick={() => run(() => engine.reconcile({ localGroupId }))} style={{ ...btnSecondary, padding: "8px 0", fontSize: 12 }}>{t("online.playerSync.syncNow")}</button>
+        <button disabled={busy || !ready} onClick={() => run(async () => setCloudOnly(await engine.listCloudOnly({ localGroupId })))} style={{ ...btnSecondary, padding: "8px 0", fontSize: 12 }}>{t("online.playerSync.cloudOnlyCheck")}</button>
+      </div>
+      {cloudOnly && (
+        <div data-testid="player-sync-cloud-only" style={{ marginTop: 6 }}>
+          {cloudOnly.length === 0 && <div style={{ fontSize: 11, color: T.muted }}>{t("online.playerSync.cloudOnlyNone")}</div>}
+          {cloudOnly.map((row) => (
+            <div key={row.playerId} style={{ padding: "6px 0", borderTop: `1px solid ${T.border}` }}>
+              <div style={{ fontSize: 12, color: T.text }}>{fmt(row.payload)}</div>
+              {row.importable
+                ? <button disabled={busy} onClick={() => run(async () => { await engine.importCloudPlayer({ localGroupId, playerId: row.playerId, token: row.token }); setCloudOnly(await engine.listCloudOnly({ localGroupId })); })} style={{ ...btnSecondary, flex: "none", padding: "5px 10px", fontSize: 11.5, marginTop: 3 }}>{t("online.playerSync.import")}</button>
+                : <div style={{ fontSize: 10.5, color: T.muted }}>{t("online.playerSync.importBlocked")}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+      {error && <div style={{ marginTop: 6, fontSize: 11, color: T.accent }}>{error}</div>}
+    </div>
+  );
+}
 // Full "☁️ BadQ Online" sheet (spec sections B-L). Owner Auth (register/verify/sign-in/reset/logout) +
 // Workspace resolution (create-once, idempotent) + Single Active Device (auto-register when none exists,
 // explicit-confirm takeover when one already exists, live revoked-state detection via a real-time Firestore
 // listener). Does not read or write ANY BadQ business data — see the file-level comment block above.
-function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroupName, t, fmtDateTime, onClose }) {
-  const cloud = typeof window !== "undefined" ? window.BadQCloud : null;
+function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, localGroups, currentLocalGroupId, currentGroupName, players, t, fmtDateTime, onClose }) {
+  const cloud = useBadQCloudAdapter();
+  const commercial = useBadQCommercialAdapter();
   const available = !!(cloud && cloud.available);
+  const commercialAvailable = !!(commercial && commercial.available);
   const [authUser, setAuthUser] = useState(() => (available && cloud.getCurrentOwner ? cloud.getCurrentOwner() : null));
+  const [commercialUser, setCommercialUser] = useState(() => (commercialAvailable && commercial.getCurrentOwner ? commercial.getCurrentOwner() : null));
   const [authMode, setAuthMode] = useState("signin"); // "signin" | "register"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -14879,6 +15767,21 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
   const [cloudError, setCloudError] = useState(null);
   const [isOffline, setIsOffline] = useState(typeof navigator !== "undefined" ? !navigator.onLine : false);
   const [takeoverDismissed, setTakeoverDismissed] = useState(false); // collapses the big confirm dialog into a small reopenable banner
+  const phase2GroupLinking = !!(commercialAvailable && commercial.listBadmintonGroups && commercial.linkBadmintonGroup &&
+    commercial.createAndLinkBadmintonGroup && commercial.validateBadmintonGroupLink && commercial.unlinkBadmintonGroup);
+  const localGroupOptions = (localGroups && Array.isArray(localGroups.records) ? localGroups.records : [])
+    .filter((record) => record && typeof record.localGroupId === "string" && typeof record.name === "string");
+  const localGroupNames = localGroupOptions.map((record) => record.name);
+  const preferredLocalGroupId = localGroupOptions.some((record) => record.localGroupId === currentLocalGroupId)
+    ? currentLocalGroupId : (localGroupOptions[0]?.localGroupId || "");
+  const [selectedLocalGroupId, setSelectedLocalGroupId] = useState(preferredLocalGroupId);
+  const selectedLocalGroup = localGroupOptions.find((record) => record.localGroupId === selectedLocalGroupId) || null;
+  const [groupLinkState, setGroupLinkState] = useState(() =>
+    phase2GroupLinking && commercial.getBadmintonGroupLinkState ? commercial.getBadmintonGroupLinkState() : { records: [] });
+  const [phase2CloudGroups, setPhase2CloudGroups] = useState([]);
+  const [selectedCloudGroupId, setSelectedCloudGroupId] = useState("");
+  const [phase2Busy, setPhase2Busy] = useState(false);
+  const [phase2Error, setPhase2Error] = useState("");
   // Distinguishes the two device-conflict scenarios that deriveOnlineStatus's single REVOKED bucket does NOT
   // separate (they share one status value on purpose -- see ONLINE_STATUS's own comment -- but need DIFFERENT
   // banner copy per spec sections H and J): a device that has NEVER been this Workspace's active device
@@ -14921,6 +15824,52 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
     const unsub = cloud.onAuthChange((u) => { setAuthUser(u || null); setWorkspace(null); setCloudError(null); setTakeoverDismissed(false); });
     return () => { try { unsub && unsub(); } catch (e) {} };
   }, [available]);
+  useEffect(() => {
+    if (!commercialAvailable || !commercial.onAuthChange) return;
+    const unsub = commercial.onAuthChange((u) => setCommercialUser(u || null));
+    return () => { try { unsub && unsub(); } catch (e) {} };
+  }, [commercialAvailable]);
+  useEffect(() => {
+    if (!phase2GroupLinking || !commercial.onBadmintonGroupLinkChange) return;
+    const unsub = commercial.onBadmintonGroupLinkChange((value) => setGroupLinkState(value || { records: [] }));
+    return () => { try { unsub && unsub(); } catch (e) {} };
+  }, [phase2GroupLinking]);
+  useEffect(() => {
+    if (!localGroupOptions.some((record) => record.localGroupId === selectedLocalGroupId)) setSelectedLocalGroupId(preferredLocalGroupId);
+  }, [preferredLocalGroupId, selectedLocalGroupId, localGroupOptions.map((record) => record.localGroupId).join("|")]);
+  useEffect(() => {
+    if (!phase2GroupLinking || !commercial.reconcileBadmintonGroupIdentities) return;
+    try { commercial.reconcileBadmintonGroupIdentities(localGroupOptions); }
+    catch (e) { setPhase2Error(t("online.groupLink.actionError")); }
+  }, [phase2GroupLinking, localGroupOptions.map((record) => `${record.localGroupId}:${record.name}`).join("|")]);
+  useEffect(() => {
+    if (!phase2GroupLinking || !commercialUser || !commercialUser.emailVerified) return;
+    let cancelled = false;
+    setPhase2Busy(true); setPhase2Error("");
+    commercial.listBadmintonGroups()
+      .then((groups) => {
+        if (cancelled) return;
+        const safe = Array.isArray(groups) ? groups : [];
+        setPhase2CloudGroups(safe);
+        setSelectedCloudGroupId((current) => safe.some((group) => group.groupId === current)
+          ? current : (safe[0]?.groupId || ""));
+      })
+      .catch(() => { if (!cancelled) setPhase2Error(t("online.groupLink.loadError")); })
+      .finally(() => { if (!cancelled) setPhase2Busy(false); });
+    return () => { cancelled = true; };
+  }, [phase2GroupLinking, commercialUser && commercialUser.uid, commercialUser && commercialUser.emailVerified]);
+
+  const selectedGroupLink = (groupLinkState.records || []).find((record) =>
+    record && record.localGroupId === selectedLocalGroupId) || null;
+  useEffect(() => {
+    if (!phase2GroupLinking || !selectedGroupLink || selectedGroupLink.linkStatus !== "linked" ||
+        selectedGroupLink.validationStatus === "validated" || !commercialUser || !commercialUser.emailVerified) return;
+    let cancelled = false;
+    commercial.validateBadmintonGroupLink(selectedGroupLink.localGroupId)
+      .catch(() => { if (!cancelled) setPhase2Error(t("online.groupLink.actionError")); });
+    return () => { cancelled = true; };
+  }, [phase2GroupLinking, selectedGroupLink && selectedGroupLink.localGroupId,
+    selectedGroupLink && selectedGroupLink.validationStatus, commercialUser && commercialUser.uid]);
   useEffect(() => {
     const goOnline = () => setIsOffline(false), goOffline = () => setIsOffline(true);
     window.addEventListener("online", goOnline); window.addEventListener("offline", goOffline);
@@ -15029,7 +15978,6 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
   // Summary shown to the Owner BEFORE they confirm (spec: "number of clubs/groups, number of current
   // sessions, most recent local update timestamp, device/browser context where practical") — built entirely
   // from data THIS device already has locally; never fetched from anywhere else.
-  const localGroupNames = Object.keys(groupDefaults || {});
   const localGroupCount = localGroupNames.length;
   const localSessionCount = (sessionHistory || []).length;
   const localMostRecentAt = (sessionHistory || []).reduce((max, h) => Math.max(max, Number(h && h.endedAt) || 0), 0);
@@ -15057,6 +16005,51 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
     } catch (e) { setInitErr(cloudErrorMessage(e, t)); }
     finally { setInitBusy(false); }
   };
+
+  const refreshPhase2Groups = async () => {
+    const groups = await commercial.listBadmintonGroups();
+    const safe = Array.isArray(groups) ? groups : [];
+    setPhase2CloudGroups(safe);
+    setSelectedCloudGroupId((current) => safe.some((group) => group.groupId === current)
+      ? current : (safe[0]?.groupId || ""));
+    return safe;
+  };
+  const doPhase2Link = async () => {
+    if (!selectedLocalGroup || !selectedCloudGroupId) return;
+    setPhase2Busy(true); setPhase2Error("");
+    try { await commercial.linkBadmintonGroup({ localGroupId: selectedLocalGroup.localGroupId, localGroupName: selectedLocalGroup.name, cloudGroupId: selectedCloudGroupId }); }
+    catch (e) { setPhase2Error(t("online.groupLink.actionError")); }
+    finally { setPhase2Busy(false); }
+  };
+  const doPhase2Create = async () => {
+    if (!selectedLocalGroup || !window.confirm(t("online.groupLink.createConfirm", { name: selectedLocalGroup.name }))) return;
+    setPhase2Busy(true); setPhase2Error("");
+    try {
+      await commercial.createAndLinkBadmintonGroup({ localGroupId: selectedLocalGroup.localGroupId, localGroupName: selectedLocalGroup.name, displayName: selectedLocalGroup.name });
+      await refreshPhase2Groups();
+    } catch (e) { setPhase2Error(t("online.groupLink.actionError")); }
+    finally { setPhase2Busy(false); }
+  };
+  const doPhase2Validate = async () => {
+    if (!selectedGroupLink) return;
+    setPhase2Busy(true); setPhase2Error("");
+    try { await commercial.validateBadmintonGroupLink(selectedGroupLink.localGroupId); }
+    catch (e) { setPhase2Error(t("online.groupLink.actionError")); }
+    finally { setPhase2Busy(false); }
+  };
+  const doPhase2Unlink = async () => {
+    if (!selectedGroupLink || !window.confirm(t("online.groupLink.unlinkConfirm"))) return;
+    setPhase2Busy(true); setPhase2Error("");
+    try { await commercial.unlinkBadmintonGroup(selectedGroupLink.localGroupId, { explicit: true }); }
+    catch (e) { setPhase2Error(t("online.groupLink.actionError")); }
+    finally { setPhase2Busy(false); }
+  };
+
+  const groupLinkStatusKey = selectedGroupLink?.validationStatus === "validated" ? "online.groupLink.validated" :
+    selectedGroupLink?.validationStatus === "offline" ? "online.groupLink.offline" :
+    selectedGroupLink?.validationStatus === "deleted" ? "online.groupLink.deleted" :
+    selectedGroupLink?.validationStatus === "account_mismatch" ? "online.groupLink.accountMismatch" :
+    "online.groupLink.stale";
 
   const doRegister = async () => {
     if (password !== confirmPassword) { setErr(t("online.auth.passwordMismatch")); return; }
@@ -15171,20 +16164,65 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
       )}
 
       {/* AUTHENTICATED + VERIFIED (sections F-L) */}
-      {authUser && authUser.emailVerified && (
+      {((authUser && authUser.emailVerified) || (phase2GroupLinking && commercialUser && commercialUser.emailVerified)) && (
         <div>
-          <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{authUser.email}</div>
-            <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t("online.auth.verified")}</div>
-          </div>
+          {authUser && authUser.emailVerified && (
+            <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: T.text }}>{authUser.email}</div>
+              <div style={{ fontSize: 10.5, color: T.muted, marginTop: 2 }}>{t("online.auth.verified")}</div>
+            </div>
+          )}
 
+          {phase2GroupLinking && commercialUser && commercialUser.emailVerified && (
+            <div data-testid="badminton-group-linking" style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, marginBottom: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 800, color: T.text, marginBottom: 10 }}>{t("online.groupLink.title")}</div>
+              {localGroupNames.length === 0 ? (
+                <div style={{ fontSize: 11.5, color: T.muted }}>{t("online.groupLink.noLocalGroups")}</div>
+              ) : (
+                <>
+                  <Label>{t("online.groupLink.localGroup")}</Label>
+                  <select data-testid="group-link-local-select" value={selectedLocalGroupId} onChange={(e) => setSelectedLocalGroupId(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, background: T.surface, color: T.text, marginBottom: 10 }}>
+                    {localGroupOptions.map((group) => <option key={group.localGroupId} value={group.localGroupId}>{group.name}</option>)}
+                  </select>
+                  {selectedGroupLink && selectedGroupLink.linkStatus === "linked" ? (
+                    <div data-testid="group-link-linked-state">
+                      <div style={{ fontSize: 12.5, fontWeight: 800, color: T.green }}>{t("online.groupLink.linked", { name: selectedGroupLink.cloudGroupDisplayName })}</div>
+                      <div style={{ fontSize: 11, color: selectedGroupLink.validationStatus === "validated" ? T.green : T.muted, marginTop: 3, marginBottom: 9 }}>{t(groupLinkStatusKey)}</div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button disabled={phase2Busy} onClick={doPhase2Validate} style={{ ...btnSecondary, flex: 1 }}>{t("online.groupLink.validate")}</button>
+                        <button disabled={phase2Busy} onClick={doPhase2Unlink} style={{ ...btnSecondary, flex: 1, color: T.accent }}>{t("online.groupLink.unlink")}</button>
+                      </div>
+                      <PlayerSyncPanel commercial={commercial} localGroupId={selectedLocalGroupId} players={players} t={t} />
+                    </div>
+                  ) : (
+                    <div data-testid="group-link-unlinked-state">
+                      <div style={{ fontSize: 11.5, color: T.muted, marginBottom: 8 }}>{t("online.groupLink.unlinked")}</div>
+                      {phase2CloudGroups.length > 0 ? (
+                        <>
+                          <Label>{t("online.groupLink.cloudGroup")}</Label>
+                          <select data-testid="group-link-cloud-select" value={selectedCloudGroupId} onChange={(e) => setSelectedCloudGroupId(e.target.value)} style={{ width: "100%", boxSizing: "border-box", padding: "8px 10px", borderRadius: 9, border: `1px solid ${T.border}`, fontSize: 13, background: T.surface, color: T.text, marginBottom: 8 }}>
+                            {phase2CloudGroups.map((group) => <option key={group.groupId} value={group.groupId}>{group.displayName}</option>)}
+                          </select>
+                          <button disabled={phase2Busy || !selectedCloudGroupId} onClick={doPhase2Link} style={{ ...btnPrimary, width: "100%", marginBottom: 8 }}>{t("online.groupLink.link")}</button>
+                        </>
+                      ) : !phase2Busy && <div style={{ fontSize: 11, color: T.muted, marginBottom: 8 }}>{t("online.groupLink.noCloudGroups")}</div>}
+                      <button disabled={phase2Busy} onClick={doPhase2Create} style={{ ...btnSecondary, width: "100%" }}>{t("online.groupLink.create")}</button>
+                    </div>
+                  )}
+                  {phase2Error && <div style={{ marginTop: 8, fontSize: 11.5, color: T.accent }}>{phase2Error}</div>}
+                </>
+              )}
+            </div>
+          )}
+
+          {authUser && authUser.emailVerified && (<>
           {cloudError && (
             <div style={{ padding: 12, borderRadius: 11, background: "#fdeae7", border: `1px solid ${T.accent}`, fontSize: 12, color: T.accent, marginBottom: 10 }}>{t("online.cloud.connectionError", { error: cloudErrorMessage(cloudError, t) })}</div>
           )}
           {isOffline && !cloudError && (
             <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>{t("online.cloud.offlineReconnect")}</div>
           )}
-          {!workspace && !cloudError && !isOffline && (
+          {!phase2GroupLinking && !workspace && !cloudError && !isOffline && (
             <div style={{ padding: 12, borderRadius: 11, background: T.surface, border: `1px solid ${T.border}`, fontSize: 12, color: T.muted, marginBottom: 10 }}>{t("online.cloud.connectingWorkspace")}</div>
           )}
 
@@ -15291,6 +16329,7 @@ function BadQOnlineSheet({ deviceId, groupDefaults, sessionHistory, currentGroup
           {notice && <div style={{ marginBottom: 10, fontSize: 12, color: T.green }}>{notice}</div>}
 
           <button disabled={busy} onClick={doLogout} style={btnSecondary}>{t("online.auth.signOut")}</button>
+          </>)}
         </div>
       )}
     </Overlay>
@@ -15409,7 +16448,10 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
   // what SessionTab always computed here.
   const pastQuans = useMemo(() => {
     const seen = new Set(), out = [];
-    (sessionHistory || []).forEach((s) => { if (s.name && !seen.has(s.name)) { seen.add(s.name); out.push({ name: s.name, photo: s.photo || null }); } });
+    (sessionHistory || []).forEach((s) => {
+      const key = s.localGroupId || `name:${s.name || ""}`;
+      if (s.name && !seen.has(key)) { seen.add(key); out.push({ localGroupId: s.localGroupId || null, name: s.name, photo: s.photo || null }); }
+    });
     return out;
   }, [sessionHistory]);
   const lockPairCount = (lockPairs || []).length;
@@ -15444,8 +16486,8 @@ function GroupSessionHeader({ session, setSession, openSessionPhoto, clearSessio
                     <div style={{ fontSize: 10.5, color: T.muted, padding: "0 8px 6px", lineHeight: 1.4 }}>{t("session.previousPhotoHint")}</div>
                     {pastQuans.map((q) => (
                       <button
-                        key={q.name}
-                        onClick={() => { setSession((s) => ({ ...s, name: q.name, photo: q.photo })); applyGroupDefaultsFor(q.name); setShowNameDropdown(false); }}
+                        key={q.localGroupId || q.name}
+                        onClick={() => { setSession((s) => ({ ...s, localGroupId: q.localGroupId, name: q.name, photo: q.photo })); applyGroupDefaultsFor(q.name); setShowNameDropdown(false); }}
                         style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderRadius: 9, background: "none", border: "none", textAlign: "left" }}
                       >
                         {q.photo ? (
@@ -17528,6 +18570,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
   // comment. Finance > ชำระเงิน, Finance Overview, and all calculations are completely untouched.
   const [open, setOpen] = useState("play"); // "play" | "payment" | "level" | null — one section open at a time
   const [editCourtLabels, setEditCourtLabels] = useState(false);
+  const [editCourtTimes, setEditCourtTimes] = useState(false); // v1.14.4: per-court start/end editor (view over session.courtHours)
   const [showCourtRecDetail, setShowCourtRecDetail] = useState(false); // v1.11.7 (Part I/J)
   const courtRec = useMemo(() => buildCourtRecommendation(players, session, settings, sessionHistory, mode), [players, session, settings, sessionHistory, mode]);
   // v1.11.72: busiest merged period (largest `active`) — used to surface a one-line games/wait summary on
@@ -17625,6 +18668,10 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           <button onClick={() => setEditCourtLabels((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "8px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 14, display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 12 }}>🔢</span> {t("quanSettings.editCourtLabels")}<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtLabels ? "rotate(180deg)" : "none" }} />
           </button>
+          <button onClick={() => setEditCourtTimes((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "8px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 12 }}>🕒</span> {t("quanSettings.courtTimesToggle")}<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtTimes ? "rotate(180deg)" : "none" }} />
+          </button>
+          {editCourtTimes && <CourtTimeRows courtCount={courtCount} courtLabels={courtLabels} session={session} setSession={setSession} t={t} />}
           {editCourtLabels && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
               {Array.from({ length: courtCount }, (_, i) => (
@@ -18140,6 +19187,28 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
 // hours) and a separately-editable "billable hours" that can differ from its actual usage duration (venue
 // free/bonus court-time). See reconcileCourtHours/buildCourtCostRows's own v1.12.12 comments for the full
 // storage-model rationale — this component is purely the editing UI on top of that.
+// v1.14.4 (P0-A): compact per-court start/end editor for Group Settings. It is a second VIEW over the exact same data the
+// cost screen edits (session.courtHours through patchCourtHoursRow / reconcileCourtHours) — no state of its own.
+function CourtTimeRows({ courtCount, courtLabels, session, setSession, t }) {
+  const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
+  const rows = reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime);
+  const patch = (court, p) => setSession((s) => ({ ...s, courtHours: patchCourtHoursRow(s.courtHours, court, p) }));
+  const inputStyle = { padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none", background: T.surface, color: T.text };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
+      {rows.map((row) => (
+        <div key={row.court} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, fontWeight: 800, minWidth: 54 }}>{t("match.colCourt")} {courtLabelFor(courtLabels, row.court)}</span>
+          <input type="time" value={row.startAt || ""} onChange={(e) => patch(row.court, { startAt: e.target.value || null })} style={inputStyle} />
+          <span style={{ fontSize: 11, color: T.muted }}>→</span>
+          <input type="time" value={row.endAt || ""} onChange={(e) => patch(row.court, { endAt: e.target.value || null })} style={inputStyle} />
+          <span style={{ fontSize: 11, color: T.muted }}>{Math.round(row.actualDurationHours * 100) / 100} {t("court.hourUnit")}{row.freeHours > 0 ? ` · ${t("court.freeHoursLabel")} ${row.freeHours}` : ""}</span>
+        </div>
+      ))}
+      <div style={{ fontSize: 10.5, color: T.muted }}>{t("quanSettings.courtTimesNote")}</div>
+    </div>
+  );
+}
 function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, courtLabels, durationHours, session, setSession, t }) {
   const rate = (settings.courtCost && settings.courtCost.ratePerHour) || 0;
   const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), rate);
@@ -18151,14 +19220,12 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
   // session-scoped (session.courtHours, not settings), still resets to a clean slate every new session (see
   // normSession/endSession) — the array's own name/identity is unchanged on purpose, only its row shape
   // grew (see reconcileCourtHours's read-side backward-compat handling of pre-v1.12.12 rows).
-  const patchCourt = (court, patch) => setSession((s) => {
-    const others = (s.courtHours || []).filter((r) => r.court !== court);
-    const existing = (s.courtHours || []).find((r) => r.court === court) || {};
-    return { ...s, courtHours: [...others, { ...existing, court, ...patch, source: "manual" }] };
-  });
+  const patchCourt = (court, patch) => setSession((s) => ({ ...s, courtHours: patchCourtHoursRow(s.courtHours, court, patch) }));
   const setCourtStartAt = (court, v) => patchCourt(court, { startAt: v || null });
   const setCourtEndAt = (court, v) => patchCourt(court, { endAt: v || null });
   const setCourtBillable = (court, v) => patchCourt(court, { billableHours: Math.max(0, Number(v) || 0) });
+  // v1.14.4: complimentary/free hours are entered here but STORED as billableHours (= actual - free) — one model, no drift.
+  const setCourtFree = (court, actual, v) => patchCourt(court, { billableHours: billableFromFreeHours(actual, v) });
   // v1.12.12 (spec P0.2): "+ เปิดสนามเพิ่ม" opens one more REAL court (bumps the same courtCount every other
   // part of the app — matchmaking/court labels — already uses, not just a cost-tracking line), defaulted to a
   // clean full-hour window starting NOW — never assumed to share the ก๊วน's own start time, since a court
@@ -18166,9 +19233,7 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
   // row via the inputs above.
   const addCourt = () => {
     const nextCourt = Math.max(0, Math.round(Number(courtCount) || 0)) + 1;
-    const nowMin = new Date().getHours() * 60;
-    const startAt = minutesToTimeStr(nowMin);
-    const endAt = minutesToTimeStr(nowMin + 60);
+    const { startAt, endAt } = newCourtDefaultWindow(new Date());
     if (typeof setCourtCount === "function") setCourtCount(nextCourt);
     setSession((s) => {
       const others = (s.courtHours || []).filter((r) => r.court !== nextCourt);
@@ -18205,6 +19270,14 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
                 style={{ width: 52, padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 12.5, fontWeight: 800, outline: "none", flexShrink: 0 }}
               />
               <span style={{ fontSize: 11, color: T.muted }}>{t ? t("court.hourUnit") : "ชม."} × ฿{rate}</span>
+              <span style={{ fontSize: 11.5, color: T.muted, flexShrink: 0, marginLeft: 6 }}>{t ? t("court.freeHoursLabel") : "ฟรี"}</span>
+              <input
+                type="number"
+                value={row.freeHours}
+                onChange={(e) => setCourtFree(row.court, row.actualDurationHours, e.target.value)}
+                onFocus={(e) => e.target.select()}
+                style={{ width: 46, padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 12.5, fontWeight: 800, outline: "none", flexShrink: 0 }}
+              />
             </div>
           </div>
         ))}
@@ -19224,7 +20297,7 @@ function HistoryTab({ sessionHistory, tournamentHistory, rewardHistory, playersB
 // AdvancedSettingsSheet (built in this same restructure, spec 9), so no settings/history/backup business
 // logic is duplicated here at all.
 function SettingsTab({
-  settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory,
+  settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, localGroups,
   changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData,
   archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer,
   tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate,
@@ -19321,7 +20394,7 @@ function SettingsTab({
           BadQOnlineNavRow/BadQOnlineSheet components P2.1 already shipped — only where they're mounted from
           has changed, nothing about their own behavior/authority logic. */}
       {view === "online" && (
-        <BadQOnlineSheet deviceId={deviceId} groupDefaults={groupDefaults} sessionHistory={sessionHistory} currentGroupName={session && session.name} t={t} fmtDateTime={fmtDateTime} onClose={() => setView(null)} />
+        <BadQOnlineSheet deviceId={deviceId} groupDefaults={groupDefaults} sessionHistory={sessionHistory} localGroups={localGroups} currentLocalGroupId={session && session.localGroupId} currentGroupName={session && session.name} players={players} t={t} fmtDateTime={fmtDateTime} onClose={() => setView(null)} />
       )}
       {view === "backup" && (
         <Overlay onClose={() => setView(null)}>
@@ -23030,6 +24103,7 @@ function restoreFailureMessage(reason, tr) {
   if (/QuotaExceeded/i.test(r)) return L("backup.failureQuotaExceeded", "นำเข้าข้อมูลไม่สำเร็จ — พื้นที่เก็บข้อมูลของเครื่องไม่พอ.") + intact + tail;
   if (/^backup-references-missing-images/.test(r)) return L("backup.failureMissingImages", "นำเข้าข้อมูลไม่สำเร็จ — ไฟล์นี้อ้างถึงรูปภาพที่ไม่มีอยู่ในไฟล์และไม่มีในเครื่องนี้ จึงไม่นำเข้า (ป้องกันรูปหาย).") + intact + tail;
   if (/^update-handoff-in-progress/.test(r)) return L("backup.failureUpdateHandoff", "นำเข้าข้อมูลไม่สำเร็จ — แอปกำลังอัปเดตเวอร์ชัน กรุณาลองอีกครั้งหลังเปิดแอปใหม่.") + intact + tail;
+  if (/^player-sync-fence/.test(r)) return L("backup.failurePlayerSyncFence", "นำเข้าข้อมูลไม่สำเร็จ — ยังบันทึกตัวป้องกันการซิงก์ผู้เล่นไม่สำเร็จ จึงยังไม่นำเข้า กรุณาลองอีกครั้ง.") + intact + tail;
   if (/safety-snapshot/.test(r)) return L("backup.failureSafetySnapshot", "นำเข้าข้อมูลไม่สำเร็จ — สำรองข้อมูลเดิมก่อนนำเข้าไม่สำเร็จ จึงยังไม่นำเข้า.") + intact + tail;
   return L("backup.failureGeneric", "นำเข้าข้อมูลไม่สำเร็จ — ข้อมูลที่บันทึกได้ไม่ตรงกับไฟล์สำรอง กรุณาลองนำเข้าอีกครั้ง.") + intact + tail;
 }
