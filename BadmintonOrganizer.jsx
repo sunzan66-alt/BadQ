@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.4";
+const APP_VERSION = "1.14.5";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -1050,6 +1050,9 @@ function normSession(s) {
       if (isValidClockTime(r.startAt)) o.startAt = r.startAt;
       if (isValidClockTime(r.endAt)) o.endAt = r.endAt;
       if (r.billableHours != null && r.billableHours !== "" && Number.isFinite(Number(r.billableHours))) o.billableHours = Math.max(0, Number(r.billableHours));
+      // v1.14.5: the Owner enters FREE (complimentary) hours; billable = max(0, actual - free) is then derived every read, so it
+      // keeps following the court's start/end. A row carries either billableHours (explicit) or freeHours, never needs both.
+      if (r.freeHours != null && r.freeHours !== "" && Number.isFinite(Number(r.freeHours))) o.freeHours = Math.max(0, Number(r.freeHours));
       return o;
     });
   // v1.11.52 (Shuttlecock Cost Redesign, spec C/D/H): "จำนวนลูกที่ใช้" is session-specific for the exact same
@@ -1755,12 +1758,15 @@ function computeSessionRepeatWarnings(teamA, teamB, index, lockPairs, players, e
   return warnings;
 }
 
-function genRound(localPlayers, mode, courtCount, lockPairs, stats, roundIndex, reserved) {
+function genRound(localPlayers, mode, courtCount, lockPairs, stats, roundIndex, reserved, allowedCourts) {
   const rs = reserved || new Set();
+  // v1.14.5: when real-time court availability is ON the caller passes the courts open right now; only those receive a game
+  // (null/undefined == every configured court, i.e. the unchanged behaviour).
+  const courtNos = Array.isArray(allowedCourts) ? allowedCourts.filter((c) => c >= 1 && c <= courtCount) : Array.from({ length: courtCount }, (_, i) => i + 1);
   const order = localPlayers.filter((p) => p.status === "ready" && !rs.has(p.id)).sort(SORT); // fairness-weighted (see SORT below)
   const used = new Set(rs);
   const matches = [];
-  for (let i = 0; i < courtCount; i++) {
+  for (let i = 0; i < courtNos.length; i++) {
     const pool = order.filter((p) => !used.has(p.id));
     const m = buildMatch(pool, mode, lockPairs, localPlayers, stats);
     if (!m) break;
@@ -1769,7 +1775,7 @@ function genRound(localPlayers, mode, courtCount, lockPairs, stats, roundIndex, 
       const lp = localPlayers.find((p) => p.id === id);
       if (lp) lp.lastPlayedRound = roundIndex;
     });
-    matches.push({ id: uid(), mode, source: "casual", teamA: m.teamA, teamB: m.teamB, status: "next", round: roundIndex, court: i + 1, locked: false, seq: nextMatchSeq() });
+    matches.push({ id: uid(), mode, source: "casual", teamA: m.teamA, teamB: m.teamB, status: "next", round: roundIndex, court: courtNos[i], locked: false, seq: nextMatchSeq() });
   }
   return matches;
 }
@@ -2746,11 +2752,13 @@ function reconcileCourtHours(courtHours, courtCount, durationHours, sessionStart
       const hasStartAt = typeof r.startAt === "string" && !!r.startAt;
       const hasEndAt = typeof r.endAt === "string" && !!r.endAt;
       const hasBillable = r.billableHours != null && !isNaN(Number(r.billableHours));
+      const hasFree = r.freeHours != null && r.freeHours !== "" && !isNaN(Number(r.freeHours));
       manualByCourt.set(Math.round(Number(r.court)), {
         startAt: hasStartAt ? r.startAt : null,
         endAt: hasEndAt ? r.endAt : null,
         billableHours: hasBillable ? Math.max(0, Number(r.billableHours)) : null,
-        legacyHours: (!hasStartAt && !hasEndAt && !hasBillable && r.hours != null && !isNaN(Number(r.hours))) ? Math.max(0, Number(r.hours)) : null,
+        freeHours: hasFree ? Math.max(0, Number(r.freeHours)) : null,
+        legacyHours: (!hasStartAt && !hasEndAt && !hasBillable && !hasFree && r.hours != null && !isNaN(Number(r.hours))) ? Math.max(0, Number(r.hours)) : null,
       });
     }
   });
@@ -2764,7 +2772,9 @@ function reconcileCourtHours(courtHours, courtCount, durationHours, sessionStart
     const startAt = (m && m.startAt) || fallbackStart;
     const endAt = (m && m.endAt) || fallbackEnd;
     const actualDurationHours = (startAt && endAt) ? sessionDurationHours(startAt, endAt) : fallbackHours;
-    const billableHours = m ? (m.billableHours != null ? m.billableHours : (m.legacyHours != null ? m.legacyHours : actualDurationHours)) : actualDurationHours;
+    const billableHours = m ? (m.billableHours != null ? m.billableHours
+      : (m.freeHours != null ? Math.round(Math.max(0, actualDurationHours - m.freeHours) * 100) / 100
+      : (m.legacyHours != null ? m.legacyHours : actualDurationHours))) : actualDurationHours;
     rows.push({ court: c, source: m ? "manual" : "auto", startAt, endAt, actualDurationHours, billableHours, hours: billableHours });
   }
   return rows;
@@ -2836,6 +2846,32 @@ function courtHoursWithNewCourtDefaults(courtHours, fromCount, toCount, now) {
     out = [...out, { court: c, startAt: w.startAt, endAt: w.endAt, billableHours: null, source: "manual" }];
   }
   return out;
+}
+// ---- v1.14.5 real-time court availability (pure) ----------------------------------------------------------------------
+// A court can receive a NEW game when startAt <= now < endAt (end exclusive, minute resolution, device-local clock). A window whose
+// end is not after its start wraps past midnight (same convention as sessionDurationHours). A row with no usable start/end is not
+// restricted. This never touches a game that is already playing — callers only consult it when ASSIGNING / STARTING a new game.
+function clockMinutesOfDay(d) {
+  const x = d instanceof Date && !isNaN(d.getTime()) ? d : new Date();
+  return x.getHours() * 60 + x.getMinutes();
+}
+function courtClockActive(startAt, endAt, nowMin) {
+  const st = timeStrToMinutes(startAt), en = timeStrToMinutes(endAt);
+  if (st == null || en == null) return true;
+  return st < en ? (nowMin >= st && nowMin < en) : (nowMin >= st || nowMin < en);
+}
+// cfg: { enabled, courtHours, courtCount, sessionStartTime, sessionEndTime, now }. Returns null when the feature is OFF (== no
+// restriction: every configured court behaves exactly as before), otherwise the array of court numbers open at `now`.
+function activeCourtsAt(cfg) {
+  const c = cfg || {};
+  if (c.enabled !== true) return null;
+  const rows = reconcileCourtHours(c.courtHours, c.courtCount, sessionDurationHours(c.sessionStartTime, c.sessionEndTime), c.sessionStartTime, c.sessionEndTime);
+  const nowMin = clockMinutesOfDay(c.now);
+  return rows.filter((r) => courtClockActive(r.startAt, r.endAt, nowMin)).map((r) => r.court);
+}
+// court == null (a game with no court yet) is never blocked here: the court is chosen later, and THAT choice is gated.
+function isCourtAssignable(activeCourts, court) {
+  return activeCourts == null || court == null || activeCourts.indexOf(court) >= 0;
 }
 // v1.11.51 (spec F): Total Court Cost = sum of every court's own cost — never a single
 // จำนวนสนาม × Session Duration × Court Rate shortcut (spec I explicitly forbids that once hours can differ).
@@ -4711,6 +4747,8 @@ function getDefaultSettings() {
     // pairingMode, "auto" or "manual") are untouched, and every `settings.pairingMode === "manual"` check
     // elsewhere in the app is unchanged, so legacy data keeps behaving exactly as before.
     court: 65, shuttle: 25, other: 0, rounds: 1, winScore: 21, deuce: true, qr: null, bank: "", pairingMode: "manual",
+    // v1.14.5: "ใช้เวลาจริงในการเปิด–ปิดสนาม". Default OFF so every existing group/session keeps today's behaviour.
+    realtimeCourtAvailability: false,
     // v1.12.7 (fix 2): brand-new groups/settings now default to "badweb-central" (Bad Web / กลาง) instead of
     // "isan" — this ONLY affects settings objects built fresh from scratch here (new group, first install).
     // An existing group's already-saved levelPresetId (isan/north/badweb-central/custom) is loaded from its
@@ -4890,6 +4928,7 @@ function normSettings(s) {
   return {
     ...getDefaultSettings(),
     ...base,
+    realtimeCourtAvailability: base.realtimeCourtAvailability === true, // v1.14.5: anything but an explicit true (absent / legacy / corrupt) => OFF
     shuttleEco: {
       costPerTube: Math.max(0, Number(sEco.costPerTube) || 0),
       shuttlesPerTube: Math.max(0, Number(sEco.shuttlesPerTube) || 0),
@@ -5883,6 +5922,9 @@ function fpSettings(s) {
   // get a different digest at authoring ([] -> defaults with one set of random ids) and at replay (another).
   // Every other prize field (label/type/value/qty/totalQty/probability/order) stays in the digest.
   base.wheelPrizes = base.wheelPrizes.map((w) => { const { id, ...rest } = jIsObj(w) ? w : {}; return rest; });
+  // v1.14.5: a UI/availability preference, not business state — kept OUT of the digest so fingerprints authored by v1.14.4 (incl. an
+  // un-replayed journal entry across the upgrade) still verify byte-for-byte.
+  delete base.realtimeCourtAvailability;
   return base;
 }
 function fpSession(session) {
@@ -8449,6 +8491,21 @@ async function runControlledUpdateHandoff(env) {
   return { ok: true };
 }
 
+// v1.14.5: lightweight minute-boundary clock for real-time court availability. One timeout aimed at the next minute boundary (not a
+// polling interval); no timer exists while `active` is false. Also refreshes when the tab/PWA becomes visible again, because a
+// backgrounded page may have had its timeout throttled.
+function useMinuteClock(active) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!active) return undefined;
+    let timer = null;
+    const arm = () => { timer = setTimeout(() => { setTick((x) => x + 1); arm(); }, 60000 - (Date.now() % 60000) + 25); };
+    const onVisible = () => { if (typeof document !== "undefined" && document.visibilityState === "visible") setTick((x) => x + 1); };
+    arm();
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisible);
+    return () => { if (timer != null) clearTimeout(timer); if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisible); };
+  }, [active]);
+}
 export default function App() {
   return (
     <AppErrorBoundary>
@@ -8670,7 +8727,17 @@ function AppInner() {
   const setCourtLabel = (i, value) => setCourtLabelsRaw((prev) => { const next = syncCourtLabels(prev, courtCount); next[i] = value; return next; });
   const [mode, setMode] = useState("doubles");
   const [settings, setSettings] = useState(getDefaultSettings);
+  // v1.14.5 real-time court availability gate. `courtGateRef` is refreshed every render; the imperative assignment code below
+  // reads it with a FRESH new Date() at the moment of the action (never a render-stale clock), so the rule is enforced in the
+  // underlying logic and cannot be bypassed by a stale UI. OFF (default) => activeCourtsNow() === null => no restriction.
+  const courtGateRef = useRef(null);
+  const activeCourtsNow = () => { const g = courtGateRef.current; return g ? activeCourtsAt({ ...g, now: new Date() }) : null; };
+  const courtAssignableNow = (court) => isCourtAssignable(activeCourtsNow(), court);
   const [session, setSession] = useState(() => normSession(null)); // session.mode: "casual" (only mode in use today) | "tournament" (future) — see GAME MODE / TOURNAMENT block above; session.id (v1.9.1): stable id so live discountCredits can reference "this session" before it's archived
+  const realtimeCourtsOn = settings.realtimeCourtAvailability === true;
+  courtGateRef.current = { enabled: realtimeCourtsOn, courtHours: session.courtHours, courtCount, sessionStartTime: session.sessionStartTime, sessionEndTime: session.sessionEndTime };
+  useMinuteClock(realtimeCourtsOn); // re-render at each minute boundary ONLY while the toggle is ON (no timer at all when OFF)
+  const activeCourts = activeCourtsNow(); // render snapshot used only to filter what the UI offers; the logic re-checks with a fresh clock
   // Web Sync Phase 3: opaque, durable local group identity. The registry lives in the existing
   // checkpoint/backup transaction; Cloud links remain in their separate Phase 2 store.
   const [localGroups, setLocalGroups] = useState(() => ({ schemaVersion: 1, records: [] }));
@@ -11064,14 +11131,15 @@ function AppInner() {
     // the values captured when the organizer tapped.
     const current = currentLatestRef.current, players = playersLatestRef.current, history = historyLatestRef.current; // eslint-disable-line no-shadow
     if (settings.pairingMode === "manual") {
-      const cur = Array.from({ length: courtCount }, (_, i) => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: 0, court: i + 1, locked: false, seq: nextMatchSeq() }));
+      const openCourts = activeCourtsNow(); // v1.14.5: only courts open right now get a game (null == every court, unchanged)
+      const cur = Array.from({ length: courtCount }, (_, i) => i + 1).filter((c) => isCourtAssignable(openCourts, c)).map((c) => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: 0, court: c, locked: false, seq: nextMatchSeq() }));
       setHistory([]); setCurrent(cur); setFuture([]); setRoundNo(0); setSel(null);
       return;
     }
     // v1.11.6: exclude archived players from the pool genRound draws matches from — they must not be
     // freshly selectable for a new round even if their (pre-archive) status happened to be "ready".
     const base = players.filter((p) => !p.archived).map((p) => ({ ...p, lastPlayedRound: -1 }));
-    const cur = genRound(base, mode, courtCount, lockPairs, counts([]), 0);
+    const cur = genRound(base, mode, courtCount, lockPairs, counts([]), 0, undefined, activeCourtsNow());
     const round0 = base.map((p) => ({ ...p }));
     const enterIds = new Set(cur.flatMap((m) => [...m.teamA, ...m.teamB].filter(Boolean)));
     const tnow = Date.now();
@@ -11092,7 +11160,8 @@ function AppInner() {
   // keeps a visible "เกมต่อไป" row waiting for it. Explicit request: with e.g. 3 courts running but only
   // enough free players to auto-pair 2 of them, court 3 must still show an empty row rather than nothing —
   // that way the organizer can hand-pick it, and it's already there the instant a court is about to finish.
-  const buildFreshNextRecord = (court, curArr, seq) => {
+  const buildFreshNextRecord = (court0, curArr, seq) => {
+    const court = courtAssignableNow(court0) ? court0 : null; // v1.14.5: a closed court is never assigned to a new game
     const emptyRecord = () => ({ id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: seq, court, locked: false, seq: nextMatchSeq() });
     if (settings.pairingMode === "manual") return emptyRecord();
     const reserved = reservedIdsFromCurrent(curArr);
@@ -11176,6 +11245,12 @@ function AppInner() {
   const startGame = (mid) => {
     const m = current.find((x) => x.id === mid);
     if (!m) return;
+    // v1.14.5: a NOT-YET-PLAYING game cannot be started on a court that is closed right now (real-time mode ON). A game that is
+    // already playing/paused is never touched by this rule (resume does not pass through here).
+    if (m.status === "next" && !courtAssignableNow(m.court)) {
+      alert("สนามนี้อยู่นอกเวลาเปิดตามที่ตั้งไว้ — เลือกสนามอื่นก่อนเริ่มเกม");
+      return;
+    }
     // v1.11.27: guard against double-booking a court — normally can't happen since v1.11.29 hides this
     // court's "▶ เริ่มเกม" button while its primary match is still playing/paused (see MatchRow), but kept
     // as defense-in-depth (e.g. a stale render, or a very fast double-tap).
@@ -11195,6 +11270,7 @@ function AppInner() {
     commitMatchLifecycle((base) => {
       const live = base.current.find((x) => x.id === mid);
       if (!live || (live.status !== "next" && live.status !== "done") || live.court == null || !startReadyMatch(live)) return null;
+      if (live.status === "next" && !courtAssignableNow(live.court)) return null; // v1.14.5: re-checked inside the serialized commit
       const paidIds = new Set(base.players.filter((p) => p.paid).map((p) => p.id));
       if (matchFinisherIds(live).some((id) => paidIds.has(id))) return null;
       if (base.current.some((c) => c.id !== mid && c.court === live.court && isLiveMatch(c))) return null;
@@ -11218,7 +11294,8 @@ function AppInner() {
     const finIds = [...m.teamA, ...m.teamB].filter(Boolean);
     let np = players.map((p) => (finIds.includes(p.id) ? { ...p, waitingSince: t, lastPlayedRound: seq } : { ...p }));
     // a prepared "เกมถัดไป" queued match always takes priority over fresh auto-pairing — see promoteQueued
-    let newMatch = promoteQueued(m, seq, court);
+    const courtOpen = courtAssignableNow(court); // v1.14.5: a court that has closed does not receive the next game
+    let newMatch = promoteQueued(m, seq, courtOpen ? court : null);
     if (newMatch) {
       const ids = new Set([...newMatch.teamA, ...newMatch.teamB].filter(Boolean));
       np = np.map((p) => { if (!ids.has(p.id)) return p; const wms = Math.max(0, t - (p.waitingSince || t)); return { ...p, lastPlayedRound: seq, waitingSince: t, waitTotal: (p.waitTotal || 0) + wms, waitCount: (p.waitCount || 0) + 1, waitMax: Math.max(p.waitMax || 0, wms) }; });
@@ -11228,6 +11305,8 @@ function AppInner() {
       // "จัดเกม" (fillCourt/addExtraMatch). Only a genuinely pre-queued match (handled above via
       // promoteQueued) still appears automatically, since the organizer already built that one on purpose.
       newMatch = null;
+    } else if (!courtOpen) {
+      newMatch = null; // closed court: leave it empty instead of auto-pairing a game onto it
     } else {
       const others = current.filter((c) => c.id !== mid);
       const reserved = reservedIdsFromCurrent(others); // excludes players queued into OTHER courts' next match too
@@ -11319,7 +11398,8 @@ function AppInner() {
         np = bumpWait(np, ids, base.roundNo + 1);
         newMatch = queuedNext;
       } else {
-        newMatch = promoteQueued(m, base.roundNo + 1, court); // legacy m.queued fallback (pre-1.11.27 sessions)
+        const courtOpen = courtAssignableNow(court); // v1.14.5: a court that has closed does not receive the next game
+        newMatch = promoteQueued(m, base.roundNo + 1, courtOpen ? court : null); // legacy m.queued fallback (pre-1.11.27 sessions)
         if (newMatch) {
           const ids = new Set([...newMatch.teamA, ...newMatch.teamB].filter(Boolean));
           np = bumpWait(np, ids, base.roundNo + 1);
@@ -11332,6 +11412,8 @@ function AppInner() {
           // organizer already built that one on purpose ahead of time. The court is simply left empty (via the
           // `.filter(Boolean)` below), rendering as "ว่าง" / "จัดเกม" — same as any other empty court.
           newMatch = null;
+        } else if (!courtOpen) {
+          newMatch = null; // v1.14.5: closed court — left empty, no auto-paired game is created on it
         } else {
           const reserved = reservedIdsFromCurrent(survivors); // excludes players queued into OTHER courts' next match too
           const nbase = np.map((p) => ({ ...p }));
@@ -11548,6 +11630,7 @@ function AppInner() {
     applyCurrentEdit((prev) => { // v1.12.38: journaled when it moves a live match (see applyCurrentEdit)
       const target = prev.find((m) => m.id === mid);
       if (!target || target.court === newCourt) return prev;
+      if (!courtAssignableNow(newCourt)) return prev; // v1.14.5: the court dropdown can never bypass real-time availability
       const occupant = prev.find((m) => m.court === newCourt && m.id !== mid);
       const canSwap = occupant && occupant.status !== "playing" && occupant.status !== "paused";
       return prev.map((m) => {
@@ -11618,6 +11701,7 @@ function AppInner() {
     // v1.12.38: this runs possibly deferred behind a pending critical write, so it reads the LATEST state, never
     // the values captured when the organizer tapped.
     const current = currentLatestRef.current, players = playersLatestRef.current, history = historyLatestRef.current; // eslint-disable-line no-shadow
+    if (!courtAssignableNow(court)) return; // v1.14.5: real-time mode ON and this court is closed right now — never receives a new game
     if (settings.pairingMode === "manual") {
       const nc = { id: uid(), mode, source: "casual", teamA: emptyTeam(), teamB: emptyTeam(), status: "next", round: roundNo + 1, court, locked: false, seq: nextMatchSeq() };
       setCurrent((prev) => [...prev, nc]);
@@ -13452,7 +13536,7 @@ function AppInner() {
         {tab === "members" && <MembersTab {...{ players: activePlayers, archivedPlayers, playingIds, addPlayer, resetAllToAbsent, setStatus, setAttendanceTime, session, setSession, setPLevel, updatePlayer, delPlayer, archivePlayer, bulkArchivePlayers, restorePlayer, openPhoto, openSessionPhoto, clearSessionPhoto, settings, setSettings, changeLevelPreset, setCustomLevels, getP, history, current, sessionHistory, tournamentHistory, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, deleteAllMembersData, wipeAllAppData, activeTournament, tournamentRegister, tournamentUnregister, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, cloudClub, setCloudClub, otherIncome, payEntranceFee, payMembership, rankingConfigs, updateRankingConfig, mode, setMode, courtCount, setCourtCount, courtLabels, setCourtLabel, lockPairs, addLockPair, removeLockPair, setHandPref, resetGames, qrRef, rewardHistory, onAwardPromotionReward, t, tc, fmtDate, fmtDateTime }} />}
         {tab === "session" && <GameTab
           t={t}
-          sessionTabProps={{ players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
+          sessionTabProps={{ activeCourts, players: activePlayers, getP, playersById, history, current: currentView, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool, activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint: setTournamentPrintReport, onGoToMembers: () => setTab("members"), t, tc, fmtDate, fmtDateFull, fmtDateTime }}
           summaryTabProps={{ players, history, current: currentView, getP, settings, session, tournamentHistory, t, tc }}
         />}
         {tab === "settings" && <SettingsTab {...{ settings, setSettings, rankingConfigs, updateRankingConfig, players, sessionHistory, localGroups, changeLevelPreset, setCustomLevels, deleteAllMembersData, wipeAllAppData, archivedPlayers, restorePlayer, groupDefaults, session, cloudClub, setCloudClub, deviceId, updatePlayer, tournamentHistory, rewardHistory, playersById, toggleHistoricalPaid, deleteSessionHistory, updateHistSessionDate, exportBackup, validateBackupFile, applyRestore, undoRestore, lastBackupAt: settings.lastBackupAt, hasPreRestoreBackup, autoBackups, bootLog, openHistPhoto, clearHistPhoto, addHistExpense, updateHistExpense, removeHistExpense, onOpenTournamentPrint: setTournamentPrintReport, autoOpen: settingsAutoOpen, onAutoOpenConsumed: () => setSettingsAutoOpen(null), uiLocale, setUiLocale, uiTimeZone, setUiTimeZone, t, tc, fmtDate, fmtDateFull, fmtDateTime, tutorialIsCompleted: tutorialEngine.isCompleted, onStartTutorialGuide: tutorialEngine.startGuide }} />}
@@ -15001,6 +15085,11 @@ function GeneralSettingsSheet({ settings, setSettings, changeLevelPreset, setCus
         <ChevronRight size={15} color={T.muted} />
       </NavRow>
       {timeZoneSheetOpen && <TimeZoneSettingsSheet timeZone={uiTimeZone} setTimeZone={setUiTimeZone} t={t} onClose={() => setTimeZoneSheetOpen(false)} />}
+
+      {/* v1.14.5: persistent toggle (part of `settings`, so it survives reload and Backup/Restore). OFF (the default, and what every legacy
+          save reads as) ignores the clock entirely; turning it OFF never touches any court's start/end, rate or free hours. */}
+      <Label>🕓 {t("settings.realtimeCourt")}</Label>
+      <Seg options={[[false, t("common.off")], [true, t("common.on")]]} value={settings.realtimeCourtAvailability === true} onChange={(v) => setSettings((x) => ({ ...x, realtimeCourtAvailability: v === true }))} />
 
       <Label>🏸 {t("settings.skillLevels")}</Label>
       <NavRow onClick={() => setLevelSheetOpen(true)}>
@@ -16594,7 +16683,7 @@ function MatchRow({
   manualBenchPool, openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, encounterIndex, mode,
   courtLabels, getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin,
   clearScore, settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
-  markAssignedMatchAsPlayed,
+  markAssignedMatchAsPlayed, activeCourts,
   COLW, TABLE_MIN_WIDTH, t, tc,
 }) {
   // v1.11.60: root-cause fix for "ลูก" input digit-overwrite bug. MatchRow is (pre-existing, unrelated to
@@ -16651,7 +16740,10 @@ function MatchRow({
   const takenCourts = !done && st === "next"
     ? new Set(current.filter((c) => c.id !== m.id && c.court != null && (c.status === "playing" || c.status === "paused" || c.status === "next")).map((c) => c.court))
     : new Set();
-  const availableCourtNumbers = Array.from({ length: courtCount }, (_, i) => i + 1).filter((c) => !takenCourts.has(c));
+  const availableCourtNumbers = Array.from({ length: courtCount }, (_, i) => i + 1).filter((c) => !takenCourts.has(c) && isCourtAssignable(activeCourts, c)); // v1.14.5: closed courts are not offered
+  // v1.14.5: a not-yet-started game whose already-picked court has since closed (real-time mode ON): the pick stays visible but
+  // marked closed, and Start is refused in startGame — it is never silently moved, and a playing game never reaches this flag.
+  const courtClosedNow = !done && st === "next" && m.court != null && !isCourtAssignable(activeCourts, m.court);
   // A previously-picked court that has SINCE become occupied/claimed elsewhere (by a match that started,
   // or another next row grabbing it first) before THIS match started must never be silently kept as if
   // nothing happened — flagged so the select can show an explicit conflict state instead (spec: "clear it
@@ -16737,6 +16829,9 @@ function MatchRow({
                 existing selection, per spec's explicit conflict-state requirement. */}
             {courtNowConflicting && !availableCourtNumbers.includes(m.court) && (
               <option value={m.court}>{t("match.courtInUse", { court: courtLabelFor(courtLabels, m.court) })}</option>
+            )}
+            {courtClosedNow && !courtNowConflicting && (
+              <option value={m.court}>{t("match.courtClosedNow", { court: courtLabelFor(courtLabels, m.court) })}</option>
             )}
           </select>
         )}
@@ -16926,7 +17021,7 @@ function MatchRow({
 }
 
 function SessionTab(props) {
-  const { players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
+  const { activeCourts, players, getP, playersById, history, current, roundNo, courtCount, setCourtCount, courtLabels, setCourtLabel, mode, setMode, settings, setSettings, session, setSession, sessionHistory, groupDefaults, saveGroupDefault, applyGroupDefaultsFor, lockPairs, addLockPair, removeLockPair, setHandPref, genStart, startGame, endGame, finishAndAdvance, markAssignedMatchAsPlayed, undoFinish, nextCourt, regenCourt, fillCourt, addExtraMatch, deleteMatch, regenFuture, toggleCurrentLock, setMatchStatus, reassignCourt, reassignHistoryCourt, replaceHistorySlot, setScore, setWin, clearScore, setMatchShuttleUsed, tapSlot, isSel, sel, replaceSlot, nextPoolFor, waitQueue, manualBenchPool, now, resetGames, endSession, changeLevelPreset, setCustomLevels, setQueuedSlot, autoQueueNext, clearQueuedNext, swapQueuedTeams, queueEligiblePool,
     activeTournament, tournamentHistory, startTournament, saveTournamentDraft, tStartMatch, tSetCourtLabel, tSetCourtCount, tSetScore, tSetWin, tClearScore, tFinishMatch, tEditAffectsDownstream, tUndoMatch, tPauseTournament, tResumeTournament, tMoveTeamDivision, tGenerateGroupKnockout, tGenerateSwissNextRound, tCompleteTournament, tArchiveOnly, tDeleteTournament, tUpdateProfile, tSetRegistrationConfig, tToggleTeamPaid, tAddFinanceEntry, tRemoveFinanceEntry, openTournamentLogo, openSessionPhoto, clearSessionPhoto, onOpenTournamentPrint, onGoToMembers,
     t, tc, fmtDate } = props;
   // v1.12.1: openQuanSettings/showNameDropdown/pastQuans (the editable group-card's own local state) moved
@@ -16985,7 +17080,7 @@ function SessionTab(props) {
   const byCourt = (a, b) => a.court - b.court;
   const nexts = current.filter((m) => m.status === "next").sort(byCourt);
   const occupied = new Set(current.map((m) => m.court));
-  const empties = []; for (let c = 1; c <= courtCount; c++) if (!occupied.has(c)) empties.push(c);
+  const empties = []; for (let c = 1; c <= courtCount; c++) if (!occupied.has(c) && isCourtAssignable(activeCourts, c)) empties.push(c); // v1.14.5: closed courts offer no "จัดเกม"
   const rounds = settings.rounds || 1;
 
   // UNIFIED MATCH TABLE — one continuously-numbered table (Match No | สนาม | ทีม A | ทีม B | ผล |
@@ -17195,7 +17290,7 @@ function SessionTab(props) {
             openSlot, setOpenSlot, current, courtCount, lockPairs, players, latestMap, encounterIndex, mode, courtLabels,
             getP, tapSlot, isSel, now, stats, scoreOpen, setScoreOpen, rounds, setScore, setWin, clearScore,
             settings, setMatchShuttleUsed, setMatchStatus, toggleCurrentLock, regenCourt, deleteMatch,
-            markAssignedMatchAsPlayed,
+            markAssignedMatchAsPlayed, activeCourts,
             COLW, TABLE_MIN_WIDTH, t, tc,
           };
           return (
@@ -18671,7 +18766,7 @@ function QuanSettingsSheet({ mode, setMode, courtCount, setCourtCount, courtLabe
           <button onClick={() => setEditCourtTimes((v) => !v)} style={{ width: "100%", textAlign: "left", padding: "8px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700, marginBottom: 8, display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 12 }}>🕒</span> {t("quanSettings.courtTimesToggle")}<ChevronDown size={14} style={{ marginLeft: "auto", transform: editCourtTimes ? "rotate(180deg)" : "none" }} />
           </button>
-          {editCourtTimes && <CourtTimeRows courtCount={courtCount} courtLabels={courtLabels} session={session} setSession={setSession} t={t} />}
+          {editCourtTimes && <CourtTimeRows courtCount={courtCount} courtLabels={courtLabels} settings={settings} setSettings={setSettings} session={session} setSession={setSession} t={t} />}
           {editCourtLabels && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
               {Array.from({ length: courtCount }, (_, i) => (
@@ -19189,24 +19284,63 @@ function ShuttlecockCostSection({ settings, setSettings, session, setSession, ma
 // storage-model rationale — this component is purely the editing UI on top of that.
 // v1.14.4 (P0-A): compact per-court start/end editor for Group Settings. It is a second VIEW over the exact same data the
 // cost screen edits (session.courtHours through patchCourtHoursRow / reconcileCourtHours) — no state of its own.
-function CourtTimeRows({ courtCount, courtLabels, session, setSession, t }) {
+function CourtTimeRows({ courtCount, courtLabels, settings, setSettings, session, setSession, t }) {
   const durationHours = sessionDurationHours(session && session.sessionStartTime, session && session.sessionEndTime);
-  const rows = reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime);
+  const rate = Math.max(0, Number(settings && settings.courtCost && settings.courtCost.ratePerHour) || 0);
+  const rows = buildCourtCostRows(reconcileCourtHours(session && session.courtHours, courtCount, durationHours, session && session.sessionStartTime, session && session.sessionEndTime), rate);
+  const total = totalCourtCostFromRows(rows);
+  const setRate = (v) => setSettings((s) => ({ ...s, courtCost: { ...(s.courtCost || {}), ratePerHour: Math.max(0, Number(v) || 0) } }));
   const patch = (court, p) => setSession((s) => ({ ...s, courtHours: patchCourtHoursRow(s.courtHours, court, p) }));
   const inputStyle = { padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, fontSize: 12, outline: "none", background: T.surface, color: T.text };
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14, padding: "10px 11px", borderRadius: 10, background: T.surface2, border: `1px solid ${T.border}` }}>
+      <NumField label={t("court.ratePerHourLabel")} value={rate} onChange={setRate} />
       {rows.map((row) => (
-        <div key={row.court} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12, fontWeight: 800, minWidth: 54 }}>{t("match.colCourt")} {courtLabelFor(courtLabels, row.court)}</span>
-          <input type="time" value={row.startAt || ""} onChange={(e) => patch(row.court, { startAt: e.target.value || null })} style={inputStyle} />
-          <span style={{ fontSize: 11, color: T.muted }}>→</span>
-          <input type="time" value={row.endAt || ""} onChange={(e) => patch(row.court, { endAt: e.target.value || null })} style={inputStyle} />
-          <span style={{ fontSize: 11, color: T.muted }}>{Math.round(row.actualDurationHours * 100) / 100} {t("court.hourUnit")}{row.freeHours > 0 ? ` · ${t("court.freeHoursLabel")} ${row.freeHours}` : ""}</span>
+        <div key={row.court} style={{ display: "flex", flexDirection: "column", gap: 5, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12, fontWeight: 800, minWidth: 54 }}>{t("match.colCourt")} {courtLabelFor(courtLabels, row.court)}</span>
+            <input type="time" value={row.startAt || ""} onChange={(e) => patch(row.court, { startAt: e.target.value || null })} style={inputStyle} />
+            <span style={{ fontSize: 11, color: T.muted }}>→</span>
+            <input type="time" value={row.endAt || ""} onChange={(e) => patch(row.court, { endAt: e.target.value || null })} style={inputStyle} />
+            <span style={{ fontSize: 11, color: T.muted }}>{t("court.actualUsedPrefix")} {Math.round(row.actualDurationHours * 100) / 100} {t("court.hourUnit")}</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "flex-end" }}>
+            <span style={{ fontSize: 11.5, color: T.muted }}>{t("court.freeHoursLabel")}</span>
+            <CompactNumInput value={row.freeHours} onCommit={(v) => patch(row.court, { freeHours: Math.max(0, v), billableHours: null })} />
+            <span style={{ fontSize: 11, color: T.muted }}>{t("court.hourUnit")}</span>
+            {rate > 0 && <span style={{ fontSize: 12, fontWeight: 800, minWidth: 54, textAlign: "right" }}>{formatCurrency(row.cost)}</span>}
+          </div>
         </div>
       ))}
-      <div style={{ fontSize: 10.5, color: T.muted }}>{t("quanSettings.courtTimesNote")}</div>
+      {rate > 0 && (
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, fontWeight: 800, paddingTop: 6, borderTop: `1px solid ${T.border}` }}>
+          <span style={{ color: T.muted, fontWeight: 700 }}>{t("court.totalLabel")}</span><span>{formatCurrency(total)}</span>
+        </div>
+      )}
     </div>
+  );
+}
+// v1.14.5: small number input that buffers keystrokes in a draft string and commits on blur/Enter (same principle as NumField), so a
+// field can be blank / "1." mid-edit without snapping back. The committed value is a plain number; the draft re-syncs from `value`
+// whenever the field is not focused.
+function CompactNumInput({ value, onCommit, width = 46 }) {
+  const [draft, setDraft] = useState(() => (value == null ? "" : String(value)));
+  const focusedRef = useRef(false);
+  useEffect(() => { if (!focusedRef.current) setDraft(value == null ? "" : String(value)); }, [value]);
+  const commit = () => {
+    const tr = draft.trim(); const n = Number(tr);
+    if (tr === "" || !Number.isFinite(n)) { setDraft(value == null ? "" : String(value)); return; }
+    onCommit(n);
+  };
+  return (
+    <input
+      type="number" inputMode="decimal" min="0" step="0.25" value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onFocus={(e) => { focusedRef.current = true; e.target.select(); }}
+      onBlur={() => { focusedRef.current = false; commit(); }}
+      onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); }}
+      style={{ width, padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 12.5, fontWeight: 800, outline: "none", background: T.surface, color: T.text }}
+    />
   );
 }
 function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, courtLabels, durationHours, session, setSession, t }) {
@@ -19223,9 +19357,10 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
   const patchCourt = (court, patch) => setSession((s) => ({ ...s, courtHours: patchCourtHoursRow(s.courtHours, court, patch) }));
   const setCourtStartAt = (court, v) => patchCourt(court, { startAt: v || null });
   const setCourtEndAt = (court, v) => patchCourt(court, { endAt: v || null });
-  const setCourtBillable = (court, v) => patchCourt(court, { billableHours: Math.max(0, Number(v) || 0) });
-  // v1.14.4: complimentary/free hours are entered here but STORED as billableHours (= actual - free) — one model, no drift.
-  const setCourtFree = (court, actual, v) => patchCourt(court, { billableHours: billableFromFreeHours(actual, v) });
+  const setCourtBillable = (court, v) => patchCourt(court, { billableHours: Math.max(0, Number(v) || 0), freeHours: null });
+  // v1.14.5: free (complimentary) hours are STORED as freeHours and billable = max(0, actual - free) is derived on every read, so
+  // it keeps following the court's start/end. Entering free hours supersedes any explicit billable override for that court.
+  const setCourtFree = (court, v) => patchCourt(court, { freeHours: Math.max(0, Number(v) || 0), billableHours: null });
   // v1.12.12 (spec P0.2): "+ เปิดสนามเพิ่ม" opens one more REAL court (bumps the same courtCount every other
   // part of the app — matchmaking/court labels — already uses, not just a cost-tracking line), defaulted to a
   // clean full-hour window starting NOW — never assumed to share the ก๊วน's own start time, since a court
@@ -19271,13 +19406,7 @@ function CourtCostSection({ settings, setSettings, courtCount, setCourtCount, co
               />
               <span style={{ fontSize: 11, color: T.muted }}>{t ? t("court.hourUnit") : "ชม."} × ฿{rate}</span>
               <span style={{ fontSize: 11.5, color: T.muted, flexShrink: 0, marginLeft: 6 }}>{t ? t("court.freeHoursLabel") : "ฟรี"}</span>
-              <input
-                type="number"
-                value={row.freeHours}
-                onChange={(e) => setCourtFree(row.court, row.actualDurationHours, e.target.value)}
-                onFocus={(e) => e.target.select()}
-                style={{ width: 46, padding: "5px 6px", borderRadius: 7, border: `1px solid ${T.border}`, textAlign: "right", fontSize: 12.5, fontWeight: 800, outline: "none", flexShrink: 0 }}
-              />
+              <CompactNumInput value={row.freeHours} onCommit={(v) => setCourtFree(row.court, v)} />
             </div>
           </div>
         ))}
