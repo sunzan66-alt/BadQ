@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useLayoutEffect } from "react";
 import { User, Search, Camera, Plus, Trash2, Check, X, Shuffle, Play, RotateCcw, Minus, ChevronDown, ChevronUp, Clock, Lock, Unlock, Calendar, ChevronRight, History, ClipboardList, Undo2, Info, QrCode, Maximize2, Wallet, Trophy, Upload, Share2, LogOut, Download, Gift } from "lucide-react";
 
-const APP_VERSION = "1.14.7";
+const APP_VERSION = "1.14.8";
 
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = { R: 1, BG1: 2, BG2: 3, BG3: 4, "S-": 5, S: 6, "N-": 7, N: 8, "P-": 9, P: 10, C: 11 };
@@ -8371,6 +8371,33 @@ function TutorialQuickStartOffer({ onStart, onDismiss, t }) {
 // SKIP_WAITING is posted ONLY by runControlledUpdateHandoff, which only runs from the Owner's tap.
 const SW_WAITING_READY_TIMEOUT_MS = 10000;
 const SW_POST_SKIP_RELOAD_FALLBACK_MS = 4000;
+// v1.14.8 — the "new version available" banner must represent an actually NEWER waiting worker, not merely the presence of one.
+// The page cannot read a waiting worker's script, but every BadQ worker installs into its OWN versioned Cache Storage namespace
+// ("badq-cache-v<APP_VERSION>", see shell/sw.js; kept in lockstep with APP_VERSION), so the newest such namespace identifies the
+// newest installed worker. Pure + side-effect free (no skipWaiting, no postMessage): used only to decide whether to SHOW the banner.
+const BADQ_CACHE_VERSION_RE = /^badq-cache-v(\d+(?:\.\d+)*)$/;
+const LEGACY_UNSAFE_CACHE_BELOW = "1.14.3"; // pre-1.14.3 workers cached authenticated /v1 responses: a controlled handoff must purge them
+function compareVersionStrings(a, b) {
+  const pa = String(a == null ? "" : a).split(".").map((x) => parseInt(x, 10) || 0), pb = String(b == null ? "" : b).split(".").map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d < 0 ? -1 : 1; }
+  return 0;
+}
+function badqCacheVersions(cacheNames) {
+  return (Array.isArray(cacheNames) ? cacheNames : []).map((n) => { const m = BADQ_CACHE_VERSION_RE.exec(String(n)); return m ? m[1] : null; }).filter(Boolean);
+}
+// Returns { show, version, reason }. show===true ONLY when a strictly newer worker version is installed than the running app, or
+// (security carry-over from the Phase 4D handoff) a pre-1.14.3 cache namespace still exists that only an activation purges.
+function waitingUpdateDecision(cacheNames, runningVersion) {
+  const versions = badqCacheVersions(cacheNames);
+  if (!versions.length) return { show: false, version: null, reason: "unknown" };
+  const newest = versions.reduce((a, b) => (compareVersionStrings(b, a) > 0 ? b : a));
+  if (compareVersionStrings(newest, runningVersion) > 0) return { show: true, version: newest, reason: "newer-waiting" };
+  if (versions.some((v) => compareVersionStrings(v, LEGACY_UNSAFE_CACHE_BELOW) < 0)) return { show: true, version: newest, reason: "legacy-cache-purge" };
+  return { show: false, version: newest, reason: "same-or-older" };
+}
+function readBadqCacheNames(cacheStorage) {
+  try { return cacheStorage && typeof cacheStorage.keys === "function" ? Promise.resolve(cacheStorage.keys()).catch(() => []) : Promise.resolve([]); } catch (e) { return Promise.resolve([]); }
+}
 function observeWaitingServiceWorker(container, onWaiting) {
   if (!container || typeof container.getRegistration !== "function") return () => {};
   let disposed = false;
@@ -9131,7 +9158,16 @@ function AppInner() {
     window.addEventListener("badq:update-available", onUpdate);
     // v1.14.3: SECOND, lifecycle-driven signal — a worker that is actually WAITING exposes the same banner even when the page
     // version already equals the deployed one. Never shown for a genuine first install; detached on cleanup.
-    const stopWaitingObserver = observeWaitingServiceWorker("serviceWorker" in navigator ? navigator.serviceWorker : null, () => setUpdateAvailable((prev) => prev || APP_VERSION));
+    let waitingDisposed = false;
+    const stopWaitingObserver0 = observeWaitingServiceWorker("serviceWorker" in navigator ? navigator.serviceWorker : null, () => {
+      // v1.14.8: a waiting worker alone is not enough — it must be a NEWER version than the one running (or a legacy cache that needs purging).
+      readBadqCacheNames(typeof caches !== "undefined" ? caches : null).then((names) => {
+        if (waitingDisposed) return;
+        const d = waitingUpdateDecision(names, APP_VERSION);
+        if (d.show) setUpdateAvailable((prev) => prev || d.version || APP_VERSION);
+      });
+    });
+    const stopWaitingObserver = () => { waitingDisposed = true; stopWaitingObserver0(); };
     return () => { window.removeEventListener("badq:update-available", onUpdate); stopWaitingObserver(); };
   }, []);
   // v1.11.41 (Section B2): explicit, user-confirmed update handoff — the ONLY place that ever tells a
@@ -16978,8 +17014,8 @@ function MatchRow({
         // startReadyMatch/canStart above) — valid combinations are only 1-vs-1 (Singles) or 2-vs-2
         // (Doubles); one side having 2 and the other 1 can never be started, so this message is shown
         // unconditionally whenever that exact mismatch exists, not gated behind allManualWarnings.
-        <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH }}>
-          <div style={{ fontSize: 11.5, fontWeight: 700, color: "#c0392b", background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 8, padding: "6px 9px" }}>
+        <div style={{ padding: "0 11px 6px", position: "sticky", left: 0, maxWidth: "min(100%, calc(100vw - 44px))", boxSizing: "border-box", WebkitTextSizeAdjust: "100%", textSizeAdjust: "100%" }}>
+          <div style={{ fontSize: 14, lineHeight: 1.3, fontWeight: 700, color: "#c0392b", background: "#fdecea", border: "1px solid #f0a8a0", borderRadius: 8, padding: "5px 9px" }}>
             {t("warn.slotMismatchTitle")}<br />{t("warn.slotMismatchDetail")}
           </div>
         </div>
@@ -16990,14 +17026,14 @@ function MatchRow({
         // teammate/opponent warnings — every line now names the exact players involved (spec 3.1) and
         // its color matches the highlighted player cards in TeamSide above (spec 4). WARNING ONLY,
         // never blocks selection (see canStart/startReady — this has no effect on either).
-        <div style={{ padding: "0 11px 8px", minWidth: TABLE_MIN_WIDTH, display: "flex", flexDirection: "column", gap: 3 }}>
+        <div style={{ padding: "0 11px 5px", position: "sticky", left: 0, maxWidth: "min(100%, calc(100vw - 44px))", boxSizing: "border-box", display: "flex", flexDirection: "column", gap: 2, WebkitTextSizeAdjust: "100%", textSizeAdjust: "100%" }}>
           {constraintWarnings.map((w) => (
-            <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
+            <div key={w.id} style={{ fontSize: 14, lineHeight: 1.3, fontWeight: 700, color: w.color }}>
               {w.kind === "lock" ? t("warn.lockPrefix") : t("warn.constraintPrefix")}{w.text}
             </div>
           ))}
           {recentWarnings.map((w) => (
-            <div key={w.id} style={{ fontSize: 11, fontWeight: 700, color: w.color }}>
+            <div key={w.id} style={{ fontSize: 14, lineHeight: 1.3, fontWeight: 700, color: w.color }}>
               ⚠️ {w.text}
             </div>
           ))}
@@ -17262,9 +17298,12 @@ function SessionTab(props) {
           <span style={{ width: COLW.status, flexShrink: 0 }}>{t ? t("match.colStatus") : "สถานะ"}</span>
           <span style={{ width: COLW.actions, flexShrink: 0 }}></span>
         </div>
+        {/* v1.14.8 (typography): compact secondary label; WebkitTextSizeAdjust 100% stops iOS auto-inflating text in this wide table; label pinned to the viewport. */}
         {!historyShowAll && hiddenFinishedCount > 0 && (
-          <button onClick={() => setHistoryShowAll(true)} style={{ width: "100%", minWidth: TABLE_MIN_WIDTH, padding: "8px 0", background: "none", border: "none", borderBottom: `1px dashed ${T.border}`, color: T.muted, fontSize: 12, fontWeight: 700 }}>
-            <History size={13} style={{ verticalAlign: -2, marginRight: 4 }} /> {t ? t("match.showMoreCompletedGames") : "แสดงแมตช์ที่จบแล้วเพิ่มเติม"} ({hiddenFinishedCount})
+          <button onClick={() => setHistoryShowAll(true)} style={{ width: "100%", minWidth: TABLE_MIN_WIDTH, display: "flex", justifyContent: "flex-start", padding: "4px 0", background: "none", border: "none", borderBottom: `1px dashed ${T.border}`, color: T.muted, fontSize: 15, lineHeight: 1.3, fontWeight: 600, WebkitTextSizeAdjust: "100%", textSizeAdjust: "100%" }}>
+            <span style={{ position: "sticky", left: 0, display: "block", width: "min(100%, calc(100vw - 44px))", textAlign: "center" }}>
+              <History size={14} style={{ verticalAlign: -2, marginRight: 5 }} />{t ? t("match.showMoreCompletedGames") : "แสดงแมตช์ที่จบแล้วเพิ่มเติม"} ({hiddenFinishedCount})
+            </span>
           </button>
         )}
         {/* v1.12.18: MatchRow is now a stable top-level component (see its own definition above SessionTab)
