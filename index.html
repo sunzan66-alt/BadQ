@@ -913,7 +913,7 @@
   // explicit user tap — never as a side effect of just opening the app.
   (function(){
     try{
-      var CURRENT_VERSION = "1.14.9";
+      var CURRENT_VERSION = "1.14.10";
       var qs = new URLSearchParams(location.search);
       if (qs.get("_v")) return; // already just reloaded once via a manual update tap, avoid loops
       fetch(location.pathname, { cache: "no-store" })
@@ -2197,6 +2197,13 @@ const th = defineMessages("th", [
   ["finance.billDetailsTitle", "รายละเอียดค่าก๊วน"],
   ["finance.doublesBreakdownLine", "คู่ {games} เกม × ฿{rate} = {total}"],
   ["finance.singlesBreakdownLine", "เดี่ยว {games} เกม × ฿{rate} = {total}"],
+  ["finance.doublesBreakdownLineShuttle", "คู่ {games} ลูก × ฿{rate} = {total}"],
+  ["finance.singlesBreakdownLineShuttle", "เดี่ยว {games} ลูก × ฿{rate} = {total}"],
+  ["finance.shuttleBillingModeLabel", "วิธีคิดค่าลูกแบด"],
+  ["finance.shuttleBillingPerGame", "คิดตามเกมที่ตี"],
+  ["finance.shuttleBillingPerShuttle", "คิดตามลูกที่ใช้จริง"],
+  ["finance.shuttleBillingPerGameNote", "เก็บค่าลูกตามอัตราเดิม 1 ลูกต่อเกมที่ตีจบ ไม่ว่าจะใช้กี่ลูก (ต้นทุนยังคิดตามลูกที่ใช้จริง)"],
+  ["finance.shuttleBillingPerShuttleNote", "เก็บค่าลูกตามอัตราเดิม × จำนวนลูกที่ใช้จริงของแต่ละเกม (แก้จำนวนลูกได้ที่ช่อง \"ลูก\" ของเกมนั้น)"],
   ["finance.shuttleCostShort", "ค่าลูก"],
   ["common.miscellaneous", "อื่น ๆ"],
   ["finance.carriedDiscountLabel", "ส่วนลดจากรอบที่แล้ว"],
@@ -4059,6 +4066,13 @@ const en = defineMessages("en", [
   ["finance.billDetailsTitle", "Session bill details"],
   ["finance.doublesBreakdownLine", "Doubles {games} games × ฿{rate} = {total}"],
   ["finance.singlesBreakdownLine", "Singles {games} games × ฿{rate} = {total}"],
+  ["finance.doublesBreakdownLineShuttle", "Doubles {games} shuttles × ฿{rate} = {total}"],
+  ["finance.singlesBreakdownLineShuttle", "Singles {games} shuttles × ฿{rate} = {total}"],
+  ["finance.shuttleBillingModeLabel", "Shuttle billing method"],
+  ["finance.shuttleBillingPerGame", "Per game played"],
+  ["finance.shuttleBillingPerShuttle", "Per shuttle actually used"],
+  ["finance.shuttleBillingPerGameNote", "Charges the existing rate once per completed game, whatever number of shuttles was used (cost still follows the shuttles actually used)."],
+  ["finance.shuttleBillingPerShuttleNote", "Charges the existing rate × the shuttles actually used in each game (edit the quantity in that game's shuttle field)."],
   ["finance.shuttleCostShort", "Shuttle fee"],
   ["common.miscellaneous", "Miscellaneous"],
   ["finance.carriedDiscountLabel", "Credit from last round"],
@@ -5325,7 +5339,7 @@ function createI18n(locale = DEFAULT_LOCALE, { timeZone = DEFAULT_TIME_ZONE } = 
   });
 })();
 function _extends() { return _extends = Object.assign ? Object.assign.bind() : function (n) { for (var e = 1; e < arguments.length; e++) { var t = arguments[e]; for (var r in t) ({}).hasOwnProperty.call(t, r) && (n[r] = t[r]); } return n; }, _extends.apply(null, arguments); }
-const APP_VERSION = "1.14.9";
+const APP_VERSION = "1.14.10";
 const LEVELS = ["R", "BG1", "BG2", "BG3", "S-", "S", "N-", "N", "P-", "P", "C"];
 const WEIGHT = {
   R: 1,
@@ -8637,6 +8651,7 @@ function computeBill(players, settings, finishedMatches) {
   const matches = finishedMatches || [];
   const doublesRate = Number(settings.shuttleDoubles ?? settings.shuttle) || 0;
   const singlesRate = Number(settings.shuttleSingles ?? settings.shuttle) || 0;
+  const perShuttleMode = settings.shuttleBillingMode === "perShuttle"; // absent / anything else => per completed game (legacy)
   const ledgerGames = completedGamesByPlayer(matches); // v1.12.38: games = completed-match ledger, never the p.games cache
   return payers.map(p => {
     const court = perPerson ? settings.perPersonRate || 0 : splitEq ? splitSummary.charge : settings.court || 0;
@@ -8644,15 +8659,24 @@ function computeBill(players, settings, finishedMatches) {
     // single cumulative p.games counter — a player with 3 doubles + 2 singles games in the SAME session
     // must be billed 3×doublesRate + 2×singlesRate, not 5×one-rate (see spec's worked example: ฿245).
     let doublesGames = 0,
-      singlesGames = 0;
+      singlesGames = 0,
+      doublesUnits = 0,
+      singlesUnits = 0; // *Units = what the rate multiplies: games (perGame) or actual shuttles (perShuttle)
     if (!perPerson && !splitEq) {
       for (const m of matches) {
         if (!m) continue;
         if (!((m.teamA || []).includes(p.id) || (m.teamB || []).includes(p.id))) continue;
-        if (resolveMatchType(m) === "singles") singlesGames++;else doublesGames++;
+        const units = perShuttleMode ? matchShuttleUsed(m) : 1;
+        if (resolveMatchType(m) === "singles") {
+          singlesGames++;
+          singlesUnits += units;
+        } else {
+          doublesGames++;
+          doublesUnits += units;
+        }
       }
     }
-    const shuttle = perPerson || splitEq ? 0 : doublesGames * doublesRate + singlesGames * singlesRate;
+    const shuttle = perPerson || splitEq ? 0 : doublesUnits * doublesRate + singlesUnits * singlesRate;
     const other = otherShare;
     const discount = p.discount || 0; // per-person discount, entered manually in the player's summary detail
     const wheelDiscount = p.wheelDiscount || 0; // locked discount won from the spin wheel (not manually editable)
@@ -8685,6 +8709,9 @@ function computeBill(players, settings, finishedMatches) {
     const outDiscount = hasFrozenPayment ? fb.eDiscount || 0 : discount;
     const outWheelDiscount = hasFrozenPayment ? fb.eWheelDiscount || 0 : wheelDiscount;
     const outCarriedInDiscount = hasFrozenPayment ? fb.eCarriedInDiscount || 0 : carriedInDiscount;
+    const outDoublesUnits = hasFrozenPayment ? fb.doublesUnits != null ? fb.doublesUnits : fb.doublesGames || 0 : doublesUnits;
+    const outSinglesUnits = hasFrozenPayment ? fb.singlesUnits != null ? fb.singlesUnits : fb.singlesGames || 0 : singlesUnits;
+    const outPerShuttle = hasFrozenPayment ? fb.perShuttle === true : perShuttleMode;
     const outDoublesGames = hasFrozenPayment ? fb.doublesGames || 0 : doublesGames;
     const outSinglesGames = hasFrozenPayment ? fb.singlesGames || 0 : singlesGames;
     const outDoublesRate = hasFrozenPayment ? fb.doublesRate || 0 : doublesRate;
@@ -8703,6 +8730,9 @@ function computeBill(players, settings, finishedMatches) {
       total,
       isOwnerExempt,
       doublesGames: outDoublesGames,
+      doublesUnits: outDoublesUnits,
+      singlesUnits: outSinglesUnits,
+      perShuttle: outPerShuttle,
       singlesGames: outSinglesGames,
       doublesRate: outDoublesRate,
       singlesRate: outSinglesRate
@@ -8789,7 +8819,10 @@ function togglePaidTransition(players, playerId, ctx) {
           doublesGames: b.doublesGames,
           singlesGames: b.singlesGames,
           doublesRate: b.doublesRate,
-          singlesRate: b.singlesRate
+          singlesRate: b.singlesRate,
+          doublesUnits: b.doublesUnits,
+          singlesUnits: b.singlesUnits,
+          perShuttle: b.perShuttle === true
         }
       };
     }
@@ -12076,6 +12109,11 @@ function ImageCropper({
 // (and mutates) the same wheelPrizes array reference.
 function getDefaultSettings() {
   return {
+    // P0 Shuttlecock Billing Modes (v1.14.10 hotfix): how the existing shuttle SELLING rate is applied to player charges.
+    // "perShuttle" (DEFAULT for NEW groups / fresh installs) charges rate x the match's actual shuttleUsed; "perGame" charges 1 rate per completed
+    // match. Saved settings that LACK this field are LEGACY and are normalised to "perGame" by every load path (see legacyShuttleBillingMode) so
+    // nobody's billing changes silently. Never affects cost.
+    shuttleBillingMode: "perShuttle",
     // v1.12.51 (Promotion & Loyalty Foundation): GROUP-SPECIFIC campaign storage, additive inside this same
     // existing `settings` object per spec section 1 — travels for free through the existing Group Default
     // (groupDefaults[session.name]), Backup/Restore, and boot-load plumbing, exactly like every other
@@ -12313,6 +12351,11 @@ function inferAdvancedFeatureFlags(rawSettings, rawActiveTournament, rawTourname
 }
 // v1.11.7 (Part M) / v1.11.12: backward-compatible settings defaults — old saved settings objects predate
 // these fields; backfill them without touching any existing customized value.
+// Explicit saved choice always wins; a saved settings object WITHOUT a valid choice is legacy => "perGame" (unchanged billing).
+function legacyShuttleBillingMode(saved) {
+  const v = saved && typeof saved === "object" ? saved.shuttleBillingMode : undefined;
+  return v === "perShuttle" ? "perShuttle" : "perGame";
+}
 function normSettings(s) {
   const base = s && typeof s === "object" ? s : {};
   const amm = Number(base.averageMatchMinutes);
@@ -12354,6 +12397,8 @@ function normSettings(s) {
   return {
     ...getDefaultSettings(),
     ...base,
+    shuttleBillingMode: s && typeof s === "object" ? legacyShuttleBillingMode(base) : "perShuttle",
+    // saved object: explicit value kept, absent / corrupt => legacy "perGame"; no saved settings at all => new default
     realtimeCourtAvailability: base.realtimeCourtAvailability === true,
     // v1.14.5: anything but an explicit true (absent / legacy / corrupt) => OFF
     shuttleEco: {
@@ -12971,7 +13016,8 @@ function migrateBackupData(parsed) {
   data.mode = data.mode || "doubles";
   data.settings = {
     ...getDefaultSettings(),
-    ...(data.settings || {})
+    ...(data.settings || {}),
+    shuttleBillingMode: data.settings && typeof data.settings === "object" ? legacyShuttleBillingMode(data.settings) : "perShuttle"
   };
   // v1.12.7 (fix 2): the spread above (getDefaultSettings() as base, then data.settings on top) already
   // makes a genuinely-missing levelPresetId key resolve to getDefaultSettings()'s new "badweb-central"
@@ -19699,6 +19745,8 @@ function AppInner() {
       setSettings(d => ({
         ...d,
         ...s.settings,
+        shuttleBillingMode: legacyShuttleBillingMode(s.settings),
+        // saved settings without the field keep legacy per-game billing
         tournamentEnabled: inferred.tournamentEnabled,
         wheelEnabled: inferred.wheelEnabled,
         wheelPrizes: normWheelPrizes(s.settings.wheelPrizes && s.settings.wheelPrizes.length ? s.settings.wheelPrizes : d.wheelPrizes)
@@ -24637,6 +24685,7 @@ function AppInner() {
     setSettings(s => ({
       ...s,
       ...bundle.settings,
+      shuttleBillingMode: legacyShuttleBillingMode(bundle.settings),
       wheelPrizes: (bundle.settings.wheelPrizes || []).map(wp => ({
         ...wp
       }))
@@ -42611,7 +42660,27 @@ function FinanceSettingsBody({
       ...s,
       shuttleSingles: v
     }))
-  }))), model === "perPerson" && /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement(Label, null, t ? t("finance.shuttleBillingModeLabel") : "วิธีคิดค่าลูกแบด"), /*#__PURE__*/React.createElement("div", {
+    "data-testid": "shuttle-billing-mode",
+    "data-mode": settings.shuttleBillingMode === "perShuttle" ? "perShuttle" : "perGame",
+    style: {
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement(Seg, {
+    options: [["perShuttle", t ? t("finance.shuttleBillingPerShuttle") : "คิดตามลูกที่ใช้จริง"], ["perGame", t ? t("finance.shuttleBillingPerGame") : "คิดตามเกมที่ตี"]],
+    value: settings.shuttleBillingMode === "perShuttle" ? "perShuttle" : "perGame",
+    onChange: v => setSettings(s => ({
+      ...s,
+      shuttleBillingMode: v === "perShuttle" ? "perShuttle" : "perGame"
+    }))
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11,
+      color: T.muted,
+      lineHeight: 1.6,
+      marginBottom: 10
+    }
+  }, settings.shuttleBillingMode === "perShuttle" ? t ? t("finance.shuttleBillingPerShuttleNote") : "" : t ? t("finance.shuttleBillingPerGameNote") : "")), model === "perPerson" && /*#__PURE__*/React.createElement("div", {
     style: {
       marginBottom: 10
     }
@@ -50376,14 +50445,14 @@ function QuanPaymentPanel({
       paddingLeft: 8,
       lineHeight: 1.6
     }
-  }, /*#__PURE__*/React.createElement("div", null, t("finance.doublesBreakdownLine", {
-    games: detailBill.doublesGames,
+  }, /*#__PURE__*/React.createElement("div", null, t(detailBill.perShuttle ? "finance.doublesBreakdownLineShuttle" : "finance.doublesBreakdownLine", {
+    games: detailBill.doublesUnits,
     rate: detailBill.doublesRate,
-    total: formatCurrency(detailBill.doublesGames * detailBill.doublesRate)
-  })), /*#__PURE__*/React.createElement("div", null, t("finance.singlesBreakdownLine", {
-    games: detailBill.singlesGames,
+    total: formatCurrency(detailBill.doublesUnits * detailBill.doublesRate)
+  })), /*#__PURE__*/React.createElement("div", null, t(detailBill.perShuttle ? "finance.singlesBreakdownLineShuttle" : "finance.singlesBreakdownLine", {
+    games: detailBill.singlesUnits,
     rate: detailBill.singlesRate,
-    total: formatCurrency(detailBill.singlesGames * detailBill.singlesRate)
+    total: formatCurrency(detailBill.singlesUnits * detailBill.singlesRate)
   })))) : /*#__PURE__*/React.createElement(BillRow, {
     label: t("finance.shuttleCostShort"),
     v: detailBill.eShuttle
